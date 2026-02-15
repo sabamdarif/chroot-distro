@@ -1826,11 +1826,11 @@ command_login() {
 	# Enable SUID on /data
 	# Extract the device block for /data in /proc/mounts
 
-	DEVICE=$(busybox grep -w "/data" /proc/mounts | busybox awk '{print $1}' | head -n 1)
+	local DEVICE_BLOCK=$(busybox grep -w "/data" /proc/mounts | busybox awk '{print $1}' | head -n 1)
 
-	if [ -n "$DEVICE" ]; then
+	if [ -n "$DEVICE_BLOCK" ]; then
 		# Remount with dev and suid options
-		busybox mount -o remount,dev,suid "$DEVICE" /data 2>/dev/null || {
+		busybox mount -o remount,dev,suid "$DEVICE_BLOCK" /data 2>/dev/null || {
 			msg "${YELLOW}Warning: failed to enable SUID on /data (remount failed)${RST}"
 		}
 	else
