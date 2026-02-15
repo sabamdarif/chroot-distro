@@ -1824,9 +1824,21 @@ command_login() {
 	done
 
 	# Enable SUID on /data
-	busybox mount -o remount,dev,suid /data 2>/dev/null || {
-		msg "${YELLOW}Warning: failed to enable SUID on /data${RST}"
-	}
+	# Extract the device block for /data in /proc/mounts
+
+	DEVICE=$(busybox grep -w "/data" /proc/mounts | busybox awk '{print $1}' | head -n 1)
+
+	if [ -n "$DEVICE" ]; then
+		# Remount with dev and suid options
+		busybox mount -o remount,dev,suid "$DEVICE" /data 2>/dev/null || {
+			msg "${YELLOW}Warning: failed to enable SUID on /data (remount failed)${RST}"
+		}
+	else
+		# Fallback: try remounting /data without specifying device (some Android versions might allow this)
+		busybox mount -o remount,dev,suid /data 2>/dev/null || {
+			msg "${YELLOW}Warning: failed to enable SUID on /data (could not find device)${RST}"
+		}
+	fi
 
 	# Mount /data directory so it can access that
 	# the main goal is that it can access /data/data/com.termux/files
