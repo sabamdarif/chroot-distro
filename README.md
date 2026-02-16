@@ -10,10 +10,7 @@
 
 ## Prerequisites
 
-> [!WARNING]
->
-> - **Back up important files before use**
-
+- **Back up important files before use**
 - **Rooted Android Device**
 - **BusyBox**: [osm0sis/android-busybox-ndk](https://github.com/osm0sis/android-busybox-ndk) (**Recommended:** v1.36.1)
 
@@ -30,6 +27,8 @@
 |          ![Fedora](https://img.shields.io/badge/Fedora-51A2DA?style=for-the-badge&logo=fedora&logoColor=white)          |  ![Kali Linux](https://img.shields.io/badge/Kali_Linux-557C94?style=for-the-badge&logo=kali-linux&logoColor=white)   | ![Manjaro](https://img.shields.io/badge/Manjaro-35BF5C?style=for-the-badge&logo=manjaro&logoColor=white) |
 |       ![OpenSUSE](https://img.shields.io/badge/OpenSUSE-73BA25?style=for-the-badge&logo=opensuse&logoColor=white)       | ![Rocky Linux](https://img.shields.io/badge/Rocky_Linux-10B981?style=for-the-badge&logo=rocky-linux&logoColor=white) |  ![Trisquel](https://img.shields.io/badge/Trisquel-0D597F?style=for-the-badge&logo=gnu&logoColor=white)  |
 |          ![Ubuntu](https://img.shields.io/badge/Ubuntu-E95420?style=for-the-badge&logo=ubuntu&logoColor=white)          |  ![Void Linux](https://img.shields.io/badge/Void_Linux-478061?style=for-the-badge&logo=void-linux&logoColor=white)   |                                                                                                          |
+
+---
 
 ## Quick Start
 
@@ -60,54 +59,6 @@ chroot-distro login debian
 | `remove`       | `rm`                        | Remove a distribution          |
 | `unmount`      | `umount`, `um`              | Unmount distribution           |
 | `clear-cache`  | `clear`, `cl`               | Clear downloaded files         |
-
----
-
-## Service Management
-
-Chroot Distro includes a lightweight service manager called `serviced` it can start a systemd process without systemd
-
-### Configuration
-
-The service manager behavior can be configured via the `settings.conf` file located at:
-
-```
-/data/local/chroot-distro/data/settings.conf
-```
-
-> [!TIP]
-> This file can be easily configured using the WebUI.
-
-### Options
-
-| Option                  | Description                                                                 |
-| ----------------------- | --------------------------------------------------------------------------- |
-| `SERVICED`              | Set to `true` to enable the service manager.                                |
-| `SERVICED_VERBOSE_MODE` | Set to `true` to enable verbose logging for debugging service start issues. |
-
-### Usage
-
-When `SERVICED` is enabled, `chroot-distro` will automatically start the built-in `serviced` manager when you login. You can then use it to manage services:
-
-```bash
-# Start a service
-serviced start sshd
-
-# Start all enabled services
-serviced start
-
-# Enable a service to start on boot
-serviced enable sshd
-
-# Disable a service
-serviced disable sshd
-
-# Check status
-serviced status sshd
-
-# List all services
-serviced list
-```
 
 ---
 
@@ -210,6 +161,54 @@ chroot-distro clear-cache
 
 ---
 
+## Service Management
+
+Chroot Distro includes a lightweight service manager called `serviced` it can start a systemd process without systemd
+
+### Configuration
+
+The service manager behavior can be configured via the `settings.conf` file located at:
+
+```
+/data/local/chroot-distro/data/settings.conf
+```
+
+> [!TIP]
+> This file can be easily configured using the WebUI.
+
+### Options
+
+| Option                  | Description                                                                 |
+| ----------------------- | --------------------------------------------------------------------------- |
+| `SERVICED`              | Set to `true` to enable the service manager.                                |
+| `SERVICED_VERBOSE_MODE` | Set to `true` to enable verbose logging for debugging service start issues. |
+
+### Usage
+
+When `SERVICED` is enabled, `chroot-distro` will automatically start the built-in `serviced` manager when you login. You can then use it to manage services:
+
+```bash
+# Start a service
+serviced start docker
+
+# Start all enabled services
+serviced start
+
+# Enable a service to start on boot
+serviced enable docker
+
+# Disable a service
+serviced disable docker
+
+# Check status
+serviced status docker
+
+# List all services
+serviced list
+```
+
+---
+
 ## Termux Integration
 
 To simplify usage from Termux, create a wrapper script:
@@ -241,6 +240,59 @@ chmod +x $PREFIX/bin/chroot-distro
 ```
 
 - You can now use chroot-distro directly from Termux without switching to root user manually.
+
+---
+
+## 📸 Screenshots
+
+<div align="center">
+
+|             **Docker Support**             |             **Flatpak Support**              |
+| :----------------------------------------: | :------------------------------------------: |
+| ![Docker Running](screeenshots/docker.png) | ![Flatpak Running](screeenshots/flatpak.png) |
+
+</div>
+
+---
+
+## 🔍 Kernel Compatibility Check
+
+Before attempting to run Docker/Flatpak, it is highly recommended to check if your kernel supports the necessary configurations.
+
+### How to Check
+
+1.  **Install Termux** (if not already installed).
+2.  **Run the Compatibility Check Script**:
+
+    The following script checks for kernel configurations required by Docker
+
+> [!NOTE]
+> This test was verified on **Realme RMX3085** with **Kernel 4.19.325 (Android 15 Custom ROM)**.
+
+```bash
+pkg install wget sudo
+
+wget https://raw.githubusercontent.com/moby/moby/master/contrib/check-config.sh
+
+chmod +x check-config.sh
+
+sed -i '1s_.*_#!/data/data/com.termux/files/usr/bin/bash_' check-config.sh
+
+sudo ./check-config.sh
+```
+
+### Expected Output
+
+You should see output similar to this:
+
+<div align="center">
+
+![Compatibility Check](screeenshots/compatibility-check.png)
+
+</div>
+
+> [!TIP]
+> For more details, check out this guide: [ivonblog](https://ivonblog.com/en-us/posts/sony-xperia-5-ii-docker-kernel/)
 
 ---
 

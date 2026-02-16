@@ -1,0 +1,86 @@
+name: Update Distro Versions
+
+on:
+  schedule:
+    - cron: '0 0 1,15 * *'  # Run on the 1st and 15th of every month
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  check-versions:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Check for updates
+        id: set-matrix
+        run: |
+          # Generate JSON output of updates
+          python3 .github/workflows/scripts/check_distro_versions.py --check > updates.json
+
+          # Debug output
+          cat updates.json
+
+          # Set output variable. We compact the JSON to a single line.
+          # If the file is empty or contains empty list '[]', we handle it.
+          if [ -s updates.json ] && [ "$(cat updates.json)" != "[]" ]; then
+            echo "matrix=$(jq -c '.' updates.json)" >> $GITHUB_OUTPUT
+          else
+            echo "matrix=[]" >> $GITHUB_OUTPUT
+          fi
+
+  create-pr:
+    needs: check-versions
+    if: needs.check-versions.outputs.matrix != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        update: ${{ fromJson(needs.check-versions.outputs.matrix) }}
+      fail-fast: false
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Apply update
+        run: |
+          python3 .github/workflows/scripts/check_distro_versions.py --update "${{ matrix.update.name }}" "${{ matrix.update.new }}"
+
+      - name: Create Pull Request
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: "${{ matrix.update.name }}: bump to ${{ matrix.update.new }}"
+          title: "${{ matrix.update.name }}: bump to ${{ matrix.update.new }}"
+          body: |
+            Automated update for **${{ matrix.update.name }}**.
+
+            - Current version: `${{ matrix.update.current }}`
+            - New version: `${{ matrix.update.new }}`
+
+            This PR updates the distro version in `${{ matrix.update.file }}`.
+          branch: "update/${{ matrix.update.name }}/${{ matrix.update.new }}"
+          base: main
+          delete-branch: true
+          signoff: true

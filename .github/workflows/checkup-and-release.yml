@@ -7,6 +7,8 @@ on:
     paths-ignore:
       - 'distro-build/**'
       - '.github/workflows/build-distro.yml'
+      - '.github/workflows/update-distro-versions.yml'
+      - '.github/workflows/scripts/check_distro_versions.py'
       - 'bootstrap-rootfs.sh'
       - '.editorconfig'
       - 'CHANGELOG.md'
@@ -18,6 +20,8 @@ on:
     paths-ignore:
       - 'distro-build/**'
       - '.github/workflows/build-distro.yml'
+      - '.github/workflows/update-distro-versions.yml'
+      - '.github/workflows/scripts/check_distro_versions.py'
       - 'bootstrap-rootfs.sh'
       - '.editorconfig'
       - 'CHANGELOG.md'

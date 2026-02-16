@@ -25,6 +25,8 @@ trap 'rm -rf "$WORKDIR"' EXIT
 
 cp -r module/* "$WORKDIR/"
 
+rm -rf "$WORKDIR/screeenshots"
+
 cp -r data "$WORKDIR/"
 
 cp -r serviced "$WORKDIR/tools"

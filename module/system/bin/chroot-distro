@@ -316,7 +316,16 @@ restore_data_permissions() {
 				fi
 			fi
 		done <"$recursive_file"
-		busybox rm -f "$recursive_file"
+	fi
+	busybox rm -f "$recursive_file"
+
+	# Restore nosuid and nodev on /data
+	DEVICE_BLOCK="$(busybox grep -w "/data" /proc/mounts | busybox awk '{print $1}' | head -n 1)"
+
+	if [ -n "$DEVICE_BLOCK" ]; then
+		busybox mount -o remount,nosuid,nodev "$DEVICE_BLOCK" /data 2>/dev/null || true
+	else
+		busybox mount -o remount,nosuid,nodev /data 2>/dev/null || true
 	fi
 
 	# Delete the permissions file
@@ -330,7 +339,7 @@ restore_data_permissions() {
 #############################################################################
 
 detect_cpu_arch() {
-	case "$(uname -m)" in
+	case "$(busybox uname -m)" in
 	aarch64 | arm64) busybox echo "aarch64" ;;
 	armv7l | armv6l | arm) busybox echo "arm" ;;
 	x86_64 | amd64) busybox echo "x86_64" ;;
@@ -866,7 +875,7 @@ run_chroot_cmd() {
 	safe_mount "/sys" "${distro_path}/sys" "$distro_name"
 
 	# Execute command in chroot
-	chroot "$distro_path" /usr/bin/env -i \
+	busybox chroot "$distro_path" /usr/bin/env -i \
 		"PATH=${DEFAULT_PATH_ENV}" \
 		"LANG=C.UTF-8" \
 		"TERM=${TERM-xterm-256color}" \
@@ -1091,7 +1100,7 @@ command_install() {
 		busybox mkdir -p "$DOWNLOAD_CACHE_DIR"
 	fi
 
-	tarball_name=$(basename "${TARBALL_URL}")
+	tarball_name=$(busybox basename "${TARBALL_URL}")
 
 	if [ ! -f "${DOWNLOAD_CACHE_DIR}/${tarball_name}" ]; then
 		msg "${BLUE}[${GREEN}*${BLUE}] ${CYAN}Downloading rootfs tarball...${RST}"
@@ -1207,7 +1216,7 @@ command_install() {
 
 	# Default /etc/hosts may be empty or incomplete.
 	msg "${BLUE}[${GREEN}*${BLUE}] ${CYAN}Creating file '${INSTALLED_ROOTFS_DIR:?}/${distro_name:?}/etc/hosts'...${RST}"
-	chmod u+rw "${INSTALLED_ROOTFS_DIR:?}/${distro_name:?}/etc/hosts" >/dev/null 2>&1 || true
+	busybox chmod u+rw "${INSTALLED_ROOTFS_DIR:?}/${distro_name:?}/etc/hosts" >/dev/null 2>&1 || true
 	busybox cat <<-EOF >"${INSTALLED_ROOTFS_DIR:?}/${distro_name:?}/etc/hosts"
 		# IPv4.
 		127.0.0.1   localhost.localdomain localhost
@@ -1294,7 +1303,7 @@ command_install() {
 	busybox umount "${INSTALLED_ROOTFS_DIR:?}/${distro_name:?}/dev" 2>/dev/null || true
 
 	# Create profile if it doesn't exist
-	touch "${INSTALLED_ROOTFS_DIR:?}/${distro_name:?}/etc/profile"
+	busybox touch "${INSTALLED_ROOTFS_DIR:?}/${distro_name:?}/etc/profile"
 
 	cleanup_profile "ANDROID_DATA"
 	echo "export ANDROID_DATA=\"/data\"" >>"${INSTALLED_ROOTFS_DIR:?}/${distro_name:?}/etc/profile"
@@ -1322,7 +1331,7 @@ command_install() {
 
 	# Enable USB device authorization
 	if [ -w /sys/module/usbcore/parameters/authorized_default ]; then
-		echo 1 >/sys/module/usbcore/parameters/authorized_default
+		busybox echo 1 >/sys/module/usbcore/parameters/authorized_default
 		msg "${BLUE}[${GREEN}*${BLUE}] ${CYAN}Enabled USB device authorization${RST}"
 	fi
 
@@ -1356,8 +1365,8 @@ command_install() {
 			# Create configuration to disable sandbox for _apt user
 			# This fixes "Permission denied" errors when downloading packages on Android
 			if [ ! -f "${INSTALLED_ROOTFS_DIR}/${distro_name}/etc/apt/apt.conf.d/99chroot-distro-sandbox" ]; then
-				echo 'APT::Sandbox::User "root";' >"${INSTALLED_ROOTFS_DIR}/${distro_name}/etc/apt/apt.conf.d/99chroot-distro-sandbox"
-				chmod 644 "${INSTALLED_ROOTFS_DIR}/${distro_name}/etc/apt/apt.conf.d/99chroot-distro-sandbox"
+				busybox echo 'APT::Sandbox::User "root";' >"${INSTALLED_ROOTFS_DIR}/${distro_name}/etc/apt/apt.conf.d/99chroot-distro-sandbox"
+				busybox chmod 644 "${INSTALLED_ROOTFS_DIR}/${distro_name}/etc/apt/apt.conf.d/99chroot-distro-sandbox"
 			fi
 		fi
 	fi
@@ -1434,19 +1443,19 @@ configure_docker_runtime() {
 	distro_name="$1"
 	if [ -x "${INSTALLED_ROOTFS_DIR}/${distro_name}/usr/bin/dockerd" ] || [ -x "${INSTALLED_ROOTFS_DIR}/${distro_name}/usr/sbin/dockerd" ]; then
 		# Always ensure daemon.json has the correct configuration
-		mkdir -p "${INSTALLED_ROOTFS_DIR}/${distro_name}/etc/docker"
-		cat >"${INSTALLED_ROOTFS_DIR}/${distro_name}/etc/docker/daemon.json" <<-EOF
+		busybox mkdir -p "${INSTALLED_ROOTFS_DIR}/${distro_name}/etc/docker"
+		busybox cat >"${INSTALLED_ROOTFS_DIR}/${distro_name}/etc/docker/daemon.json" <<-EOF
 			{
 			  "storage-driver": "vfs",
 			  "iptables": false,
 			  "bridge": "none"
 			}
 		EOF
-		chmod 644 "${INSTALLED_ROOTFS_DIR}/${distro_name}/etc/docker/daemon.json"
+		busybox chmod 644 "${INSTALLED_ROOTFS_DIR}/${distro_name}/etc/docker/daemon.json"
 
 		# Switch to legacy iptables (fixes kernel incompatibility)
 		if [ -x "${INSTALLED_ROOTFS_DIR}/${distro_name}/usr/sbin/update-alternatives" ] && [ -x "${INSTALLED_ROOTFS_DIR}/${distro_name}/usr/sbin/iptables-legacy" ]; then
-			if readlink "${INSTALLED_ROOTFS_DIR}/${distro_name}/etc/alternatives/iptables" | grep -q "nft"; then
+			if busybox readlink "${INSTALLED_ROOTFS_DIR}/${distro_name}/etc/alternatives/iptables" | busybox grep -q "nft"; then
 				run_chroot_cmd update-alternatives --set iptables /usr/sbin/iptables-legacy >/dev/null 2>&1 || true
 				run_chroot_cmd update-alternatives --set ip6tables /usr/sbin/ip6tables-legacy >/dev/null 2>&1 || true
 			fi
@@ -1491,9 +1500,9 @@ command_login() {
 			exec_command=""
 			for arg in "$@"; do
 				if [ -z "$exec_command" ]; then
-					exec_command=$(printf '%s' "$arg" | sed "s/'/'\\\\''/g; s/^/'/; s/$/'/")
+					exec_command=$(busybox printf '%s' "$arg" | busybox sed "s/'/'\\\\''/g; s/^/'/; s/$/'/")
 				else
-					quoted_arg=$(printf '%s' "$arg" | sed "s/'/'\\\\''/g; s/^/'/; s/$/'/")
+					quoted_arg=$(busybox printf '%s' "$arg" | busybox sed "s/'/'\\\\''/g; s/^/'/; s/$/'/")
 					exec_command="$exec_command $quoted_arg"
 				fi
 			done
@@ -1638,23 +1647,23 @@ command_login() {
 	fi
 
 	# Catch invalid specified user before login command will be executed.
-	if ! grep -q "^${login_user}:" "${INSTALLED_ROOTFS_DIR}/${distro_name}/etc/passwd" >/dev/null 2>&1; then
+	if ! busybox grep -q "^${login_user}:" "${INSTALLED_ROOTFS_DIR}/${distro_name}/etc/passwd" >/dev/null 2>&1; then
 		msg "${BRED}Error: no user '${YELLOW}${login_user}${BRED}' defined in /etc/passwd of distribution.${RST}"
 		return 1
 	fi
 
 	# Extract user information from /etc/passwd
-	login_uid=$(grep "^${login_user}:" "${INSTALLED_ROOTFS_DIR}/${distro_name}/etc/passwd" | cut -d ':' -f 3)
+	login_uid=$(busybox grep "^${login_user}:" "${INSTALLED_ROOTFS_DIR}/${distro_name}/etc/passwd" | busybox cut -d ':' -f 3)
 	if [ -z "${login_uid}" ]; then
 		msg "${BRED}Error: failed to retrieve the id of user '${YELLOW}${login_user}${BRED}' from /etc/passwd of distribution.${RST}"
 		return 1
 	fi
-	login_gid=$(grep "^${login_user}:" "${INSTALLED_ROOTFS_DIR}/${distro_name}/etc/passwd" | cut -d ':' -f 4)
+	login_gid=$(busybox grep "^${login_user}:" "${INSTALLED_ROOTFS_DIR}/${distro_name}/etc/passwd" | busybox cut -d ':' -f 4)
 	if [ -z "${login_gid}" ]; then
 		msg "${BRED}Error: failed to retrieve the primary group id of user '${YELLOW}${login_user}${BRED}' from /etc/passwd of distribution.${RST}"
 		return 1
 	fi
-	login_home=$(grep "^${login_user}:" "${INSTALLED_ROOTFS_DIR}/${distro_name}/etc/passwd" | cut -d ':' -f 6)
+	login_home=$(busybox grep "^${login_user}:" "${INSTALLED_ROOTFS_DIR}/${distro_name}/etc/passwd" | busybox cut -d ':' -f 6)
 	if [ -z "$login_home" ]; then
 		msg "${BRED}Error: failed to retrieve the home of user '${YELLOW}${login_user}${BRED}' from /etc/passwd of distribution.${RST}"
 		return 1
@@ -1662,7 +1671,7 @@ command_login() {
 	if [ -z "$login_wd" ]; then
 		login_wd="$login_home"
 	fi
-	login_shell=$(grep "^${login_user}:" "${INSTALLED_ROOTFS_DIR}/${distro_name}/etc/passwd" | cut -d ':' -f 7)
+	login_shell=$(busybox grep "^${login_user}:" "${INSTALLED_ROOTFS_DIR}/${distro_name}/etc/passwd" | busybox cut -d ':' -f 7)
 	if [ -z "$login_shell" ]; then
 		msg "${BRED}Error: failed to retrieve the shell of user '${YELLOW}${login_user}${BRED}' from /etc/passwd of distribution.${RST}"
 		return 1
@@ -1672,9 +1681,9 @@ command_login() {
 	login_env_vars="$login_env_vars LANG=en_US.UTF-8"
 
 	# Ensure mount points exist
-	mkdir -p "${INSTALLED_ROOTFS_DIR}/${distro_name}/dev"
-	mkdir -p "${INSTALLED_ROOTFS_DIR}/${distro_name}/proc"
-	mkdir -p "${INSTALLED_ROOTFS_DIR}/${distro_name}/sys"
+	busybox mkdir -p "${INSTALLED_ROOTFS_DIR}/${distro_name}/dev"
+	busybox mkdir -p "${INSTALLED_ROOTFS_DIR}/${distro_name}/proc"
+	busybox mkdir -p "${INSTALLED_ROOTFS_DIR}/${distro_name}/sys"
 
 	# Initialize mount tracker - create distro-specific directory
 	# Only clean the tracker file if this is the first session (no active sessions yet)
@@ -1725,16 +1734,16 @@ command_login() {
 			dst="${INSTALLED_ROOTFS_DIR}/${distro_name}/sys/fs/cgroup/${dst_name}"
 
 			if [ -d "$src" ]; then
-				mkdir -p "$dst"
+				busybox mkdir -p "$dst"
 				safe_mount "$src" "$dst" "$distro_name" "" "bind"
 			fi
 		done
 
 		for ctrl in devices freezer cpuacct; do
-			if grep -q "${ctrl}[[:space:]].*1$" /proc/cgroups 2>/dev/null; then
+			if busybox grep -q "${ctrl}[[:space:]].*1$" /proc/cgroups 2>/dev/null; then
 				dst="${INSTALLED_ROOTFS_DIR}/${distro_name}/sys/fs/cgroup/${ctrl}"
 				if ! busybox mount | busybox grep -q " on $dst "; then
-					mkdir -p "$dst"
+					busybox mkdir -p "$dst"
 					safe_mount "none" "$dst" "$distro_name" "cgroup" "$ctrl"
 				fi
 			fi
@@ -1742,12 +1751,12 @@ command_login() {
 
 		if [ -d "${INSTALLED_ROOTFS_DIR}/${distro_name}/sys/fs/cgroup/cpu" ]; then
 			if [ ! -e "${INSTALLED_ROOTFS_DIR}/${distro_name}/sys/fs/cgroup/cpuacct" ]; then
-				ln -sf cpu "${INSTALLED_ROOTFS_DIR}/${distro_name}/sys/fs/cgroup/cpuacct"
+				busybox ln -sf cpu "${INSTALLED_ROOTFS_DIR}/${distro_name}/sys/fs/cgroup/cpuacct"
 			fi
 		fi
 
 		if busybox grep -q "cgroup2" /proc/filesystems 2>/dev/null; then
-			mkdir -p "${INSTALLED_ROOTFS_DIR}/${distro_name}/sys/fs/cgroup/unified"
+			busybox mkdir -p "${INSTALLED_ROOTFS_DIR}/${distro_name}/sys/fs/cgroup/unified"
 			safe_mount "" "${INSTALLED_ROOTFS_DIR}/${distro_name}/sys/fs/cgroup/unified" "$distro_name" "cgroup2" "rw,nosuid,nodev,noexec,relatime"
 		fi
 
@@ -1800,8 +1809,8 @@ command_login() {
 
 	# Special handling for Arch Linux
 	if [ "$distro_name" = "archlinux" ]; then
-		mkdir -p "${INSTALLED_ROOTFS_DIR}/${distro_name}/var/cache/pacman/pkg"
-		mkdir -p "${INSTALLED_ROOTFS_DIR}/${distro_name}/var/lib/pacman"
+		busybox mkdir -p "${INSTALLED_ROOTFS_DIR}/${distro_name}/var/cache/pacman/pkg"
+		busybox mkdir -p "${INSTALLED_ROOTFS_DIR}/${distro_name}/var/lib/pacman"
 
 		# Mount the pacman cache directory to /cache (preserves /var/lib/pacman database)
 		# if i don't do this then you will see a error like this:-
@@ -1897,7 +1906,7 @@ command_login() {
 			termux_internal_home="$TERMUX_HOME"
 			extra_paths_to_save=""
 
-			if echo "$login_wd" | grep -q "^$termux_internal_home"; then
+			if echo "$login_wd" | busybox grep -q "^$termux_internal_home"; then
 				# Path is inside home, we must ensure home is traversable
 				extra_paths_to_save="$termux_internal_home"
 				busybox chmod o+rx "${INSTALLED_ROOTFS_DIR}/${distro_name}${termux_internal_home}" 2>/dev/null || true
@@ -1941,7 +1950,7 @@ command_login() {
 
 	if [ "$make_termux_tmp_shared" = "true" ]; then
 		if [ ! -d "${TERMUX_PREFIX}/tmp" ]; then
-			mkdir -p "${TERMUX_PREFIX}/tmp"
+			busybox mkdir -p "${TERMUX_PREFIX}/tmp"
 		fi
 
 		safe_mount "${TERMUX_PREFIX}/tmp" "${INSTALLED_ROOTFS_DIR}/${distro_name}/tmp" "$distro_name"
@@ -1974,7 +1983,7 @@ command_login() {
 	# Bind custom file systems
 	if [ -n "$custom_fs_bindings" ]; then
 		# Use printf to handle the space-separated bindings properly
-		printf '%s\n' "$custom_fs_bindings" | tr ' ' '\n' | while IFS= read -r binding; do
+		busybox printf '%s\n' "$custom_fs_bindings" | busybox tr ' ' '\n' | while IFS= read -r binding; do
 			[ -z "$binding" ] && continue
 			case "$binding" in
 			*:*)
@@ -2027,8 +2036,8 @@ command_login() {
 		if [ ! -x "${INSTALLED_ROOTFS_DIR}/${distro_name}/bin/serviced" ]; then
 			if [ -f "${MODDIR}/tools/serviced.py" ]; then
 				msg "${YELLOW}Installing serviced to /bin/serviced...${RST}"
-				cp "${MODDIR}/tools/serviced.py" "${INSTALLED_ROOTFS_DIR}/${distro_name}/bin/serviced"
-				chmod +x "${INSTALLED_ROOTFS_DIR}/${distro_name}/bin/serviced"
+				busybox cp "${MODDIR}/tools/serviced.py" "${INSTALLED_ROOTFS_DIR}/${distro_name}/bin/serviced"
+				busybox chmod +x "${INSTALLED_ROOTFS_DIR}/${distro_name}/bin/serviced"
 			else
 				msg "${YELLOW}Warning: serviced source not found at ${MODDIR}/tools/serviced.py, skipping auto-install${RST}"
 			fi
@@ -2059,7 +2068,7 @@ command_login() {
 	increment_session "$distro_name"
 
 	# Execute chroot with all arguments
-	chroot "$@"
+	busybox chroot "$@"
 
 	# Store the exit code
 	exit_code=$?
@@ -2312,12 +2321,12 @@ command_clear_cache() {
 	fi
 
 	# Check if cache has any files
-	cache_files_count=$(busybox find "$DOWNLOAD_CACHE_DIR" -type f 2>/dev/null | wc -l)
+	cache_files_count=$(busybox find "$DOWNLOAD_CACHE_DIR" -type f 2>/dev/null | busybox wc -l)
 	if [ "$cache_files_count" -eq 0 ]; then
 		msg "${BLUE}[${GREEN}*${BLUE}] ${CYAN}Download cache is empty.${RST}"
 	else
 		# Get cache size before clearing using busybox du
-		size_of_cache=$(busybox du -sh "$DOWNLOAD_CACHE_DIR" 2>/dev/null | cut -f1)
+		size_of_cache=$(busybox du -sh "$DOWNLOAD_CACHE_DIR" 2>/dev/null | busybox cut -f1)
 
 		msg "${BLUE}[${GREEN}*${BLUE}] ${CYAN}Clearing cache files...${RST}"
 		# Find and delete files one by one for better error handling
@@ -2432,11 +2441,7 @@ command_remove() {
 	# Attempt to restore permissions so directory can be removed without issues.
 	# Use busybox chmod if available for better compatibility
 	msg "${BLUE}[${GREEN}*${BLUE}] ${CYAN}Restoring permissions...${RST}"
-	if command -v busybox >/dev/null 2>&1; then
-		busybox chmod -R u+rwx "${INSTALLED_ROOTFS_DIR}/${distro_name}" >/dev/null 2>&1 || true
-	else
-		chmod -R u+rwx "${INSTALLED_ROOTFS_DIR}/${distro_name}" >/dev/null 2>&1 || true
-	fi
+	busybox chmod -R u+rwx "${INSTALLED_ROOTFS_DIR}/${distro_name}" >/dev/null 2>&1 || true
 
 	# Ensure we don't accidentally remove wrong directories
 	if [ -z "${INSTALLED_ROOTFS_DIR}" ] || [ -z "${distro_name}" ]; then
@@ -2619,19 +2624,19 @@ command_unmount_system_points() {
 	if [ "$make_termux_tmp_shared" = "true" ]; then
 		ORIGINAL_UID=$(busybox stat -c %u ${TERMUX_ROOT_DIR})
 		ORIGINAL_GID=$(busybox stat -c %g ${TERMUX_ROOT_DIR})
-		PM_OUTPUT=$(pm list packages -U 2>/dev/null | grep "package:com.termux uid:" 2>/dev/null)
+		PM_OUTPUT=$(pm list packages -U 2>/dev/null | busybox grep "package:com.termux uid:" 2>/dev/null)
 		# making pm verifaction optional because in some case like for kernelsu
 		# you might need to fix the pm command failed
 		# (https://kernelsu.org/guide/how-to-integrate-for-non-gki.html#failed-to-execute-pm-in-terminal)
 		# issue, otherwise pm command will not work for you
 		if [ -n "$PM_OUTPUT" ]; then
-			PM_UID=$(echo "$PM_OUTPUT" | sed 's/.*uid:\([0-9]*\).*/\1/')
+			PM_UID=$(echo "$PM_OUTPUT" | busybox sed 's/.*uid:\([0-9]*\).*/\1/')
 			if [ "$ORIGINAL_UID" != "$PM_UID" ]; then
 				msg "${YELLOW} Warning: Termux UID mismatch detected.${RST}"
 				msg "${YELLOW} You might faced issue in Termux X11${RST}"
 			fi
 		fi
-		chown -R "${ORIGINAL_UID:?}":"${ORIGINAL_GID:?}" ${TERMUX_PREFIX:?}/tmp
+		busybox chown -R "${ORIGINAL_UID:?}":"${ORIGINAL_GID:?}" ${TERMUX_PREFIX:?}/tmp
 		unset ORIGINAL_UID ORIGINAL_GID PM_OUTPUT PM_UID
 	fi
 
@@ -2646,13 +2651,13 @@ command_unmount_system_points() {
 		# restore Termux Home ownership to Termux
 		ORIGINAL_UID=$(busybox stat -c %u ${TERMUX_ROOT_DIR})
 		ORIGINAL_GID=$(busybox stat -c %g ${TERMUX_ROOT_DIR})
-		PM_OUTPUT=$(pm list packages -U 2>/dev/null | grep "package:com.termux uid:" 2>/dev/null)
+		PM_OUTPUT=$(pm list packages -U 2>/dev/null | busybox grep "package:com.termux uid:" 2>/dev/null)
 		# making pm verifaction optional because in some case like for kernelsu
 		# you might need to fix the pm command failed
 		# (https://kernelsu.org/guide/how-to-integrate-for-non-gki.html#failed-to-execute-pm-in-terminal)
 		# issue, otherwise pm command will not work for you
 		if [ -n "$PM_OUTPUT" ]; then
-			PM_UID=$(echo "$PM_OUTPUT" | sed 's/.*uid:\([0-9]*\).*/\1/')
+			PM_UID=$(echo "$PM_OUTPUT" | busybox sed 's/.*uid:\([0-9]*\).*/\1/')
 			if [ "$ORIGINAL_UID" != "$PM_UID" ]; then
 				msg "${YELLOW} Warning: Termux UID mismatch detected.${RST}"
 				msg "${YELLOW} You might faced issue login in Termux${RST}"
@@ -2700,13 +2705,13 @@ command_unmount_system_points_force() {
 	# Kill processes using the rootfs
 	if command -v busybox >/dev/null 2>&1; then
 		busybox fuser -k "$rootfs" 2>/dev/null || true
-		sleep 1
+		busybox sleep 1
 	fi
 
 	# Find all mount points under rootfs and unmount in reverse order
 	busybox grep " ${rootfs}" /proc/mounts 2>/dev/null |
 		busybox awk '{print $2}' |
-		sort -r |
+		busybox sort -r |
 		while IFS= read -r mount_point; do
 			busybox umount "$mount_point" 2>/dev/null ||
 				busybox umount -l "$mount_point" 2>/dev/null || true
