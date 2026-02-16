@@ -1254,11 +1254,17 @@ command_install() {
 
 	# Add other Android groups
 	busybox cat <<-EOF >>"${INSTALLED_ROOTFS_DIR:?}/${distro_name:?}/etc/group"
+		aid_bluetooth:x:1002:
 		aid_graphics:x:1003:
 		aid_input:x:1004:
 		aid_audio:x:1005:
 		aid_video:x:1006:
 		aid_drm:x:1007:
+		aid_wifi:x:1010:
+		aid_usb:x:1018:
+		aid_bt_admin:x:3001:
+		aid_bt_net:x:3002:
+		aid_admin:x:3005:
 	EOF
 
 	# get the gid fist from the current system, it it unable to fetch
