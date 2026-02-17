@@ -1541,7 +1541,7 @@ command_login() {
 			;;
 		--isolated)
 			# The option '--isolated' is not compatible with any share bind
-			if [ "$use_termux_home" = "true" ] || [ "$make_termux_tmp_shared" = "true" ] || [ ! -z "$custom_fs_bindings" ] || [ ! -z "$login_wd" ]; then
+			if [ "$use_termux_home" = "true" ] || [ "$make_termux_tmp_shared" = "true" ] || [ -n "$custom_fs_bindings" ] || [ -n "$login_wd" ]; then
 				msg
 				msg "${BRED}Error: option '${YELLOW}--isolated${BRED}' cannot be used with '${YELLOW}--bind${BRED}', '${YELLOW}--work-dir${BRED}', '${YELLOW}--shared-tmp${BRED}' or '${YELLOW}--termux-home${BRED}'${RST}"
 				command_login_help
@@ -1763,7 +1763,7 @@ command_login() {
 
 	# If the isolated tracker file was keeped, we rule out incompatible options
 	if [ -f "$isolated_tracker_file" ]; then
-		if [ "$use_termux_home" = "true" ] || [ "$make_termux_tmp_shared" = "true" ] || [ ! -z "$custom_fs_bindings" ] || [ ! "$login_wd" = "$login_home" ]; then
+		if [ "$use_termux_home" = "true" ] || [ "$make_termux_tmp_shared" = "true" ] || [ -n "$custom_fs_bindings" ] || [ ! "$login_wd" = "$login_home" ]; then
 			msg "${BRED}Error: a running isolated environment was found. cannot use '${YELLOW}--bind${BRED}', '${YELLOW}--work-dir${BRED}', '${YELLOW}--shared-tmp${BRED}' or '${YELLOW}--termux-home${BRED}'${RST}"
 			return 1
 		fi
