@@ -110,6 +110,23 @@ msg() {
 
 #############################################################################
 #
+# FUNCTION TO GET ISOLATED TRACKER FILE PATH FOR A DISTRO
+#
+# Returns the distro-specific isolated tracker file path.
+#
+#############################################################################
+
+get_isolated_tracker_file() {
+	distro_name="$1"
+	if [ -z "$distro_name" ]; then
+		msg "${BRED}Error: get_isolated_file() called without distro_name${RST}"
+		return 1
+	fi
+	busybox echo "${RUNTIME_DIR}/data/${distro_name}/isolated"
+}
+
+#############################################################################
+#
 # FUNCTION TO GET MOUNT TRACKER FILE PATH FOR A DISTRO
 #
 # Returns the distro-specific mount tracker file path.
@@ -904,6 +921,7 @@ cleanup_all_mounts() {
 	msg "${BLUE}[${GREEN}*${BLUE}] ${CYAN}Unmounting mount points for ${distro_name}...${RST}"
 
 	mount_tracker_file=$(get_mount_tracker_file "$distro_name")
+	isolated_tracker_file=$(get_isolated_tracker_file "$distro_name")
 
 	if [ ! -f "$mount_tracker_file" ]; then
 		return 0
@@ -918,6 +936,8 @@ cleanup_all_mounts() {
 	done
 
 	busybox rm -f "$mount_tracker_file"
+
+	if [ -f "$isolated_tracker_file" ] && busybox rm -f "$isolated_tracker_file"
 
 	# Restore original permissions of /data directories if they were modified
 	restore_data_permissions "$distro_name"
@@ -1333,7 +1353,7 @@ command_install() {
 	echo "export EXTERNAL_STORAGE=\"/sdcard/\"" >>"${INSTALLED_ROOTFS_DIR:?}/${distro_name:?}/etc/profile"
 
 	# Fix root user - add to network groups
-	run_chroot_cmd /sbin/usermod -a -G aid_inet,aid_net_raw root 2>/dev/null || true
+	run_chroot_cmd /sbin/usermod -a -G aid_inet,aid_net_raw,aid_bt_admin,aid_bt_net,aid_admin root 2>/dev/null || true
 
 	# Enable USB device authorization
 	if [ -w /sys/module/usbcore/parameters/authorized_default ]; then
@@ -1382,7 +1402,7 @@ command_install() {
 		busybox sed -i '/^EXTRA_GROUPS=/d' "${INSTALLED_ROOTFS_DIR}/${distro_name}/etc/adduser.conf" 2>/dev/null
 		busybox sed -i '/^ADD_EXTRA_GROUPS=/d' "${INSTALLED_ROOTFS_DIR}/${distro_name}/etc/adduser.conf" 2>/dev/null
 		busybox echo 'ADD_EXTRA_GROUPS=1' >>"${INSTALLED_ROOTFS_DIR}/${distro_name}/etc/adduser.conf"
-		busybox echo 'EXTRA_GROUPS="aid_inet aid_net_raw"' >>"${INSTALLED_ROOTFS_DIR}/${distro_name}/etc/adduser.conf"
+		busybox echo 'EXTRA_GROUPS="aid_inet aid_net_raw aid_bt_admin aid_bt_net"' >>"${INSTALLED_ROOTFS_DIR}/${distro_name}/etc/adduser.conf"
 	fi
 
 	# REMOVE LD_PRELOAD from chroot environment to avoid errors
@@ -1490,6 +1510,7 @@ configure_flatpak_runtime() {
 
 command_login() {
 	use_termux_home=false
+	make_distro_isolated=false
 	make_termux_tmp_shared=false
 	custom_fs_bindings=""
 	login_user="root"
@@ -1518,14 +1539,43 @@ command_login() {
 			command_login_help
 			return 0
 			;;
+		--isolated)
+			# The option '--isolated' is not compatible with any share bind
+			if [ "$use_termux_home" = "true" ] || [ "$make_termux_tmp_shared" = "true" ] || [ ! -z "$custom_fs_bindings" ] || [ ! -z "$login_wd" ]; then
+				msg
+				msg "${BRED}Error: option '${YELLOW}--isolated${BRED}' cannot be used with '${YELLOW}--bind${BRED}', '${YELLOW}--work-dir${BRED}', '${YELLOW}--shared-tmp${BRED}' or '${YELLOW}--termux-home${BRED}'${RST}"
+				command_login_help
+				return 1
+			fi
+			make_distro_isolated=true
+			;;
 		--termux-home)
+			# The option '--termux-home' is not compatible with '--isolated'
+			if [ "$make_distro_isolated" = "true" ]; then
+				msg
+				msg "${BRED}Error: option '${YELLOW}--termux-home${BRED}' can not be used '${YELLOW}--isolated${BRED}'${RST}"
+				command_login_help
+				return 1
+			fi
 			use_termux_home=true
 			;;
 		--shared-tmp)
+			# The option '--shared-tmp' is not compatible with '--isolated'
+			if [ "$make_distro_isolated" = "true" ]; then
+				msg
+				msg "${BRED}Error: option '${YELLOW}--shared-tmp${BRED}' can not be used '${YELLOW}--isolated${BRED}'${RST}"
+				command_login_help
+				return 1
+			fi
 			make_termux_tmp_shared=true
 			;;
 		--bind)
-			if [ $# -ge 2 ]; then
+			if [ "$make_distro_isolated" = "true" ]; then
+				msg
+				msg "${BRED}Error: option '${YELLOW}--bind${BRED}' can not be used '${YELLOW}--isolated${BRED}'${RST}"
+				command_login_help
+				return 1
+			elif [ $# -ge 2 ]; then
 				shift 1
 
 				if [ -z "$1" ]; then
@@ -1567,7 +1617,12 @@ command_login() {
 			fi
 			;;
 		--work-dir)
-			if [ $# -ge 2 ]; then
+			if [ "$make_distro_isolated" = "true" ]; then
+				msg
+				msg "${BRED}Error: option '${YELLOW}--work-dir${BRED}' can not be used '${YELLOW}--isolated${BRED}'${RST}"
+				command_login_help
+				return 1
+			elif [ $# -ge 2 ]; then
 				shift 1
 
 				if [ -z "$1" ]; then
@@ -1694,15 +1749,32 @@ command_login() {
 	# Initialize mount tracker - create distro-specific directory
 	# Only clean the tracker file if this is the first session (no active sessions yet)
 	mount_tracker_file=$(get_mount_tracker_file "$distro_name")
+	isolated_tracker_file=$(get_isolated_tracker_file "$distro_name")
 	busybox mkdir -p "$(dirname "$mount_tracker_file")" 2>/dev/null || true
 
 	# Check if there are already active sessions
 	session_file=$(get_session_file "$distro_name")
 	if [ ! -f "$session_file" ]; then
-		# No active sessions, this is the first one - clean old mount tracker
+		# No active sessions, this is the first one - clean old mount and isolated trackers
 		busybox rm -f "$mount_tracker_file"
+		busybox rm -f "$isolated_tracker_file"
 	fi
-	# If sessions exist, keep the mount tracker file (mounts are shared across sessions)
+	# If sessions exist, keep the mount and isolated tracker files (mounts are shared across sessions)
+
+	# If the isolated tracker file was keeped, we rule out incompatible options
+	if [ -f "$isolated_tracker_file" ]; then
+		if [ "$use_termux_home" = "true" ] || [ "$make_termux_tmp_shared" = "true" ] || [ ! -z "$custom_fs_bindings" ] || [ ! "$login_wd" = "$login_home" ]; then
+			msg "${BRED}Error: a running isolated environment was found. cannot use '${YELLOW}--bind${BRED}', '${YELLOW}--work-dir${BRED}', '${YELLOW}--shared-tmp${BRED}' or '${YELLOW}--termux-home${BRED}'${RST}"
+			return 1
+		fi
+		make_distro_isolated=true
+	elif [ "$make_distro_isolated" = "true" && ! -f "$session_file" ]; then
+		# If this the first session and we try to start isolated, we create the tracker file
+		busybox echo "" > "$isolated_tracker_file"
+	else
+		msg "${BRED}Error: try starting an isolated environment while non-isolated ones are running"
+		return 1
+	fi
 
 	# Make the rootfs a mount point so it can be remounted (fixes Docker errors)
 	safe_mount "${INSTALLED_ROOTFS_DIR}/${distro_name}" "${INSTALLED_ROOTFS_DIR}/${distro_name}" "$distro_name" "" "--bind"
@@ -1711,9 +1783,11 @@ command_login() {
 	safe_mount "/dev" "${INSTALLED_ROOTFS_DIR}/${distro_name}/dev" "$distro_name"
 
 	# Mount binderfs if it exists
-	if [ -d "/dev/binderfs" ]; then
+	if [ "$make_distro_isolated" != "true" ] && [ -d "/dev/binderfs" ]; then
 		safe_mount "/dev/binderfs" "${INSTALLED_ROOTFS_DIR}/${distro_name}/dev/binderfs" "$distro_name"
 	fi
+
+	# Mount shm if it exists
 	if [ -d /dev/shm ]; then
 		safe_mount "/dev/shm" "${INSTALLED_ROOTFS_DIR}/${distro_name}/dev/shm" "$distro_name"
 	else
@@ -1791,26 +1865,29 @@ command_login() {
 	safe_mount "/dev/urandom" "${INSTALLED_ROOTFS_DIR}/${distro_name}/dev/random" "$distro_name"
 	safe_mount "/var/tmp" "${INSTALLED_ROOTFS_DIR}/${distro_name}/var/tmp" "$distro_name"
 
-	safe_mount "/data/dalvik-cache" "${INSTALLED_ROOTFS_DIR}/${distro_name}/data/dalvik-cache" "$distro_name"
+	# Mount dalvik cache if not isolated
+	[ "$make_distro_isolated" != "true" ] && safe_mount "/data/dalvik-cache" "${INSTALLED_ROOTFS_DIR}/${distro_name}/data/dalvik-cache" "$distro_name"
 
-	# Mount Android-specific directories
-	if [ -d "/config" ]; then
-		safe_mount "/config" "${INSTALLED_ROOTFS_DIR}/${distro_name}/config" "$distro_name"
-	fi
-	if [ -d "/dev/bus/usb" ]; then
-		safe_mount "/dev/bus/usb" "${INSTALLED_ROOTFS_DIR}/${distro_name}/dev/bus/usb" "$distro_name"
-	fi
+	# Mount Android-specific directories if not isolated
+	if [ "$make_distro_isolated" != "true" ]; then
+		if [ -d "/config" ]; then
+			safe_mount "/config" "${INSTALLED_ROOTFS_DIR}/${distro_name}/config" "$distro_name"
+		fi
+		if [ -d "/dev/bus/usb" ]; then
+			safe_mount "/dev/bus/usb" "${INSTALLED_ROOTFS_DIR}/${distro_name}/dev/bus/usb" "$distro_name"
+		fi
 
-	# Mount /apex modules
-	if [ -d "/apex" ]; then
-		(
-			cd /apex || return
-			for apex_module in *; do
-				if [ -d "/apex/$apex_module" ]; then
-					safe_mount "/apex/$apex_module" "${INSTALLED_ROOTFS_DIR}/${distro_name}/apex/$apex_module" "$distro_name" "" "--rbind"
-				fi
-			done
-		)
+		# Mount /apex modules
+		if [ -d "/apex" ]; then
+			(
+				cd /apex || return
+				for apex_module in *; do
+					if [ -d "/apex/$apex_module" ]; then
+						safe_mount "/apex/$apex_module" "${INSTALLED_ROOTFS_DIR}/${distro_name}/apex/$apex_module" "$distro_name" "" "--rbind"
+					fi
+				done
+			)
+		fi
 	fi
 
 	# Special handling for Arch Linux
@@ -1828,15 +1905,17 @@ command_login() {
 		fi
 	fi
 
-	# Mount Android storage directories
-	safe_mount "/sdcard" "${INSTALLED_ROOTFS_DIR}/${distro_name}/sdcard" "$distro_name"
+	# Mount Android storage directories if not isolated
+	[ "$make_distro_isolated" != "true" ] && safe_mount "/sdcard" "${INSTALLED_ROOTFS_DIR}/${distro_name}/sdcard" "$distro_name"
 
-	# Mount /storage/* directories
-	for storage_dir in /storage/*; do
-		if [ -d "$storage_dir" ]; then
-			safe_mount "$storage_dir" "${INSTALLED_ROOTFS_DIR}/${distro_name}${storage_dir}" "$distro_name"
-		fi
-	done
+	# Mount /storage/* directories if not isolated
+	if [ "$make_distro_isolated" != "true" ]; then
+		for storage_dir in /storage/*; do
+			if [ -d "$storage_dir" ]; then
+				safe_mount "$storage_dir" "${INSTALLED_ROOTFS_DIR}/${distro_name}${storage_dir}" "$distro_name"
+			fi
+		done
+	fi
 
 	# Enable SUID on /data
 	# Extract the device block for /data in /proc/mounts
@@ -1855,11 +1934,12 @@ command_login() {
 		}
 	fi
 
-	# Mount /data directory so it can access that
+	# Mount /data directory if not isolated so it can access that
 	# the main goal is that it can access /data/data/com.termux/files
-	safe_mount "/data" "${INSTALLED_ROOTFS_DIR}/${distro_name}/data" "$distro_name"
+	[ "$make_distro_isolated" != "true" ] && safe_mount "/data" "${INSTALLED_ROOTFS_DIR}/${distro_name}/data" "$distro_name"
 
 	# Use Termux home directory if requested.
+	# Notice: since shared and isolated options are mutually exclusive, this remains secure because it can never be reached by an isolated requests
 	if [ "$use_termux_home" = "true" ]; then
 		if [ "$login_user" = "root" ]; then
 			safe_mount "$TERMUX_HOME" "${INSTALLED_ROOTFS_DIR}/${distro_name}/root" "$distro_name"
@@ -1905,7 +1985,7 @@ command_login() {
 	fi
 
 	# Fix permissions for --work-dir if it's in a restricted location (like /data) and we didn't use --termux-home
-	if [ -n "$login_wd" ] && [ "$login_user" != "root" ] && [ "$use_termux_home" != "true" ]; then
+	if [ -n "$login_wd" ] && [ "$login_user" != "root" ] && [ "$use_termux_home" != "true" ] && [ "$make_distro_isolated" != "true" ]; then
 		case "$login_wd" in
 		${TERMUX_ROOT_DIR}/*)
 			# Check if we need to open the 'home' directory too (common case)
@@ -1949,11 +2029,12 @@ command_login() {
 	fi
 
 	if [ "$login_user" != "root" ]; then
-		if ! busybox grep -qE "^(aid_inet|aid_net_raw):.*:.*${login_user}" "${INSTALLED_ROOTFS_DIR}/${distro_name}/etc/group"; then
-			run_chroot_cmd /sbin/usermod -a -G aid_inet,aid_net_raw "$login_user" 2>/dev/null || true
+		if ! busybox grep -qE "^(aid_inet|aid_net_raw|aid_bt_admin|aid_bt_net):.*:.*${login_user}" "${INSTALLED_ROOTFS_DIR}/${distro_name}/etc/group"; then
+			run_chroot_cmd /sbin/usermod -a -G aid_inet,aid_net_raw,aid_bt_admin,aid_bt_net "$login_user" 2>/dev/null || true
 		fi
 	fi
 
+	# Notice: since shared and isolated options are mutually exclusive, this remains secure because it can never be reached by an isolated requests
 	if [ "$make_termux_tmp_shared" = "true" ]; then
 		if [ ! -d "${TERMUX_PREFIX}/tmp" ]; then
 			busybox mkdir -p "${TERMUX_PREFIX}/tmp"
@@ -1987,6 +2068,7 @@ command_login() {
 	fi
 
 	# Bind custom file systems
+	# Notice: since shared and isolated options are mutually exclusive, this remains secure because it can never be reached by an isolated requests
 	if [ -n "$custom_fs_bindings" ]; then
 		# Use printf to handle the space-separated bindings properly
 		busybox printf '%s\n' "$custom_fs_bindings" | busybox tr ' ' '\n' | while IFS= read -r binding; do
@@ -2125,6 +2207,7 @@ command_login_help() {
 	echo "Options:"
 	echo "  --user USERNAME        Login as specified user"
 	echo "  --work-dir PATH        Set working directory"
+	echo "  --isolated			   Run in isolated environment"
 	echo "  --shared-tmp           Share host tmp directory"
 	echo "  --termux-home          Mount Termux home directory"
 	echo "  --bind PATH[:TARGET]   Bind mount additional paths"
@@ -2812,6 +2895,8 @@ command_help() {
 	msg "  ${GREEN}remove       ${CYAN}- Delete a specified distribution.${RST}"
 	msg "                 ${BRED}WARNING: this command destroys data!${RST}"
 	msg "  ${GREEN}clear-cache  ${CYAN}- Clear cache of downloaded files. ${RST}"
+	msg
+	msg "  ${GREEN}unmount      ${CYAN}- Unmount all system points for the specified distribution.${RST}"
 	msg
 	msg "${CYAN}Each of commands has its own help information. To view it, just${RST}"
 	msg "${CYAN}supply a '${GREEN}--help${CYAN}' argument to chosen command.${RST}"
