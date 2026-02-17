@@ -108,8 +108,10 @@ chroot-distro login debian
 #### Available Options
 
 - `--user <username>` – Login as a specified user (user must exist in chroot environment)
-- `--termux-home` – Mount Termux home directory inside chroot
-- `--bind <host_path>:<chroot_path>` – Bind mount a path from host to chroot
+- `--isolated` - Run the specified distro in an isolated chroot environment
+- `--shared-tmp` - Share Termux tmp directory (no compatible with `--isolated`)
+- `--termux-home` – Mount Termux home directory inside chroot (no compatible with `--isolated`)
+- `--bind <host_path>:<chroot_path>` – Bind mount a path from host to chroot (no compatible with `--isolated`)
 - `--work-dir <path>` – Set custom working directory (default: user's home directory)
 
 #### Execute Commands
