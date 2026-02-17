@@ -2207,7 +2207,7 @@ command_login_help() {
 	echo "Options:"
 	echo "  --user USERNAME        Login as specified user"
 	echo "  --work-dir PATH        Set working directory"
-	echo "  --isolated			   Run in isolated environment"
+	echo "  --isolated             Run in isolated environment"
 	echo "  --shared-tmp           Share host tmp directory"
 	echo "  --termux-home          Mount Termux home directory"
 	echo "  --bind PATH[:TARGET]   Bind mount additional paths"
