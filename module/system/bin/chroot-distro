@@ -1768,10 +1768,10 @@ command_login() {
 			return 1
 		fi
 		make_distro_isolated=true
-	elif [ "$make_distro_isolated" = "true" && ! -f "$session_file" ]; then
+	elif [ "$make_distro_isolated" = "true" ] && [ ! -f "$session_file" ]; then
 		# If this the first session and we try to start isolated, we create the tracker file
 		busybox echo "" > "$isolated_tracker_file"
-	else
+	elif  [ "$make_distro_isolated" = "true" ]; then
 		msg "${BRED}Error: try starting an isolated environment while non-isolated ones are running"
 		return 1
 	fi
