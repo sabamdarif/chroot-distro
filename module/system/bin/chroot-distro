@@ -110,6 +110,23 @@ msg() {
 
 #############################################################################
 #
+#
+#
+#
+#
+#############################################################################
+
+get_resolv_conf_dir() {
+	distro_name="$1"
+	if [ -z "$distro_name" ]; then
+		msg "${BRED}Error: get_resolv_conf_dir() called without distro_name${RST}"
+		return 1
+	fi
+	busybox echo "${RUNTIME_DIR}/data/${distro_name}/resolvconf"
+}
+
+#############################################################################
+#
 # FUNCTION TO GET ISOLATED TRACKER FILE PATH FOR A DISTRO
 #
 # Returns the distro-specific isolated tracker file path.
@@ -1227,12 +1244,14 @@ command_install() {
 	# Enhanced network configuration with dynamic DNS
 	msg "${BLUE}[${GREEN}*${BLUE}] ${CYAN}Configuring network and DNS...${RST}"
 
-	busybox mkdir -p "${INSTALLED_ROOTFS_DIR}/${distro_name}/run/resolvconf"
-	busybox cat <<-EOF >"${INSTALLED_ROOTFS_DIR}/${distro_name}/run/resolvconf/resolv.conf"
+	resolv_conf_dir=$(get_resolv_conf_dir "$distro_name")
+
+	busybox mkdir -p "$resolv_conf_dir"
+	busybox cat <<-EOF >"${resolv_conf_dir}/resolv.conf"
 		nameserver ${DEFAULT_PRIMARY_NAMESERVER}
 		nameserver ${DEFAULT_SECONDARY_NAMESERVER}
 	EOF
-	busybox ln -sf "${INSTALLED_ROOTFS_DIR}/${distro_name}/run/resolvconf/resolv.conf" "${INSTALLED_ROOTFS_DIR}/${distro_name}/etc/resolv.conf" 2>/dev/null || true
+	busybox ln -sf "/run/resolvconf/resolv.conf" "${INSTALLED_ROOTFS_DIR}/${distro_name}/etc/resolv.conf" 2>/dev/null || true
 
 	# Default /etc/hosts may be empty or incomplete.
 	msg "${BLUE}[${GREEN}*${BLUE}] ${CYAN}Creating file '${INSTALLED_ROOTFS_DIR:?}/${distro_name:?}/etc/hosts'...${RST}"
@@ -1851,6 +1870,12 @@ command_login() {
 	fi
 
 	safe_mount "" "${INSTALLED_ROOTFS_DIR}/${distro_name}/run" "$distro_name" "tmpfs" "rw,nosuid,nodev,mode=755,size=256M"
+
+	# Remount resolvconf to use network safely in chroot
+	resolv_conf_dir=$(get_resolv_conf_dir "$distro_name")
+
+	busybox mkdir -p "${INSTALLED_ROOTFS_DIR}/${distro_name}/run/resolvconf" 2>/dev/null | true
+	safe_mount "$resolv_conf_dir" "${INSTALLED_ROOTFS_DIR}/${distro_name}/run/resolvconf" "$distro_name" "" "--bind"
 
 	busybox mount --make-rshared "${INSTALLED_ROOTFS_DIR}/${distro_name}" 2>/dev/null || true
 
@@ -2588,6 +2613,10 @@ command_remove() {
 		msg "${BLUE}[${BRED}!${BLUE}] ${CYAN}Finished with errors. Some files probably were not deleted.${RST}"
 		return 1
 	fi
+
+	# Remove the resolvconf dir
+	resolv_conf_dir=$(get_resolv_conf_dir "$distro_name")
+	busybox rm -rf "$resolv_conf_dir" 2>/dev/null | true
 
 	# Update module description
 	sh "$MODDIR/status.sh"
