@@ -937,7 +937,7 @@ cleanup_all_mounts() {
 
 	busybox rm -f "$mount_tracker_file"
 
-	if [ -f "$isolated_tracker_file" ] && busybox rm -f "$isolated_tracker_file"
+	[ -f "$isolated_tracker_file" ] && busybox rm -f "$isolated_tracker_file"
 
 	# Restore original permissions of /data directories if they were modified
 	restore_data_permissions "$distro_name"
