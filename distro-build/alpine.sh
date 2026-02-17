@@ -1,4 +1,4 @@
-dist_version="3.23.2"
+dist_version="3.23.3"
 
 bootstrap_distribution() {
 	sudo rm -f "${ROOTFS_DIR}"/alpine-*.tar.xz
