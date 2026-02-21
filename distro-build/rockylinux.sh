@@ -1,4 +1,4 @@
-dist_version="10.0"
+dist_version="10.1"
 
 bootstrap_distribution() {
 	sudo rm -f "${ROOTFS_DIR}"/rocky-*.tar.xz
