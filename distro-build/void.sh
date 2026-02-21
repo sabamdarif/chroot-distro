@@ -1,4 +1,4 @@
-dist_version="20250202"
+dist_version="20250401"
 
 bootstrap_distribution() {
 	sudo rm -f "${ROOTFS_DIR}"/void-*.tar.xz
