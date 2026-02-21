@@ -1,6 +1,6 @@
 # Put only current stable version here!
-dist_version="11.0"
-dist_codename="aramo"
+dist_version="12.0"
+dist_codename="ecne"
 
 bootstrap_distribution() {
 	sudo rm -f "${ROOTFS_DIR}"/trisquel-*-"${dist_version}".tar.xz
