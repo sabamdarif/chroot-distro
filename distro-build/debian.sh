@@ -1,5 +1,5 @@
 # Put only current stable version here!
-dist_version="13.3"
+dist_version="13.4"
 dist_codename="trixie"
 
 bootstrap_distribution() {
