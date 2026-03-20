@@ -872,10 +872,26 @@ download_file() {
 	output_file="$2"
 
 	if command -v curl >/dev/null 2>&1; then
-		curl -L --fail --connect-timeout 30 --insecure -o "$output_file" "$url"
-	else
-		busybox wget -T 30 --no-check-certificate -O "$output_file" "$url"
+		curl -L --fail --connect-timeout 30 --insecure -o "$output_file" "$url" && return 0
 	fi
+
+	if busybox wget -T 30 --no-check-certificate -O "$output_file" "$url"; then
+		return 0
+	fi
+
+	if [ -x "/data/data/com.termux/files/usr/bin/curl" ]; then
+		/data/data/com.termux/files/usr/bin/curl -L --fail --connect-timeout 30 --insecure -o "$output_file" "$url" && return 0
+	fi
+
+	if [ -x "/data/data/com.termux/files/usr/bin/wget" ]; then
+		/data/data/com.termux/files/usr/bin/wget -T 30 --no-check-certificate -O "$output_file" "$url" && return 0
+	fi
+
+	if [ -x "/data/data/com.termux/files/usr/bin/busybox" ]; then
+		/data/data/com.termux/files/usr/bin/busybox wget -T 30 --no-check-certificate -O "$output_file" "$url" && return 0
+	fi
+
+	return 1
 }
 
 # Function to clean up failed installation
