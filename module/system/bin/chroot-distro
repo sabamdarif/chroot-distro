@@ -39,7 +39,7 @@ else
 	RST=''
 fi
 
-PROGRAM_VERSION="1.5.4"
+PROGRAM_VERSION="1.5.5"
 
 REPO_OWNER="sabamdarif"
 

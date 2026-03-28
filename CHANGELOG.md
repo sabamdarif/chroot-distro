@@ -1,5 +1,28 @@
 # Changelog
 
+### v1.5.5
+
+- fix(chroot-distro/command_install): extract the rootfs with proper permission
+- style(ci): format all workflow files
+- fix(chroot-distro): embed status.sh into the main script bacause status.sh wasn't working on some device
+- fix(chroot-distro): read current mount options and only remount if nosuid is actually set
+- fix(chroot-distro/command_remove): verify all mounts are actually gone before doing rm -rf
+- feat(download): add Termux fallback download methods (#37)
+- feat(webui): make start,stop,uninstall button follow material ui color
+- manjaro: bump to 20260309 (#33)
+- debian: bump to 13.4 (#34)
+- archlinux: bump to 2026.03.01 (#35)
+- feat(webui): rename `Enable Serviced` to `Enable Serviced Autostart`
+- feat(webui): update distro config icon to a linux icon
+- fix(webui): hide the search button on distro config page and hide both buttons in main settings page
+- feat(webui): put distro specfic settings in a seperate page
+- feat(chroot-distro): now use seperate folder called mounts inside DATA_DIR where it will store all the mount points data
+- feat(chroot-distro): do not depend on get_isolated_tracker_file for --isolated option
+- docs: update README credits and add GPL-v3 license and author information in serviced
+- feat(serviced): v0.1.7: now supports help, cat, kill also now it will scan the user folders for systemd services files
+- feat(serviced): v0.1.6, now you can launch few systemd services
+- feat(webui): add option in the distro's settings page to manage non-root users
+
 ### v1.5.4
 
 - feat(serviced): version 0.1.5

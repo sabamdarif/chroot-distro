@@ -1,6 +1,6 @@
 {
-  "version": "1.5.4",
-  "versionCode": 31,
-  "zipUrl": "https://github.com/sabamdarif/chroot-distro/releases/download/1.5.4/chroot-distro.zip",
+  "version": "1.5.5",
+  "versionCode": 32,
+  "zipUrl": "https://github.com/sabamdarif/chroot-distro/releases/download/1.5.5/chroot-distro.zip",
   "changelog": "https://raw.githubusercontent.com/sabamdarif/chroot-distro/main/CHANGELOG.md"
 }
