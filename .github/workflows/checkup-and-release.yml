@@ -34,7 +34,7 @@ jobs:
         runs-on: ubuntu-latest
         steps:
             - name: Checkout code
-              uses: actions/checkout@v4
+              uses: actions/checkout@v6
 
             - name: Run ShellCheck on scripts
               run: |
@@ -60,7 +60,7 @@ jobs:
         needs: [shellcheck]
         steps:
             - name: Checkout code
-              uses: actions/checkout@v4
+              uses: actions/checkout@v6
 
             - name: Setup Node.js
               uses: actions/setup-node@v4
@@ -84,7 +84,7 @@ jobs:
         if: "!startsWith(github.event.head_commit.message, 'release:') && !contains(github.event.head_commit.message, '[skip ci]')"
         steps:
             - name: Checkout code
-              uses: actions/checkout@v4
+              uses: actions/checkout@v6
 
             - name: Check version consistency
               run: |
@@ -120,7 +120,7 @@ jobs:
             contents: write
         steps:
             - name: Checkout code
-              uses: actions/checkout@v4
+              uses: actions/checkout@v6
               with:
                   fetch-depth: 0
                   token: ${{ secrets.GITHUB_TOKEN }}

@@ -42,7 +42,7 @@ jobs:
             should_build: ${{ steps.plan.outputs.should_build }}
         steps:
             - name: Checkout repository
-              uses: actions/checkout@v4
+              uses: actions/checkout@v6
               with:
                   fetch-depth: 0
 
@@ -67,7 +67,7 @@ jobs:
                 distro: ${{ fromJson(needs.prepare.outputs.matrix) }}
         steps:
             - name: Checkout repository
-              uses: actions/checkout@v4
+              uses: actions/checkout@v6
 
             - name: Build Rootfs
               uses: ./.github/actions/build-rootfs
@@ -90,7 +90,7 @@ jobs:
             contents: write
         steps:
             - name: Checkout repository
-              uses: actions/checkout@v4
+              uses: actions/checkout@v6
 
             - name: Download all artifacts
               uses: actions/download-artifact@v4
