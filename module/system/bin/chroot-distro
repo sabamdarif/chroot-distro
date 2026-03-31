@@ -72,7 +72,7 @@ DEFAULT_PATH_ENV="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/
 BUSYBOXPATH="$(command -v busybox 2>/dev/null)"
 
 # variables to store distro information
-SUPPORTED_DISTRIBUTIONS="alpine archlinux debian fedora manajro opensuse rockylinux ubuntu void kali trisquel"
+SUPPORTED_DISTRIBUTIONS="alpine archlinux debian fedora manjaro opensuse rockylinux ubuntu void kali trisquel"
 
 # JSON distro configuration paths
 DATA_DIR="${RUNTIME_DIR}/data"
