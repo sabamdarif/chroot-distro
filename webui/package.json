@@ -12,6 +12,6 @@
     "vite": "^7.2.4"
   },
   "dependencies": {
-    "kernelsu": "^3.0.0"
+    "kernelsu": "^3.0.2"
   }
 }
