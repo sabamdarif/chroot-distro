@@ -65,7 +65,7 @@ jobs:
             - name: Setup Node.js
               uses: actions/setup-node@v4
               with:
-                  node-version: "20"
+                  node-version: "24"
                   cache: "npm"
                   cache-dependency-path: webui/package-lock.json
 
@@ -299,7 +299,7 @@ jobs:
             - name: Setup Node.js
               uses: actions/setup-node@v4
               with:
-                  node-version: "20"
+                  node-version: "24"
                   cache: "npm"
                   cache-dependency-path: webui/package-lock.json
 
