@@ -52,7 +52,7 @@ jobs:
                   bash .github/workflows/scripts/check_distro_versions.sh --update "${{ matrix.update.name }}" "${{ matrix.update.new }}" "${{ matrix.update.new_codename }}"
 
             - name: Create Pull Request
-              uses: peter-evans/create-pull-request@v6
+              uses: peter-evans/create-pull-request@v8
               with:
                   token: ${{ secrets.PAT_TOKEN || secrets.GITHUB_TOKEN }}
                   commit-message: "${{ matrix.update.name }}: bump to ${{ matrix.update.new }}"
