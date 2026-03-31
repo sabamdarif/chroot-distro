@@ -76,7 +76,7 @@ jobs:
                   skip-archs: ${{ env.SKIP_ARCHS }}
 
             - name: Upload Artifacts
-              uses: actions/upload-artifact@v4
+              uses: actions/upload-artifact@v7
               with:
                   name: rootfs-${{ matrix.distro }}
                   path: rootfs/*.tar.xz
