@@ -41,11 +41,11 @@
     },
     {
       "name": "kali",
-      "version": "2025.4",
+      "version": "2026.1",
       "supported_arch": [
         "aarch64"
       ],
-      "aarch64_url": "https://github.com/sabamdarif/chroot-distro/releases/download/kali/kali-aarch64-2025.4.tar.xz",
+      "aarch64_url": "https://github.com/sabamdarif/chroot-distro/releases/download/kali/kali-aarch64-2026.1.tar.xz",
       "arm_url": ""
     },
     {
