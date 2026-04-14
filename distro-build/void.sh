@@ -25,6 +25,7 @@ bootstrap_distribution() {
 			mount --bind /dev "${WORKDIR}/void-$(translate_arch "$arch")/dev"
 			mount --bind /proc "${WORKDIR}/void-$(translate_arch "$arch")/proc"
 			mount --bind /sys "${WORKDIR}/void-$(translate_arch "$arch")/sys"
+			chroot "${WORKDIR}/void-$(translate_arch "$arch")" xbps-install -Syu xbps
 			chroot "${WORKDIR}/void-$(translate_arch "$arch")" xbps-install -Sy sudo
 			chroot "${WORKDIR}/void-$(translate_arch "$arch")" xbps-reconfigure -fa
 		EOF
