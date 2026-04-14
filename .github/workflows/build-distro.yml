@@ -3,11 +3,6 @@ name: build distro
 on:
     push:
         branches: [main]
-        paths:
-            - ".github/workflows/build-distro.yml"
-            - ".github/actions/**"
-            - "distro-build/*.sh"
-            - "bootstrap-rootfs.sh"
     pull_request:
         paths:
             - ".github/workflows/build-distro.yml"

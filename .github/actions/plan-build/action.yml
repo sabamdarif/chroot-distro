@@ -74,8 +74,15 @@ runs:
                 echo "Changed files:"
                 cat ./files_changed.txt
 
+                COMMIT_MSG="${{ github.event.head_commit.message }}"
+
+                # Check if it's a release commit
+                if echo "$COMMIT_MSG" | grep -qE '^release:\s*v?[0-9]+\.[0-9]+\.[0-9]+'; then
+                  echo "Release commit detected. Building ALL distributions."
+                  distros=$(ls -1 distro-build/*.sh | sed 's@distro-build/\(.*\)\.sh@\1@' | tr '\n' ' ')
+                  should_build="true"
                 # Check for changes in core files or any action definition
-                if grep -qE '^bootstrap-rootfs.sh$|^\.github/workflows/build-distro.yml$|^\.github/actions/.*' ./files_changed.txt; then
+                elif grep -qE '^bootstrap-rootfs.sh$|^\.github/workflows/build-distro.yml$|^\.github/actions/.*' ./files_changed.txt; then
                   echo "Core files changed. Building ALL distributions."
                   distros=$(ls -1 distro-build/*.sh | sed 's@distro-build/\(.*\)\.sh@\1@' | tr '\n' ' ')
                   should_build="true"
