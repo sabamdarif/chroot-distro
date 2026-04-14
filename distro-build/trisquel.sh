@@ -16,7 +16,7 @@ bootstrap_distribution() {
 			--architectures=${arch} \
 			--variant=apt \
 			--components="main" \
-			--include="ca-certificates,locales,trisquel-keyring,software-properties-common,passwd" \
+			--include="ca-certificates,locales,trisquel-keyring,software-properties-common,passwd,sudo" \
 			--format=directory \
 			"${dist_codename}" \
 			"${WORKDIR}/trisquel-$(translate_arch "$arch")" \

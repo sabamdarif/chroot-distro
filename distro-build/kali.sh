@@ -28,7 +28,7 @@ bootstrap_distribution() {
 			--arch="${kali_arch}" \
 			--variant=minbase \
 			--components=main,contrib,non-free,non-free-firmware \
-			--include=kali-archive-keyring,apt-transport-https,ca-certificates \
+			--include=kali-archive-keyring,apt-transport-https,ca-certificates,sudo \
 			kali-rolling \
 			"${WORKDIR}/kali-$(translate_arch "$arch")" \
 			http://http.kali.org/kali

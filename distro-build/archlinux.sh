@@ -56,6 +56,7 @@ bootstrap_distribution() {
 					echo "[*] Retry \$attempt: pacman upgrade failed, retrying in 30s..."
 					sleep 30
 				done
+				chroot "${WORKDIR}/archlinux-$(translate_arch "$arch")" pacman -S --noconfirm sudo
 			EOF
 			;;
 		x86_64 | i686)
@@ -108,7 +109,7 @@ bootstrap_distribution() {
 				mount --bind /dev "${WORKDIR}/archlinux-bootstrap/dev"
 				mount --bind /proc "${WORKDIR}/archlinux-bootstrap/proc"
 				mount --bind /sys "${WORKDIR}/archlinux-bootstrap/sys"
-				chroot "${WORKDIR}/archlinux-bootstrap" pacstrap -K /archlinux-${arch} base
+				chroot "${WORKDIR}/archlinux-bootstrap" pacstrap -K /archlinux-${arch} base sudo
 			EOF
 
 			sudo mv "${WORKDIR}/archlinux-bootstrap/archlinux-${arch}" "${WORKDIR}/archlinux-$(translate_arch "$arch")"

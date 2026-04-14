@@ -16,7 +16,7 @@ bootstrap_distribution() {
 			--architectures=${arch} \
 			--variant=minbase \
 			--components="main,contrib" \
-			--include="ca-certificates,locales" \
+			--include="ca-certificates,locales,sudo" \
 			--format=directory \
 			"${dist_codename}" \
 			"${WORKDIR}/debian-${dist_codename}-$(translate_arch "$arch")"

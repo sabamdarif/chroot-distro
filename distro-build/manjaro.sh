@@ -30,7 +30,7 @@ bootstrap_distribution() {
 		chroot "${WORKDIR}/manjaro-aarch64" pacman-key --populate manjaro
 		chroot "${WORKDIR}/manjaro-aarch64" pacman-key --populate archlinuxarm
 		chroot "${WORKDIR}/manjaro-aarch64" pacman -Syu --noconfirm
-		chroot "${WORKDIR}/manjaro-aarch64" pacman -S --noconfirm util-linux
+		chroot "${WORKDIR}/manjaro-aarch64" pacman -S --noconfirm util-linux sudo
 	EOF
 
 	sudo rm -f "${WORKDIR:?}"/manjaro-aarch64/var/cache/pacman/pkg/* || true
