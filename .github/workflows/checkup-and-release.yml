@@ -192,6 +192,7 @@ jobs:
                   # Filter and format commits
                   FORMATTED_COMMITS=$(echo "$COMMITS" | \
                     grep -v "^github-actions\[bot\]|" | \
+                    grep -v "^dependabot\[bot\]|" | \
                     sed 's/^[^|]*|//' | \
                     grep -v "^release:" | \
                     grep -v "^chore: update files for release" | \
