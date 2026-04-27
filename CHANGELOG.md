@@ -1,5 +1,19 @@
 # Changelog
 
+### v1.5.6
+
+- fedora: fix download url
+- archlinux: bump to 2026.04.01 (#58)
+- manjaro: bump to 20260413 (#59)
+- feat(ci/build-distro): build distro in each release
+- feat(ci/checkup-and-release): filter out all commit from `dependabot[bot]` in the changelog
+- fix(distro-build/void): fix void build issue
+- feat(distro-build): include sudo in all the rootfs archive by default
+- manjaro: bump to 20260330 (#50)
+- kali: bump to 2026.1 (#51)
+- feat(ci): update node version and setup dependabot
+- fix(chroot-distro): typo in SUPPORTED_DISTRIBUTIONS manajro -> manjaro
+
 ### v1.5.5
 
 - fix(chroot-distro/command_install): extract the rootfs with proper permission
