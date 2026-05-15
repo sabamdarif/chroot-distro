@@ -50,11 +50,11 @@
     },
     {
       "name": "manjaro",
-      "version": "20260413",
+      "version": "20260511",
       "supported_arch": [
         "aarch64"
       ],
-      "aarch64_url": "https://github.com/sabamdarif/chroot-distro/releases/download/manjaro/manjaro-aarch64-20260413.tar.xz",
+      "aarch64_url": "https://github.com/sabamdarif/chroot-distro/releases/download/manjaro/manjaro-aarch64-20260511.tar.xz",
       "arm_url": ""
     },
     {
