@@ -2,13 +2,13 @@
   "distros": [
     {
       "name": "alpine",
-      "version": "3.23.3",
+      "version": "3.23.4",
       "supported_arch": [
         "aarch64",
         "arm"
       ],
-      "aarch64_url": "https://github.com/sabamdarif/chroot-distro/releases/download/alpine/alpine-aarch64-3.23.3.tar.xz",
-      "arm_url": "https://github.com/sabamdarif/chroot-distro/releases/download/alpine/alpine-arm-3.23.3.tar.xz"
+      "aarch64_url": "https://github.com/sabamdarif/chroot-distro/releases/download/alpine/alpine-aarch64-3.23.4.tar.xz",
+      "arm_url": "https://github.com/sabamdarif/chroot-distro/releases/download/alpine/alpine-arm-3.23.4.tar.xz"
     },
     {
       "name": "archlinux",
