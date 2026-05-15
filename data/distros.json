@@ -12,13 +12,13 @@
     },
     {
       "name": "archlinux",
-      "version": "2026.04.01",
+      "version": "2026.05.01",
       "supported_arch": [
         "aarch64",
         "arm"
       ],
-      "aarch64_url": "https://github.com/sabamdarif/chroot-distro/releases/download/archlinux/archlinux-aarch64-2026.04.01.tar.xz",
-      "arm_url": "https://github.com/sabamdarif/chroot-distro/releases/download/archlinux/archlinux-arm-2026.04.01.tar.xz"
+      "aarch64_url": "https://github.com/sabamdarif/chroot-distro/releases/download/archlinux/archlinux-aarch64-2026.05.01.tar.xz",
+      "arm_url": "https://github.com/sabamdarif/chroot-distro/releases/download/archlinux/archlinux-arm-2026.05.01.tar.xz"
     },
     {
       "name": "debian",
