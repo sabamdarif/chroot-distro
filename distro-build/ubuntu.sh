@@ -1,6 +1,6 @@
 # After changing, update the DISTRO_NAME below.
-dist_version="25.10"
-dist_codename="questing"
+dist_version="26.04"
+dist_codename="resolute"
 
 bootstrap_distribution() {
 	sudo rm -f "${ROOTFS_DIR}"/ubuntu-*-"${dist_version}".tar.xz
