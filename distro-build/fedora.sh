@@ -11,7 +11,7 @@ bootstrap_distribution() {
 
 		curl --fail --location \
 			--output "${WORKDIR}/Fedora-Container-Base-Generic.${arch}-${dist_version}.oci.tar.xz" \
-			"https://mirror.de.leaseweb.net/fedora/linux/releases/${dist_version%%-*}/Container/${arch}/images/Fedora-Container-Base-Generic-${dist_version}.${arch}.oci.tar.xz"
+			"https://mirror.de.leaseweb.net/fedora/releases/${dist_version%%-*}/Container/${arch}/images/Fedora-Container-Base-Generic-${dist_version}.${arch}.oci.tar.xz"
 		sudo rm -rf "${WORKDIR}/fedora-tmp" "${WORKDIR}/fedora-$(translate_arch "$arch")"
 		mkdir "${WORKDIR}/fedora-tmp"
 		tar -C "${WORKDIR}/fedora-tmp" -Jxf "${WORKDIR}/Fedora-Container-Base-Generic.${arch}-${dist_version}.oci.tar.xz"

@@ -2,6 +2,7 @@
 
 ### v1.5.6
 
+- fedora: fix download url
 - archlinux: bump to 2026.04.01 (#58)
 - manjaro: bump to 20260413 (#59)
 - feat(ci/build-distro): build distro in each release

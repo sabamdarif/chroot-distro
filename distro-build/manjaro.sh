@@ -1,4 +1,4 @@
-dist_version="20260413"
+dist_version="20260511"
 
 bootstrap_distribution() {
 	sudo rm -f "${ROOTFS_DIR}"/manjaro-*.tar.xz
