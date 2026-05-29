@@ -1,5 +1,6 @@
 import json
 import os
+import ssl
 import typing
 import urllib.error
 import urllib.request
@@ -235,6 +236,11 @@ def pull_image(image_ref: str, rootfs_dir: str, arch: str) -> dict[str, typing.A
                         auth_denied_msg(image_ref, dl_err.code)
                     ) from dl_err
                 raise
+            except (ssl.SSLError, ConnectionError, OSError) as dl_err:
+                raise RuntimeError(
+                    f"Network error downloading layer {i + 1}/{n_layers} "
+                    f"({short_id}): {dl_err}"
+                ) from dl_err
 
         log_info(f"{short_id}: Applying layer {i + 1}/{n_layers}...")
         apply_layer(layer_path, rootfs_dir)
