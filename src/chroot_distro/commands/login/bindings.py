@@ -1,6 +1,41 @@
 import os
 
-from chroot_distro.constants import IS_TERMUX
+from chroot_distro.constants import IS_TERMUX, TERMUX_APP_PACKAGE, TERMUX_PREFIX
+
+
+def android_data_bindings() -> list[tuple[str, str]]:
+    """Return list of (source, target) tuples for Android data paths (dalvik cache, app directories, etc.)."""
+    binds: list[tuple[str, str]] = []
+    if not IS_TERMUX:
+        return binds
+
+    for path in (
+        "/data/app",
+        "/data/dalvik-cache",
+        "/data/misc/apexdata/com.android.art/dalvik-cache",
+    ):
+        try:
+            real = os.path.realpath(path)
+        except OSError:
+            continue
+        if not os.path.exists(real):
+            continue
+        if os.path.isdir(real):
+            mode = oct(os.stat(real).st_mode)[-1]
+            if mode in ("1", "5", "7"):
+                binds.append((real, real))
+
+    apps_dir = f"/data/data/{TERMUX_APP_PACKAGE}/files/apps"
+    if os.path.isdir(apps_dir):
+        binds.append((apps_dir, apps_dir))
+
+    # Bind Termux cache directory
+    cache_dir = f"/data/data/{TERMUX_APP_PACKAGE}/cache"
+    if os.path.isdir(cache_dir):
+        binds.append((cache_dir, cache_dir))
+
+    return binds
+
 
 
 def storage_bindings() -> list[tuple[str, str]]:
@@ -98,6 +133,10 @@ def get_bindings(
             binds.append((src, dst))
         for src, dst in storage_bindings():
             binds.append((src, dst))
+        for src, dst in android_data_bindings():
+            binds.append((src, dst))
+        if os.path.exists(TERMUX_PREFIX):
+            binds.append((TERMUX_PREFIX, TERMUX_PREFIX))
 
     # 3. Shared Home Directory
     # Default behavior is sharing home in non-isolated/non-minimal mode, unless overridden.

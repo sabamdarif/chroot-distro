@@ -287,7 +287,26 @@ Spawn an interactive shell (or a custom command) inside an installed container. 
 
 #### Host bindings (Termux, default mode)
 Without `--isolated` or `--minimal`, the following host paths are bind-mounted inside the container when present and readable:
-`/apex`, `/data/app`, `/data/dalvik-cache`, `/data/misc/apexdata/com.android.art/dalvik-cache`, `/data/data/<termux-app-package>`, `/linkerconfig/com.android.art/ld.config.txt`, `/linkerconfig/ld.config.txt`, `/odm`, `/plat_property_contexts`, `/product`, `/property_contexts`, `/sdcard`, `/storage/emulated/0`, `/storage/self/primary`, `/system`, `/system_ext`, `/vendor`.
+
+```
+/apex
+/data/app
+/data/dalvik-cache
+/data/misc/apexdata/com.android.art/dalvik-cache
+/data/data/<termux-app-package>
+/linkerconfig/com.android.art/ld.config.txt
+/linkerconfig/ld.config.txt
+/odm
+/plat_property_contexts
+/product
+/property_contexts
+/sdcard
+/storage/emulated/0
+/storage/self/primary
+/system
+/system_ext
+/vendor
+```
 
 For normal-type containers, the Termux `$PREFIX` is also bound at its original path inside the guest so Termux utilities are reachable.
 
