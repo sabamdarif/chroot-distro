@@ -140,7 +140,7 @@ def _exec_chroot(
         login_uid=str(uid) if uid else None,
         login_gid=str(gid) if gid else None,
         groups=groups,
-        skip_chdir=False,
+        workdir=stage.workdir or "/",
         inner_cmd=command,
     )
 

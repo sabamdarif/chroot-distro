@@ -343,26 +343,12 @@ def _command_login_inner(container_name: str, args) -> None:
                 crit_error(f"Failed to mount bindings: {e}")
                 sys.exit(1)
 
-    # 3. Handle --skip-chdir option for GNU chroot
-    # If the user specified a working directory, we resolve it to the host path.
-    # We then chdir on the host to that path and pass skip_chdir=True to build_chroot_args.
-    skip_chdir = False
-    if login_wd:
-        # Resolve guest login_wd relative to rootfs
-        resolved_wd = os.path.join(rootfs, login_wd.lstrip("/"))
-        if os.path.exists(resolved_wd):
-            try:
-                os.chdir(resolved_wd)
-                skip_chdir = True
-            except OSError:
-                pass
-
     chroot_args = build_chroot_args(
         rootfs=rootfs,
         login_uid=login_uid,
         login_gid=login_gid,
         groups=groups,
-        skip_chdir=skip_chdir,
+        workdir=login_wd,
         inner_cmd=inner,
     )
 

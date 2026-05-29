@@ -1,12 +1,21 @@
+import shlex
+
+
 def build_chroot_args(
     rootfs: str,
     login_uid: str | None = None,
     login_gid: str | None = None,
     groups: list[str] | None = None,
-    skip_chdir: bool = False,
+    workdir: str = "",
     inner_cmd: list[str] | None = None,
 ) -> list[str]:
-    """Build the command line arguments for the GNU chroot command."""
+    """Build the command line arguments for the GNU chroot command.
+
+    GNU chroot's ``--skip-chdir`` is only valid when NEWROOT is ``/``,
+    so we cannot use it for our containers.  Instead, when *workdir* is
+    set we wrap the inner command with ``sh -c 'cd <dir> && exec …'``
+    so the directory change happens **inside** the chroot namespace.
+    """
     args = ["chroot"]
 
     # 1. Handle user and group specifications
@@ -22,15 +31,22 @@ def build_chroot_args(
         group_str = ",".join(str(g) for g in groups)
         args.append(f"--groups={group_str}")
 
-    # 3. Handle skip-chdir option
-    if skip_chdir:
-        args.append("--skip-chdir")
-
-    # 4. Rootfs target directory
+    # 3. Rootfs target directory
     args.append(rootfs)
 
-    # 5. Inner command to run inside chroot
-    if inner_cmd:
-        args.extend(inner_cmd)
+    # 4. Inner command — optionally prefixed with a cd into workdir
+    cmd = list(inner_cmd) if inner_cmd else []
+    if workdir and workdir != "/":
+        # Wrap the inner command so 'cd' happens inside the chroot.
+        # exec replaces the shell process to keep the PID tree clean.
+        wrapped = (
+            f"cd {shlex.quote(workdir)} && exec {shlex.join(cmd)}"
+            if cmd
+            else f"cd {shlex.quote(workdir)}"
+        )
+        args.extend(["/bin/sh", "-c", wrapped])
+    else:
+        args.extend(cmd)
 
     return args
+
