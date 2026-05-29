@@ -10,7 +10,7 @@ import tempfile
 from chroot_distro.arch import get_device_cpu_arch, normalize_arch
 from chroot_distro.atomic import atomic_replace
 from chroot_distro.commands.install_local import install_from_local_file
-from chroot_distro.constants import BASE_CACHE_DIR, PROGRAM_NAME
+from chroot_distro.constants import BASE_CACHE_DIR, IS_TERMUX, PROGRAM_NAME
 from chroot_distro.helpers.android import configure_android_rootfs
 from chroot_distro.helpers.docker import derive_alias, pull_image
 from chroot_distro.helpers.download import download_file
@@ -220,7 +220,7 @@ def _run_install(
             log_info("Updating '/etc/hosts'...")
             write_hosts(rootfs_dir)
 
-            if os.path.isfile(os.path.join(rootfs_dir, "etc", "passwd")):
+            if IS_TERMUX and os.path.isfile(os.path.join(rootfs_dir, "etc", "passwd")):
                 log_info("Registering Android-specific UIDs and GIDs...")
                 register_android_ids(rootfs_dir)
                 configure_android_rootfs(rootfs_dir)
