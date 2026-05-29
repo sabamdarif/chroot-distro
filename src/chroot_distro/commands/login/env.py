@@ -77,3 +77,43 @@ def inject_termux_profile(rootfs: str, env: dict) -> None:
         os.chmod(snippet, 0o644)
     except OSError:
         pass
+
+
+def resolve_term(rootfs: str, term: str) -> str:
+    """Verify if the terminal type term has a terminfo file inside the rootfs.
+
+    If not found, fallback to 'xterm-256color'.
+    """
+    if not term:
+        return "xterm-256color"
+
+    # Terminfo folder structure is typically based on the first character.
+    # Ncurses on case-insensitive filesystems or some systems may use hexadecimal ord.
+    first_char = term[0]
+    if not first_char.isalnum() and first_char != "_":
+        return "xterm-256color"
+
+    first_char_hex = f"{ord(first_char):02x}"
+
+    termux_usr = TERMUX_PREFIX.lstrip("/")
+
+    terminfo_dirs = [
+        "usr/share/terminfo",
+        "lib/terminfo",
+        "etc/terminfo",
+        "usr/lib/terminfo",
+        os.path.join(termux_usr, "share", "terminfo"),
+        os.path.join(termux_usr, "lib", "terminfo"),
+    ]
+
+    for d in terminfo_dirs:
+        path1 = os.path.join(rootfs, d, first_char, term)
+        path2 = os.path.join(rootfs, d, first_char_hex, term)
+        try:
+            if os.path.isfile(path1) or os.path.isfile(path2):
+                return term
+        except OSError:
+            pass
+
+    return "xterm-256color"
+

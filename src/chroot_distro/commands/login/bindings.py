@@ -139,12 +139,25 @@ def get_bindings(
             binds.append((TERMUX_PREFIX, TERMUX_PREFIX))
 
     # 3. Shared Home Directory
-    # Default behavior is sharing home in non-isolated/non-minimal mode, unless overridden.
-    # If shared_home is explicitly requested, or if not isolated and running in standard mode.
-    if shared_home or (not isolated and not IS_TERMUX):
-        host_home = os.path.expanduser("~")
-        if os.path.exists(host_home) and login_home:
-            binds.append((host_home, login_home))
+    # Default behavior is sharing home in non-isolated/non-minimal mode for the root user.
+    # For non-root guest users, we only share home if explicitly requested via shared_home.
+    # We also resolve the host home directory, taking sudo into account.
+    host_home = None
+    sudo_user = os.environ.get("SUDO_USER")
+    if sudo_user:
+        try:
+            import pwd
+            host_home = pwd.getpwnam(sudo_user).pw_dir
+        except Exception:
+            pass
+    if not host_home:
+        host_home = os.environ.get("HOME") or os.path.expanduser("~")
+
+    should_share = shared_home or (
+        not isolated and not IS_TERMUX and login_home == "/root"
+    )
+    if should_share and host_home and os.path.exists(host_home) and login_home:
+        binds.append((host_home, login_home))
 
     # 4. Shared Tmp
     if (shared_tmp or (not isolated and not IS_TERMUX)) and os.path.exists("/tmp"):

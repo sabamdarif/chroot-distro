@@ -38,11 +38,14 @@ def build_chroot_args(
     cmd = list(inner_cmd) if inner_cmd else []
     if workdir and workdir != "/":
         # Wrap the inner command so 'cd' happens inside the chroot.
+        # If the directory doesn't exist or is inaccessible, we fall back to /
+        # to ensure the shell still starts successfully.
         # exec replaces the shell process to keep the PID tree clean.
+        quoted_workdir = shlex.quote(workdir)
         wrapped = (
-            f"cd {shlex.quote(workdir)} && exec {shlex.join(cmd)}"
+            f"cd {quoted_workdir} 2>/dev/null || cd /; exec {shlex.join(cmd)}"
             if cmd
-            else f"cd {shlex.quote(workdir)}"
+            else f"cd {quoted_workdir} 2>/dev/null || cd /"
         )
         args.extend(["/bin/sh", "-c", wrapped])
     else:

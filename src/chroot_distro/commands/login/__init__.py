@@ -13,6 +13,7 @@ from chroot_distro.commands.login.env import (
     IMAGE_ENV_BLOCKED,
     inject_termux_profile,
     read_manifest_env,
+    resolve_term,
 )
 from chroot_distro.commands.login.passwd import (
     find_passwd_by_uid,
@@ -29,7 +30,7 @@ from chroot_distro.constants import (
     TERMUX_PREFIX,
 )
 from chroot_distro.locking import ContainerLock
-from chroot_distro.message import crit_error
+from chroot_distro.message import crit_error, warn
 from chroot_distro.names import require_valid_name
 from chroot_distro.paths import container_dir, container_rootfs
 
@@ -143,7 +144,7 @@ def _resolve_login_user(rootfs: str, container_name: str, user_arg: str) -> dict
     }
 
 
-def _build_termux_env(extra_env, minimal):
+def _build_termux_env(rootfs, extra_env, minimal):
     env: dict = {}
     termux_home_inner = TERMUX_HOME
     if not minimal:
@@ -155,16 +156,15 @@ def _build_termux_env(extra_env, minimal):
         key, _, val = entry.partition("=")
         if key:
             env[key] = val
-    host_term = os.environ.get("TERM", "")
-    if host_term:
-        env["TERM"] = host_term
+    host_term = env.get("TERM") or os.environ.get("TERM", "")
+    env["TERM"] = resolve_term(rootfs, host_term)
     host_colorterm = os.environ.get("COLORTERM", "")
     if host_colorterm:
         env["COLORTERM"] = host_colorterm
     return env
 
 
-def _build_normal_env(container_path, login_user, login_home,
+def _build_normal_env(rootfs, container_path, login_user, login_home,
                       extra_env, minimal, isolated):
     env: dict = {}
 
@@ -173,7 +173,8 @@ def _build_normal_env(container_path, login_user, login_home,
             key, _, val = entry.partition("=")
             if key:
                 env[key] = val
-        env["TERM"] = os.environ.get("TERM", "") or "xterm-256color"
+        host_term = env.get("TERM") or os.environ.get("TERM", "")
+        env["TERM"] = resolve_term(rootfs, host_term)
         host_colorterm = os.environ.get("COLORTERM", "")
         if host_colorterm:
             env["COLORTERM"] = host_colorterm
@@ -207,7 +208,8 @@ def _build_normal_env(container_path, login_user, login_home,
 
     env["HOME"] = login_home
     env["USER"] = login_user
-    env["TERM"] = os.environ.get("TERM", "") or "xterm-256color"
+    host_term = env.get("TERM") or os.environ.get("TERM", "")
+    env["TERM"] = resolve_term(rootfs, host_term)
     host_colorterm = os.environ.get("COLORTERM", "")
     if host_colorterm:
         env["COLORTERM"] = host_colorterm
@@ -270,7 +272,7 @@ def _command_login_inner(container_name: str, args) -> None:
     if dist_type == "termux":
         if not login_wd:
             login_wd = TERMUX_HOME
-        child_env = _build_termux_env(extra_env, minimal)
+        child_env = _build_termux_env(rootfs, extra_env, minimal)
 
         if run_inner is not None:
             inner = run_inner
@@ -288,11 +290,29 @@ def _command_login_inner(container_name: str, args) -> None:
         login_home = user["home"]
         login_shell = user["shell"]
 
+        if login_home and login_home != "/":
+            try:
+                host_home_path = resolve_rootfs_path(rootfs, login_home)
+                home_exists = os.path.isdir(host_home_path)
+            except OSError:
+                home_exists = False
+                host_home_path = os.path.join(rootfs, login_home.lstrip("/"))
+
+            if not home_exists:
+                try:
+                    os.makedirs(host_home_path, exist_ok=True)
+                    uid_int = int(login_uid) if login_uid is not None else 0
+                    gid_int = int(login_gid) if login_gid is not None else 0
+                    os.chown(host_home_path, uid_int, gid_int)
+                    os.chmod(host_home_path, 0o755)
+                except Exception as e:
+                    warn(f"failed to create home directory {login_home}: {e}")
+
         if not login_wd:
             login_wd = login_home
 
         child_env = _build_normal_env(
-            container_path, login_user, login_home,
+            rootfs, container_path, login_user, login_home,
             extra_env, minimal, isolated,
         )
 
