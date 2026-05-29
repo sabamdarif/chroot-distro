@@ -1,0 +1,284 @@
+#compdef chroot-distro pd
+#
+# Zsh completion for chroot-distro and pd
+#
+# Install:
+#   cp _chroot-distro /usr/share/zsh/site-functions/_chroot-distro
+# Or for the current user, add to a directory in $fpath:
+#   mkdir -p ~/.local/share/zsh/site-functions
+#   cp _chroot-distro ~/.local/share/zsh/site-functions/_chroot-distro
+#   # Add to ~/.zshrc: fpath=(~/.local/share/zsh/site-functions $fpath)
+
+# ---------------------------------------------------------------------------
+# Helper: list installed containers
+# ---------------------------------------------------------------------------
+_chroot_distro_containers() {
+    local dir
+    if _chroot_distro_is_termux; then
+        dir="${TERMUX__PREFIX:-/data/data/com.termux/files/usr}/var/lib/chroot-distro/containers"
+    else
+        dir="${XDG_DATA_HOME:-${HOME}/.local/share}/chroot-distro/containers"
+    fi
+    local -a containers
+    if [[ -d "${dir}" ]]; then
+        local d
+        for d in "${dir}"/*/; do
+            [[ -d "${d}rootfs" ]] && containers+=("${d:t}")
+        done
+    fi
+    _describe 'container' containers
+}
+
+# ---------------------------------------------------------------------------
+# Termux/Android detection — mirrors _detect_termux() in constants.py.
+# Returns 0 (true) when at least two of three independent indicators match.
+# ---------------------------------------------------------------------------
+_chroot_distro_is_termux() {
+    local score=0
+    [[ -f /system/build.prop || -d /data/app ]] && ((score++))
+    [[ -n "${TERMUX_APP__APP_VERSION_NAME}" || -n "${TERMUX_VERSION}" ]] && ((score++))
+    local prefix="${TERMUX__PREFIX:-/data/data/com.termux/files/usr}"
+    [[ -r "${prefix}" && -x "${prefix}" ]] && ((score++))
+    (( score >= 2 ))
+}
+
+# ---------------------------------------------------------------------------
+# Main completion function
+# ---------------------------------------------------------------------------
+_chroot_distro() {
+    local curcontext="${curcontext}" state state_descr line
+    typeset -A opt_args
+
+    _arguments -C \
+        '(-h --help)'{-h,--help}'[show help]' \
+        '1:command:->command' \
+        '*:: :->args'
+
+    case "${state}" in
+        command)
+            local -a subcommands
+            subcommands=(
+                'install:install a container from a Docker image or local archive'
+                'remove:remove an installed container'
+                'rename:rename a container'
+                'reset:reinstall a container from its original image'
+                'login:open a shell inside a container'
+                'list:list installed containers'
+                'backup:backup a container to a tar archive'
+                'restore:restore a container from a tar archive'
+                'clear-cache:clear the download cache'
+                'copy:copy files between host and container'
+                'sync:synchronize files between host and container'
+                'run:run the image entrypoint/cmd in a container'
+                'build:build an OCI image from a Dockerfile'
+                'push:push a locally built image to a registry'
+                'help:show help'
+            )
+            _describe 'command' subcommands
+            ;;
+
+        args)
+            local cmd="${words[1]}"
+            curcontext="${curcontext%:*:*}:chroot-distro-${cmd}:"
+
+            case "${cmd}" in
+
+                # -----------------------------------------------------------
+                install)
+                    _arguments \
+                        '(-h --help)'{-h,--help}'[show help]' \
+                        '(-n --name)'{-n,--name}'[install under a custom container name]:alias' \
+                        '(-a --architecture)'{-a,--architecture}'[target CPU architecture]:arch:(aarch64 arm i686 riscv64 x86_64)' \
+                        '(-q --quiet)'{-q,--quiet}'[suppress non-error output]' \
+                        '1:docker image or local archive:_files'
+                    ;;
+
+                # -----------------------------------------------------------
+                remove)
+                    _arguments \
+                        '(-h --help)'{-h,--help}'[show help]' \
+                        '(-v --verbose -q --quiet)'{-v,--verbose}'[print each removed file]' \
+                        '(-v --verbose -q --quiet)'{-q,--quiet}'[suppress non-error output]' \
+                        '1:container:_chroot_distro_containers'
+                    ;;
+
+                # -----------------------------------------------------------
+                rename)
+                    _arguments \
+                        '(-h --help)'{-h,--help}'[show help]' \
+                        '(-q --quiet)'{-q,--quiet}'[suppress non-error output]' \
+                        '1:original container:_chroot_distro_containers' \
+                        '2:new container name'
+                    ;;
+
+                # -----------------------------------------------------------
+                reset)
+                    _arguments \
+                        '(-h --help)'{-h,--help}'[show help]' \
+                        '(-q --quiet)'{-q,--quiet}'[suppress non-error output]' \
+                        '1:container:_chroot_distro_containers'
+                    ;;
+
+                # -----------------------------------------------------------
+                login)
+                    local -a _login_args
+                    _login_args=(
+                        '(-h --help)'{-h,--help}'[show help]'
+                        '(-u --user)'{-u,--user}'[run as this user (default\: root)]:user'
+                        '(-P --redirect-ports)'{-P,--redirect-ports}'[redirect ports below 1024]'
+                        '--shared-home[mount home inside container]'
+                        '--shared-tmp[share /tmp with the host]'
+                        '--shared-x11[share the X11 socket (/tmp/.X11-unix)]'
+                        '*'{-b,--bind}'[bind-mount PATH\[:DEST\] into the container]:path:_files'
+                        '--emulator[path to QEMU user-mode emulator binary]:path:_files'
+                        '--kernel[fake kernel release string]:string'
+                        '--hostname[hostname visible inside the container]:string'
+                        '(-w --work-dir)'{-w,--work-dir}'[initial working directory]:path:_directories'
+                        '*'{-e,--env}'[set environment variable]:VAR=VALUE'
+                        '--get-chroot-cmd[print the chroot command line and exit]'
+                        '1:container:_chroot_distro_containers'
+                        '*:inner command:_command_names -e'
+                    )
+                    _chroot_distro_is_termux && _login_args+=(
+                        '(--isolated --minimal)--isolated[isolated mode]'
+                        '(--isolated --minimal)--minimal[minimal isolated mode]'
+                        '--no-link2symlink[disable chroot link2symlink extension]'
+                        '--no-sysvipc[disable SysV IPC emulation]'
+                        '--no-kill-on-exit[do not kill child processes when session ends]'
+                    )
+                    _arguments -s "${_login_args[@]}"
+                    ;;
+
+                # -----------------------------------------------------------
+                list)
+                    _arguments \
+                        '(-h --help)'{-h,--help}'[show help]' \
+                        '(-q --quiet)'{-q,--quiet}'[suppress non-error output]'
+                    ;;
+
+                # -----------------------------------------------------------
+                backup)
+                    _arguments \
+                        '(-h --help)'{-h,--help}'[show help]' \
+                        '(-v --verbose -q --quiet)'{-v,--verbose}'[print each archived file]' \
+                        '(-v --verbose -q --quiet)'{-q,--quiet}'[suppress non-error output]' \
+                        '(-o --output)'{-o,--output}'[write archive to FILE instead of stdout]:file:_files' \
+                        '(-c --compress)'{-c,--compress}'[compression algorithm]:type:(gzip bzip2 xz none)' \
+                        '1:container:_chroot_distro_containers'
+                    ;;
+
+                # -----------------------------------------------------------
+                restore)
+                    _arguments \
+                        '(-h --help)'{-h,--help}'[show help]' \
+                        '(-v --verbose -q --quiet)'{-v,--verbose}'[print each extracted file]' \
+                        '(-v --verbose -q --quiet)'{-q,--quiet}'[suppress non-error output]' \
+                        '1:archive:_files -g "*.tar *.tar.gz *.tgz *.tar.bz2 *.tbz2 *.tar.xz *.txz"'
+                    ;;
+
+                # -----------------------------------------------------------
+                clear-cache)
+                    _arguments \
+                        '(-h --help)'{-h,--help}'[show help]' \
+                        '(-v --verbose -q --quiet)'{-v,--verbose}'[list removed files]' \
+                        '(-v --verbose -q --quiet)'{-q,--quiet}'[suppress non-error output]'
+                    ;;
+
+                # -----------------------------------------------------------
+                copy)
+                    _arguments \
+                        '(-h --help)'{-h,--help}'[show help]' \
+                        '(-v --verbose -q --quiet)'{-v,--verbose}'[print each copied file]' \
+                        '(-v --verbose -q --quiet)'{-q,--quiet}'[suppress non-error output]' \
+                        '(-m --move)'{-m,--move}'[move instead of copy]' \
+                        '(-r --recursive)'{-r,--recursive}'[copy directories recursively]' \
+                        '1:source (host path or container\:path):_files' \
+                        '2:destination (host path or container\:path):_files'
+                    ;;
+
+                # -----------------------------------------------------------
+                sync)
+                    _arguments \
+                        '(-h --help)'{-h,--help}'[show help]' \
+                        '(-v --verbose -q --quiet)'{-v,--verbose}'[print each synced file]' \
+                        '(-v --verbose -q --quiet)'{-q,--quiet}'[suppress non-error output]' \
+                        '(-c --checksum)'{-c,--checksum}'[use CRC32 checksum instead of size+mtime]' \
+                        '(-d --delete)'{-d,--delete}'[remove destination entries absent from source]' \
+                        '1:source (host path or container\:path):_files' \
+                        '2:destination (host path or container\:path):_files'
+                    ;;
+
+                # -----------------------------------------------------------
+                run)
+                    local -a _run_args
+                    _run_args=(
+                        '(-h --help)'{-h,--help}'[show help]'
+                        '(-u --user)'{-u,--user}'[run as this user (default\: root)]:user'
+                        '(-P --redirect-ports)'{-P,--redirect-ports}'[redirect ports below 1024]'
+                        '--shared-home[mount home inside container]'
+                        '--shared-tmp[share /tmp with the host]'
+                        '--shared-x11[share the X11 socket (/tmp/.X11-unix)]'
+                        '*'{-b,--bind}'[bind-mount PATH\[:DEST\] into the container]:path:_files'
+                        '--emulator[path to QEMU user-mode emulator binary]:path:_files'
+                        '--kernel[fake kernel release string]:string'
+                        '--hostname[hostname visible inside the container]:string'
+                        '(-w --work-dir)'{-w,--work-dir}'[initial working directory]:path:_directories'
+                        '*'{-e,--env}'[set environment variable]:VAR=VALUE'
+                        '--get-chroot-cmd[print the chroot command line and exit]'
+                        '1:container:_chroot_distro_containers'
+                        '*:arguments'
+                    )
+                    _chroot_distro_is_termux && _run_args+=(
+                        '(--isolated --minimal)--isolated[isolated mode]'
+                        '(--isolated --minimal)--minimal[minimal isolated mode]'
+                        '--no-link2symlink[disable chroot link2symlink extension]'
+                        '--no-sysvipc[disable SysV IPC emulation]'
+                        '--no-kill-on-exit[do not kill child processes when session ends]'
+                    )
+                    _arguments -s "${_run_args[@]}"
+                    ;;
+
+                # -----------------------------------------------------------
+                build)
+                    _arguments \
+                        '(-h --help)'{-h,--help}'[show help]' \
+                        '(-f --file)'{-f,--file}'[path to Dockerfile (- reads from stdin)]:file:_files' \
+                        '*'{-t,--tag}'[image reference to assign (repeatable)]:ref' \
+                        '*--build-arg[set a build-time ARG (repeatable)]:K=V' \
+                        '(-a --architecture)'{-a,--architecture}'[target CPU architecture]:arch:(aarch64 arm i686 riscv64 x86_64)' \
+                        '--target[stop after this named build stage]:stage' \
+                        '--emulator[path to QEMU user-mode emulator binary]:path:_files' \
+                        '*'{-o,--output}'[write OCI tarball to FILE (repeatable)]:file:_files' \
+                        '--install-as[install image as a local container after build]:name:_chroot_distro_containers' \
+                        '--no-cache[disable per-instruction build cache]' \
+                        '(-v --verbose -q --quiet)'{-v,--verbose}'[echo each instruction and stream RUN output]' \
+                        '(-v --verbose -q --quiet)'{-q,--quiet}'[suppress non-error output]' \
+                        '1:build context directory:_directories'
+                    ;;
+
+                # -----------------------------------------------------------
+                push)
+                    _arguments \
+                        '(-h --help)'{-h,--help}'[show help]' \
+                        '(-q --quiet)'{-q,--quiet}'[suppress non-error output]' \
+                        '(-a --architecture)'{-a,--architecture}'[target CPU architecture]:arch:(aarch64 arm i686 riscv64 x86_64)' \
+                        '1:image reference'
+                    ;;
+
+                # -----------------------------------------------------------
+                help)
+                    local -a topics
+                    topics=(
+                        install remove rename reset login list
+                        backup restore clear-cache copy sync run
+                        build push
+                    )
+                    _describe 'topic' topics
+                    ;;
+
+            esac
+            ;;
+    esac
+}
+
+_chroot_distro "$@"
