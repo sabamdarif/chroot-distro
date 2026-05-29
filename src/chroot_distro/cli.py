@@ -17,7 +17,7 @@ from chroot_distro.commands.reset import command_reset
 from chroot_distro.commands.restore import command_restore
 from chroot_distro.commands.run import command_run
 from chroot_distro.commands.sync import command_sync
-from chroot_distro.constants import PROGRAM_NAME
+from chroot_distro.constants import IS_TERMUX, PROGRAM_NAME
 from chroot_distro.exceptions import ChrootDistroError, RootRequiredError
 from chroot_distro.message import crit_error, msg, set_quiet
 from chroot_distro.parser import (
@@ -54,16 +54,22 @@ def _sigquit_to_keyboard_interrupt(_signum, _frame):
     raise KeyboardInterrupt()
 
 
-def _ensure_root_user() -> None:
-    """Ensure that we are running as root.
+def _ensure_root_user(no_elevate: bool = False) -> None:
+    """Ensure that we are running as root, elevating if necessary/possible.
 
     Unlike proot-distro (which is rootless), chroot-distro uses the host's
     native chroot and mount mechanisms, requiring root privileges.
     """
-    if os.getuid() != 0:
+    if os.getuid() == 0:
+        return
+
+    if no_elevate:
         raise RootRequiredError(
             f"{PROGRAM_NAME} requires root privileges. Please run with sudo or as root."
         )
+
+    from chroot_distro.elevate import elevate_or_die
+    elevate_or_die()
 
 
 def _dispatch_help(raw_args) -> bool:
@@ -180,10 +186,23 @@ def main() -> None:
     if canonical != "list" and getattr(args, "quiet", False):
         set_quiet(True)
 
-    # Root check is required for mutating commands (all commands except list/help)
-    if canonical not in ("list", "help"):
+    # Root check requirement:
+    # - In normal Linux: all commands require root except "help"
+    # - In Termux: all commands require root except "list" and "help"
+    requires_root = False
+    if IS_TERMUX:
+        if canonical not in ("list", "help"):
+            requires_root = True
+    elif canonical != "help":
+        requires_root = True
+
+    if requires_root:
+        no_elevate = (
+            getattr(args, "no_elevate", False)
+            or os.environ.get("CHROOT_DISTRO_NO_ELEVATE") == "1"
+        )
         try:
-            _ensure_root_user()
+            _ensure_root_user(no_elevate=no_elevate)
         except RootRequiredError as e:
             msg()
             crit_error(str(e))
