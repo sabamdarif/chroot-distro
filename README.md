@@ -17,7 +17,7 @@ exporting it as a standalone OCI tarball.
 > [!IMPORTANT]
 > **Root Requirement**: Unlike `proot-distro` (which is rootless via `proot`),
 > `chroot-distro` relies on the host kernel's native namespaces and mount system.
-> Therefore, it **requires root privileges** (`sudo` or native root) for all mutating operations.
+> Therefore, it **requires root privileges** (which it automatically elevates using sudo, doas, pkexec, or su if needed).
 
 ---
 
@@ -75,15 +75,12 @@ The CLI is exposed both as `chroot-distro` and the shorter alias `cd` (provided 
 
 ## Installation
 
-Chroot-Distro requires Python 3.10 or newer. Since it uses native mount and chroot, it must be run with root privileges (e.g. using `sudo` or as root).
+Chroot-Distro requires Python 3.10 or newer. Since it uses native mount and chroot, it requires root privileges (which it automatically elevates using sudo, doas, pkexec, or su if needed).
 
 ### On Termux (Android)
 
 1. Ensure your device is **rooted** (via Magisk, KernelSU, or APatch).
-2. Install **BusyBox** (Recommended: [osm0sis/android-busybox-ndk](https://github.com/osm0sis/android-busybox-ndk) v1.36.1+).
-   > [!TIP]
-   > KernelSU and APatch users do not need to flash BusyBox manually as it is built-in.
-3. Install from PyPI:
+2. Install from PyPI:
    ```sh
    pip install chroot-distro
    ```
@@ -98,7 +95,7 @@ Chroot-Distro requires Python 3.10 or newer. Since it uses native mount and chro
 
 ```sh
 # On Debian/Ubuntu:
-sudo apt install python3-pip
+apt install python3-pip
 
 pip install chroot-distro          # from PyPI
 # or
@@ -109,11 +106,9 @@ pip install .                     # from local checkout
 
 ---
 
-## First-run check
+## First-run check / Auto-Elevation
 
-On startup, mutating commands verify that the program is being run by a user with root privileges (UID `0`). If not, the program exits with a clean `root privileges required` error.
-
-Additionally, on Android/Termux, the utility verifies that BusyBox is available on the system path to ensure proper utility support.
+On startup, mutating commands verify if the program is being run by a user with root privileges (UID `0`). If not, the program automatically attempts to elevate itself using standard tools (`sudo`, `doas`, `pkexec`, or `su`). You can opt out of this auto-elevation by passing `--no-elevate` or setting the environment variable `CHROOT_DISTRO_NO_ELEVATE=1`.
 
 ---
 
@@ -121,35 +116,35 @@ Additionally, on Android/Termux, the utility verifies that BusyBox is available 
 
 ```sh
 # List available distributions
-sudo chroot-distro list
+chroot-distro list
 
 # Install Ubuntu 24.04 from Docker Hub
-sudo chroot-distro install ubuntu:24.04
+chroot-distro install ubuntu:24.04
 
 # Start a shell inside the container
-sudo chroot-distro login ubuntu
+chroot-distro login ubuntu
 
 # Same thing, but using the short command alias
-sudo cd sh ubuntu
+cd sh ubuntu
 
 # Run a single command and exit
-sudo chroot-distro login ubuntu -- /bin/uname -a
+chroot-distro login ubuntu -- /bin/uname -a
 
 # List all installed containers
 chroot-distro list
 
 # Build and install a custom image from a Dockerfile
-sudo chroot-distro build -t myapp:1.0 --install-as myapp ./mycontext
+chroot-distro build -t myapp:1.0 --install-as myapp ./mycontext
 
 # Publish the built image to a registry
 export CD_DOCKER_AUTH=myuser:mypassword
-sudo chroot-distro push myuser/myapp:1.0
+chroot-distro push myuser/myapp:1.0
 
 # Rebuild from scratch (loses all in-container data)
-sudo chroot-distro reset ubuntu
+chroot-distro reset ubuntu
 
 # Permanently remove a container (unmounts all active sessions first)
-sudo chroot-distro remove ubuntu
+chroot-distro remove ubuntu
 ```
 
 ---
@@ -162,7 +157,7 @@ help text laid out for the current terminal width.
 ### `install` — Install a container
 
 ```
-sudo chroot-distro install [OPTIONS] (IMAGE or PATH or URL)
+chroot-distro install [OPTIONS] (IMAGE or PATH or URL)
 Aliases: add, i, in, ins
 ```
 
@@ -204,7 +199,7 @@ Provide a path starting with `/`, `./`, `../`, or `~`, or an HTTP/HTTPS URL:
 ### `build` — Build an image from a Dockerfile
 
 ```
-sudo chroot-distro build [OPTIONS] [PATH]
+chroot-distro build [OPTIONS] [PATH]
 ```
 
 Build an OCI/Docker-compatible image from a Dockerfile. `PATH` is the build context directory (default `.`); all `COPY`/`ADD` source paths are resolved relative to it.
@@ -239,7 +234,7 @@ If the Dockerfile contains any `RUN` instructions, they must be executed against
 ### `push` — Push a built image to a registry
 
 ```
-sudo chroot-distro push [OPTIONS] IMAGE
+chroot-distro push [OPTIONS] IMAGE
 ```
 
 Upload a locally built image to a Docker/OCI registry. The image must have been produced by `chroot-distro build -t IMAGE` first. It streams layers from the local cache to the registry without requiring a Docker daemon.
@@ -258,7 +253,7 @@ Set `CD_DOCKER_AUTH=username:password` for authentication.
 ### `login` — Start a shell inside a container
 
 ```
-sudo chroot-distro login [OPTIONS] CONTAINER [-- COMMAND ...]
+chroot-distro login [OPTIONS] CONTAINER [-- COMMAND ...]
 Aliases: sh
 ```
 
@@ -325,7 +320,7 @@ On Android/Termux (unless isolated or minimal), `$PREFIX/bin` is appended to `PA
 ### `run` — Run the image-defined entrypoint
 
 ```
-sudo chroot-distro run [OPTIONS] CONTAINER [-- ARG ...]
+chroot-distro run [OPTIONS] CONTAINER [-- ARG ...]
 ```
 
 Run the `Entrypoint` and/or `Cmd` defined in the container's OCI image manifest (equivalent to `docker run`).
@@ -365,7 +360,7 @@ Show all installed containers. Does not require root.
 ### `remove` — Delete a container
 
 ```
-sudo chroot-distro remove [OPTIONS] CONTAINER
+chroot-distro remove [OPTIONS] CONTAINER
 Aliases: rm
 ```
 
@@ -383,7 +378,7 @@ Before deletion, Chroot-Distro verifies active mounts using `/proc/mounts` and p
 ### `rename` — Rename a container
 
 ```
-sudo chroot-distro rename OLDNAME NEWNAME
+chroot-distro rename OLDNAME NEWNAME
 ```
 
 Rename a container from `OLDNAME` to `NEWNAME`.
@@ -393,7 +388,7 @@ Rename a container from `OLDNAME` to `NEWNAME`.
 ### `reset` — Reinstall a container from scratch
 
 ```
-sudo chroot-distro reset CONTAINER
+chroot-distro reset CONTAINER
 ```
 
 Remove the container rootfs and reinstall it from the Docker image manifest cached at install time. **All data inside the container is lost.**
@@ -403,7 +398,7 @@ Remove the container rootfs and reinstall it from the Docker image manifest cach
 ### `backup` — Archive a container
 
 ```
-sudo chroot-distro backup [OPTIONS] CONTAINER
+chroot-distro backup [OPTIONS] CONTAINER
 Aliases: bak, bkp
 ```
 
@@ -427,7 +422,7 @@ File ownership is zeroed out in the archive (`uid=gid=0`). Block/character devic
 ### `restore` — Restore a container from a backup
 
 ```
-sudo chroot-distro restore [OPTIONS] [BACKUP_FILE]
+chroot-distro restore [OPTIONS] [BACKUP_FILE]
 ```
 
 Restore a container from a TAR archive. Reads from stdin when `BACKUP_FILE` is omitted. Compression is auto-detected.
@@ -449,7 +444,7 @@ Files must be stored under a subdirectory named after the container (e.g. `<name
 ### `copy` — Copy files to or from a container
 
 ```
-sudo chroot-distro copy [OPTIONS] [CONTAINER:]SRC [CONTAINER:]DEST
+chroot-distro copy [OPTIONS] [CONTAINER:]SRC [CONTAINER:]DEST
 Aliases: cp
 ```
 
@@ -467,7 +462,7 @@ Copy files between the host filesystem and a container rootfs, or between two co
 ### `sync` — Synchronize files to or from a container
 
 ```
-sudo chroot-distro sync [OPTIONS] [CONTAINER:]SRC [CONTAINER:]DEST
+chroot-distro sync [OPTIONS] [CONTAINER:]SRC [CONTAINER:]DEST
 ```
 
 Synchronize SRC to DEST, copying only files that differ. Recursive by default.
@@ -490,7 +485,7 @@ Files are written atomically using a temp file (`.~cd_sync` -> `os.replace`) to 
 ### `clear-cache` — Delete the download cache
 
 ```
-sudo chroot-distro clear-cache
+chroot-distro clear-cache
 Aliases: clear, cl
 ```
 
@@ -580,7 +575,7 @@ cp src/chroot_distro/completions/chroot-distro.bash \
 
 ## Limitations
 
-- **Root Privilege Requirement**: Unlike rootless solutions, all modifying operations require root access (or `sudo`).
+- **Root Privilege Requirement**: Unlike rootless solutions, all modifying operations require root access (automatically handled via self-elevation).
 - **No Background Supervisors**: Standard systemd / init daemon managers cannot be initialized directly out of the box due to namespace limits.
 - **No zstd-compressed layers**: Python's `tarfile` module lacks zstd decompression. Images packed with zstd layers will fail. Use standard gzip or xz OCI image tags.
 - **Real Bind Mounts Persistence**: Real mounts are placed on the host file structure. If a login shell crashes or processes hang, paths can remain locked. While Chroot-Distro uses lazy unmount fallback (`umount -l`) to clean up, orphan processes should be monitored.
