@@ -35,6 +35,7 @@ exporting it as a standalone OCI tarball.
    * [`run`](#run--run-the-image-defined-entrypoint)
    * [`list`](#list--list-installed-containers)
    * [`remove`](#remove--delete-a-container)
+   * [`unmount`](#unmount--unmount-a-container)
    * [`rename`](#rename--rename-a-container)
    * [`reset`](#reset--reinstall-a-container-from-scratch)
    * [`backup`](#backup--archive-a-container)
@@ -142,6 +143,9 @@ chroot-distro push myuser/myapp:1.0
 
 # Rebuild from scratch (loses all in-container data)
 chroot-distro reset ubuntu
+
+# Safely unmount a container (stops active processes and resets sessions count to 0)
+chroot-distro unmount ubuntu
 
 # Permanently remove a container (unmounts all active sessions first)
 chroot-distro remove ubuntu
@@ -372,6 +376,17 @@ Before deletion, Chroot-Distro verifies active mounts using `/proc/mounts` and p
 |---|---|
 | `-v`, `--verbose` | Log each deleted file. |
 | `-q`, `--quiet` | Suppress non-error output. |
+
+---
+
+### `unmount` — Unmount a container
+
+```
+chroot-distro unmount CONTAINER
+Aliases: umount
+```
+
+Safely unmount a container's filesystem bindings. If there are active chroot processes running in the container, it sends `SIGTERM` (falling back to `SIGKILL` if they do not exit within 2 seconds) to terminate them, resets the active session counter to `0`, and unmounts all bind mounts cleanly.
 
 ---
 

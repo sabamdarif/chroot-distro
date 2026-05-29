@@ -429,6 +429,21 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
         ],
     },
 
+    "unmount": {
+        "usage": "unmount CONTAINER",
+        "aliases": ("umount",),
+        "summary": (
+            "Safely unmount a container, stopping all active sessions "
+            "and resetting the session counter to 0."
+        ),
+        "options": [
+            ("-h, --help", "Show this help."),
+        ],
+        "examples": [
+            f"{PROGRAM_NAME} unmount ubuntu",
+        ],
+    },
+
     "rename": {
         "usage": "rename OLDNAME NEWNAME",
         "summary": "Rename the installed chroot container.",
@@ -578,6 +593,7 @@ TOP_COMMANDS = [
     ("login", "Start interactive shell inside a container."),
     ("run", "Run container entrypoint in server or distroless images."),
     ("remove", "Delete a container.", "Destroys data!"),
+    ("unmount", "Safely unmount a container."),
     ("rename", "Rename a container."),
     ("reset", "Reinstall a container from scratch.", "Destroys data!"),
     ("backup", "Save container as a TAR archive."),

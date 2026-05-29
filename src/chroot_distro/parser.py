@@ -38,6 +38,7 @@ REQUIRED_ARGS = {
                 ("destination", "destination path is not specified.")],
     "run":     [("container_name", "container name is not specified.")],
     "push":    [("image_ref", "image reference is not specified.")],
+    "unmount": [("container_name", "container name is not specified.")],
 }
 
 
@@ -50,6 +51,7 @@ ALIAS_TO_CANONICAL = {
     "bak": "backup", "bkp": "backup",
     "clear": "clear-cache", "cl": "clear-cache",
     "cp": "copy",
+    "umount": "unmount",
     "h": "help", "he": "help", "hel": "help",
 }
 
@@ -105,6 +107,7 @@ def build_parser() -> _CdArgumentParser:
     _build(sub)
     _push(sub)
     _run(sub)
+    _unmount(sub)
 
     return parser
 
@@ -286,3 +289,11 @@ def _run(sub):
     _add_login_or_run_common(p)
     p.add_argument("--get-chroot-cmd", dest="get_chroot_cmd", action="store_true")
     p.add_argument("-h", "--help", action="store_true")
+
+
+def _unmount(sub):
+    p = sub.add_parser("unmount", aliases=["umount"], add_help=False)
+    p._cd_command = "unmount"
+    p.add_argument("container_name", nargs="?", default=None)
+    p.add_argument("-h", "--help", action="store_true")
+

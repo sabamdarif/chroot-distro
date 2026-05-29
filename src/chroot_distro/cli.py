@@ -17,6 +17,7 @@ from chroot_distro.commands.reset import command_reset
 from chroot_distro.commands.restore import command_restore
 from chroot_distro.commands.run import command_run
 from chroot_distro.commands.sync import command_sync
+from chroot_distro.commands.unmount import command_unmount
 from chroot_distro.constants import IS_TERMUX, PROGRAM_NAME
 from chroot_distro.exceptions import ChrootDistroError, RootRequiredError
 from chroot_distro.message import crit_error, msg, set_quiet
@@ -44,6 +45,7 @@ _COMMAND_HANDLERS = {
     "copy":        command_copy,
     "sync":        command_sync,
     "run":         command_run,
+    "unmount":     command_unmount,
     "build":       command_build,
     "push":        command_push,
     "help":        command_help,

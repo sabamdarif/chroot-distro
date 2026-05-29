@@ -124,3 +124,18 @@ def count(name: str) -> int:
 
         fcntl.flock(lock_fh, fcntl.LOCK_UN)
         return count_val
+
+
+def reset(name: str) -> None:
+    """Reset the active sessions count for a container to 0.
+
+    Uses file locking to ensure safety.
+    """
+    session_file, lock_file = _get_session_file_and_lock(name)
+
+    with open(lock_file, "w") as lock_fh:
+        fcntl.flock(lock_fh, fcntl.LOCK_EX)
+        with open(session_file, "w") as f:
+            f.write("0")
+        fcntl.flock(lock_fh, fcntl.LOCK_UN)
+
