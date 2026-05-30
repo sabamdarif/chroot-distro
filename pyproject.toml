@@ -37,7 +37,7 @@ classifiers = [
 	"Topic :: System :: Systems Administration",
 	"Typing :: Typed",
 ]
-dependencies = [] # Zero third-party deps — matches proot-distro
+dependencies = [] # Zero third-party deps
 
 [project.optional-dependencies]
 dev = [

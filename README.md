@@ -1,9 +1,9 @@
 # Chroot-Distro
 
 Chroot-Distro is a utility for managing rootful Linux containers in
-[Termux](https://termux.dev) and on regular Linux hosts. It uses native kernel
-`chroot` and bind mounts (`mount --bind`) to provide a high-performance, near-native Linux
-environment.
+[Termux](https://termux.dev) and on regular Linux hosts. It uses the
+host kernel's native `chroot` and bind mounts (`mount --bind`) to provide a
+high-performance, near-native Linux environment.
 
 Containers are created by pulling Docker/OCI images directly from
 Docker Hub or any compatible registry — or by extracting a local
@@ -14,20 +14,17 @@ Chroot-Distro can also **build** OCI images from a Dockerfile (no Docker
 daemon required), storing the result in the local manifest cache or
 exporting it as a standalone OCI tarball.
 
-> [!IMPORTANT]
-> **Root Requirement**: Unlike `proot-distro` (which is rootless via `proot`),
-> `chroot-distro` relies on the host kernel's native namespaces and mount system.
-> Therefore, it **requires root privileges** (which it automatically elevates using sudo, doas, pkexec, or su if needed).
+Unlike [proot-distro](https://github.com/termux/proot-distro) (which is
+rootless via `proot`), Chroot-Distro **requires root privileges** on the host. Mutating commands
+automatically re-launch themselves via `sudo`, `doas`, `pkexec`, or `su`
+when needed (see [First-run check](#first-run-check)).
 
 ---
 
 ## Table of contents
 
 1. [Introduction](#introduction)
-2. [Installation](#installation)
-3. [First-run check](#first-run-check)
-4. [Quick start](#quick-start)
-5. [Commands reference](#commands-reference)
+2. [Commands reference](#commands-reference)
    * [`install`](#install--install-a-container)
    * [`build`](#build--build-an-image-from-a-dockerfile)
    * [`push`](#push--push-a-built-image-to-a-registry)
@@ -44,14 +41,12 @@ exporting it as a standalone OCI tarball.
    * [`sync`](#sync--synchronize-files-to-or-from-a-container)
    * [`clear-cache`](#clear-cache--delete-the-download-cache)
    * [`help`](#help--show-command-help)
-6. [Global options](#global-options)
-7. [Command aliases](#command-aliases)
-8. [How Chroot-Distro works](#how-chroot-distro-works)
-9. [Storage layout](#storage-layout)
-10. [Environment variables](#environment-variables)
-11. [Shell completions](#shell-completions)
-12. [Limitations](#limitations)
-13. [Donate / Support](#donate--support)
+3. [How Chroot-Distro works](#how-chroot-distro-works)
+4. [Storage layout](#storage-layout)
+5. [Environment variables](#environment-variables)
+6. [Shell completions](#shell-completions)
+7. [Limitations](#limitations)
+8. [Donate](#donate)
 
 ---
 
@@ -59,73 +54,85 @@ exporting it as a standalone OCI tarball.
 
 Chroot-Distro lets you run a full Linux userland — Ubuntu, Debian,
 Alpine, Arch, openSUSE, distroless server images, anything available as
-a Docker/OCI image — on top of Termux on an Android device, or on top
-of a regular Linux distribution, **with** native kernel performance, **without**
-the overhead of `proot`'s `ptrace` interception, and **without** a Docker daemon.
+a Docker/OCI image — on top of Termux on a rooted Android device, or on
+top of a regular Linux distribution, **with** native kernel performance,
+**without** the overhead of `proot`'s `ptrace` interception, and
+**without** a Docker daemon.
 
 Typical use cases:
 
-- Running a desktop-class Linux distribution on a phone or tablet at native speeds.
-- Running disk-intensive and compiling workloads (e.g. GCC/Clang, Rust, Go builds) without `proot` slowdowns.
-- Spinning up server software (Nginx, Nextcloud, PostgreSQL, Docker-in-Chroot, etc.) on
+- Running a desktop-class Linux distribution on a phone or tablet at
+  near-native speed (rooted device required on Termux).
+- Disk-intensive and compile workloads (GCC/Clang, Rust, Go) without
+  `proot` slowdowns.
+- Spinning up server software (Nginx, Nextcloud, PostgreSQL, etc.) on
   Android by reusing the same OCI images you'd run on a server.
-- Building custom OCI images from a Dockerfile on-device, without a Docker daemon.
-- Trying a distribution non-destructively: install, mess around,
+- Building custom OCI images from a Dockerfile on-device, without a
+  Docker daemon — and pushing them to Docker Hub, GHCR, or any
+  OCI-compatible registry.
+- Trying a distribution non-destructively: install, experiment,
   `chroot-distro remove` when done.
 
----
+### Installation
 
-## Installation
+Chroot-Distro requires **Python 3.10 or newer**. There are no third-party
+Python dependencies. Because it uses native `chroot` and bind mounts, the
+effective user for mutating operations must be **root** (see
+[First-run check](#first-run-check)).
 
-Chroot-Distro requires Python 3.10 or newer. Since it uses native mount and chroot, it requires root privileges (which it automatically elevates using sudo, doas, pkexec, or su if needed).
+#### On Termux (Android)
 
-### On Termux (Android)
+1. Root your device (Magisk, KernelSU, APatch, or similar).
+2. Install Termux from
+   [F-Droid](https://f-droid.org/en/packages/com.termux/) or
+   [Termux GitHub Releases](https://github.com/termux/termux-app/releases).
+3. Install Chroot-Distro:
 
-1. Ensure your device is **rooted** (via Magisk, KernelSU, or APatch).
-2. Install from PyPI:
 ```sh
+pkg install python
 pip install chroot-distro
 ```
-Or from a local git clone:
+
+From a local checkout:
+
 ```sh
+git clone https://github.com/sabamdarif/chroot-distro
+cd chroot-distro
+pip install .                     # regular install
+# pip install -e .                # editable install for development
+```
+
+#### On a regular Linux host
+
+```sh
+# Debian/Ubuntu example:
+sudo apt install python3-pip
+
+pip install chroot-distro
+# or from a checkout:
 git clone https://github.com/sabamdarif/chroot-distro
 cd chroot-distro
 pip install .
 ```
 
-### On a regular Linux host
+### First-run check
+
+On startup, commands that modify containers or mounts verify that the
+effective UID is `0`. If not, Chroot-Distro re-executes itself using, in
+order: `sudo`, `doas`, `pkexec`, or `su`.
+
+| Situation | Behaviour |
+|---|---|
+| Default | Auto-elevate when not root. |
+| `--no-elevate` or `CHROOT_DISTRO_NO_ELEVATE=1` | Skip elevation; exit with an error if not root. |
+| Termux, default | Prefer `su` (real root) over `sudo`. |
+| Termux, `--use-sudo` or `CHROOT_DISTRO_USE_SUDO=1` | Prefer `sudo` for elevation. |
+
+`list` and `help` do not require root and are never re-executed.
+
+### Quick start
 
 ```sh
-# On Debian/Ubuntu:
-apt install python3-pip
-```
-
-```sh
-pip install chroot-distro
-```
-Or from a local git clone:
-```sh
-git clone https://github.com/sabamdarif/chroot-distro
-cd chroot-distro
-pip install .
-```
-
----
-
-## First-run check / Auto-Elevation
-
-On startup, mutating commands verify if the program is being run by a user with root privileges (UID `0`). If not, the program automatically attempts to elevate itself using standard tools (`sudo`, `doas`, `pkexec`, or `su`). You can opt out of this auto-elevation by passing `--no-elevate` or setting the environment variable `CHROOT_DISTRO_NO_ELEVATE=1`.
-
-On Termux (Android), privilege auto-elevation prioritizes `su` (real root) over `sudo` (which might be fake/proot-faked root). You can override this preference and force standard `sudo` elevation by passing `--use-sudo` or setting the environment variable `CHROOT_DISTRO_USE_SUDO=1`.
-
----
-
-## Quick start
-
-```sh
-# List available distributions
-chroot-distro list
-
 # Install Ubuntu 24.04 from Docker Hub
 chroot-distro install ubuntu:24.04
 
@@ -151,10 +158,10 @@ chroot-distro push myuser/myapp:1.0
 # Rebuild from scratch (loses all in-container data)
 chroot-distro reset ubuntu
 
-# Safely unmount a container (stops active processes and resets sessions count to 0)
+# Unmount bindings and end active sessions
 chroot-distro unmount ubuntu
 
-# Permanently remove a container (unmounts all active sessions first)
+# Permanently remove a container (unmounts active sessions first)
 chroot-distro remove ubuntu
 ```
 
@@ -165,46 +172,16 @@ chroot-distro remove ubuntu
 Every subcommand supports `--help` (also `-h`), which prints help text
 laid out for the current terminal width.
 
-### Summary
-
-| Command | Aliases | Description |
-|---|---|---|
-| `install` | `add`, `i`, `in`, `ins` | Install a container from an image or archive |
-| `remove` | `rm` | Delete a container |
-| `rename` | — | Rename a container |
-| `reset` | — | Reinstall from cached manifest |
-| `login` | `sh` | Interactive shell (or custom command) |
-| `list` | `li`, `ls` | List installed containers |
-| `backup` | `bak`, `bkp` | Archive a container |
-| `restore` | — | Restore from backup |
-| `clear-cache` | `clear`, `cl` | Delete download/build cache |
-| `copy` | `cp` | Copy files host ↔ container |
-| `sync` | — | Synchronize files host ↔ container |
-| `run` | — | Run image Entrypoint/Cmd |
-| `build` | — | Build image from Dockerfile |
-| `push` | — | Push built image to registry |
-| `unmount` | `umount` | Unmount bindings and end sessions |
-| `help` | `h`, `he`, `hel` | Show help for a command |
-
-## Global options
-
-These flags appear **before** the subcommand (e.g. `chroot-distro --no-elevate list`):
+**Global flags** (before the subcommand):
 
 | Option | Description |
 |---|---|
 | `-h`, `--help` | Show top-level help. |
-| `--no-elevate` | Do not auto-elevate to root (same as `CHROOT_DISTRO_NO_ELEVATE=1`). |
-| `--use-sudo` | On Termux, prefer `sudo` over `su` for elevation (same as `CHROOT_DISTRO_USE_SUDO=1`). |
+| `--no-elevate` | Do not auto-elevate to root (`CHROOT_DISTRO_NO_ELEVATE=1`). |
+| `--use-sudo` | On Termux, prefer `sudo` over `su` (`CHROOT_DISTRO_USE_SUDO=1`). |
 
-## Command aliases
-
-The CLI accepts the canonical names above plus short aliases (see table). For example:
-
-```sh
-chroot-distro sh ubuntu       # same as chroot-distro login ubuntu
-chroot-distro ins alpine
-chroot-distro umount ubuntu
-```
+Short aliases are accepted for many commands (`sh` → `login`, `rm` →
+`remove`, `ins` → `install`, etc.); each section below lists them.
 
 ### `install` — Install a container
 
@@ -213,21 +190,19 @@ chroot-distro install [OPTIONS] (IMAGE or PATH or URL)
 Aliases: add, i, in, ins
 ```
 
-Pull a Docker/OCI image and create a container from it, extract a local archive file, or fetch a remote archive via HTTP/HTTPS.
+Pull a Docker/OCI image and create a container from it, extract a local
+archive, or download a remote archive over HTTP/HTTPS.
 
 **Options:**
 
 | Option | Description |
 |---|---|
-| `-n`, `--name NAME` | Set a custom local name for the container (mutually exclusive with `--override-alias`). |
-| `--override-alias NAME` | Same as `-n` / `--name`. |
-| `-a`, `--architecture ARCH` | Override the target CPU architecture. Accepts native names (`aarch64`, `arm`, `i686`, `riscv64`, `x86_64`) or Docker platforms (`linux/arm64`, `linux/amd64`, etc.). Defaults to host. |
+| `-n`, `--name NAME` | Custom local container name. Defaults to the image name (without tag/registry) or the archive filename. Must start with a letter or digit; may contain only letters, digits, `_`, `.`, `-`. |
+| `--override-alias NAME` | Same as `-n` / `--name` (mutually exclusive). |
+| `-a`, `--architecture ARCH` | Override target CPU architecture. Accepts native names (`aarch64`, `arm`, `i686`, `riscv64`, `x86_64`) or Docker platform strings (`linux/arm64`, `linux/amd64`, …). Defaults to the host CPU. |
 | `-q`, `--quiet` | Suppress non-error output. |
-| `-h`, `--help` | Show command help. |
 
-Container names must start with a letter or digit and contain only letters, digits, `_`, `.`, `-`.
-
-#### From a OCI registry
+#### From a Docker/OCI registry
 
 `IMAGE` is a standard Docker image reference:
 
@@ -238,17 +213,74 @@ Container names must start with a letter or digit and contain only letters, digi
 | User image | `myuser/myimage:tag` |
 | Custom registry | `ghcr.io/foo/bar:latest` |
 
-Custom registries are detected by the first path component containing `.` or `:`. Public images on registries are pulled with an anonymous Bearer token.
+Custom registries are detected when the first path component contains
+`.` or `:` (a hostname). Public images on `ghcr.io`, `quay.io`,
+`registry.gitlab.com`, etc. are pulled with an anonymous Bearer token
+discovered from each registry's `/v2/` challenge.
 
-**Private images** require credentials. Set the environment variable `CD_DOCKER_AUTH` to `username:password` (or `username:PAT`) before running `install` (e.g. `export CD_DOCKER_AUTH=myuser:ghp_xxx`). `PD_DOCKER_AUTH` is also accepted as a fallback.
+**Private images** require credentials. Set `CD_DOCKER_AUTH` to
+`username:password` (or `username:PAT`) before running `install`. The
+colon separator is mandatory. `PD_DOCKER_AUTH` is accepted as a fallback
+for compatibility with proot-distro:
 
-Layers are cached in `/root/.cache/chroot-distro/oci_layers/` and reused on subsequent installs. If both the resolved manifest and all layers are cached, installation runs fully offline.
+```sh
+export CD_DOCKER_AUTH=myuser:mypassword
+chroot-distro install myuser/private-image:tag
 
-#### From a local archive or URL
+export CD_DOCKER_AUTH=myuser:ghp_xxx
+chroot-distro install ghcr.io/myorg/private-image:tag
+```
 
-Provide a path starting with `/`, `./`, `../`, or `~`, or an HTTP/HTTPS URL:
-- **Plain rootfs tarball**: A tar archive whose top-level entries form a standard Linux filesystem (`bin/`, `etc/`, `usr/`, etc.). The tool automatically scores directory names to detect strip components. Supported compression: gzip, bzip2, xz, lzma, or uncompressed.
-- **OCI image layout**: A tar archive containing an `oci-layout` file (produced by `docker save` or `skopeo`). Layers are applied in order with OCI whiteout markers, allowing `reset` and `run` to work like with registry-pulled images.
+Layers are cached under `$BASE_CACHE_DIR/oci_layers/` and reused on
+subsequent installs. If the resolved manifest and all layers are already
+cached, installation runs fully offline.
+
+**Examples:**
+
+```sh
+chroot-distro install ubuntu:24.04
+chroot-distro install alpine:3.21 --name my-alpine
+chroot-distro install debian:bookworm --architecture aarch64
+chroot-distro install ghcr.io/myorg/myimage:latest
+```
+
+#### From a local archive
+
+`IMAGE` can be a path starting with `/`, `./`, `../`, or `~`. A bare
+token like `ubuntu` is always treated as a Docker image reference.
+
+Two archive formats are supported (auto-detected):
+
+- **Plain rootfs tarball** — top-level entries form a standard Linux
+  filesystem (`bin/`, `etc/`, `usr/`, …). Strip level is scored
+  automatically. Compression: gzip, bzip2, xz, lzma, or uncompressed.
+  No `manifest.json` is written (`reset` and `run` are not available).
+- **OCI image layout** — archive contains `oci-layout` at its root (as
+  from `docker save` or `skopeo copy oci-archive:`). Layers are applied
+  with OCI whiteout semantics; `manifest.json` is written so `reset` and
+  `run` work like registry installs.
+
+**Examples:**
+
+```sh
+chroot-distro install ./alpine-rootfs.tar.gz
+chroot-distro install ./myimage.oci.tar --name myimage
+```
+
+#### From a URL
+
+When an HTTP or HTTPS URL is given instead of a local path, the archive
+is downloaded fully and then processed the same way as a local file.
+Only `http://` and `https://` are supported. The default container name
+is derived from the last URL path component; use `--name` to override.
+
+```sh
+chroot-distro install https://example.com/rootfs.tar.xz --name demo
+```
+
+After installation, if the image defines an `Entrypoint`, a
+`Run entrypoint: chroot-distro run <name>` hint is printed alongside
+`Start shell: chroot-distro login <name>`.
 
 ---
 
@@ -258,33 +290,63 @@ Provide a path starting with `/`, `./`, `../`, or `~`, or an HTTP/HTTPS URL:
 chroot-distro build [OPTIONS] [PATH]
 ```
 
-Build an OCI/Docker-compatible image from a Dockerfile. `PATH` is the build context directory (default `.`); all `COPY`/`ADD` source paths are resolved relative to it.
+Build an OCI/Docker-compatible image from a Dockerfile. `PATH` is the
+build context directory (default `.`); all `COPY`/`ADD` source paths are
+resolved relative to it.
 
-By default, the built image is stored in the local manifest cache under the tag given by `--tag` (defaulting to `<basename(PATH)>:latest`). A subsequent `chroot-distro install <tag>` finds the manifest in the cache and installs offline.
+By default the built image is stored in the local manifest cache under
+the tag given by `--tag` (default `<basename(PATH)>:latest`). A subsequent
+`chroot-distro install <tag>` installs entirely without network access.
 
 **Options:**
 
 | Option | Description |
 |---|---|
-| `-f`, `--file PATH` | Use a Dockerfile at PATH instead of `<PATH>/Dockerfile`. Pass `-` to read the Dockerfile from stdin. |
+| `-f`, `--file PATH` | Dockerfile at PATH instead of `<PATH>/Dockerfile`. Pass `-` to read from stdin. |
 | `-t`, `--tag REF` | Image reference to assign. Repeatable. |
-| `--build-arg K=V` | Set a build-time `ARG`. |
+| `--build-arg K=V` | Set a build-time `ARG` (only declared `ARG`s are honoured). Repeatable. |
 | `--architecture ARCH` | Target CPU architecture (default: host). |
-| `--target STAGE` | Stop after the named stage of a multi-stage build. |
-| `-o`, `--output FILE` | Write the built image as an OCI image-layout tarball to FILE. |
-| `--install-as NAME` | After build, install the image as a container named NAME. |
-| `--no-cache` | Disable build caching. |
+| `--target STAGE` | Stop after the named multi-stage build stage. |
+| `-o`, `--output FILE` | Write an OCI image-layout tarball to FILE. Compression inferred from the extension. Repeatable. |
+| `--install-as NAME` | After build, install the image as container NAME. |
+| `--no-cache` | Disable per-step build caching. |
 | `-v`, `--verbose` | Echo each instruction and stream `RUN` output. |
 | `-q`, `--quiet` | Suppress non-error output. |
-| `-h`, `--help` | Show command help. |
 
 **Supported Dockerfile instructions:**
-`FROM`, `RUN`, `COPY` (with `--from`, `--chown`, `--chmod`), `ADD`, `CMD`, `ENTRYPOINT`, `ENV`, `ARG`, `LABEL`, `MAINTAINER`, `USER`, `WORKDIR`, `EXPOSE`, `VOLUME`, `STOPSIGNAL`, `HEALTHCHECK`, `SHELL`, `ONBUILD`.
 
-BuildKit-only features (`RUN --mount`, `RUN --network`, `RUN --security`, `COPY --link`, `COPY --parents`) are rejected with an explicit error.
+`FROM` (multi-stage, `FROM scratch`, `COPY --from=`), `RUN` (shell,
+JSON exec, here-doc), `COPY` (`--from`, `--chown`, `--chmod`), `ADD`,
+`CMD`, `ENTRYPOINT`, `ENV`, `ARG`, `LABEL`, `MAINTAINER`, `USER`,
+`WORKDIR`, `EXPOSE`, `VOLUME`, `STOPSIGNAL`, `HEALTHCHECK`, `SHELL`,
+`ONBUILD`.
+
+BuildKit-only features (`RUN --mount`, `RUN --network`,
+`RUN --security`, `COPY --link`, `COPY --parents`) are rejected with an
+explicit error.
 
 **`chroot` requirement:**
-If the Dockerfile contains any `RUN` instructions, they must be executed against the in-progress rootfs under `chroot` and therefore require root privileges. Metadata-only builds run in pure Python and do not require root.
+
+If the Dockerfile contains any `RUN` instruction, each step executes
+inside the in-progress rootfs via `chroot` and therefore requires root.
+Metadata-only builds (`COPY`/`ADD`/`ENV`/… without `RUN`) run in
+pure-Python mode and do not require root.
+
+**Examples:**
+
+```sh
+chroot-distro build .
+chroot-distro build -t myapp:1.0 --install-as myapp .
+chroot-distro build -t myapp:arm64 --architecture aarch64 -o myapp.oci.tar.gz .
+chroot-distro build --build-arg HTTP_PROXY=$HTTP_PROXY -t myapp .
+```
+
+**Limitations:**
+
+`RUN` steps run under `chroot`, not a real container runtime: no PID,
+network, or IPC isolation, no `cgroups`, no `seccomp`. Steps that depend
+on real namespaces or kernel features may fail or behave differently from
+`docker build`. Multi-platform manifest lists are not produced.
 
 ---
 
@@ -294,17 +356,31 @@ If the Dockerfile contains any `RUN` instructions, they must be executed against
 chroot-distro push [OPTIONS] IMAGE
 ```
 
-Upload a locally built image to a Docker/OCI registry. The image must have been produced by `chroot-distro build -t IMAGE` first. It streams layers from the local cache to the registry without requiring a Docker daemon.
-
-Set `CD_DOCKER_AUTH=username:password` for authentication.
+Upload a locally built image to a Docker/OCI registry. The image must
+have been produced by `chroot-distro build -t IMAGE` first; `push` reads
+the manifest and blobs from the local cache. No Docker daemon is
+required.
 
 **Options:**
 
 | Option | Description |
 |---|---|
-| `-a`, `--architecture ARCH` | Push the manifest built for the given architecture. Default: host. |
+| `--architecture ARCH` | Push the manifest built for the given architecture (must match the build). Default: host. |
 | `-q`, `--quiet` | Suppress non-error output. |
-| `-h`, `--help` | Show command help. |
+
+**Authentication:**
+
+Set `CD_DOCKER_AUTH=username:password` (colon required). `PD_DOCKER_AUTH`
+is accepted as a fallback:
+
+```sh
+chroot-distro build -t myuser/myapp:1.0 ./mycontext
+export CD_DOCKER_AUTH=myuser:mypassword
+chroot-distro push myuser/myapp:1.0
+```
+
+Each layer is HEAD-probed first; existing blobs are skipped. 401/403
+responses include a hint to set or fix `CD_DOCKER_AUTH`.
 
 ---
 
@@ -315,33 +391,47 @@ chroot-distro login [OPTIONS] CONTAINER [-- COMMAND ...]
 Aliases: sh
 ```
 
-Spawn an interactive shell (or a custom command) inside an installed container. The `--` separator passes a command to run inside the container's login shell.
+Spawn an interactive shell (or a custom command) inside an installed
+container. The `--` separator passes arguments to the container's login
+shell.
 
-**Options:**
+**Examples:**
+
+```sh
+chroot-distro login ubuntu
+chroot-distro login ubuntu --user myuser
+chroot-distro login ubuntu -- /bin/ls /etc
+chroot-distro login ubuntu -- bash -c "echo hello"
+chroot-distro sh ubuntu
+chroot-distro login ubuntu --get-chroot-cmd
+```
+
+**Options always available:**
 
 | Option | Description |
 |---|---|
-| `-u`, `--user USER` | Log in as USER (default: `root`). Accepts username (`name`), numeric `uid`, or `name:group` / `uid:gid`. |
-| `--shared-home` | Bind the invoking user's host home into the guest home (at `--user`'s home path, or `/root` for root). On Termux, binds `TERMUX_HOME`. |
+| `-u`, `--user USER` | Log in as USER (default: `root`). Accepts `name`, numeric `uid`, `name:group`, or `uid:gid`. |
+| `--shared-home` | Bind the invoking user's host home into the guest home (or `/root` for root). On Termux, binds `TERMUX_HOME`. |
 | `--termux-home` | Alias for `--shared-home` (proot-distro compatibility). |
-| `--shared-tmp` | Bind the host tmp directory (`/tmp` on Linux, `$PREFIX/tmp` on Termux) to `/tmp` inside the container. |
-| `--shared-x11` | Bind the host X11 socket directory to `/tmp/.X11-unix` inside the container. |
+| `--shared-tmp` | Bind host tmp (`/tmp` on Linux, `$PREFIX/tmp` on Termux) to `/tmp` in the guest. |
+| `--shared-x11` | Bind the host X11 socket directory to `/tmp/.X11-unix` in the guest. |
 | `-b`, `--bind SRC[:DST]` | Bind-mount a custom host path (repeatable). `DST` must be an absolute guest path. |
-| `--hostname STRING` | Customize hostname inside the container (default: `localhost`). |
-| `-w`, `--work-dir PATH` | Set the initial working directory (default: user's home directory). |
-| `-e`, `--env VAR=VALUE` | Set an environment variable in the guest (repeatable). |
+| `--hostname STRING` | Hostname inside the container (default: `localhost`). |
+| `-w`, `--work-dir PATH` | Initial working directory (default: user's home). |
+| `-e`, `--env VAR=VALUE` | Set a guest environment variable (repeatable). |
 | `--get-chroot-cmd` | Print the fully assembled `env` + `chroot` command line and exit. |
-| `-h`, `--help` | Show command help. |
 
-**Termux-only options** (`--isolated` and `--minimal` are mutually exclusive):
+**Options available only on Termux (Android):**
 
 | Option | Description |
 |---|---|
-| `--isolated` | Skip non-essential host bindings (storage, Termux app paths, Android system paths). |
-| `--minimal` | Bare-minimum environment: only binds `/dev`, `/proc`, `/sys`. |
+| `--isolated` | Skip non-essential host bindings (storage, Termux app paths, Android system paths). Mutually exclusive with `--minimal`. |
+| `--minimal` | Bare minimum: only `/dev`, `/proc`, `/sys`. Mutually exclusive with `--isolated`. |
 
 #### Host bindings (Termux, default mode)
-Without `--isolated` or `--minimal`, the following host paths are bind-mounted inside the container when present and readable:
+
+Without `--isolated` or `--minimal`, the following host paths are
+bind-mounted when present and readable:
 
 ```
 /apex
@@ -363,17 +453,38 @@ Without `--isolated` or `--minimal`, the following host paths are bind-mounted i
 /vendor
 ```
 
-For normal-type containers, the Termux `$PREFIX` is also bound at its original path inside the guest so Termux utilities are reachable.
+For normal-type containers, the Termux `$PREFIX` is also bound at its
+original path so Termux utilities (`termux-api`, `pkg`, etc.) remain
+reachable inside the guest.
 
 #### Guest environment
-The host's environment is **not** carried into the guest. Chroot-Distro builds a clean environment dict. Precedence (later entries win):
-1. **Baseline**: `PATH` (default: `/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`), `MOZ_FAKE_NO_SANDBOX=1` and `PULSE_SERVER=127.0.0.1` (Android/Termux only).
-2. **Image-defined `Env`**: Read from `manifest.json`.
-3. **Android system vars**: (`ANDROID_*`, `BOOTCLASSPATH`, etc.), Android/Termux only, when not `--isolated` and not `--minimal`.
-4. **User `--env`**: Your `--env VAR=VALUE` CLI entries.
-5. **Session vars**: `HOME`, `USER`, `TERM` (defaulting to `xterm-256color`), `COLORTERM` (only when set on host).
 
-On Android/Termux (unless isolated or minimal), `$PREFIX/bin` is appended to `PATH` so Termux host tools stay reachable. A profile script at `/etc/profile.d/termux-profile.sh` is automatically written to re-apply env variables after guest profile initialization.
+The host environment is **not** carried into the guest. Precedence (later
+entries win):
+
+1. Baseline: `PATH` (from `DEFAULT_PATH_ENV`), `MOZ_FAKE_NO_SANDBOX=1`,
+   `PULSE_SERVER=127.0.0.1` (Termux only).
+2. Image-defined `Env` from `manifest.json`.
+3. Android system vars (`ANDROID_*`, `BOOTCLASSPATH`, …), Termux only,
+   when not `--isolated` and not `--minimal`.
+4. Your `--env VAR=VALUE` entries.
+5. `HOME`, `USER`, `TERM` (default `xterm-256color`), `COLORTERM`
+   (when set on the host).
+
+On Termux (unless isolated or minimal), `$PREFIX/bin` is appended to
+`PATH`. A snippet at `/etc/profile.d/termux-profile.sh` re-applies
+login-time variables after the distro's `/etc/profile` runs, so
+`su - someuser` inside the container does not drop them.
+
+In `--minimal` mode only your `--env` entries plus `TERM`/`COLORTERM`
+are exported.
+
+#### Session lifecycle
+
+The first `login` or `run` for a container performs bind mounts and
+increments a session counter. Each exiting session decrements it; when
+the counter reaches zero, all bind mounts are unmounted automatically.
+Use `unmount` to force teardown (see below).
 
 ---
 
@@ -383,22 +494,37 @@ On Android/Termux (unless isolated or minimal), `$PREFIX/bin` is appended to `PA
 chroot-distro run [OPTIONS] CONTAINER [-- ARG ...]
 ```
 
-Run the `Entrypoint` and/or `Cmd` defined in the container's OCI image manifest (equivalent to `docker run`).
+Run the `Entrypoint` and/or `Cmd` from the container's OCI manifest
+(equivalent to `docker run`). Requires an OCI install with
+`manifest.json` (plain tarball installs have no recorded
+Entrypoint/Cmd).
 
 **Entrypoint and Cmd resolution:**
 
-| Image defines | Args after `--` | Command executed inside chroot |
+| Image | Args after `--` | Inner command |
 |---|---|---|
 | `Entrypoint` + `Cmd` | _(none)_ | `Entrypoint + Cmd` |
-| `Entrypoint` + `Cmd` | `ARGS` | `Entrypoint + ARGS` (`Cmd` replaced) |
+| `Entrypoint` + `Cmd` | `ARGS` | `Entrypoint + ARGS` (Cmd replaced) |
 | Only `Cmd` | _(none)_ | `Cmd` |
-| Only `Cmd` | `ARGS` | `ARGS` (`Cmd` replaced) |
+| Only `Cmd` | `ARGS` | `ARGS` (Cmd replaced) |
 | Only `Entrypoint` | _(none)_ | `Entrypoint` |
 | Only `Entrypoint` | `ARGS` | `Entrypoint + ARGS` |
 | Neither | _(none)_ | Error |
 | Neither | `ARGS` | `ARGS` |
 
-Supports the same options as `login`.
+When `--work-dir` is not given, `run` uses the image `WorkingDir`
+(falling back to `/`).
+
+`run` accepts the same options as `login`. See
+`chroot-distro login --help`.
+
+**Examples:**
+
+```sh
+chroot-distro run hello-world
+chroot-distro run ubuntu -- /bin/echo hi
+chroot-distro run nextcloud --get-chroot-cmd
+```
 
 ---
 
@@ -409,12 +535,13 @@ chroot-distro list [OPTIONS]
 Aliases: li, ls
 ```
 
-Show all installed containers. Does not require root.
+Show installed containers (subdirectories of `containers/` with a
+`rootfs/`). Does not require root. When none are installed, an install
+suggestion is printed.
 
 | Option | Description |
 |---|---|
 | `-q`, `--quiet` | Print only container names, one per line. |
-| `-h`, `--help` | Show command help. |
 
 ---
 
@@ -425,15 +552,17 @@ chroot-distro remove [OPTIONS] CONTAINER
 Aliases: rm
 ```
 
-Permanently delete the container and all of its data. **This cannot be undone and is not confirmed.**
+Permanently delete the container and all its data. **This cannot be
+undone and is not confirmed.**
 
-Before deletion, Chroot-Distro verifies active mounts using `/proc/mounts` and performs a clean recursive unmount. It then fixes file permissions (chmod) on the fly to guarantee the rootfs can be cleared safely without leaving dead mounts or system locks.
+Before deletion, active mounts are detected via `/proc/mounts` and
+unmounted cleanly. File permissions are fixed on the fly so chmod-000'd
+subtrees can always be removed.
 
 | Option | Description |
 |---|---|
 | `-v`, `--verbose` | Log each deleted file. |
-| `-q`, `--quiet` | Suppress non-error output. |
-| `-h`, `--help` | Show command help. |
+| `-q`, `--quiet` | Suppress non-error output. Mutually exclusive with `--verbose`. |
 
 ---
 
@@ -444,11 +573,11 @@ chroot-distro unmount CONTAINER
 Aliases: umount
 ```
 
-Safely unmount a container's filesystem bindings. If there are active chroot processes running in the container, it sends `SIGTERM` (falling back to `SIGKILL` if they do not exit within 2 seconds) to terminate them, resets the active session counter to `0`, and unmounts all bind mounts cleanly.
-
-| Option | Description |
-|---|---|
-| `-h`, `--help` | Show command help. |
+Safely unmount a container's bind mounts. If chroot processes are still
+running, `SIGTERM` is sent (with `SIGKILL` after two seconds if needed),
+the session counter is reset to `0`, and all bind mounts are removed.
+If a path is busy, a lazy unmount (`umount -l`) is attempted as a
+fallback.
 
 ---
 
@@ -463,7 +592,6 @@ Rename a container from `OLDNAME` to `NEWNAME`.
 | Option | Description |
 |---|---|
 | `-q`, `--quiet` | Suppress non-error output. |
-| `-h`, `--help` | Show command help. |
 
 ---
 
@@ -473,12 +601,14 @@ Rename a container from `OLDNAME` to `NEWNAME`.
 chroot-distro reset CONTAINER
 ```
 
-Remove the container rootfs and reinstall it from the Docker image manifest cached at install time. **All data inside the container is lost.**
+Remove the container rootfs and reinstall from the image recorded in
+`containers/<name>/manifest.json`. **All data inside the container is
+lost.** Requires an OCI install (plain rootfs tarballs cannot be
+re-pulled).
 
 | Option | Description |
 |---|---|
 | `-q`, `--quiet` | Suppress non-error output. |
-| `-h`, `--help` | Show command help. |
 
 ---
 
@@ -489,21 +619,33 @@ chroot-distro backup [OPTIONS] CONTAINER
 Aliases: bak, bkp
 ```
 
-Create a TAR archive of the container containing `<name>/manifest.json` and `<name>/rootfs/`.
+Create a TAR archive containing `<name>/manifest.json` (when present)
+and `<name>/rootfs/`.
 
 **Options:**
 
 | Option | Description |
 |---|---|
-| `-o`, `--output FILE` | Write to FILE instead of stdout. Refuses to overwrite. |
+| `-o`, `--output FILE` | Write to FILE instead of stdout. Refuses to overwrite an existing file. |
 | `-c`, `--compress TYPE` | Force compression: `gzip`, `bzip2`, `xz`, or `none`. |
 | `-v`, `--verbose` | Log each archived file. |
-| `-q`, `--quiet` | Suppress non-error output. |
-| `-h`, `--help` | Show command help. |
+| `-q`, `--quiet` | Suppress non-error output. Mutually exclusive with `--verbose`. |
 
-File ownership is zeroed out in the archive (`uid=gid=0`). Block/character devices, FIFOs, and sockets are silently skipped. Before archiving, permissions are adjusted to ensure the rootfs is readable.
+Compression is inferred from the file extension unless `--compress`
+overrides it. Without `--output`, the archive goes to stdout
+(uncompressed by default); stdout cannot be a TTY.
 
-`backup` is **TTY-safe** when piping to commands that might require user input (e.g. `gpg -c`).
+File ownership in the archive is zeroed. Block/char devices, FIFOs, and
+sockets are skipped. `backup` is **TTY-safe** when piping into
+interactive tools (e.g. `gpg -c`).
+
+**Examples:**
+
+```sh
+chroot-distro backup ubuntu --output ubuntu.tar.xz
+chroot-distro backup ubuntu | gzip > ubuntu.tar.gz
+chroot-distro backup ubuntu | gpg -c > ubuntu.tar.gpg
+```
 
 ---
 
@@ -513,20 +655,34 @@ File ownership is zeroed out in the archive (`uid=gid=0`). Block/character devic
 chroot-distro restore [OPTIONS] [BACKUP_FILE]
 ```
 
-Restore a container from a TAR archive. Reads from stdin when `BACKUP_FILE` is omitted. Compression is auto-detected.
+Restore from a TAR archive. When `BACKUP_FILE` is omitted, data is read
+from stdin. Compression is auto-detected.
 
 **Options:**
 
 | Option | Description |
 |---|---|
 | `-v`, `--verbose` | Log each extracted file. |
-| `-q`, `--quiet` | Suppress non-error output. |
-| `-h`, `--help` | Show command help. |
+| `-q`, `--quiet` | Suppress non-error output. Mutually exclusive with `--verbose`. |
 
-**Requirements:**
-Files must be stored under a subdirectory named after the container (e.g. `<name>/rootfs/`). The existing rootfs is cleared on the first match. Hard links inside the archive are materialized as independent file copies via `shutil.copy2` to preserve filesystem isolation.
+**Archive format requirements:**
 
-`restore` is **TTY-safe** when reading from an interactive pipeline (e.g. `gpg -d | chroot-distro restore`).
+- Files must live under `<name>/manifest.json` and `<name>/rootfs/…`.
+  Bare-root archives are rejected.
+- Without `manifest.json`, login still works but `reset` and `run` will
+  not.
+- Hard links in the archive are materialised as independent copies.
+
+`restore` is **TTY-safe** for interactive pipelines
+(`gpg -d archive.gpg | chroot-distro restore`).
+
+**Examples:**
+
+```sh
+chroot-distro restore ubuntu.tar.xz
+cat ubuntu.tar.xz | chroot-distro restore
+gpg -d ubuntu.tar.gpg | chroot-distro restore
+```
 
 ---
 
@@ -537,15 +693,23 @@ chroot-distro copy [OPTIONS] [CONTAINER:]SRC [CONTAINER:]DEST
 Aliases: cp
 ```
 
-Copy files between the host filesystem and a container rootfs, or between two containers. In-container paths are prefixed with the container name and a colon: `ubuntu:/etc/resolv.conf`.
+Copy files between the host and a container rootfs, or between two
+containers. In-container paths use the `container:path` prefix.
 
 | Option | Description |
 |---|---|
-| `-r`, `--recursive` | Copy directories recursively. |
-| `-m`, `--move` | Move instead of copying (deletes source after success). |
+| `-r`, `--recursive` | Copy directories recursively (preserves symlinks). |
+| `-m`, `--move` | Move instead of copy (delete source after success). |
 | `-v`, `--verbose` | Log each copied file. |
-| `-q`, `--quiet` | Suppress non-error output. |
-| `-h`, `--help` | Show command help. |
+| `-q`, `--quiet` | Suppress non-error output. Mutually exclusive with `--verbose`. |
+
+**Examples:**
+
+```sh
+chroot-distro copy ./file.txt ubuntu:/root/file.txt
+chroot-distro copy ubuntu:/etc/resolv.conf ./resolv.conf.bak
+chroot-distro copy --recursive ./myapp ubuntu:/opt/myapp
+```
 
 ---
 
@@ -555,21 +719,34 @@ Copy files between the host filesystem and a container rootfs, or between two co
 chroot-distro sync [OPTIONS] [CONTAINER:]SRC [CONTAINER:]DEST
 ```
 
-Synchronize SRC to DEST, copying only files that differ. Recursive by default.
+Synchronize SRC to DEST, copying only files that differ. Always
+recursive.
 
-**Comparison modes:**
-- Default: File size and integer modification time.
-- `--checksum` (`-c`): File size and CRC32 checksum.
+**Comparison method:**
 
-Files are written atomically using a temp file (`.~cd_sync` -> `os.replace`) to prevent corruption on interruption.
+| Mode | What is compared |
+|---|---|
+| Default | File size and integer modification time |
+| `--checksum` | File size and CRC32 checksum |
+
+Regular files are written atomically (`.~cd_sync` temp file →
+`os.replace`). Symlinks are copied as-is. Hard links become independent
+copies. Block/char devices, FIFOs, and sockets are skipped.
 
 | Option | Description |
 |---|---|
 | `-c`, `--checksum` | Compare by size + CRC32 instead of size + mtime. |
-| `-d`, `--delete` | Remove extra files in destination. |
-| `-v`, `--verbose` | Log each synced/deleted entry. |
-| `-q`, `--quiet` | Suppress non-error output. |
-| `-h`, `--help` | Show command help. |
+| `-d`, `--delete` | Remove destination entries with no source counterpart. |
+| `-v`, `--verbose` | Log each synced or deleted entry. |
+| `-q`, `--quiet` | Suppress non-error output. Mutually exclusive with `--verbose`. |
+
+**Examples:**
+
+```sh
+chroot-distro sync ./app ubuntu:/opt/app
+chroot-distro sync --checksum ./data ubuntu:/data
+chroot-distro sync --delete ./app ubuntu:/opt/app
+```
 
 ---
 
@@ -580,13 +757,18 @@ chroot-distro clear-cache
 Aliases: clear, cl
 ```
 
-Remove all entries from the cache directory (registry layers, manifests, build cache index).
+Remove every entry from `$BASE_CACHE_DIR` — layer blobs (`oci_layers/`),
+resolved manifests (`oci_manifests/`), and the build cache index
+(`build_cache_index.json`). Freed disk space is reported in human-readable
+units.
 
 | Option | Description |
 |---|---|
-| `-v`, `--verbose` | List removed cache entries. |
-| `-q`, `--quiet` | Suppress non-error output. |
-| `-h`, `--help` | Show command help. |
+| `-v`, `--verbose` | Log each deleted file. |
+| `-q`, `--quiet` | Suppress non-error output. Mutually exclusive with `--verbose`. |
+
+After `clear-cache`, the next `install` or `reset` of an image requires
+network access again.
 
 ---
 
@@ -603,48 +785,96 @@ Print detailed help for `COMMAND`, or general usage when omitted.
 
 ## How Chroot-Distro works
 
-Chroot-Distro is built around two primary blocks:
+Chroot-Distro is a thin orchestration layer around two primary building
+blocks:
 
 ### 1. OCI registry client
-The OCI pull/push logic is written in pure Python using `urllib`:
-- Discovers challenge token endpoints and obtains OAuth bearer tokens.
-- Downloads OCI layer blobs, verifying their SHA-256 integrity on the fly.
-- Sequence-extracts layers onto a clean folder, respecting OCI whiteout formats.
-- Performs post-install configurations: DNS setups (`resolv.conf`), minimal `hosts`, and populates Android UIDs/GIDs in guest databases (`/etc/passwd`, `/etc/group`) for proper network access mapping.
 
-### 2. Native chroot & mount
-Unlike `proot` which acts as a path translator via `ptrace` system call interceptions:
-- **Real Bind Mounts**: Chroot-Distro performs kernel-level bind-mounting (`mount --bind`).
-- **Session Tracking**: A file-based session tracker (`RUNTIME_DIR/data/<name>/sessions`) tracks active `login` and `run` instances.
-- **Automated Mounting**: The first login session mounts necessary host directories (`/dev`, `/proc`, `/sys`, custom bindings). Subsequent sessions skip mounting.
-- **Automated Unmounting**: The last session exiting (counter drops to 0) automatically unmounts all bind mounts.
-- **Lazy Unmount Fallback**: If an unmount fails with "target is busy", Chroot-Distro issues a lazy unmount (`umount -l`) to clean up namespace resources safely, preventing data corruption or path leaks.
-- **Under the Hood Command**:
-  When logging in, Chroot-Distro issues an execution path matching:
-  ```sh
-  env -i USER=root HOME=/root PATH=... \
-    chroot /root/.local/share/chroot-distro/containers/ubuntu/rootfs \
-    /bin/sh -c 'cd /root && exec /bin/bash -l'
-  ```
+The `install` command speaks the OCI Distribution protocol directly over
+`urllib`:
+
+- Public images on **Docker Hub** need no credentials
+  (e.g. `ubuntu:24.04`).
+- Public images on **other registries** use a full reference
+  (e.g. `ghcr.io/myorg/myimage:tag`).
+- Manifest lists are resolved to the platform matching your CPU (or
+  `--architecture`).
+- Each layer blob is downloaded with **SHA-256 verified** before
+  entering the cache.
+- Layer blobs and the resolved single-arch manifest are cached locally.
+
+Layers are applied in order with full OCI whiteout semantics. After all
+layers are applied, Chroot-Distro adds small fixups when `/etc/` exists:
+
+- `/etc/resolv.conf` is replaced with Google DNS (8.8.8.8 / 8.8.4.4).
+- `/etc/hosts` gets a minimal localhost mapping.
+- On Termux, the host Android user is registered as `aid_<name>` in
+  `/etc/passwd`, `/etc/group`, etc., so Android UID permissions work
+  inside the guest.
+
+The OCI manifest and image config are saved to
+`containers/<name>/manifest.json` for `reset` and `run`.
+
+Local archives and HTTP/HTTPS URLs follow the same extraction paths as
+in the [`install`](#install--install-a-container) section.
+
+### 2. Native chroot and bind mounts
+
+Unlike `proot`, which rewrites paths via `ptrace`, Chroot-Distro uses
+real kernel features:
+
+- **Bind mounts** (`mount --bind`) for host directories inside the guest.
+- **Session tracking** under `$RUNTIME_DIR/data/<name>/sessions`.
+- **Automatic mount/unmount**: the first session mounts; the last session
+  exiting unmounts everything.
+- **Lazy unmount fallback** (`umount -l`) when a target is busy.
+
+A typical `login` invocation looks roughly like:
+
+```sh
+env PATH=… HOME=/root USER=root … \
+  chroot /…/containers/ubuntu/rootfs \
+  /bin/sh -c 'cd /root && exec /bin/bash -l'
+```
+
+Add `--get-chroot-cmd` to print the exact command line without running it.
 
 #### Cross-architecture support
-Emulating guest CPU architectures (e.g. running `x86_64` on `aarch64` Android) uses **QEMU user-mode** via host-installed binary mappings. Architectures are auto-detected by parsing the ELF headers of common shells in the guest rootfs on login.
+
+Guest architectures (`aarch64`, `arm`, `i686`, `x86_64`, `riscv64`) are
+detected at login by reading ELF headers of common shell binaries. Cross-arch
+execution uses **QEMU user-mode** via `binfmt_misc` / QEMU user binaries
+installed on the host.
 
 ---
 
 ## Storage layout
 
-Since Chroot-Distro must run as root, all runtime files are placed in root's home directory:
+All runtime data lives under `$RUNTIME_DIR`:
+
+- **Termux**: `$TERMUX__PREFIX/var/lib/chroot-distro/`, where
+  `TERMUX__PREFIX` defaults to `/data/data/com.termux/files/usr`.
+- **Regular Linux**: `$XDG_DATA_HOME/chroot-distro/` (default
+  `~/.local/share/chroot-distro/`).
+
+The OCI cache (`$BASE_CACHE_DIR`) is under `$RUNTIME_DIR/cache` on
+Termux, and under `$XDG_CACHE_HOME/chroot-distro/` (default
+`~/.cache/chroot-distro/`) on a regular Linux host.
+
+Because mutating commands run as root after auto-elevation, effective
+paths on Linux are typically under `/root/.local/share/` and
+`/root/.cache/` unless you set `XDG_DATA_HOME` / `XDG_CACHE_HOME`.
 
 | Path | Contents |
 |---|---|
-| `/root/.local/share/chroot-distro/containers/<name>/rootfs/` | Container root filesystem |
-| `/root/.local/share/chroot-distro/containers/<name>/manifest.json` | Image manifest metadata |
-| `/root/.local/share/chroot-distro/locks/<name>.lock` | POSIX flock session lock |
-| `/root/.local/share/chroot-distro/locks/build/` | POSIX flock image building locks |
-| `/root/.cache/chroot-distro/oci_layers/` | Cached OCI layer blobs (shared cache) |
-| `/root/.cache/chroot-distro/oci_manifests/` | Cached single-arch image manifests |
-| `/root/.cache/chroot-distro/build_cache_index.json` | Build cache index |
+| `containers/<name>/rootfs/` | Container root filesystem |
+| `containers/<name>/manifest.json` | Image reference, arch, OCI manifest, image config |
+| `data/<name>/sessions` | Active `login` / `run` session counter |
+| `locks/<name>.lock` | Per-container POSIX flock |
+| `locks/build/<key>.lock` | Build/push lock |
+| `$BASE_CACHE_DIR/oci_layers/` | Cached OCI layer blobs |
+| `$BASE_CACHE_DIR/oci_manifests/` | Cached single-arch manifests |
+| `$BASE_CACHE_DIR/build_cache_index.json` | Dockerfile build cache index |
 
 ---
 
@@ -652,38 +882,48 @@ Since Chroot-Distro must run as root, all runtime files are placed in root's hom
 
 | Variable | Effect |
 |---|---|
-| `CD_DOCKER_AUTH` | Scoped Bearer authentication for registries. Format: `username:password` or `username:PAT`. `PD_DOCKER_AUTH` is also checked as fallback. |
-| `CD_FORCE_NO_COLORS` | Set to any value to disable ANSI escape colors in logs/output. |
-| `XDG_DATA_HOME` | Customizes base data directory (default: `/root/.local/share`). |
-| `XDG_CACHE_HOME` | Customizes base cache directory (default: `/root/.cache`). |
-| `COLUMNS` | Fallback terminal width for help rendering. |
-| `CHROOT_DISTRO_USE_SUDO` | Set to `1` to force using `sudo` first for privilege elevation on Termux. |
-| `CHROOT_DISTRO_NO_ELEVATE` | Set to `1` to disable privilege auto-elevation. |
+| `TERMUX__PREFIX` | Override Termux prefix; drives `RUNTIME_DIR` on Termux. Default: `/data/data/com.termux/files/usr`. |
+| `TERMUX__HOME` | Override Termux home for `--shared-home` bindings. Default: `/data/data/com.termux/files/home`. |
+| `TERMUX_APP__PACKAGE_NAME` | Termux app package (default `com.termux`); used for `/data/data/<pkg>/…` binds. |
+| `TERMUX_APP__APP_VERSION_NAME`, `TERMUX_VERSION` | Either counts toward Termux detection when set. |
+| `XDG_DATA_HOME` | Base for `$XDG_DATA_HOME/chroot-distro/` on non-Termux hosts. Default: `~/.local/share`. |
+| `XDG_CACHE_HOME` | Base for `$XDG_CACHE_HOME/chroot-distro/` on non-Termux hosts. Default: `~/.cache`. |
+| `CD_DOCKER_AUTH` | Registry credentials as `username:password` or `username:PAT` (colon required). Used by `install`, `build` (`FROM` pulls), and `push`. `PD_DOCKER_AUTH` is accepted as a fallback. |
+| `CD_FORCE_NO_COLORS` | When set, disables ANSI colours in Chroot-Distro output. |
+| `CHROOT_DISTRO_NO_ELEVATE` | When set to `1`, disables privilege auto-elevation (same as `--no-elevate`). |
+| `CHROOT_DISTRO_USE_SUDO` | When set to `1`, prefer `sudo` over `su` on Termux (same as `--use-sudo`). |
+| `COLUMNS` | Fallback terminal width for `--help` rendering. |
+| `TERM`, `COLORTERM` | Inherited into the guest (always; even in `--minimal`). `TERM` defaults to `xterm-256color` when unset on the host. |
 
 ---
 
 ## Shell completions
 
-Completion scripts for `chroot-distro` live under `src/chroot_distro/completions/`. They cover all subcommands, global flags (`--no-elevate`, `--use-sudo`), and per-command options (including `login`/`run` flags such as `--shared-home`, `--termux-home`, `--get-chroot-cmd`, and Termux-only `--isolated` / `--minimal`).
+Completion scripts for Bash, Zsh, and Fish live in
+`src/chroot_distro/completions/`:
 
-### Bash
+- `chroot-distro.bash`
+- `_chroot-distro`
+- `chroot-distro.fish`
+
+They complete subcommands, global flags (`--no-elevate`, `--use-sudo`),
+and per-command options (including `login`/`run` flags such as
+`--shared-home`, `--termux-home`, `--get-chroot-cmd`, and Termux-only
+`--isolated` / `--minimal`).
+
+If your shell does not pick them up automatically, install them manually:
+
 ```sh
+# Bash
 mkdir -p ~/.local/share/bash-completion/completions
 cp src/chroot_distro/completions/chroot-distro.bash \
    ~/.local/share/bash-completion/completions/chroot-distro
-```
 
-### Zsh
-```sh
+# Zsh (add fpath before compinit in ~/.zshrc)
 mkdir -p ~/.zsh/completions
 cp src/chroot_distro/completions/_chroot-distro ~/.zsh/completions/_chroot-distro
-# Add to ~/.zshrc before compinit:
-#   fpath=(~/.zsh/completions $fpath)
-#   compinit
-```
 
-### Fish
-```sh
+# Fish
 mkdir -p ~/.config/fish/completions
 cp src/chroot_distro/completions/chroot-distro.fish \
    ~/.config/fish/completions/chroot-distro.fish
@@ -693,55 +933,83 @@ cp src/chroot_distro/completions/chroot-distro.fish \
 
 ## Limitations
 
-- **Root Privilege Requirement**: Unlike rootless solutions, all modifying operations require root access (automatically handled via self-elevation).
-- **No Background Supervisors**: Standard systemd / init daemon managers cannot be initialized directly out of the box due to namespace limits.
-- **No zstd-compressed layers**: Python's `tarfile` module lacks zstd decompression. Images packed with zstd layers will fail. Use standard gzip or xz OCI image tags.
-- **Real Bind Mounts Persistence**: Real mounts are placed on the host file structure. If a login shell crashes or processes hang, paths can remain locked. While Chroot-Distro uses lazy unmount fallback (`umount -l`) to clean up, orphan processes should be monitored.
-- **Dockerfile Build limits**: Builds run `RUN` steps via native chroot. BuildKit-exclusive features (such as `RUN --mount`) are not supported.
+### Kernel and chroot limitations
+
+- **Root required**: real `chroot` and bind mounts need appropriate
+  privileges; there is no rootless mode.
+- **No real init**: `systemd`, socket-activated supervisors, and full
+  init systems generally do not work. Individual long-running processes
+  are fine.
+- **Kernel features**: FUSE modules, real `iptables`, custom cgroup
+  hierarchies, and similar kernel-module features may not work inside the
+  guest.
+- **Namespaces**: Chroot-Distro is not a full container runtime — no
+  network/PID/IPC namespace isolation comparable to Docker or Podman.
+- **Bind mount hygiene**: crashed sessions or orphan processes can leave
+  mounts busy; `unmount` and lazy unmount mitigate this but orphaned
+  processes should be cleaned up.
+
+### Chroot-Distro limitations
+
+- **Termux requires root**: unlike proot-distro, Chroot-Distro cannot run
+  containers on a non-rooted Android device.
+- **Registry authentication**: private pulls and pushes need
+  `CD_DOCKER_AUTH=user:password` (or `PD_DOCKER_AUTH`). Docker
+  `config.json` credential helpers are not read.
+- **No zstd-compressed layers**: Python's `tarfile` does not support
+  zstd. Images using zstd layers fail with an explicit error; try another
+  tag or compression format.
+- **Dockerfile builds are not BuildKit**: `RUN` executes under `chroot`,
+  not a real container runtime. BuildKit-only Dockerfile features are
+  rejected. Multi-platform manifest lists are not produced — build and
+  push once per architecture.
+- **`push` is single-arch**: no manifest-list assembly, cross-repo blob
+  mounting, or chunked uploads.
+- **No live state migration**: `backup`/`restore` capture the rootfs and
+  manifest, not in-memory process state.
+- **Termux-only flags on non-Termux hosts**: `--isolated` and `--minimal`
+  are only exposed when running on Termux.
 
 ---
 
-## Donate / Support
+## Donate
 
-If you find this project helpful and would like to support its development, consider buying me a coffee! Your support helps maintain and improve this project.
+If this project is useful to you, tips in cryptocurrency are welcome:
 
-**Cryptocurrency Addresses:**
-
-*   **USDT (BEP20, ERC20):** `0x1d216cf986d95491a479ffe5415dff18dded7e71`
-*   **USDT (TRC20):** `TCjRKPLG4BgNdHibt2yeAwgaBZVB4JoPaD`
-*   **BTC:** `13Q7xf3qZ9xH81rS2gev8N4vD92L9wYiKH`
-*   **DOGE:** `DJkMCnBAFG14TV3BqZKmbbjD8Pi1zKLLG6`
-*   **ETH:** `0x1d216cf986d95491a479ffe5415dff18dded7e71`
-
----
-
-## License
-
-This project is licensed under the **GNU General Public License v3.0** (see [LICENSE](LICENSE)).
+**Bitcoin**
 
 ```
-Copyright (C) 2025 sabamdarif
+13Q7xf3qZ9xH81rS2gev8N4vD92L9wYiKH
+```
 
-This program is free software: you can redistribute it and/or modify
-it under the terms of the GNU General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
+**Ethereum / USDT (BEP20, ERC20)**
+
+```
+0x1d216cf986d95491a479ffe5415dff18dded7e71
+```
+
+**USDT (TRC20)**
+
+```
+TCjRKPLG4BgNdHibt2yeAwgaBZVB4JoPaD
+```
+
+**Dogecoin**
+
+```
+DJkMCnBAFG14TV3BqZKmbbjD8Pi1zKLLG6
 ```
 
 ---
 
-## Acknowledgments
+## Issues and contributing
 
-Special thanks to:
+- **Bug reports**: https://github.com/sabamdarif/chroot-distro/issues
+- **License**: GPL-3.0-only. See [LICENSE](LICENSE).
 
-- [proot-distro](https://github.com/termux/proot-distro) — The blueprint and inspiration for this project's architecture.
+### Acknowledgments
+
+- [proot-distro](https://github.com/termux/proot-distro) — architecture
+  and CLI design inspiration.
 - [Magisk-Modules-Alt-Repo/chroot-distro](https://github.com/Magisk-Modules-Alt-Repo/chroot-distro)
 - [ravindu644/Ubuntu-Chroot](https://github.com/ravindu644/Ubuntu-Chroot)
-
----
-
-<div align="center">
-
-**⭐ If you enjoy this project, consider giving it a star!**
-
-</div>
