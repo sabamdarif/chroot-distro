@@ -35,6 +35,11 @@ from chroot_distro.constants import (
     TERMUX_PREFIX,
 )
 from chroot_distro.helpers.android import ensure_data_suid, termux_home_owner_ids
+from chroot_distro.helpers.x11 import (
+    guest_can_read_auth,
+    resolve_host_x11_env,
+    x11_auth_bind_path,
+)
 from chroot_distro.locking import ContainerLock
 from chroot_distro.message import crit_error, warn
 from chroot_distro.names import require_valid_name
@@ -401,6 +406,33 @@ def _command_login_inner(container_name: str, args) -> None:
     if dist_type == "normal" and IS_TERMUX and not isolated and not minimal:
         inject_termux_profile(rootfs, child_env)
 
+    x11_auth_binds: list[str] = []
+    if (
+        not IS_TERMUX
+        and dist_type == "normal"
+        and not minimal
+        and (shared_x11 or not isolated)
+    ):
+        x11_env, resolved_x11_binds = resolve_host_x11_env()
+        user_env_keys = {entry.partition("=")[0] for entry in extra_env if "=" in entry}
+        for key, val in x11_env.items():
+            if key not in user_env_keys:
+                child_env[key] = val
+
+        x11_auth_binds = list(resolved_x11_binds)
+        xauth = child_env.get("XAUTHORITY", "")
+        bind_path = x11_auth_bind_path(xauth)
+        if bind_path and bind_path not in x11_auth_binds:
+            x11_auth_binds.append(bind_path)
+
+        if xauth and login_uid is not None and not guest_can_read_auth(int(login_uid), xauth):
+            warn(
+                f"X authority file '{xauth}' is not readable by guest UID {login_uid}; "
+                f"GUI apps may fail. Try --shared-home, run "
+                f"'xhost +SI:localuser:{login_user}' on the host, or use a "
+                f"UID-matched user."
+            )
+
     # 1. Resolve all bind mounts
     resolved_binds = bindings.get_bindings(
         rootfs=rootfs,
@@ -409,6 +441,7 @@ def _command_login_inner(container_name: str, args) -> None:
         shared_home=use_shared_home,
         shared_tmp=shared_tmp,
         shared_x11=shared_x11,
+        x11_auth_binds=x11_auth_binds,
         custom_binds=custom_binds,
         login_home=login_home or "/root",
         login_user=login_user,

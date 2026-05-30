@@ -319,6 +319,7 @@ def get_bindings(
     shared_home: bool = False,
     shared_tmp: bool = False,
     shared_x11: bool = False,
+    x11_auth_binds: list[str] | None = None,
     custom_binds: list[str] | None = None,
     login_home: str = "/root",
     login_user: str = "root",
@@ -392,6 +393,14 @@ def get_bindings(
             x11_path = "/tmp/.X11-unix"
             if os.path.exists(x11_path):
                 binds.append((x11_path, x11_path))
+
+    # 5b. X11 authority file binds (Linux only; runtime dir is covered by /run)
+    if not IS_TERMUX and (shared_x11 or not isolated) and x11_auth_binds:
+        bound_srcs = {src for src, _ in binds}
+        for path in x11_auth_binds:
+            if os.path.exists(path) and path not in bound_srcs:
+                binds.append((path, path))
+                bound_srcs.add(path)
 
     # 6. Custom binds specified by the user
     # Format: host_path:guest_path or host_path

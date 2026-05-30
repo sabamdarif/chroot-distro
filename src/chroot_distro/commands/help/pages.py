@@ -354,7 +354,7 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
                 + (
                     " Takes priority over Isolated Mode. Inherited by --shared-tmp. Already included in default mode."
                     if IS_TERMUX
-                    else " On Linux, included by default unless --isolated."
+                    else " On Linux, included by default unless --isolated; forwards DISPLAY, XAUTHORITY, and XDG_RUNTIME_DIR and bind-mounts the authority file when needed."
                 ),
             ),
             (
@@ -531,7 +531,7 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
                 + (
                     " Takes priority over Isolated Mode. Inherited by --shared-tmp. Already included in default mode."
                     if IS_TERMUX
-                    else " On Linux, included by default unless --isolated."
+                    else " On Linux, included by default unless --isolated; forwards DISPLAY, XAUTHORITY, and XDG_RUNTIME_DIR and bind-mounts the authority file when needed."
                 ),
             ),
             (

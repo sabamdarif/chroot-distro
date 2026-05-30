@@ -416,7 +416,7 @@ chroot-distro login ubuntu --get-chroot-cmd
 | `--shared-home` | Bind the invoking user's host home into the guest home (or `/root` for root). On Termux, binds `TERMUX_HOME`. |
 | `--termux-home` | Alias for `--shared-home` (proot-distro compatibility). |
 | `--shared-tmp` | Bind host tmp (`/tmp` on Linux, `$PREFIX/tmp` on Termux) to `/tmp` in the guest. On Linux, included by default unless `--isolated`. |
-| `--shared-x11` | Bind the host X11 socket directory to `/tmp/.X11-unix` in the guest. On Linux, included by default unless `--isolated`. |
+| `--shared-x11` | Bind the host X11 socket directory to `/tmp/.X11-unix` in the guest. On Linux, also forwards `DISPLAY`, `XAUTHORITY`, and `XDG_RUNTIME_DIR` from the invoking user's session and bind-mounts the authority file when needed. Included by default unless `--isolated`. On Termux, opt-in only (termux-x11 often works with `--shared-tmp` alone). |
 | `-b`, `--bind SRC[:DST]` | Bind-mount a custom host path (repeatable). `DST` must be an absolute guest path. |
 | `--hostname STRING` | Hostname inside the container (default: `localhost`). |
 | `-w`, `--work-dir PATH` | Initial working directory (default: user's home). |
@@ -426,9 +426,15 @@ chroot-distro login ubuntu --get-chroot-cmd
 #### Host bindings (Linux, default mode)
 
 Without `--isolated` or `--minimal`, host `/tmp` and `/tmp/.X11-unix`
-(when present) are bind-mounted into the guest. Use `--isolated` to
-skip those defaults, or `--minimal` for only core pseudo-filesystems.
-Home is never bind-mounted unless you pass `--shared-home`.
+(when present) are bind-mounted into the guest. When X11 sharing is
+active, `DISPLAY`, `XAUTHORITY`, and `XDG_RUNTIME_DIR` are forwarded from
+the invoking user's desktop session; the X authority file is bind-mounted
+when it lives outside `/run` (which is already shared). If the guest
+user's UID does not match the host file owner, GUI apps may still fail —
+use `--shared-home`, `xhost +SI:localuser:GUEST`, or a UID-matched user.
+Use `--isolated` to skip those defaults, or `--minimal` for only core
+pseudo-filesystems. Home is never bind-mounted unless you pass
+`--shared-home`.
 
 #### Host bindings (Termux, default mode)
 
@@ -472,6 +478,9 @@ entries win):
 4. Your `--env VAR=VALUE` entries.
 5. `HOME`, `USER`, `TERM` (default `xterm-256color`), `COLORTERM`
    (when set on the host).
+6. On Linux (unless `--isolated` or `--minimal`): `DISPLAY`,
+   `XAUTHORITY`, and `XDG_RUNTIME_DIR` when X11 sharing is active
+   (default mode or `--shared-x11`). Your `--env` entries override these.
 
 On Termux (unless isolated or minimal), `$PREFIX/bin` is appended to
 `PATH`. A snippet at `/etc/profile.d/termux-profile.sh` re-applies
