@@ -355,7 +355,7 @@ def _command_login_inner(container_name: str, args) -> None:
         # Pre-clean stale mounts if any
         with contextlib.suppress(Exception):
             mount_manager.unmount_all(rootfs)
-        # Perform mounting
+        # Phase 1: bind mounts
         for src, dst in resolved_binds:
             try:
                 mount_manager.safe_mount(src, dst)
@@ -365,6 +365,24 @@ def _command_login_inner(container_name: str, args) -> None:
                 session.decrement(container_name)
                 crit_error(f"Failed to mount bindings: {e}")
                 sys.exit(1)
+
+        # Phase 2: special filesystem mounts
+        try:
+            specials = bindings.get_special_mounts(
+                rootfs,
+                enable_usb=not minimal,
+                enable_binfmt=not minimal,
+                enable_docker_cgroup=not minimal,
+                enable_shm=not minimal,
+            )
+            for sm in specials:
+                mount_manager.apply_special_mount(rootfs, sm)
+        except Exception as e:
+            # Clean up and rollback
+            mount_manager.unmount_all(rootfs)
+            session.decrement(container_name)
+            crit_error(f"Failed to apply special mounts: {e}")
+            sys.exit(1)
 
 
 

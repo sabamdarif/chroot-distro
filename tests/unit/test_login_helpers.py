@@ -139,3 +139,38 @@ def test_build_chroot_args_termux_chroot_resolution():
          patch("os.path.isfile", side_effect=lambda p: p == "/fake/termux/usr/bin/chroot"):
         args = build_chroot_args(rootfs="/fake/rootfs")
         assert args[0] == "/fake/termux/usr/bin/chroot"
+
+
+def test_special_mounts_default():
+    from chroot_distro.commands.login.bindings import get_special_mounts
+    
+    with patch("os.path.exists", return_value=False), \
+         patch("chroot_distro.commands.login.bindings.IS_TERMUX", False):
+        specials = get_special_mounts("/fake/rootfs")
+        
+        # In non-Termux/Linux by default, it should at least return devpts
+        assert len(specials) >= 1
+        devpts_mount = [s for s in specials if s.fstype == "devpts"]
+        assert len(devpts_mount) == 1
+        assert devpts_mount[0].target == "/dev/pts"
+        assert devpts_mount[0].optional is False
+
+
+def test_special_mounts_termux_all():
+    from chroot_distro.commands.login.bindings import get_special_mounts
+    
+    with patch("os.path.exists", return_value=False), \
+         patch("chroot_distro.commands.login.bindings.IS_TERMUX", True), \
+         patch("chroot_distro.commands.login.bindings._fs_supported", return_value=True), \
+         patch("os.path.isdir", return_value=False), \
+         patch("os.listdir", return_value=["usb1"]):
+        specials = get_special_mounts("/fake/rootfs")
+        
+        # On Termux with support and USB OTG active, it should mount all specials
+        fstypes = [s.fstype for s in specials]
+        assert "devpts" in fstypes
+        assert "usbfs" in fstypes
+        assert "binfmt_misc" in fstypes
+        assert "cgroup" in fstypes
+        assert "tmpfs" in fstypes
+

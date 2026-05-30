@@ -148,3 +148,69 @@ def ensure_no_mounts(rootfs: str) -> None:
             f"Safety check failed: Active mount points remain under {rootfs}: {remaining}. "
             "Refusing to delete or modify files in this directory to prevent host filesystem data loss."
         )
+
+
+def _fs_supported(fstype: str) -> bool:
+    """Return True if the kernel reports support for the given filesystem type."""
+    try:
+        with open("/proc/filesystems") as f:
+            return fstype in f.read()
+    except OSError:
+        return False
+
+
+def apply_special_mount(rootfs: str, sm) -> bool:
+    """Execute a single SpecialMount inside rootfs.
+
+    Returns True on success, False on failure (when optional=True).
+    Raises RuntimeError on failure when optional=False.
+    """
+    # Kernel check
+    if sm.check and not _fs_supported(sm.check):
+        warn(f"Skipping {sm.fstype} mount: '{sm.check}' not in /proc/filesystems")
+        return False
+
+    target = os.path.join(rootfs, sm.target.lstrip("/"))
+
+    # Create mount point inside rootfs
+    if sm.mkdir:
+        os.makedirs(target, exist_ok=True)
+    elif not os.path.exists(target):
+        warn(f"Mount target {target} does not exist and mkdir=False, skipping")
+        return False
+
+    # Check if already mounted
+    if is_mounted(target):
+        return True
+
+    # Build mount command
+    cmd = ["mount", "-t", sm.fstype]
+    if sm.options:
+        cmd += ["-o", sm.options]
+    cmd += [sm.source, target]
+
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except subprocess.TimeoutExpired:
+        msg = f"mount timeout for {sm.fstype} at {target}"
+        if sm.optional:
+            warn(msg)
+            return False
+        raise RuntimeError(msg)
+
+    if result.returncode != 0:
+        msg = f"mount -t {sm.fstype} failed: {result.stderr.strip()}"
+        if sm.optional:
+            warn(msg)
+            return False
+        raise RuntimeError(msg)
+
+    from chroot_distro.message import log_info
+    log_info(f"Mounted {sm.fstype} at {sm.target}")
+    return True
+

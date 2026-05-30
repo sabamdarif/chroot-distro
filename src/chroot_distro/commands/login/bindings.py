@@ -1,6 +1,191 @@
+import logging
 import os
+from dataclasses import dataclass
 
 from chroot_distro.constants import IS_TERMUX, TERMUX_APP_PACKAGE, TERMUX_PREFIX
+
+log = logging.getLogger(__name__)
+
+
+@dataclass
+class SpecialMount:
+    """
+    A non-bind-mount: mount -t <fstype> [-o <options>] <source> <target>.
+    Used for usbfs, binfmt_misc, cgroup, devpts, tmpfs inside the chroot.
+    """
+    fstype: str           # e.g. "usbfs", "binfmt_misc", "cgroup", "tmpfs"
+    source: str           # first arg, often "none" or same as fstype
+    target: str           # absolute guest path (NOT yet prefixed with rootfs)
+    options: str = ""     # -o value; empty string = no -o flag
+    mkdir: bool = True    # create target dir inside rootfs if missing
+    check: str = ""       # if set: verify this string is in /proc/filesystems first
+    optional: bool = True # if True, log warning on failure instead of raising
+
+
+def _fs_supported(fstype: str) -> bool:
+    """Return True if the kernel reports support for the given filesystem type."""
+    try:
+        with open("/proc/filesystems") as f:
+            return fstype in f.read()
+    except OSError:
+        return False
+
+
+def _usb_specials() -> list[SpecialMount]:
+    """On regular Linux: /dev/bus/usb already exists → comes in via /dev bind → nothing to do.
+
+    On Android: mount usbfs at /dev/bus/usb if kernel + hardware support it.
+    """
+    # Regular Linux: /dev/bus/usb is a real directory created by udev
+    if os.path.isdir("/dev/bus/usb"):
+        return []  # already covered by existing /dev bind
+
+    if not IS_TERMUX:
+        return []
+
+    # Android path: check kernel support
+    if not _fs_supported("usbfs"):
+        log.debug("USB: kernel does not support usbfs, skipping")
+        return []
+
+    # Check that at least one USB host controller is active (OTG host mode)
+    # Without a host controller there are no devices to enumerate anyway
+    usb_sys = "/sys/bus/usb/devices"
+    try:
+        has_controller = any(
+            e.startswith("usb") for e in os.listdir(usb_sys)
+        )
+    except OSError:
+        has_controller = False
+
+    if not has_controller:
+        log.debug("USB: no active USB host controller found in %s", usb_sys)
+        return []
+
+    # gid=5 is the "tty" group on Android; devmode=0664 gives group rw
+    return [SpecialMount(
+        fstype="usbfs",
+        source="usbfs",
+        target="/dev/bus/usb",
+        options="devmode=0664,devgid=5",
+        mkdir=True,
+        check="usbfs",
+        optional=True,
+    )]
+
+
+def _binfmt_misc_special() -> SpecialMount | None:
+    """Mount binfmt_misc inside the chroot if the host hasn't already done it.
+
+    On regular Linux with systemd: already mounted → comes in via /proc bind → return None.
+    On Android: the kernel supports it but nothing mounts it → mount it ourselves.
+    """
+    # Already mounted? The 'register' file only appears when binfmt_misc is mounted.
+    if os.path.exists("/proc/sys/fs/binfmt_misc/register"):
+        return None  # host already has it; will appear in chroot via /proc bind
+
+    if not _fs_supported("binfmt_misc"):
+        log.debug("binfmt_misc: not in /proc/filesystems, skipping")
+        return None
+
+    return SpecialMount(
+        fstype="binfmt_misc",
+        source="binfmt_misc",
+        target="/proc/sys/fs/binfmt_misc",
+        options="",
+        mkdir=False,   # /proc is already bind-mounted; the dir exists inside
+        check="binfmt_misc",
+        optional=True,
+    )
+
+
+def _docker_cgroup_specials() -> list[SpecialMount]:
+    """Mount minimal cgroup controllers needed by Docker on Android.
+
+    On regular Linux, these already exist under /sys/fs/cgroup/.
+    """
+    specials = []
+
+    # Legacy cgroup devices controller
+    # Required by Docker daemon to set up device access policies for containers
+    if not os.path.isdir("/sys/fs/cgroup/devices"):
+        if _fs_supported("cgroup"):    # NOTE: "cgroup" not "cgroup2"
+            specials.append(SpecialMount(
+                fstype="cgroup",
+                source="cgroup",
+                target="/sys/fs/cgroup/devices",
+                options="devices",
+                mkdir=True,
+                check="cgroup",
+                optional=True,
+            ))
+
+    # cpuset controller (required by many Docker networking setups)
+    if not os.path.isdir("/sys/fs/cgroup/cpuset"):
+        if _fs_supported("cgroup"):
+            specials.append(SpecialMount(
+                fstype="cgroup",
+                source="cgroup",
+                target="/sys/fs/cgroup/cpuset",
+                options="cpuset",
+                mkdir=True,
+                check="cgroup",
+                optional=True,
+            ))
+
+    return specials
+
+
+def get_special_mounts(
+    rootfs: str,
+    *,
+    enable_usb: bool = True,
+    enable_binfmt: bool = True,
+    enable_docker_cgroup: bool = True,   # enabled by default per user request
+    enable_shm: bool = True,
+) -> list[SpecialMount]:
+    """Return list of special filesystem mounts to apply after bind mounts.
+
+    Caller is responsible for actually running them via apply_special_mount().
+    """
+    specials: list[SpecialMount] = []
+
+    # Devpts overmount to isolate chroot login session PTYs
+    specials.append(SpecialMount(
+        fstype="devpts",
+        source="devpts",
+        target="/dev/pts",
+        options="gid=5,mode=620,ptmxmode=0666,newinstance",
+        mkdir=True,
+        check="devpts",
+        optional=False,   # PTYs are required for a functional chroot login
+    ))
+
+    if enable_usb:
+        specials.extend(_usb_specials())
+
+    if enable_binfmt:
+        sm = _binfmt_misc_special()
+        if sm:
+            specials.append(sm)
+
+    if enable_docker_cgroup and IS_TERMUX:
+        specials.extend(_docker_cgroup_specials())
+
+    if enable_shm and not os.path.exists("/dev/shm"):
+        # host already has /dev/shm → comes in via /dev bind
+        # only add a fresh tmpfs when host doesn't have one (some Android kernels)
+        specials.append(SpecialMount(
+            fstype="tmpfs",
+            source="tmpfs",
+            target="/dev/shm",
+            options="size=256M,mode=1777",
+            mkdir=True,
+            optional=True,
+        ))
+
+    return specials
+
 
 
 def android_data_bindings() -> list[tuple[str, str]]:
