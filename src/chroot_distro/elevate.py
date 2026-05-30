@@ -68,9 +68,7 @@ def elevate_or_die(use_sudo: bool = False) -> None:
 
     # Check loop sentinel
     if os.environ.get("_CHROOT_DISTRO_ELEVATING") == "1":
-        raise RootRequiredError(
-            "Privilege elevation loop detected. The tool is still not running as root."
-        )
+        raise RootRequiredError("Privilege elevation loop detected. The tool is still not running as root.")
 
     tool_cmd = _find_escalation_tool(use_sudo=use_sudo)
     if not tool_cmd:
@@ -96,6 +94,4 @@ def elevate_or_die(use_sudo: bool = False) -> None:
     try:
         os.execvp(full_argv[0], full_argv)
     except OSError as e:
-        raise RootRequiredError(
-            f"Failed to execute privilege elevation tool '{tool_name}': {e}"
-        ) from e
+        raise RootRequiredError(f"Failed to execute privilege elevation tool '{tool_name}': {e}") from e

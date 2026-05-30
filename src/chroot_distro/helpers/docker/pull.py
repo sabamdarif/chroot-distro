@@ -30,21 +30,24 @@ from chroot_distro.helpers.docker.transport import (
 from chroot_distro.message import log_error, log_info
 from chroot_distro.progress import fmt_size
 
-_MANIFEST_LIST_TYPES = frozenset({
-    DOCKER_MANIFEST_LIST_MEDIA, OCI_INDEX_MEDIA,
-})
+_MANIFEST_LIST_TYPES = frozenset(
+    {
+        DOCKER_MANIFEST_LIST_MEDIA,
+        OCI_INDEX_MEDIA,
+    }
+)
 
-_ACCEPT_HEADER = ", ".join([
-    OCI_INDEX_MEDIA,
-    DOCKER_MANIFEST_LIST_MEDIA,
-    OCI_MANIFEST_MEDIA,
-    DOCKER_MANIFEST_MEDIA,
-])
+_ACCEPT_HEADER = ", ".join(
+    [
+        OCI_INDEX_MEDIA,
+        DOCKER_MANIFEST_LIST_MEDIA,
+        OCI_MANIFEST_MEDIA,
+        DOCKER_MANIFEST_MEDIA,
+    ]
+)
 
 
-def _get_manifest(
-    repo: str, ref: str, token: str, registry: str = ""
-) -> dict[str, typing.Any]:
+def _get_manifest(repo: str, ref: str, token: str, registry: str = "") -> dict[str, typing.Any]:
     base = registry_base_url(registry)
     url = f"{base}/v2/{repo}/manifests/{ref}"
     headers = {**_ua(), "Accept": _ACCEPT_HEADER}
@@ -77,8 +80,7 @@ def _pick_platform(
     # Variant-agnostic fallback.
     for entry in entries:
         plat = entry.get("platform", {})
-        if (plat.get("os", "linux") == "linux"
-                and plat.get("architecture") == arch):
+        if plat.get("os", "linux") == "linux" and plat.get("architecture") == arch:
             return entry
 
     available = []
@@ -119,9 +121,7 @@ def _resolve_single_manifest(image_ref: str, arch: str) -> tuple[dict[str, typin
     return manifest, token, repo, registry
 
 
-def _fetch_config_blob(
-    repo: str, cfg_digest: str, token: str, registry: str = ""
-) -> dict[str, typing.Any]:
+def _fetch_config_blob(repo: str, cfg_digest: str, token: str, registry: str = "") -> dict[str, typing.Any]:
     """Fetch the image config blob; return parsed dict (empty on error)."""
     if not cfg_digest:
         return {}
@@ -154,46 +154,30 @@ def pull_image(image_ref: str, rootfs_dir: str, arch: str) -> dict[str, typing.A
         if all_layers_cached(layers):
             log_info(f"Image '{image_ref}' ({arch}) is cached.")
         else:
-            missing = sum(
-                1 for layer in layers
-                if not os.path.isfile(layer_cache_path(layer["digest"]))
-            )
-            log_info(f"Downloading {missing} missing "
-                     f"layer(s) for '{image_ref}' ({arch})...")
+            missing = sum(1 for layer in layers if not os.path.isfile(layer_cache_path(layer["digest"])))
+            log_info(f"Downloading {missing} missing layer(s) for '{image_ref}' ({arch})...")
             try:
                 log_info(f"Authenticating with registry{auth_note()}...")
                 token = get_auth_token(repo, registry)
             except (urllib.error.URLError, OSError) as net_err:
                 if isinstance(net_err, urllib.error.HTTPError):
                     if net_err.code in (401, 403):
-                        raise RuntimeError(
-                            auth_denied_msg(image_ref, net_err.code)
-                        ) from net_err
+                        raise RuntimeError(auth_denied_msg(image_ref, net_err.code)) from net_err
                     if net_err.code == 404:
                         raise RuntimeError(
-                            f"Image not found: '{image_ref}' does not "
-                            f"exist on the registry."
+                            f"Image not found: '{image_ref}' does not exist on the registry."
                         ) from net_err
-                log_error(f"{missing} of {len(layers)} layer(s) for "
-                          f"'{image_ref}' ({arch}) are not in the local "
-                          f"cache.")
+                log_error(f"{missing} of {len(layers)} layer(s) for '{image_ref}' ({arch}) are not in the local cache.")
                 raise RuntimeError(f"Network error: {net_err}") from net_err
     else:
         try:
-            manifest, token, repo, registry = _resolve_single_manifest(
-                image_ref, arch
-            )
+            manifest, token, repo, registry = _resolve_single_manifest(image_ref, arch)
         except (urllib.error.URLError, OSError) as net_err:
             if isinstance(net_err, urllib.error.HTTPError):
                 if net_err.code in (401, 403):
-                    raise RuntimeError(
-                        auth_denied_msg(image_ref, net_err.code)
-                    ) from net_err
+                    raise RuntimeError(auth_denied_msg(image_ref, net_err.code)) from net_err
                 if net_err.code == 404:
-                    raise RuntimeError(
-                        f"Image not found: '{image_ref}' does not exist "
-                        f"on the registry."
-                    ) from net_err
+                    raise RuntimeError(f"Image not found: '{image_ref}' does not exist on the registry.") from net_err
             log_error(f"No cached manifest found for '{image_ref}' ({arch}).")
             raise RuntimeError(f"Network error: {net_err}") from net_err
         cfg_digest = manifest.get("config", {}).get("digest", "")
@@ -202,9 +186,7 @@ def pull_image(image_ref: str, rootfs_dir: str, arch: str) -> dict[str, typing.A
 
     layers = manifest.get("layers", [])
     if not layers:
-        raise RuntimeError(
-            f"Manifest for '{image_ref}' contains no filesystem layers."
-        )
+        raise RuntimeError(f"Manifest for '{image_ref}' contains no filesystem layers.")
 
     n_layers = len(layers)
     for i, layer in enumerate(layers):
@@ -220,26 +202,21 @@ def pull_image(image_ref: str, rootfs_dir: str, arch: str) -> dict[str, typing.A
         short_id = digest.split(":")[-1][:12]
         cached_path = layer_cache_path(digest)
         if os.path.isfile(cached_path):
-            log_info(f"{short_id}: Layer {i + 1}/{n_layers} already cached, "
-                     f"skipping download.")
+            log_info(f"{short_id}: Layer {i + 1}/{n_layers} already cached, skipping download.")
             layer_path = cached_path
         else:
             size = layer.get("size", 0)
             size_str = f" ({fmt_size(size)})" if size else ""
-            log_info(f"{short_id}: Downloading layer "
-                     f"{i + 1}/{n_layers}{size_str}...")
+            log_info(f"{short_id}: Downloading layer {i + 1}/{n_layers}{size_str}...")
             try:
                 layer_path = download_blob(repo, digest, token or "", registry)
             except urllib.error.HTTPError as dl_err:
                 if dl_err.code in (401, 403):
-                    raise RuntimeError(
-                        auth_denied_msg(image_ref, dl_err.code)
-                    ) from dl_err
+                    raise RuntimeError(auth_denied_msg(image_ref, dl_err.code)) from dl_err
                 raise
             except (ssl.SSLError, ConnectionError, OSError) as dl_err:
                 raise RuntimeError(
-                    f"Network error downloading layer {i + 1}/{n_layers} "
-                    f"({short_id}): {dl_err}"
+                    f"Network error downloading layer {i + 1}/{n_layers} ({short_id}): {dl_err}"
                 ) from dl_err
 
         log_info(f"{short_id}: Applying layer {i + 1}/{n_layers}...")

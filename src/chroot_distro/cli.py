@@ -33,22 +33,22 @@ def command_stub(args) -> None:
 
 
 _COMMAND_HANDLERS = {
-    "install":     command_install,
-    "remove":      command_remove,
-    "rename":      command_rename,
-    "reset":       command_reset,
-    "login":       command_login,
-    "list":        command_list,
-    "backup":      command_backup,
-    "restore":     command_restore,
+    "install": command_install,
+    "remove": command_remove,
+    "rename": command_rename,
+    "reset": command_reset,
+    "login": command_login,
+    "list": command_list,
+    "backup": command_backup,
+    "restore": command_restore,
     "clear-cache": command_clear_cache,
-    "copy":        command_copy,
-    "sync":        command_sync,
-    "run":         command_run,
-    "unmount":     command_unmount,
-    "build":       command_build,
-    "push":        command_push,
-    "help":        command_help,
+    "copy": command_copy,
+    "sync": command_sync,
+    "run": command_run,
+    "unmount": command_unmount,
+    "build": command_build,
+    "push": command_push,
+    "help": command_help,
 }
 
 
@@ -66,11 +66,10 @@ def _ensure_root_user(no_elevate: bool = False, use_sudo: bool = False) -> None:
         return
 
     if no_elevate:
-        raise RootRequiredError(
-            f"{PROGRAM_NAME} requires root privileges. Please run with sudo or as root."
-        )
+        raise RootRequiredError(f"{PROGRAM_NAME} requires root privileges. Please run with sudo or as root.")
 
     from chroot_distro.elevate import elevate_or_die
+
     elevate_or_die(use_sudo=use_sudo)
 
 
@@ -90,11 +89,7 @@ def _reject_unknown_command(raw_args) -> None:
     if not raw_args:
         return
     first = raw_args[0]
-    if (
-        not first.startswith("-")
-        and first not in _COMMAND_HANDLERS
-        and first not in ALIAS_TO_CANONICAL
-    ):
+    if not first.startswith("-") and first not in _COMMAND_HANDLERS and first not in ALIAS_TO_CANONICAL:
         msg()
         crit_error(f"unknown command '{first}'.")
         command_help()
@@ -107,13 +102,13 @@ def _split_separator(canonical, raw_args, args):
     if canonical == "login":
         if "--" in raw_args:
             sep_idx = raw_args.index("--")
-            args.login_cmd = raw_args[sep_idx + 1:]
+            args.login_cmd = raw_args[sep_idx + 1 :]
         else:
             args.login_cmd = []
     elif canonical == "run":
         if "--" in raw_args:
             sep_idx = raw_args.index("--")
-            args.run_args = raw_args[sep_idx + 1:]
+            args.run_args = raw_args[sep_idx + 1 :]
         else:
             args.run_args = []
 
@@ -129,9 +124,7 @@ def main() -> None:
     if len(sys.argv) >= 2:
         ALIAS_TO_CANONICAL.get(sys.argv[1], sys.argv[1])
 
-    if len(sys.argv) < 2 or sys.argv[1] in (
-        "-h", "--help", "help", "hel", "he", "h"
-    ):
+    if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help", "help", "hel", "he", "h"):
         command_help()
         sys.exit(0)
 
@@ -199,14 +192,8 @@ def main() -> None:
         requires_root = True
 
     if requires_root:
-        no_elevate = (
-            getattr(args, "no_elevate", False)
-            or os.environ.get("CHROOT_DISTRO_NO_ELEVATE") == "1"
-        )
-        use_sudo = (
-            getattr(args, "use_sudo", False)
-            or os.environ.get("CHROOT_DISTRO_USE_SUDO") == "1"
-        )
+        no_elevate = getattr(args, "no_elevate", False) or os.environ.get("CHROOT_DISTRO_NO_ELEVATE") == "1"
+        use_sudo = getattr(args, "use_sudo", False) or os.environ.get("CHROOT_DISTRO_USE_SUDO") == "1"
         try:
             _ensure_root_user(no_elevate=no_elevate, use_sudo=use_sudo)
         except RootRequiredError as e:

@@ -19,13 +19,14 @@ class SpecialMount:
     A non-bind-mount: mount -t <fstype> [-o <options>] <source> <target>.
     Used for usbfs, binfmt_misc, cgroup, devpts, tmpfs inside the chroot.
     """
-    fstype: str           # e.g. "usbfs", "binfmt_misc", "cgroup", "tmpfs"
-    source: str           # first arg, often "none" or same as fstype
-    target: str           # absolute guest path (NOT yet prefixed with rootfs)
-    options: str = ""     # -o value; empty string = no -o flag
-    mkdir: bool = True    # create target dir inside rootfs if missing
-    check: str = ""       # if set: verify this string is in /proc/filesystems first
-    optional: bool = True # if True, log warning on failure instead of raising
+
+    fstype: str  # e.g. "usbfs", "binfmt_misc", "cgroup", "tmpfs"
+    source: str  # first arg, often "none" or same as fstype
+    target: str  # absolute guest path (NOT yet prefixed with rootfs)
+    options: str = ""  # -o value; empty string = no -o flag
+    mkdir: bool = True  # create target dir inside rootfs if missing
+    check: str = ""  # if set: verify this string is in /proc/filesystems first
+    optional: bool = True  # if True, log warning on failure instead of raising
 
 
 def _fs_supported(fstype: str) -> bool:
@@ -58,9 +59,7 @@ def _usb_specials() -> list[SpecialMount]:
     # Without a host controller there are no devices to enumerate anyway
     usb_sys = "/sys/bus/usb/devices"
     try:
-        has_controller = any(
-            e.startswith("usb") for e in os.listdir(usb_sys)
-        )
+        has_controller = any(e.startswith("usb") for e in os.listdir(usb_sys))
     except OSError:
         has_controller = False
 
@@ -69,15 +68,17 @@ def _usb_specials() -> list[SpecialMount]:
         return []
 
     # gid=5 is the "tty" group on Android; devmode=0664 gives group rw
-    return [SpecialMount(
-        fstype="usbfs",
-        source="usbfs",
-        target="/dev/bus/usb",
-        options="devmode=0664,devgid=5",
-        mkdir=True,
-        check="usbfs",
-        optional=True,
-    )]
+    return [
+        SpecialMount(
+            fstype="usbfs",
+            source="usbfs",
+            target="/dev/bus/usb",
+            options="devmode=0664,devgid=5",
+            mkdir=True,
+            check="usbfs",
+            optional=True,
+        )
+    ]
 
 
 def _binfmt_misc_special() -> SpecialMount | None:
@@ -99,7 +100,7 @@ def _binfmt_misc_special() -> SpecialMount | None:
         source="binfmt_misc",
         target="/proc/sys/fs/binfmt_misc",
         options="",
-        mkdir=False,   # /proc is already bind-mounted; the dir exists inside
+        mkdir=False,  # /proc is already bind-mounted; the dir exists inside
         check="binfmt_misc",
         optional=True,
     )
@@ -115,38 +116,44 @@ def _docker_cgroup_specials() -> list[SpecialMount]:
     # On Android, the /sys/fs/cgroup directory is in the read-only sysfs.
     # We must mount a writeable tmpfs over /sys/fs/cgroup first, so that we can
     # create the controllers' mountpoint subdirectories.
-    specials.append(SpecialMount(
-        fstype="tmpfs",
-        source="tmpfs",
-        target="/sys/fs/cgroup",
-        options="mode=0755",
-        mkdir=True,
-        optional=True,
-    ))
+    specials.append(
+        SpecialMount(
+            fstype="tmpfs",
+            source="tmpfs",
+            target="/sys/fs/cgroup",
+            options="mode=0755",
+            mkdir=True,
+            optional=True,
+        )
+    )
 
     # Legacy cgroup devices controller
     # Required by Docker daemon to set up device access policies for containers
-    if _fs_supported("cgroup"):    # NOTE: "cgroup" not "cgroup2"
-        specials.append(SpecialMount(
-            fstype="cgroup",
-            source="cgroup",
-            target="/sys/fs/cgroup/devices",
-            options="devices",
-            mkdir=True,
-            check="cgroup",
-            optional=True,
-        ))
+    if _fs_supported("cgroup"):  # NOTE: "cgroup" not "cgroup2"
+        specials.append(
+            SpecialMount(
+                fstype="cgroup",
+                source="cgroup",
+                target="/sys/fs/cgroup/devices",
+                options="devices",
+                mkdir=True,
+                check="cgroup",
+                optional=True,
+            )
+        )
 
         # cpuset controller (required by many Docker networking setups)
-        specials.append(SpecialMount(
-            fstype="cgroup",
-            source="cgroup",
-            target="/sys/fs/cgroup/cpuset",
-            options="cpuset",
-            mkdir=True,
-            check="cgroup",
-            optional=True,
-        ))
+        specials.append(
+            SpecialMount(
+                fstype="cgroup",
+                source="cgroup",
+                target="/sys/fs/cgroup/cpuset",
+                options="cpuset",
+                mkdir=True,
+                check="cgroup",
+                optional=True,
+            )
+        )
 
     return specials
 
@@ -156,7 +163,7 @@ def get_special_mounts(
     *,
     enable_usb: bool = True,
     enable_binfmt: bool = True,
-    enable_docker_cgroup: bool = True,   # enabled by default per user request
+    enable_docker_cgroup: bool = True,  # enabled by default per user request
     enable_shm: bool = True,
 ) -> list[SpecialMount]:
     """Return list of special filesystem mounts to apply after bind mounts.
@@ -166,15 +173,17 @@ def get_special_mounts(
     specials: list[SpecialMount] = []
 
     # Devpts overmount to isolate chroot login session PTYs
-    specials.append(SpecialMount(
-        fstype="devpts",
-        source="devpts",
-        target="/dev/pts",
-        options="gid=5,mode=620,ptmxmode=0666,newinstance",
-        mkdir=True,
-        check="devpts",
-        optional=False,   # PTYs are required for a functional chroot login
-    ))
+    specials.append(
+        SpecialMount(
+            fstype="devpts",
+            source="devpts",
+            target="/dev/pts",
+            options="gid=5,mode=620,ptmxmode=0666,newinstance",
+            mkdir=True,
+            check="devpts",
+            optional=False,  # PTYs are required for a functional chroot login
+        )
+    )
 
     if enable_usb:
         specials.extend(_usb_specials())
@@ -190,17 +199,18 @@ def get_special_mounts(
     if enable_shm and not os.path.exists("/dev/shm"):
         # host already has /dev/shm → comes in via /dev bind
         # only add a fresh tmpfs when host doesn't have one (some Android kernels)
-        specials.append(SpecialMount(
-            fstype="tmpfs",
-            source="tmpfs",
-            target="/dev/shm",
-            options="size=256M,mode=1777",
-            mkdir=True,
-            optional=True,
-        ))
+        specials.append(
+            SpecialMount(
+                fstype="tmpfs",
+                source="tmpfs",
+                target="/dev/shm",
+                options="size=256M,mode=1777",
+                mkdir=True,
+                optional=True,
+            )
+        )
 
     return specials
-
 
 
 def android_data_bindings() -> list[tuple[str, str]]:
@@ -237,7 +247,6 @@ def android_data_bindings() -> list[tuple[str, str]]:
     return binds
 
 
-
 def storage_bindings() -> list[tuple[str, str]]:
     """Return list of (source, target) tuples for Android shared storage."""
     binds: list[tuple[str, str]] = []
@@ -252,12 +261,14 @@ def storage_bindings() -> list[tuple[str, str]]:
     else:
         for p in ("/storage/self/primary", "/storage/emulated/0", "/sdcard"):
             if os.access(p, os.R_OK):
-                binds.extend([
-                    (p, "/mnt/sdcard"),
-                    (p, "/sdcard"),
-                    (p, "/storage/emulated/0"),
-                    (p, "/storage/self/primary"),
-                ])
+                binds.extend(
+                    [
+                        (p, "/mnt/sdcard"),
+                        (p, "/sdcard"),
+                        (p, "/storage/emulated/0"),
+                        (p, "/storage/self/primary"),
+                    ]
+                )
                 break
     return binds
 
@@ -269,10 +280,16 @@ def system_bindings() -> list[tuple[str, str]]:
         return binds
 
     for path in (
-        "/apex", "/odm", "/product", "/system", "/system_ext", "/vendor",
+        "/apex",
+        "/odm",
+        "/product",
+        "/system",
+        "/system_ext",
+        "/vendor",
         "/linkerconfig/ld.config.txt",
         "/linkerconfig/com.android.art/ld.config.txt",
-        "/plat_property_contexts", "/property_contexts",
+        "/plat_property_contexts",
+        "/property_contexts",
     ):
         try:
             real = os.path.realpath(path)

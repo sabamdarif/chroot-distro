@@ -101,10 +101,7 @@ class _FlockBase:
             with contextlib.suppress(OSError):
                 os.set_inheritable(fd.fileno(), True)
 
-
-        lock_op = (
-            (fcntl.LOCK_EX if self._exclusive else fcntl.LOCK_SH) | fcntl.LOCK_NB
-        )
+        lock_op = (fcntl.LOCK_EX if self._exclusive else fcntl.LOCK_SH) | fcntl.LOCK_NB
         try:
             fcntl.flock(fd.fileno(), lock_op)
         except OSError as exc:

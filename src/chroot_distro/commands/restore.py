@@ -35,10 +35,10 @@ from chroot_distro.progress import (
 )
 
 _MAGIC_COMPRESS = (
-    (b'\x1f\x8b',      'gz'),   # gzip
-    (b'BZh',           'bz2'),  # bzip2
-    (b'\xfd7zXZ\x00',  'xz'),   # xz
-    (b'\x5d\x00',      'xz'),   # lzma legacy
+    (b"\x1f\x8b", "gz"),  # gzip
+    (b"BZh", "bz2"),  # bzip2
+    (b"\xfd7zXZ\x00", "xz"),  # xz
+    (b"\x5d\x00", "xz"),  # lzma legacy
 )
 
 _LEGACY_PREFIX = "installed-rootfs"
@@ -49,7 +49,7 @@ def _detect_compression(header: bytes) -> str:
     for magic, mode in _MAGIC_COMPRESS:
         if header.startswith(magic):
             return mode
-    return ''
+    return ""
 
 
 def _clear_existing_rootfs(container_name: str) -> None:
@@ -74,9 +74,7 @@ def _clear_existing_rootfs(container_name: str) -> None:
                 os.unlink(os.path.join(dp, fname))
             count += 1
             if progress_active():
-                sys.stderr.write(
-                    f"\r{pfx}Removing old rootfs... {count} files{C['RST']}"
-                )
+                sys.stderr.write(f"\r{pfx}Removing old rootfs... {count} files{C['RST']}")
                 sys.stderr.flush()
         for dname in dns:
             with contextlib.suppress(OSError):
@@ -189,11 +187,11 @@ def command_restore(args) -> None:
             draw_bytes_bar(done_size, 0, noun="extracted")
 
     def _check_bare_root(member_name: str) -> bool:
-        name = member_name.lstrip('/')
+        name = member_name.lstrip("/")
         if not name:
             return False
-        parts = name.split('/')
-        return len(parts) == 1 and not name.endswith('/')
+        parts = name.split("/")
+        return len(parts) == 1 and not name.endswith("/")
 
     raw_fh = None
     pending_locks: dict[str, ContainerLock] = {}
@@ -201,17 +199,18 @@ def command_restore(args) -> None:
     try:
         if archive:
             total_size = os.path.getsize(archive)
-            raw_fh = open(archive, 'rb')  # noqa: SIM115
+            raw_fh = open(archive, "rb")  # noqa: SIM115
             counter = ByteCounter(raw_fh)
             tf_fileobj: typing.Any = counter
-            tf_mode = 'r|*'
+            tf_mode = "r|*"
         else:
             import io
+
             buf = sys.stdin.buffer
-            header = buf.peek(6)[:6] if isinstance(buf, io.BufferedReader) else b''
+            header = buf.peek(6)[:6] if isinstance(buf, io.BufferedReader) else b""
             comp = _detect_compression(header)
             tf_fileobj = sys.stdin.buffer
-            tf_mode = f'r|{comp}'
+            tf_mode = f"r|{comp}"
 
         with tarfile.open(fileobj=tf_fileobj, mode=tf_mode) as tf:  # type: ignore[call-overload]
             for member in tf:
@@ -228,9 +227,7 @@ def command_restore(args) -> None:
                     continue
 
                 if container_name not in pending_locks:
-                    lock = ContainerLock(
-                        container_name, exclusive=True, command="restore"
-                    )
+                    lock = ContainerLock(container_name, exclusive=True, command="restore")
                     if not lock.acquire():
                         hint = read_lock_info(container_lock_path(container_name))
                         clear_bar()
@@ -290,7 +287,7 @@ def command_restore(args) -> None:
                     if parent:
                         os.makedirs(parent, exist_ok=True)
                     try:
-                        with open(dest, 'wb') as out:
+                        with open(dest, "wb") as out:
                             while True:
                                 chunk = fobj.read(1 << 17)
                                 if not chunk:

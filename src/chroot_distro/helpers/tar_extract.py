@@ -23,14 +23,16 @@ def extract_tar_to_rootfs(
     """
     total_size = os.path.getsize(archive_path)
     deferred_links: list = []  # (dest, src) — copied after all regular files
-    deferred_dirs: list = []   # (dest, mtime) — stamped after all writes
+    deferred_dirs: list = []  # (dest, mtime) — stamped after all writes
 
     with open(archive_path, "rb") as raw_fh:
         counter = ByteCounter(raw_fh)
         with tarfile.open(fileobj=counter, mode="r|*") as tf:
             for member in tf:
                 _process_member(
-                    member, tf, rootfs_dir,
+                    member,
+                    tf,
+                    rootfs_dir,
                     strip=strip,
                     handle_whiteouts=handle_whiteouts,
                     deferred_links=deferred_links,
@@ -59,8 +61,8 @@ def extract_tar_to_rootfs(
 
 # ----- per-member dispatch -------------------------------------------------
 
-def _process_member(member, tf, rootfs_dir, *, strip, handle_whiteouts,
-                    deferred_links, deferred_dirs):
+
+def _process_member(member, tf, rootfs_dir, *, strip, handle_whiteouts, deferred_links, deferred_dirs):
     if member.isblk() or member.ischr() or member.isfifo():
         return
 
@@ -75,10 +77,7 @@ def _process_member(member, tf, rootfs_dir, *, strip, handle_whiteouts,
     if not rel_path or rel_path == ".":
         return
 
-    parent = (
-        os.path.join(rootfs_dir, *rel_parts[:-1])
-        if len(rel_parts) > 1 else rootfs_dir
-    )
+    parent = os.path.join(rootfs_dir, *rel_parts[:-1]) if len(rel_parts) > 1 else rootfs_dir
     dest = os.path.join(rootfs_dir, rel_path)
 
     if handle_whiteouts and _apply_whiteout(rel_parts, parent):

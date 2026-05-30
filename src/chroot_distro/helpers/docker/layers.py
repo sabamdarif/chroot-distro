@@ -44,7 +44,10 @@ def _is_retryable(exc: BaseException) -> bool:
 
 
 def download_blob(
-    repo: str, digest: str, token: str, registry: str = "",
+    repo: str,
+    digest: str,
+    token: str,
+    registry: str = "",
 ) -> str:
     """Download a blob to the layer cache; return the local file path.
 
@@ -62,17 +65,13 @@ def download_blob(
         raise RuntimeError(f"Malformed layer digest '{digest}'.")
     algo, expected_hex = digest.split(":", 1)
     if algo.lower() != "sha256":
-        raise RuntimeError(
-            f"Unsupported layer digest algorithm '{algo}' (only sha256 "
-            f"is supported)."
-        )
+        raise RuntimeError(f"Unsupported layer digest algorithm '{algo}' (only sha256 is supported).")
 
     last_exc: BaseException | None = None
     for attempt in range(_MAX_RETRIES + 1):
         if attempt > 0:
             delay = _RETRY_BACKOFF[min(attempt - 1, len(_RETRY_BACKOFF) - 1)]
-            warn(f"Retry {attempt}/{_MAX_RETRIES} in {delay}s "
-                 f"(reason: {last_exc})...")
+            warn(f"Retry {attempt}/{_MAX_RETRIES} in {delay}s (reason: {last_exc})...")
             time.sleep(delay)
 
         base = registry_base_url(registry)
@@ -124,4 +123,3 @@ def download_blob(
 def apply_layer(layer_path: str, rootfs_dir: str) -> None:
     """Apply one OCI/Docker layer (gzipped tar) onto rootfs_dir."""
     extract_tar_to_rootfs(layer_path, rootfs_dir, handle_whiteouts=True)
-

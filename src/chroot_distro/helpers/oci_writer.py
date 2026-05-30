@@ -78,6 +78,7 @@ def build_manifest_and_config(
 # Variant A — store the manifest in dlcache so install can find it
 # ---------------------------------------------------------------------------
 
+
 def store_in_cache(
     image_ref: str,
     arch_name_pd: str,
@@ -108,15 +109,15 @@ def store_in_cache(
 # ---------------------------------------------------------------------------
 
 _TAR_MODES = {
-    ".tar":     "w",
+    ".tar": "w",
     ".oci.tar": "w",
-    ".tar.gz":  "w:gz",
-    ".tgz":     "w:gz",
+    ".tar.gz": "w:gz",
+    ".tgz": "w:gz",
     ".oci.tar.gz": "w:gz",
     ".tar.bz2": "w:bz2",
-    ".tbz2":    "w:bz2",
-    ".tar.xz":  "w:xz",
-    ".txz":     "w:xz",
+    ".tbz2": "w:bz2",
+    ".tar.xz": "w:xz",
+    ".txz": "w:xz",
     ".oci.tar.xz": "w:xz",
 }
 
@@ -179,9 +180,7 @@ def write_oci_archive(
     }
     index_bytes = canonical_json(index)
     oci_layout_bytes = canonical_json({"imageLayoutVersion": "1.0.0"})
-    docker_manifest_bytes = canonical_json(
-        _build_docker_manifest(manifest, config_digest_hex, image_ref)
-    )
+    docker_manifest_bytes = canonical_json(_build_docker_manifest(manifest, config_digest_hex, image_ref))
 
     with atomic_replace(os.path.abspath(out_path)) as tmp, tarfile.open(tmp, mode) as tf:  # type: ignore[call-overload]
         # oci-layout first so our own install probe detects the
@@ -190,18 +189,21 @@ def write_oci_archive(
         _add_bytes(tf, "index.json", index_bytes)
         _add_bytes(tf, "manifest.json", docker_manifest_bytes)
         _add_bytes(
-            tf, f"blobs/sha256/{manifest_digest_hex}", manifest_bytes,
+            tf,
+            f"blobs/sha256/{manifest_digest_hex}",
+            manifest_bytes,
         )
         _add_bytes(
-            tf, f"blobs/sha256/{config_digest_hex}", config_bytes,
+            tf,
+            f"blobs/sha256/{config_digest_hex}",
+            config_bytes,
         )
         for layer in manifest["layers"]:
             hex_digest = layer["digest"].split(":", 1)[1]
             src = layer_cache_path(layer["digest"])
             if not os.path.isfile(src):
                 raise RuntimeError(
-                    f"Layer blob {layer['digest']} is missing from the "
-                    f"cache; cannot package OCI archive."
+                    f"Layer blob {layer['digest']} is missing from the cache; cannot package OCI archive."
                 )
             _add_file(tf, src, f"blobs/sha256/{hex_digest}")
 
@@ -239,6 +241,7 @@ def _build_docker_manifest(
 
 def _add_bytes(tf: tarfile.TarFile, arcname: str, data: bytes) -> None:
     import io
+
     tinfo = tarfile.TarInfo(arcname)
     tinfo.size = len(data)
     tinfo.mode = 0o644

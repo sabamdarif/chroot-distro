@@ -61,4 +61,3 @@ def build_chroot_args(
         args.extend(cmd)
 
     return args
-

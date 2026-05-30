@@ -38,9 +38,7 @@ from chroot_distro.progress import (
 def _resolve_upload_url(base: str, location: str) -> str:
     """Resolve the Location header from POST /v2/<repo>/blobs/uploads/."""
     if not location:
-        raise RuntimeError(
-            "Registry did not return an upload Location header."
-        )
+        raise RuntimeError("Registry did not return an upload Location header.")
     if location.startswith(("http://", "https://")):
         return location
     if location.startswith("/"):
@@ -49,7 +47,10 @@ def _resolve_upload_url(base: str, location: str) -> str:
 
 
 def _blob_exists(
-    repo: str, digest: str, token: str, registry: str = "",
+    repo: str,
+    digest: str,
+    token: str,
+    registry: str = "",
 ) -> bool:
     """Return True iff blob *digest* already exists on the registry."""
     base = registry_base_url(registry)
@@ -81,8 +82,7 @@ class _ProgressReader:
     def read(self, size: int = -1) -> bytes:
         data = self._fh.read(size)
         self.sent += len(data)
-        if self._tty and (self.sent - self._last_shown >= 262144
-                          or len(data) == 0):
+        if self._tty and (self.sent - self._last_shown >= 262144 or len(data) == 0):
             self._last_shown = self.sent
             pfx = f"{C['BLUE']}[{C['GREEN']}*{C['BLUE']}] {C['CYAN']}"
             if self.total:
@@ -94,17 +94,17 @@ class _ProgressReader:
                     f"{fmt_size(self.total)}\033[K{C['RST']}"
                 )
             else:
-                line = (
-                    f"\r{pfx}{self._label}: "
-                    f"{fmt_size(self.sent)} uploaded...\033[K{C['RST']}"
-                )
+                line = f"\r{pfx}{self._label}: {fmt_size(self.sent)} uploaded...\033[K{C['RST']}"
             sys.stderr.write(line)
             sys.stderr.flush()
         return data
 
 
 def _upload_blob_bytes(
-    repo: str, digest: str, data: bytes, token: str,
+    repo: str,
+    digest: str,
+    data: bytes,
+    token: str,
     registry: str = "",
 ) -> None:
     """Upload a small in-memory blob (POST + monolithic PUT)."""
@@ -135,14 +135,16 @@ def _upload_blob_bytes(
     )
     with auth_opener().open(put_req) as resp:
         if not 200 <= resp.status < 300:
-            raise RuntimeError(
-                f"Blob upload failed for {digest}: HTTP {resp.status}"
-            )
+            raise RuntimeError(f"Blob upload failed for {digest}: HTTP {resp.status}")
 
 
 def _upload_blob_file(
-    repo: str, digest: str, file_path: str, token: str,
-    registry: str = "", label: str = "",
+    repo: str,
+    digest: str,
+    file_path: str,
+    token: str,
+    registry: str = "",
+    label: str = "",
 ) -> None:
     """Upload a blob from *file_path* (streamed, POST + monolithic PUT)."""
     base = registry_base_url(registry)
@@ -178,16 +180,18 @@ def _upload_blob_file(
             )
             with auth_opener().open(put_req) as resp:
                 if not 200 <= resp.status < 300:
-                    raise RuntimeError(
-                        f"Blob upload failed for {digest}: HTTP {resp.status}"
-                    )
+                    raise RuntimeError(f"Blob upload failed for {digest}: HTTP {resp.status}")
     finally:
         clear_bar()
 
 
 def _put_manifest(
-    repo: str, reference: str, body: bytes, media_type: str,
-    token: str, registry: str = "",
+    repo: str,
+    reference: str,
+    body: bytes,
+    media_type: str,
+    token: str,
+    registry: str = "",
 ) -> str:
     """PUT a manifest at <reference> (tag or digest). Returns the registry
     digest from the Docker-Content-Digest header, if provided."""
@@ -203,9 +207,7 @@ def _put_manifest(
     req = urllib.request.Request(url, data=body, method="PUT", headers=headers)
     with auth_opener().open(req) as resp:
         if not 200 <= resp.status < 300:
-            raise RuntimeError(
-                f"Manifest upload failed: HTTP {resp.status}"
-            )
+            raise RuntimeError(f"Manifest upload failed: HTTP {resp.status}")
         return str(resp.headers.get("Docker-Content-Digest", ""))
 
 
@@ -235,14 +237,9 @@ def push_image(image_ref: str, arch: str) -> dict[str, typing.Any]:
 
     layers = manifest.get("layers", [])
     if not layers:
-        raise RuntimeError(
-            f"Cached manifest for '{image_ref}' has no filesystem layers."
-        )
+        raise RuntimeError(f"Cached manifest for '{image_ref}' has no filesystem layers.")
 
-    missing = [
-        layer["digest"] for layer in layers
-        if not os.path.isfile(layer_cache_path(layer["digest"]))
-    ]
+    missing = [layer["digest"] for layer in layers if not os.path.isfile(layer_cache_path(layer["digest"]))]
     if missing:
         raise RuntimeError(
             f"Cannot push '{image_ref}': {len(missing)} layer blob(s) are "
@@ -286,33 +283,36 @@ def push_image(image_ref: str, arch: str) -> dict[str, typing.Any]:
 
         try:
             if _blob_exists(repo, digest, token, registry):
-                log_info(f"{short_id}: Layer {i + 1}/{n_layers} already "
-                         f"exists on registry, skipping upload.")
+                log_info(f"{short_id}: Layer {i + 1}/{n_layers} already exists on registry, skipping upload.")
                 continue
 
-            log_info(f"{short_id}: Uploading layer {i + 1}/{n_layers} "
-                     f"({fmt_size(size)})...")
+            log_info(f"{short_id}: Uploading layer {i + 1}/{n_layers} ({fmt_size(size)})...")
             _upload_blob_file(
-                repo, digest, path, token, registry, label=short_id,
+                repo,
+                digest,
+                path,
+                token,
+                registry,
+                label=short_id,
             )
             bytes_uploaded += size
         except urllib.error.HTTPError as exc:
             if exc.code in (401, 403):
-                raise RuntimeError(
-                    push_denied_msg(image_ref, exc.code)
-                ) from exc
+                raise RuntimeError(push_denied_msg(image_ref, exc.code)) from exc
             raise
 
     cfg_short = expected_cfg_digest.split(":")[-1][:12]
     try:
         if _blob_exists(repo, expected_cfg_digest, token, registry):
-            log_info(f"{cfg_short}: Image config already exists on "
-                     f"registry, skipping upload.")
+            log_info(f"{cfg_short}: Image config already exists on registry, skipping upload.")
         else:
-            log_info(f"{cfg_short}: Uploading image config "
-                     f"({fmt_size(len(config_bytes))})...")
+            log_info(f"{cfg_short}: Uploading image config ({fmt_size(len(config_bytes))})...")
             _upload_blob_bytes(
-                repo, expected_cfg_digest, config_bytes, token, registry,
+                repo,
+                expected_cfg_digest,
+                config_bytes,
+                token,
+                registry,
             )
             bytes_uploaded += len(config_bytes)
     except urllib.error.HTTPError as exc:
@@ -322,11 +322,15 @@ def push_image(image_ref: str, arch: str) -> dict[str, typing.Any]:
 
     manifest_media = manifest.get("mediaType") or OCI_MANIFEST_MEDIA
     manifest_bytes = canonical_json(_strip_private_keys(manifest))
-    log_info(f"Uploading manifest for tag '{tag}' "
-             f"({fmt_size(len(manifest_bytes))})...")
+    log_info(f"Uploading manifest for tag '{tag}' ({fmt_size(len(manifest_bytes))})...")
     try:
         registry_digest = _put_manifest(
-            repo, tag, manifest_bytes, manifest_media, token, registry,
+            repo,
+            tag,
+            manifest_bytes,
+            manifest_media,
+            token,
+            registry,
         )
     except urllib.error.HTTPError as exc:
         if exc.code in (401, 403):

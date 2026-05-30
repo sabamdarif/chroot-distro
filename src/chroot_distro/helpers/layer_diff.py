@@ -45,6 +45,7 @@ def _file_crc32(path: str) -> int:
 # Snapshot / diff
 # ---------------------------------------------------------------------------
 
+
 def snapshot(rootfs: str) -> dict[str, tuple[typing.Any, ...]]:
     """Return {rel_path: fingerprint_tuple} for every entry under rootfs.
 
@@ -100,8 +101,7 @@ def snapshot(rootfs: str) -> dict[str, tuple[typing.Any, ...]]:
 
 
 def diff_snapshots(
-    before: dict[str, tuple[typing.Any, ...]],
-    after: dict[str, tuple[typing.Any, ...]]
+    before: dict[str, tuple[typing.Any, ...]], after: dict[str, tuple[typing.Any, ...]]
 ) -> tuple[list[str], list[str], list[str]]:
     """Return (added, modified, deleted), each a sorted list of rel paths."""
     added = []
@@ -136,6 +136,7 @@ def _whiteout_paths(deleted: list[str], surviving_dirs: typing.Iterable[str]) ->
 # ---------------------------------------------------------------------------
 # Streaming layer-tar writer + progress bar
 # ---------------------------------------------------------------------------
+
 
 class _ProgressHashTee:
     """File-like wrapper. write() forwards bytes to `fh`, updates `hasher`,
@@ -181,9 +182,7 @@ def _make_progress_callback(total_size: int) -> tuple[typing.Callable[[int], Non
 
 
 def _pack_stream(
-    out_path: str,
-    total_uncompressed: int,
-    populate: typing.Callable[[tarfile.TarFile], None]
+    out_path: str, total_uncompressed: int, populate: typing.Callable[[tarfile.TarFile], None]
 ) -> tuple[str, int, str]:
     """Run `populate(tf)` against a tarfile.TarFile that streams its
     output through a hash+gzip+hash pipeline into `out_path`.
@@ -242,6 +241,7 @@ def _pack_stream(
 # ---------------------------------------------------------------------------
 # Public layer writers
 # ---------------------------------------------------------------------------
+
 
 def write_layer_tar(
     rootfs: str,
@@ -328,6 +328,7 @@ def write_files_layer(file_map: dict[str, typing.Any], out_path: str) -> tuple[s
 # ---------------------------------------------------------------------------
 # Per-entry tar emitters
 # ---------------------------------------------------------------------------
+
 
 def _add_entry(tf: tarfile.TarFile, rootfs: str, rel: str) -> None:
     """Add the on-disk entry at <rootfs>/<rel> to the tar by arcname=rel."""
@@ -436,12 +437,11 @@ def _add_file_map_entry(tf: tarfile.TarFile, arcname: str, entry: typing.Any) ->
         tinfo = tarfile.TarInfo(arcname)
         tinfo.type = tarfile.DIRTYPE
         tinfo.mode = (
-            entry.get("mode", stat.S_IMODE(st.st_mode))
-            if isinstance(entry, dict) else stat.S_IMODE(st.st_mode)
+            entry.get("mode", stat.S_IMODE(st.st_mode)) if isinstance(entry, dict) else stat.S_IMODE(st.st_mode)
         )
         tinfo.mtime = int(st.st_mtime)
-        tinfo.uid = (entry.get("uid", 0) if isinstance(entry, dict) else 0)
-        tinfo.gid = (entry.get("gid", 0) if isinstance(entry, dict) else 0)
+        tinfo.uid = entry.get("uid", 0) if isinstance(entry, dict) else 0
+        tinfo.gid = entry.get("gid", 0) if isinstance(entry, dict) else 0
         tf.addfile(tinfo)
     elif stat.S_ISLNK(st.st_mode):
         tinfo = tarfile.TarInfo(arcname)
@@ -456,11 +456,10 @@ def _add_file_map_entry(tf: tarfile.TarFile, arcname: str, entry: typing.Any) ->
         tinfo.type = tarfile.REGTYPE
         tinfo.size = st.st_size
         tinfo.mode = (
-            entry.get("mode", stat.S_IMODE(st.st_mode))
-            if isinstance(entry, dict) else stat.S_IMODE(st.st_mode)
+            entry.get("mode", stat.S_IMODE(st.st_mode)) if isinstance(entry, dict) else stat.S_IMODE(st.st_mode)
         )
         tinfo.mtime = int(st.st_mtime)
-        tinfo.uid = (entry.get("uid", 0) if isinstance(entry, dict) else 0)
-        tinfo.gid = (entry.get("gid", 0) if isinstance(entry, dict) else 0)
+        tinfo.uid = entry.get("uid", 0) if isinstance(entry, dict) else 0
+        tinfo.gid = entry.get("gid", 0) if isinstance(entry, dict) else 0
         with open(src_path, "rb") as fobj:
             tf.addfile(tinfo, fobj)

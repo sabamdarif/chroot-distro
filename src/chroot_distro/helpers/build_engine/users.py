@@ -13,7 +13,9 @@ def resolve_id(rootfs_dir: str, name: str, is_group: bool, default: int) -> int:
     if name.isdigit():
         return int(name)
     path = os.path.join(
-        rootfs_dir, "etc", "group" if is_group else "passwd",
+        rootfs_dir,
+        "etc",
+        "group" if is_group else "passwd",
     )
     try:
         with open(path) as fh:
@@ -36,10 +38,7 @@ def resolve_chown(rootfs_dir: str, chown: str) -> tuple[int, int]:
     else:
         user, group = chown, ""
     uid = resolve_id(rootfs_dir, user, is_group=False, default=0)
-    gid = (
-        resolve_id(rootfs_dir, group, is_group=True, default=uid)
-        if group else uid
-    )
+    gid = resolve_id(rootfs_dir, group, is_group=True, default=uid) if group else uid
     return uid, gid
 
 
@@ -53,7 +52,5 @@ def resolve_user_for_chroot(rootfs_dir: str, user_spec: str) -> tuple[int, int]:
     else:
         u, g = spec, ""
     uid = resolve_id(rootfs_dir, u, is_group=False, default=0)
-    gid = (
-        resolve_id(rootfs_dir, g, is_group=True, default=uid) if g else uid
-    )
+    gid = resolve_id(rootfs_dir, g, is_group=True, default=uid) if g else uid
     return uid, gid

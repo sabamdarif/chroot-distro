@@ -15,15 +15,14 @@ from chroot_distro.commands.login.env import (
     read_manifest_env,
     resolve_term,
 )
-from chroot_distro.helpers.android import ensure_data_suid, termux_home_owner_ids
 from chroot_distro.commands.login.passwd import (
     align_user_to_termux_owner,
     find_passwd_by_uid,
     find_user_groups,
     read_group_gid,
     read_passwd_field,
-    resolve_rootfs_path,
     resolve_host_home,
+    resolve_rootfs_path,
     set_passwd_uid_gid,
     sync_passwd_to_home_owner,
     sync_passwd_to_path_owner,
@@ -35,6 +34,7 @@ from chroot_distro.constants import (
     TERMUX_HOME,
     TERMUX_PREFIX,
 )
+from chroot_distro.helpers.android import ensure_data_suid, termux_home_owner_ids
 from chroot_distro.locking import ContainerLock
 from chroot_distro.message import crit_error, warn
 from chroot_distro.names import require_valid_name
@@ -47,9 +47,7 @@ def command_login(args) -> None:
     require_valid_name(container_name)
 
     # We use non-exclusive lock for concurrent login sessions
-    with ContainerLock(
-        container_name, exclusive=False, command="login"
-    ):
+    with ContainerLock(container_name, exclusive=False, command="login"):
         _command_login_inner(container_name, args)
 
 
@@ -64,8 +62,7 @@ def _resolve_login_user(rootfs: str, container_name: str, user_arg: str) -> dict
     if ":" in user_arg:
         user_spec, group_spec = user_arg.split(":", 1)
         if not user_spec or not group_spec:
-            crit_error("'--user' with ':' separator requires "
-                       "both user and group to be non-empty.")
+            crit_error("'--user' with ':' separator requires both user and group to be non-empty.")
             sys.exit(1)
     else:
         user_spec = user_arg
@@ -87,9 +84,7 @@ def _resolve_login_user(rootfs: str, container_name: str, user_arg: str) -> dict
         else:
             try:
                 with open(passwd_path) as fh:
-                    user_found = any(
-                        line.startswith(f"{user_spec}:") for line in fh
-                    )
+                    user_found = any(line.startswith(f"{user_spec}:") for line in fh)
             except OSError:
                 user_found = False
             if not user_found:
@@ -112,9 +107,7 @@ def _resolve_login_user(rootfs: str, container_name: str, user_arg: str) -> dict
         else:
             gid = read_group_gid(rootfs, group_spec)
             if not gid:
-                crit_error(
-                    f"no group '{group_spec}' defined in /etc/group."
-                )
+                crit_error(f"no group '{group_spec}' defined in /etc/group.")
                 sys.exit(1)
     else:
         if user_spec == "root":
@@ -122,17 +115,20 @@ def _resolve_login_user(rootfs: str, container_name: str, user_arg: str) -> dict
         elif user_spec.isdigit():
             uid = user_spec
         else:
-            crit_error(f"container '{container_name}' has no /etc/passwd; "
-                       f"'--user' only accepts a numeric UID in this case.")
+            crit_error(
+                f"container '{container_name}' has no /etc/passwd; '--user' only accepts a numeric UID in this case."
+            )
             sys.exit(1)
         if group_spec is None:
             gid = uid
         elif group_spec.isdigit():
             gid = group_spec
         else:
-            crit_error(f"container '{container_name}' has no /etc/group; "
-                       f"'--user' only accepts a numeric GID in group "
-                       f"specification.")
+            crit_error(
+                f"container '{container_name}' has no /etc/group; "
+                f"'--user' only accepts a numeric GID in group "
+                f"specification."
+            )
             sys.exit(1)
         home = "/"
         shell = "/bin/sh"
@@ -170,8 +166,7 @@ def _build_termux_env(rootfs, extra_env, minimal):
     return env
 
 
-def _build_normal_env(rootfs, container_path, login_user, login_home,
-                      extra_env, minimal, isolated):
+def _build_normal_env(rootfs, container_path, login_user, login_home, extra_env, minimal, isolated):
     env: dict = {}
 
     if minimal:
@@ -198,10 +193,15 @@ def _build_normal_env(rootfs, container_path, login_user, login_home,
 
     if IS_TERMUX and not isolated:
         for var in (
-            "ANDROID_ART_ROOT", "ANDROID_DATA", "ANDROID_I18N_ROOT",
-            "ANDROID_ROOT", "ANDROID_RUNTIME_ROOT",
+            "ANDROID_ART_ROOT",
+            "ANDROID_DATA",
+            "ANDROID_I18N_ROOT",
+            "ANDROID_ROOT",
+            "ANDROID_RUNTIME_ROOT",
             "ANDROID_TZDATA_ROOT",
-            "BOOTCLASSPATH", "DEX2OATBOOTCLASSPATH", "EXTERNAL_STORAGE",
+            "BOOTCLASSPATH",
+            "DEX2OATBOOTCLASSPATH",
+            "EXTERNAL_STORAGE",
         ):
             val = os.environ.get(var, "")
             if val:
@@ -224,9 +224,7 @@ def _build_normal_env(rootfs, container_path, login_user, login_home,
 
 def _check_shell_available(rootfs, container_path, login_shell, container_name):
     try:
-        shell_found = os.path.isfile(
-            resolve_rootfs_path(rootfs, login_shell)
-        )
+        shell_found = os.path.isfile(resolve_rootfs_path(rootfs, login_shell))
     except OSError:
         shell_found = False
     if shell_found:
@@ -237,24 +235,23 @@ def _check_shell_available(rootfs, container_path, login_shell, container_name):
         with open(os.path.join(container_path, "manifest.json")) as fh:
             data = json.load(fh)
         cfg = (data.get("image_config") or {}).get("config", {})
-        has_ep_or_cmd = bool(
-            (cfg.get("Entrypoint") or []) or (cfg.get("Cmd") or [])
-        )
+        has_ep_or_cmd = bool((cfg.get("Entrypoint") or []) or (cfg.get("Cmd") or []))
     except (OSError, ValueError):
         pass
 
     if has_ep_or_cmd:
-        crit_error(f"shell '{login_shell}' is not available in container "
-                   f"'{container_name}'. The image defines an Entrypoint or "
-                   f"Cmd; use '{PROGRAM_NAME} run {container_name}' instead.")
+        crit_error(
+            f"shell '{login_shell}' is not available in container "
+            f"'{container_name}'. The image defines an Entrypoint or "
+            f"Cmd; use '{PROGRAM_NAME} run {container_name}' instead."
+        )
     else:
-        crit_error(f"shell '{login_shell}' is not available in container "
-                   f"'{container_name}' and the image has no Entrypoint or "
-                   f"Cmd defined.")
+        crit_error(
+            f"shell '{login_shell}' is not available in container "
+            f"'{container_name}' and the image has no Entrypoint or "
+            f"Cmd defined."
+        )
     sys.exit(1)
-
-
-
 
 
 def _command_login_inner(container_name: str, args) -> None:
@@ -325,7 +322,9 @@ def _command_login_inner(container_name: str, args) -> None:
                         aligned = True
                     else:
                         aligned = sync_passwd_to_path_owner(
-                            rootfs, login_user, host_home,
+                            rootfs,
+                            login_user,
+                            host_home,
                         )
                         if not aligned:
                             crit_error(
@@ -336,7 +335,9 @@ def _command_login_inner(container_name: str, args) -> None:
                             sys.exit(1)
                 if aligned:
                     user = _resolve_login_user(
-                        rootfs, container_name, login_user,
+                        rootfs,
+                        container_name,
+                        login_user,
                     )
                     login_uid = user["uid"]
                     login_gid = user["gid"]
@@ -346,7 +347,9 @@ def _command_login_inner(container_name: str, args) -> None:
         elif not use_shared_home and not minimal and login_home:
             if sync_passwd_to_home_owner(rootfs, login_user, login_home):
                 user = _resolve_login_user(
-                    rootfs, container_name, login_user,
+                    rootfs,
+                    container_name,
+                    login_user,
                 )
                 login_uid = user["uid"]
                 login_gid = user["gid"]
@@ -374,8 +377,13 @@ def _command_login_inner(container_name: str, args) -> None:
             login_wd = login_home
 
         child_env = _build_normal_env(
-            rootfs, container_path, login_user, login_home,
-            extra_env, minimal, isolated,
+            rootfs,
+            container_path,
+            login_user,
+            login_home,
+            extra_env,
+            minimal,
+            isolated,
         )
 
         if run_inner is not None:
@@ -386,10 +394,7 @@ def _command_login_inner(container_name: str, args) -> None:
 
     if IS_TERMUX and not isolated and not minimal:
         termux_bin = f"{TERMUX_PREFIX}/bin"
-        components = [
-            c for c in child_env.get("PATH", "").split(":")
-            if c and c != termux_bin
-        ]
+        components = [c for c in child_env.get("PATH", "").split(":") if c and c != termux_bin]
         components.append(termux_bin)
         child_env["PATH"] = ":".join(components)
 
@@ -446,8 +451,6 @@ def _command_login_inner(container_name: str, args) -> None:
             session.decrement(container_name)
             crit_error(f"Failed to apply special mounts: {e}")
             sys.exit(1)
-
-
 
     chroot_args = build_chroot_args(
         rootfs=rootfs,

@@ -16,11 +16,30 @@ from chroot_distro.message import log_info
 from chroot_distro.progress import clear_bar, fmt_size, progress_active
 
 # Top-level directory names that signal a rootfs filesystem root.
-_ROOTFS_DIRS = frozenset({
-    "bin", "dev", "etc", "home", "lib", "lib32", "lib64", "libx32",
-    "media", "mnt", "opt", "proc", "root", "run", "sbin", "srv",
-    "sys", "tmp", "usr", "var",
-})
+_ROOTFS_DIRS = frozenset(
+    {
+        "bin",
+        "dev",
+        "etc",
+        "home",
+        "lib",
+        "lib32",
+        "lib64",
+        "libx32",
+        "media",
+        "mnt",
+        "opt",
+        "proc",
+        "root",
+        "run",
+        "sbin",
+        "srv",
+        "sys",
+        "tmp",
+        "usr",
+        "var",
+    }
+)
 
 
 # Reverse of ARCH_TO_DOCKER: Docker architecture name → chroot-distro arch.
@@ -81,29 +100,19 @@ def _oci_find_manifest_entry(tf, member_map, index_manifests, dist_arch):
             p = entry["platform"]
             if p.get("architecture") == docker_arch and p.get("os") == "linux":
                 return entry
-        raise RuntimeError(
-            f"No manifest found for architecture '{dist_arch}' "
-            f"in OCI index (tried {docker_arch})."
-        )
+        raise RuntimeError(f"No manifest found for architecture '{dist_arch}' in OCI index (tried {docker_arch}).")
 
     # Slow path: read each manifest → config to detect architecture.
     for entry in index_manifests:
-        manifest = _oci_read_json(
-            tf, member_map, _oci_blob_path(entry["digest"])
-        )
+        manifest = _oci_read_json(tf, member_map, _oci_blob_path(entry["digest"]))
         config_digest = manifest.get("config", {}).get("digest", "")
         if not config_digest:
             continue
-        config = _oci_read_json(
-            tf, member_map, _oci_blob_path(config_digest)
-        )
+        config = _oci_read_json(tf, member_map, _oci_blob_path(config_digest))
         if config.get("architecture") == docker_arch:
             return entry
 
-    raise RuntimeError(
-        f"No manifest found for architecture '{dist_arch}' "
-        f"in OCI image (tried {docker_arch})."
-    )
+    raise RuntimeError(f"No manifest found for architecture '{dist_arch}' in OCI image (tried {docker_arch}).")
 
 
 def _oci_cache_layer(tf, member_map, digest):
@@ -114,9 +123,7 @@ def _oci_cache_layer(tf, member_map, digest):
         raise RuntimeError(f"OCI archive is missing layer blob: {blob_path}")
     fobj = tf.extractfile(member)
     if fobj is None:
-        raise RuntimeError(
-            f"OCI layer blob is not a regular file: {blob_path}"
-        )
+        raise RuntimeError(f"OCI layer blob is not a regular file: {blob_path}")
     cache_path = layer_cache_path(digest)
     try:
         with atomic_replace(cache_path) as tmp, open(tmp, "wb") as out:
@@ -132,13 +139,9 @@ def _extract_oci(tf, member_map, rootfs_dir, dist_arch):
     if not index_manifests:
         raise RuntimeError("OCI index.json contains no manifests.")
 
-    manifest_entry = _oci_find_manifest_entry(
-        tf, member_map, index_manifests, dist_arch
-    )
+    manifest_entry = _oci_find_manifest_entry(tf, member_map, index_manifests, dist_arch)
 
-    manifest = _oci_read_json(
-        tf, member_map, _oci_blob_path(manifest_entry["digest"])
-    )
+    manifest = _oci_read_json(tf, member_map, _oci_blob_path(manifest_entry["digest"]))
 
     config_digest = manifest.get("config", {}).get("digest", "")
     if not config_digest:
@@ -161,11 +164,9 @@ def _extract_oci(tf, member_map, rootfs_dir, dist_arch):
         cache_path = layer_cache_path(digest)
 
         if os.path.isfile(cache_path):
-            log_info(f"{short_id}: Layer {i + 1}/{n_layers} already cached, "
-                     f"skipping.")
+            log_info(f"{short_id}: Layer {i + 1}/{n_layers} already cached, skipping.")
         else:
-            log_info(f"{short_id}: Caching layer "
-                     f"{i + 1}/{n_layers}{size_str}...")
+            log_info(f"{short_id}: Caching layer {i + 1}/{n_layers}{size_str}...")
             _oci_cache_layer(tf, member_map, digest)
 
         log_info(f"{short_id}: Applying layer {i + 1}/{n_layers}...")
@@ -173,9 +174,7 @@ def _extract_oci(tf, member_map, rootfs_dir, dist_arch):
 
     annotations = manifest_entry.get("annotations", {})
     image_ref = (
-        annotations.get("io.containerd.image.name")
-        or annotations.get("org.opencontainers.image.ref.name")
-        or ""
+        annotations.get("io.containerd.image.name") or annotations.get("org.opencontainers.image.ref.name") or ""
     )
 
     return {
@@ -186,9 +185,7 @@ def _extract_oci(tf, member_map, rootfs_dir, dist_arch):
     }
 
 
-def install_from_local_file(
-    archive_path: str, rootfs_dir: str, dist_arch: str
-):
+def install_from_local_file(archive_path: str, rootfs_dir: str, dist_arch: str):
     """Open *archive_path*, detect its format, and extract into *rootfs_dir*."""
     probe_names: list = []
     is_oci = False

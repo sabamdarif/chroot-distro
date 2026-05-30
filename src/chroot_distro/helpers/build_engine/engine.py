@@ -47,28 +47,24 @@ class BuildEngine:
         verbose: bool,
         quiet: bool,
         no_cache: bool,
-        emulator: str | None
+        emulator: str | None,
     ):
         self.build_dir = os.path.abspath(build_dir)
         self.tmp_root = tmp_root
         self.target_arch_pd = target_arch_pd
-        self.target_arch_docker = ARCH_TO_DOCKER.get(
-            target_arch_pd, (target_arch_pd, "")
-        )[0]
+        self.target_arch_docker = ARCH_TO_DOCKER.get(target_arch_pd, (target_arch_pd, ""))[0]
         host_arch = get_device_cpu_arch()
-        self.host_arch_docker = ARCH_TO_DOCKER.get(
-            host_arch, (host_arch, "")
-        )[0]
+        self.host_arch_docker = ARCH_TO_DOCKER.get(host_arch, (host_arch, ""))[0]
         self.user_build_args = dict(user_build_args)
         self.target_stage = target_stage
         self.verbose = verbose
         self.quiet = quiet
         self.no_cache = no_cache
         self.emulator = emulator
-        self.stages: dict[str, Stage] = {}        # name -> Stage
+        self.stages: dict[str, Stage] = {}  # name -> Stage
         self.stages_by_idx: list[Stage] = []
         self.current: Stage | None = None
-        self.global_args: dict[str, str] = {}   # ARG declared before first FROM
+        self.global_args: dict[str, str] = {}  # ARG declared before first FROM
         self.declared_global: set[str] = set()
         self.ignore_patterns = load_dockerignore(self.build_dir)
         self._stop_after = False
@@ -158,8 +154,7 @@ class BuildEngine:
             rendered = f"{C['YELLOW']}{parts[0]}{C['RST']}"
         else:
             rendered = ""
-        log_info(f"Step {self._step_no}/{self._step_total}: "
-                 f"{C['RST']}{rendered}")
+        log_info(f"Step {self._step_no}/{self._step_total}: {C['RST']}{rendered}")
 
     def log(self, text: str) -> None:
         """Emit *text* via log_info() unless `--quiet` is in effect."""
@@ -178,10 +173,7 @@ class BuildEngine:
             if name == "ARG":
                 # Global ARG: already captured by _prescan; no-op here.
                 return
-            raise BuildError(
-                f"Instruction '{name}' before any FROM at line "
-                f"{instr['lineno']}."
-            )
+            raise BuildError(f"Instruction '{name}' before any FROM at line {instr['lineno']}.")
         if name == "ONBUILD":
             do_onbuild(self, instr)
             self._record_history(instr, layer_added=False)
@@ -191,12 +183,12 @@ class BuildEngine:
 
         handler = HANDLERS.get(name)
         if handler is None:
-            raise BuildError(
-                f"Unsupported instruction '{name}' at line {instr['lineno']}."
-            )
+            raise BuildError(f"Unsupported instruction '{name}' at line {instr['lineno']}.")
         self._run_with_history(handler, instr)
 
-    def _run_with_history(self, handler: typing.Callable[[typing.Any, dict[str, typing.Any]], None], instr: dict[str, typing.Any]) -> None:
+    def _run_with_history(
+        self, handler: typing.Callable[[typing.Any, dict[str, typing.Any]], None], instr: dict[str, typing.Any]
+    ) -> None:
         """Run handler, then append a history entry for the instruction.
 
         Whether the entry is marked empty_layer depends on whether the
@@ -238,10 +230,7 @@ class BuildEngine:
         value = instr.get("value", "")
         if isinstance(value, str):
             new["value"] = expand_vars(value, env)
-        new["flags"] = {
-            k: expand_vars(v, env) if isinstance(v, str) else v
-            for k, v in instr.get("flags", {}).items()
-        }
+        new["flags"] = {k: expand_vars(v, env) if isinstance(v, str) else v for k, v in instr.get("flags", {}).items()}
         return new
 
     def expansion_scope(self) -> dict[str, str | None]:
@@ -273,11 +262,7 @@ class BuildEngine:
     def _do_from(self, instr: dict[str, typing.Any]) -> None:
         # If --target was set and the current stage is the target, the
         # next FROM marks the end of the build for this invocation.
-        if (
-            self.target_stage
-            and self.current is not None
-            and self.current.name == self.target_stage
-        ):
+        if self.target_stage and self.current is not None and self.current.name == self.target_stage:
             self._stop_after = True
             return
 
@@ -286,9 +271,7 @@ class BuildEngine:
         )
         m = _FROM_RE.match(value)
         if not m:
-            raise BuildError(
-                f"Invalid FROM at line {instr['lineno']}: {value!r}"
-            )
+            raise BuildError(f"Invalid FROM at line {instr['lineno']}: {value!r}")
         base_ref = m.group(1)
         stage_name = m.group(2)
 
@@ -297,7 +280,9 @@ class BuildEngine:
         rootfs_dir = os.path.join(stage_dir, "rootfs")
         os.makedirs(rootfs_dir, exist_ok=True)
         stage = Stage(
-            index=idx, name=stage_name or "", rootfs_dir=rootfs_dir,
+            index=idx,
+            name=stage_name or "",
+            rootfs_dir=rootfs_dir,
             target_arch_pd=self.target_arch_pd,
         )
 
@@ -343,11 +328,10 @@ class BuildEngine:
                 pass
 
         # Fire ONBUILD triggers from the base image's config.
-        base_onbuild = (
-            (stage.image_config.get("config") or {}).get("OnBuild") or []
-        )
+        base_onbuild = (stage.image_config.get("config") or {}).get("OnBuild") or []
         if base_onbuild:
             from chroot_distro.helpers.dockerfile import parse_dockerfile
+
             for trig in base_onbuild:
                 _, trig_instrs = parse_dockerfile(trig + "\n")
                 for ti in trig_instrs:
@@ -358,10 +342,7 @@ class BuildEngine:
                         trig_instr = self._expand_instruction(ti)
                     h = HANDLERS.get(trig_instr["name"])
                     if h is None:
-                        raise BuildError(
-                            f"ONBUILD trigger uses unsupported "
-                            f"instruction '{trig_instr['name']}'."
-                        )
+                        raise BuildError(f"ONBUILD trigger uses unsupported instruction '{trig_instr['name']}'.")
                     self._run_with_history(h, trig_instr)
 
     def _inherit_from_stage(self, new_stage: Stage, parent: Stage) -> None:
@@ -372,16 +353,12 @@ class BuildEngine:
         new stage starts with the inherited entries and subsequent
         instructions append to the same list.
         """
-        new_stage.image_config = json.loads(
-            json.dumps(parent.image_config)
-        )
+        new_stage.image_config = json.loads(json.dumps(parent.image_config))
         for layer in parent.layers:
             cache_path = layer_cache_path(layer["digest"])
             if not os.path.isfile(cache_path):
                 raise BuildError(
-                    f"Layer {layer['digest']} of stage "
-                    f"'{parent.name or parent.index}' is missing from "
-                    f"the cache."
+                    f"Layer {layer['digest']} of stage '{parent.name or parent.index}' is missing from the cache."
                 )
             apply_layer(cache_path, new_stage.rootfs_dir)
         new_stage.layers = list(parent.layers)
@@ -391,27 +368,19 @@ class BuildEngine:
         """Use helpers.docker.pull_image to populate the stage rootfs."""
         log_info(f"Pulling base image '{image_ref}' ({self.target_arch_pd})...")
         try:
-            meta = pull_image(image_ref, stage.rootfs_dir,
-                              self.target_arch_pd)
+            meta = pull_image(image_ref, stage.rootfs_dir, self.target_arch_pd)
         except RuntimeError as exc:
             raise BuildError(f"FROM {image_ref}: {exc}") from exc
 
         stage.image_config = meta.get("image_config") or {"config": {}}
         manifest = meta.get("manifest") or {}
-        config_diff_ids = (
-            (stage.image_config.get("rootfs") or {}).get("diff_ids") or []
-        )
+        config_diff_ids = (stage.image_config.get("rootfs") or {}).get("diff_ids") or []
         stage.layers = []
         for i, layer in enumerate(manifest.get("layers", [])):
             digest = layer.get("digest", "")
             size = layer.get("size", 0)
-            diff_id = (
-                config_diff_ids[i]
-                if i < len(config_diff_ids) else digest
-            )
-            stage.layers.append(
-                {"digest": digest, "size": size, "diff_id": diff_id}
-            )
+            diff_id = config_diff_ids[i] if i < len(config_diff_ids) else digest
+            stage.layers.append({"digest": digest, "size": size, "diff_id": diff_id})
         if stage.layers:
             stage.parent_layer_digest = stage.layers[-1]["digest"]
 
@@ -421,9 +390,7 @@ class BuildEngine:
         if self.target_stage:
             stage = self.stages.get(self.target_stage)
             if stage is None:
-                raise BuildError(
-                    f"--target stage '{self.target_stage}' was not built."
-                )
+                raise BuildError(f"--target stage '{self.target_stage}' was not built.")
             return stage
         assert self.current is not None
         return self.current

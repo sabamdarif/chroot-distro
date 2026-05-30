@@ -33,45 +33,40 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
         ),
         "options": [
             ("-h, --help", "Show this help."),
-            ("-f, --file [PATH]",
-             "Use a Dockerfile at PATH instead of <PATH>/Dockerfile. "
-             "Pass '-' to read the Dockerfile from standard input."),
-            ("-t, --tag [REF]",
-             "Image reference to assign. Repeatable. Defaults to "
-             "'<basename(PATH)>:latest'."),
-            ("--build-arg [K=V]",
-             "Set a build-time ARG. Only ARGs declared in the "
-             "Dockerfile are honoured. Repeatable."),
-            ("-a, --architecture [ARCH]",
-             "Target CPU architecture (default: host architecture). "
-             f"Accepts {PROGRAM_NAME} names (aarch64, arm, i686, "
-             "riscv64, x86_64) or Docker platform strings "
-             "(linux/arm64, linux/amd64, ...)."),
-            ("--target [STAGE]",
-             "Stop after the named stage of a multi-stage build."),
-            ("-o, --output [FILE]",
-             "Write the built image as an OCI tarball to FILE. "
-             "Compression is inferred from the extension "
-             "(.oci.tar, .oci.tar.gz, .oci.tar.xz). Repeatable."),
-            ("--install-as [NAME]",
-             "Install the built image as a container named NAME "
-             "after the build completes."),
-            ("--no-cache",
-             "Disable build-step caching. Each instruction is "
-             "executed fresh."),
-            ("-v, --verbose",
-             "Echo each instruction and stream RUN output to the "
-             "terminal."),
-            ("-q, --quiet",
-             "Suppress non-error output. Mutually exclusive "
-             "with --verbose."),
+            (
+                "-f, --file [PATH]",
+                "Use a Dockerfile at PATH instead of <PATH>/Dockerfile. "
+                "Pass '-' to read the Dockerfile from standard input.",
+            ),
+            ("-t, --tag [REF]", "Image reference to assign. Repeatable. Defaults to '<basename(PATH)>:latest'."),
+            (
+                "--build-arg [K=V]",
+                "Set a build-time ARG. Only ARGs declared in the Dockerfile are honoured. Repeatable.",
+            ),
+            (
+                "-a, --architecture [ARCH]",
+                "Target CPU architecture (default: host architecture). "
+                f"Accepts {PROGRAM_NAME} names (aarch64, arm, i686, "
+                "riscv64, x86_64) or Docker platform strings "
+                "(linux/arm64, linux/amd64, ...).",
+            ),
+            ("--target [STAGE]", "Stop after the named stage of a multi-stage build."),
+            (
+                "-o, --output [FILE]",
+                "Write the built image as an OCI tarball to FILE. "
+                "Compression is inferred from the extension "
+                "(.oci.tar, .oci.tar.gz, .oci.tar.xz). Repeatable.",
+            ),
+            ("--install-as [NAME]", "Install the built image as a container named NAME after the build completes."),
+            ("--no-cache", "Disable build-step caching. Each instruction is executed fresh."),
+            ("-v, --verbose", "Echo each instruction and stream RUN output to the terminal."),
+            ("-q, --quiet", "Suppress non-error output. Mutually exclusive with --verbose."),
         ],
         "examples": [
             f"{PROGRAM_NAME} build -t myapp:1.0 .",
             f"{PROGRAM_NAME} build -t myapp:1.0 --output myapp.oci.tar.gz .",
             f"{PROGRAM_NAME} build -t myapp --install-as myapp .",
-            f"{PROGRAM_NAME} build -f Dockerfile.arm "
-                f"--architecture aarch64 .",
+            f"{PROGRAM_NAME} build -f Dockerfile.arm --architecture aarch64 .",
         ],
         "footer": [
             {
@@ -105,7 +100,6 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
             },
         ],
     },
-
     "push": {
         "usage": "push [OPTIONS] IMAGE",
         "summary": (
@@ -129,19 +123,21 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
             "the small manifest."
             "\n\n"
             "Private repositories require authentication. Set "
-            "CD_DOCKER_AUTH=\"user:password\" (or "
-            "\"user:personal-access-token\") before running push. "
+            'CD_DOCKER_AUTH="user:password" (or '
+            '"user:personal-access-token") before running push. '
             "Self-hosted registries that allow anonymous push do not "
             "need CD_DOCKER_AUTH set."
         ),
         "options": [
             ("-h, --help", "Show this help."),
-            ("-a, --architecture [ARCH]",
-             "Push the manifest built for the given architecture. "
-             f"Accepts {PROGRAM_NAME} names (aarch64, arm, i686, "
-             "riscv64, x86_64) or Docker platform strings "
-             "(linux/arm64, linux/amd64, ...). Default: host "
-             "architecture."),
+            (
+                "-a, --architecture [ARCH]",
+                "Push the manifest built for the given architecture. "
+                f"Accepts {PROGRAM_NAME} names (aarch64, arm, i686, "
+                "riscv64, x86_64) or Docker platform strings "
+                "(linux/arm64, linux/amd64, ...). Default: host "
+                "architecture.",
+            ),
             ("-q, --quiet", "Suppress non-error output."),
         ],
         "examples": [
@@ -168,7 +164,6 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
             },
         ],
     },
-
     "backup": {
         "usage": "backup [OPTIONS] CONTAINER",
         "aliases": ("bak", "bkp"),
@@ -180,40 +175,34 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
         ),
         "options": [
             ("-h, --help", "Show this help."),
-            ("-c, --compress [TYPE]",
-             "Force a specific compression algorithm, overriding the "
-             "file extension. Supported values: gzip, bzip2, xz, none."),
-            ("-o, --output [FILE]",
-             "Write the archive to FILE instead of stdout. When "
-             "--compress is not given, compression is inferred from "
-             "the file extension like tar.gz or txz."),
-            ("-v, --verbose",
-             "Log each file name as it is added to the archive."),
-            ("-q, --quiet",
-             "Suppress non-error output. Mutually exclusive "
-             "with --verbose."),
+            (
+                "-c, --compress [TYPE]",
+                "Force a specific compression algorithm, overriding the "
+                "file extension. Supported values: gzip, bzip2, xz, none.",
+            ),
+            (
+                "-o, --output [FILE]",
+                "Write the archive to FILE instead of stdout. When "
+                "--compress is not given, compression is inferred from "
+                "the file extension like tar.gz or txz.",
+            ),
+            ("-v, --verbose", "Log each file name as it is added to the archive."),
+            ("-q, --quiet", "Suppress non-error output. Mutually exclusive with --verbose."),
         ],
         "examples": [
             f"{PROGRAM_NAME} backup ubuntu --output ~/ubuntu.tar.xz",
         ],
     },
-
     "clear-cache": {
         "usage": "clear-cache",
         "aliases": ("clear", "cl"),
-        "summary": (
-            "Remove all files from downloads cache (e.g. Docker image "
-            "layers)."
-        ),
+        "summary": ("Remove all files from downloads cache (e.g. Docker image layers)."),
         "options": [
             ("-h, --help", "Show this help."),
             ("-v, --verbose", "Log each removed file."),
-            ("-q, --quiet",
-             "Suppress non-error output. Mutually exclusive "
-             "with --verbose."),
+            ("-q, --quiet", "Suppress non-error output. Mutually exclusive with --verbose."),
         ],
     },
-
     "copy": {
         "usage": "copy [OPTIONS] [DIST:]SRC [DIST:]DEST",
         "aliases": ("cp",),
@@ -224,13 +213,10 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
         ),
         "options": [
             ("-h, --help", "Show this help."),
-            ("-m, --move",
-             "Delete source file after a successful copy."),
+            ("-m, --move", "Delete source file after a successful copy."),
             ("-r, --recursive", "Recursive mode for copying directories."),
             ("-v, --verbose", "Log each copied file."),
-            ("-q, --quiet",
-             "Suppress non-error output. Mutually exclusive "
-             "with --verbose."),
+            ("-q, --quiet", "Suppress non-error output. Mutually exclusive with --verbose."),
         ],
         "examples": [
             f"{PROGRAM_NAME} copy ./file.txt ubuntu:/root/file.txt",
@@ -246,7 +232,6 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
             },
         ],
     },
-
     "install": {
         "usage": "install [OPTIONS] (IMAGE:TAG or URL or FILE)",
         "aliases": ("add", "i", "in", "ins"),
@@ -274,32 +259,35 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
             "line option."
             "\n\n"
             "Private images require authentication. Set the environment "
-            "variable CD_DOCKER_AUTH=\"user:password\" before running "
+            'variable CD_DOCKER_AUTH="user:password" before running '
             "the install command. Some registries use a personal access "
             "token instead of password."
         ),
         "options": [
             ("-h, --help", "Show this help."),
-            ("-n, --name [NAME]",
-             "Set a custom name for the container. Must start with "
-             "alphanumeric character and then may contain only latin "
-             "letters, numbers and special symbols dot, minus, underscore. "
-             "Default equals to image name without tag and registry prefix."),
-            ("-a, --architecture [ARCH]",
-             "Override the target CPU architecture. Accepts native "
-             "names (aarch64, arm, i686, riscv64, x86_64) or Docker "
-             "platform strings (linux/arm64, linux/amd64, linux/arm/v7, "
-             "linux/386, linux/riscv64)."),
+            (
+                "-n, --name [NAME]",
+                "Set a custom name for the container. Must start with "
+                "alphanumeric character and then may contain only latin "
+                "letters, numbers and special symbols dot, minus, underscore. "
+                "Default equals to image name without tag and registry prefix.",
+            ),
+            (
+                "-a, --architecture [ARCH]",
+                "Override the target CPU architecture. Accepts native "
+                "names (aarch64, arm, i686, riscv64, x86_64) or Docker "
+                "platform strings (linux/arm64, linux/amd64, linux/arm/v7, "
+                "linux/386, linux/riscv64).",
+            ),
             ("-q, --quiet", "Suppress non-error output."),
         ],
         "examples": [
             f"{PROGRAM_NAME} install ubuntu:24.04",
             f"{PROGRAM_NAME} install -a x86_64 debian",
             f"{PROGRAM_NAME} install -n dist https://example.com/rootfs.tar",
-            f"{PROGRAM_NAME} install -n dist ~/rootfs.tgz"
+            f"{PROGRAM_NAME} install -n dist ~/rootfs.tgz",
         ],
     },
-
     "list": {
         "usage": "list [OPTIONS]",
         "aliases": ("li", "ls"),
@@ -309,7 +297,6 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
             ("-q, --quiet", "Print only container names, one per line."),
         ],
     },
-
     "login": {
         "usage": "login [OPTIONS] CONTAINER [-- COMMAND]",
         "aliases": ("sh",),
@@ -324,68 +311,93 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
         ),
         "options": [
             ("-h, --help", "Show this help."),
-            ("-u, --user [USER]",
-             "User identity to switch to instead of root. Accepted forms: "
-             "'name' (username from /etc/passwd), "
-             "'name:group' (username and group name from /etc/passwd and /etc/group), "
-             "'uid' (numeric UID), "
-             "'uid:gid' (numeric UID and GID)."),
-            *([("--isolated",
-                "Enable Isolated Mode. No host file system bindings created "
-                "unless user manually requested specific directories to be bound.")] if IS_TERMUX else []),
-            *([("--minimal",
-                "Enable Isolated Mode with bare minimum configuration. "
-                "Only /dev, /proc and /sys are bound. Specific features "
-                "may only be enabled through command line options.")] if IS_TERMUX else []),
-            ("--shared-home",
-             "Bind host home directory into the container."
-             + (" Takes priority over Isolated Mode."
-                " Already included in default mode." if IS_TERMUX else "")),
-            ("--shared-tmp",
-             "Bind host tmp directory to /tmp."
-             + (" Takes priority over Isolated Mode."
-                " Already included in default mode." if IS_TERMUX else "")),
-            ("--shared-x11",
-             "Bind host X11 socket directory to /tmp/.X11-unix."
-             + (" Takes priority over Isolated Mode."
-                " Inherited by --shared-tmp."
-                " Already included in default mode." if IS_TERMUX else "")),
-            ("-b, --bind [SRC:DEST]",
-             "Custom filesystem binding. Can be specified multiple times."
-             + (" Takes priority over Isolated Mode." if IS_TERMUX else "")),
+            (
+                "-u, --user [USER]",
+                "User identity to switch to instead of root. Accepted forms: "
+                "'name' (username from /etc/passwd), "
+                "'name:group' (username and group name from /etc/passwd and /etc/group), "
+                "'uid' (numeric UID), "
+                "'uid:gid' (numeric UID and GID).",
+            ),
+            *(
+                [
+                    (
+                        "--isolated",
+                        "Enable Isolated Mode. No host file system bindings created "
+                        "unless user manually requested specific directories to be bound.",
+                    )
+                ]
+                if IS_TERMUX
+                else []
+            ),
+            *(
+                [
+                    (
+                        "--minimal",
+                        "Enable Isolated Mode with bare minimum configuration. "
+                        "Only /dev, /proc and /sys are bound. Specific features "
+                        "may only be enabled through command line options.",
+                    )
+                ]
+                if IS_TERMUX
+                else []
+            ),
+            (
+                "--shared-home",
+                "Bind host home directory into the container."
+                + (" Takes priority over Isolated Mode. Already included in default mode." if IS_TERMUX else ""),
+            ),
+            (
+                "--shared-tmp",
+                "Bind host tmp directory to /tmp."
+                + (" Takes priority over Isolated Mode. Already included in default mode." if IS_TERMUX else ""),
+            ),
+            (
+                "--shared-x11",
+                "Bind host X11 socket directory to /tmp/.X11-unix."
+                + (
+                    " Takes priority over Isolated Mode. Inherited by --shared-tmp. Already included in default mode."
+                    if IS_TERMUX
+                    else ""
+                ),
+            ),
+            (
+                "-b, --bind [SRC:DEST]",
+                "Custom filesystem binding. Can be specified multiple times."
+                + (" Takes priority over Isolated Mode." if IS_TERMUX else ""),
+            ),
             ("--hostname [TEXT]", "Customize the system hostname."),
             ("-w, --work-dir [PATH]", "Set the initial working directory."),
-            ("-e, --env VAR=VALUE",
-             "Set an environment variable. Can be specified multiple "
-             "times."),
-            ("--get-chroot-cmd",
-             "Print the fully assembled chroot command line and exit "
-             "without running it."),
+            ("-e, --env VAR=VALUE", "Set an environment variable. Can be specified multiple times."),
+            ("--get-chroot-cmd", "Print the fully assembled chroot command line and exit without running it."),
         ],
         "footer": [
-            *([{
-                "title": "HOST BINDINGS",
-                "intro": (
-                    "Without --isolated, the following host paths "
-                    "are bound inside the container:"
-                ),
-                "bullets": [
-                    ("/apex", None),
-                    ("/data/dalvik-cache", None),
-                    (f"/data/data/{TERMUX_APP_PACKAGE}", None),
-                    ("/linkerconfig/ld.config.txt", None),
-                    ("/linkerconfig/com.android.art/ld.config.txt", None),
-                    ("/mnt/sdcard", None),
-                    ("/odm", None),
-                    ("/product", None),
-                    ("/sdcard", None),
-                    ("/storage/emulated/0", None),
-                    ("/storage/self/primary", None),
-                    ("/system", None),
-                    ("/system_ext", None),
-                    ("/vendor", None),
-                ],
-            }] if IS_TERMUX else []),
+            *(
+                [
+                    {
+                        "title": "HOST BINDINGS",
+                        "intro": ("Without --isolated, the following host paths are bound inside the container:"),
+                        "bullets": [
+                            ("/apex", None),
+                            ("/data/dalvik-cache", None),
+                            (f"/data/data/{TERMUX_APP_PACKAGE}", None),
+                            ("/linkerconfig/ld.config.txt", None),
+                            ("/linkerconfig/com.android.art/ld.config.txt", None),
+                            ("/mnt/sdcard", None),
+                            ("/odm", None),
+                            ("/product", None),
+                            ("/sdcard", None),
+                            ("/storage/emulated/0", None),
+                            ("/storage/self/primary", None),
+                            ("/system", None),
+                            ("/system_ext", None),
+                            ("/vendor", None),
+                        ],
+                    }
+                ]
+                if IS_TERMUX
+                else []
+            ),
             {
                 "title": "NOTES",
                 "intro": (
@@ -402,9 +414,10 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
                         "disabled if Termux app does not have necessary "
                         "permissions."
                         "\n\n"
-                        if IS_TERMUX else ""
-                    ) +
-                    f"{CANONICAL_PROGRAM_NAME} comes without any guarantee "
+                        if IS_TERMUX
+                        else ""
+                    )
+                    + f"{CANONICAL_PROGRAM_NAME} comes without any guarantee "
                     "that any user-selected distribution image will work "
                     "properly. Any kind of observed bugs could happen "
                     "because of incompatibilities with the host kernel."
@@ -412,30 +425,20 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
             },
         ],
     },
-
     "remove": {
         "usage": "remove [OPTIONS] CONTAINER",
         "aliases": ("rm",),
-        "summary": (
-            "Permanently delete the specified chroot container. "
-            "No confirmation is requested, be careful."
-        ),
+        "summary": ("Permanently delete the specified chroot container. No confirmation is requested, be careful."),
         "options": [
             ("-h, --help", "Show this help."),
             ("-v, --verbose", "Log each deleted file."),
-            ("-q, --quiet",
-             "Suppress non-error output. Mutually exclusive "
-             "with --verbose."),
+            ("-q, --quiet", "Suppress non-error output. Mutually exclusive with --verbose."),
         ],
     },
-
     "unmount": {
         "usage": "unmount CONTAINER",
         "aliases": ("umount",),
-        "summary": (
-            "Safely unmount a container, stopping all active sessions "
-            "and resetting the session counter to 0."
-        ),
+        "summary": ("Safely unmount a container, stopping all active sessions and resetting the session counter to 0."),
         "options": [
             ("-h, --help", "Show this help."),
         ],
@@ -443,7 +446,6 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
             f"{PROGRAM_NAME} unmount ubuntu",
         ],
     },
-
     "rename": {
         "usage": "rename OLDNAME NEWNAME",
         "summary": "Rename the installed chroot container.",
@@ -452,7 +454,6 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
             ("-q, --quiet", "Suppress non-error output."),
         ],
     },
-
     "reset": {
         "usage": "reset CONTAINER",
         "summary": (
@@ -467,7 +468,6 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
             ("-q, --quiet", "Suppress non-error output."),
         ],
     },
-
     "restore": {
         "usage": "restore [OPTIONS] [BACKUP_FILE]",
         "summary": (
@@ -477,9 +477,7 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
         "options": [
             ("-h, --help", "Show this help."),
             ("-v, --verbose", "Log each extracted file."),
-            ("-q, --quiet",
-             "Suppress non-error output. Mutually exclusive "
-             "with --verbose."),
+            ("-q, --quiet", "Suppress non-error output. Mutually exclusive with --verbose."),
         ],
         "footer": [
             {
@@ -493,7 +491,6 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
             },
         ],
     },
-
     "run": {
         "usage": "run [OPTIONS] CONTAINER [-- ARG ...]",
         "summary": (
@@ -508,50 +505,71 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
         ),
         "options": [
             ("-h, --help", "Show this help."),
-            ("-u, --user [USER]",
-             "User identity to switch to instead of root. Accepted forms: "
-             "'name' (username from /etc/passwd), "
-             "'name:group' (username and group name from /etc/passwd and /etc/group), "
-             "'uid' (numeric UID), "
-             "'uid:gid' (numeric UID and GID)."),
-            *([("--isolated",
-                "Enable Isolated Mode. No host file system bindings created "
-                "unless user manually requested specific directories to be bound.")] if IS_TERMUX else []),
-            *([("--minimal",
-                "Enable Isolated Mode with bare minimum configuration. "
-                "Only /dev, /proc and /sys are bound. Specific features "
-                "may only be enabled through command line options.")] if IS_TERMUX else []),
-            ("--shared-home",
-             "Bind host home directory into the container."
-             + (" Takes priority over Isolated Mode."
-                " Already included in default mode." if IS_TERMUX else "")),
-            ("--shared-tmp",
-             "Bind host tmp directory to /tmp."
-             + (" Takes priority over Isolated Mode."
-                " Already included in default mode." if IS_TERMUX else "")),
-            ("--shared-x11",
-             "Bind host X11 socket directory to /tmp/.X11-unix."
-             + (" Takes priority over Isolated Mode."
-                " Inherited by --shared-tmp."
-                " Already included in default mode." if IS_TERMUX else "")),
-            ("-b, --bind [SRC:DEST]",
-             "Custom filesystem binding. Can be specified multiple times."
-             + (" Takes priority over Isolated Mode." if IS_TERMUX else "")),
+            (
+                "-u, --user [USER]",
+                "User identity to switch to instead of root. Accepted forms: "
+                "'name' (username from /etc/passwd), "
+                "'name:group' (username and group name from /etc/passwd and /etc/group), "
+                "'uid' (numeric UID), "
+                "'uid:gid' (numeric UID and GID).",
+            ),
+            *(
+                [
+                    (
+                        "--isolated",
+                        "Enable Isolated Mode. No host file system bindings created "
+                        "unless user manually requested specific directories to be bound.",
+                    )
+                ]
+                if IS_TERMUX
+                else []
+            ),
+            *(
+                [
+                    (
+                        "--minimal",
+                        "Enable Isolated Mode with bare minimum configuration. "
+                        "Only /dev, /proc and /sys are bound. Specific features "
+                        "may only be enabled through command line options.",
+                    )
+                ]
+                if IS_TERMUX
+                else []
+            ),
+            (
+                "--shared-home",
+                "Bind host home directory into the container."
+                + (" Takes priority over Isolated Mode. Already included in default mode." if IS_TERMUX else ""),
+            ),
+            (
+                "--shared-tmp",
+                "Bind host tmp directory to /tmp."
+                + (" Takes priority over Isolated Mode. Already included in default mode." if IS_TERMUX else ""),
+            ),
+            (
+                "--shared-x11",
+                "Bind host X11 socket directory to /tmp/.X11-unix."
+                + (
+                    " Takes priority over Isolated Mode. Inherited by --shared-tmp. Already included in default mode."
+                    if IS_TERMUX
+                    else ""
+                ),
+            ),
+            (
+                "-b, --bind [SRC:DEST]",
+                "Custom filesystem binding. Can be specified multiple times."
+                + (" Takes priority over Isolated Mode." if IS_TERMUX else ""),
+            ),
             ("--hostname [TEXT]", "Customize the system hostname."),
             ("-w, --work-dir [PATH]", "Set the initial working directory."),
-            ("-e, --env VAR=VALUE",
-             "Set an environment variable. Can be specified multiple "
-             "times."),
-            ("--get-chroot-cmd",
-             "Print the fully assembled chroot command line and exit "
-             "without running it."),
+            ("-e, --env VAR=VALUE", "Set an environment variable. Can be specified multiple times."),
+            ("--get-chroot-cmd", "Print the fully assembled chroot command line and exit without running it."),
         ],
         "examples": [
             f"{PROGRAM_NAME} run nextcloud",
             f"{PROGRAM_NAME} run ubuntu --isolated -- /bin/echo hi",
         ],
     },
-
     "sync": {
         "usage": "sync [OPTIONS] [DIST:]SRC [DIST:]DEST",
         "summary": (
@@ -566,21 +584,23 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
         ),
         "options": [
             ("-h, --help", "Show this help."),
-            ("-c, --checksum",
-             "Compare files by size and CRC32 checksum instead of "
-             "size and modification time. Slower but with high precision."),
-            ("-d, --delete",
-             "After syncing, remove destination files and "
-             "directories that have no counterpart in the source. "
-             "Only effective when source is a directory."),
+            (
+                "-c, --checksum",
+                "Compare files by size and CRC32 checksum instead of "
+                "size and modification time. Slower but with high precision.",
+            ),
+            (
+                "-d, --delete",
+                "After syncing, remove destination files and "
+                "directories that have no counterpart in the source. "
+                "Only effective when source is a directory.",
+            ),
             ("-v, --verbose", "Log each synced or deleted entry."),
-            ("-q, --quiet",
-             "Suppress non-error output. Mutually exclusive "
-             "with --verbose."),
+            ("-q, --quiet", "Suppress non-error output. Mutually exclusive with --verbose."),
         ],
         "examples": [
             f"{PROGRAM_NAME} sync ./dotfiles/ ubuntu:/root/",
-            f"{PROGRAM_NAME} sync --delete ./app/ ubuntu:/opt/app/"
+            f"{PROGRAM_NAME} sync --delete ./app/ ubuntu:/opt/app/",
         ],
     },
 }

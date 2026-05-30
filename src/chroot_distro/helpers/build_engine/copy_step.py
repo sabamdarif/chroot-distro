@@ -52,10 +52,7 @@ def _do_copy_or_add(
 
     tokens = list(instr["value"]) if instr["exec_form"] else shlex.split(str(instr["value"]))
     if len(tokens) < 2:
-        raise BuildError(
-            f"{instr['name']} requires at least one source and a "
-            f"destination at line {instr['lineno']}."
-        )
+        raise BuildError(f"{instr['name']} requires at least one source and a destination at line {instr['lineno']}.")
 
     sources = tokens[:-1]
     dest = tokens[-1]
@@ -64,8 +61,7 @@ def _do_copy_or_add(
     for k in flags:
         if k in ("link", "parents"):
             raise BuildError(
-                f"{instr['name']} --{k} is a BuildKit-only flag and is "
-                f"not supported (line {instr['lineno']})."
+                f"{instr['name']} --{k} is a BuildKit-only flag and is not supported (line {instr['lineno']})."
             )
 
     chown = flags.get("chown")
@@ -92,9 +88,7 @@ def _do_copy_or_add(
         dest = os.path.normpath(os.path.join(stage.workdir or "/", dest))
 
     uid, gid = resolve_chown(stage.rootfs_dir, chown) if chown else (0, 0)
-    mode_override = (
-        int(chmod, 8) if chmod and re.match(r"^[0-7]+$", chmod) else None
-    )
+    mode_override = int(chmod, 8) if chmod and re.match(r"^[0-7]+$", chmod) else None
 
     file_map: dict[str, typing.Any] = {}
     for kind, src in resolved:
@@ -102,14 +96,27 @@ def _do_copy_or_add(
             _copy_url(src, dest, file_map, uid, gid, mode_override)
         elif kind == "ctx":
             _copy_from_context(
-                engine, src, dest, is_dir_dest, file_map,
-                uid, gid, mode_override, auto_extract,
+                engine,
+                src,
+                dest,
+                is_dir_dest,
+                file_map,
+                uid,
+                gid,
+                mode_override,
+                auto_extract,
             )
         elif kind == "rootfs":
             assert from_rootfs is not None
             _copy_from_rootfs(
-                from_rootfs, src, dest, is_dir_dest, file_map,
-                uid, gid, mode_override,
+                from_rootfs,
+                src,
+                dest,
+                is_dir_dest,
+                file_map,
+                uid,
+                gid,
+                mode_override,
             )
 
     if not file_map:
@@ -125,9 +132,7 @@ def _do_copy_or_add(
     final_path = layer_cache_path(digest)
     os.makedirs(os.path.dirname(final_path), exist_ok=True)
     os.replace(tmp_layer_path, final_path)
-    stage.layers.append(
-        {"digest": digest, "size": size, "diff_id": diff_id}
-    )
+    stage.layers.append({"digest": digest, "size": size, "diff_id": diff_id})
     stage.parent_layer_digest = digest
 
 
@@ -164,24 +169,25 @@ def _copy_from_context(
     src_rel_raw = src.lstrip("/")
 
     full = os.path.normpath(os.path.join(engine.build_dir, src_rel_raw))
-    if (full != engine.build_dir
-            and not full.startswith(engine.build_dir + os.sep)):
-        raise BuildError(
-            f"COPY source '{src}' escapes the build context."
-        )
+    if full != engine.build_dir and not full.startswith(engine.build_dir + os.sep):
+        raise BuildError(f"COPY source '{src}' escapes the build context.")
     if not os.path.exists(full):
         matches = sorted(simple_glob(engine.build_dir, src_rel_raw))
         matches = [m for m in matches if not is_ignored(m, engine.ignore_patterns)]
         if not matches:
-            raise BuildError(
-                f"COPY/ADD source '{src}' not found in build context."
-            )
+            raise BuildError(f"COPY/ADD source '{src}' not found in build context.")
         for m in matches:
             full_m = os.path.join(engine.build_dir, m)
             _add_to_file_map(
-                full_m, dest, is_dir_dest=True, file_map=file_map,
-                uid=uid, gid=gid, mode_override=mode_override,
-                auto_extract=auto_extract, src_rel=m,
+                full_m,
+                dest,
+                is_dir_dest=True,
+                file_map=file_map,
+                uid=uid,
+                gid=gid,
+                mode_override=mode_override,
+                auto_extract=auto_extract,
+                src_rel=m,
                 ignore_patterns=engine.ignore_patterns,
             )
         return
@@ -189,9 +195,15 @@ def _copy_from_context(
     if is_ignored(rel, engine.ignore_patterns):
         return
     _add_to_file_map(
-        full, dest, is_dir_dest=is_dir_dest, file_map=file_map,
-        uid=uid, gid=gid, mode_override=mode_override,
-        auto_extract=auto_extract, src_rel=rel,
+        full,
+        dest,
+        is_dir_dest=is_dir_dest,
+        file_map=file_map,
+        uid=uid,
+        gid=gid,
+        mode_override=mode_override,
+        auto_extract=auto_extract,
+        src_rel=rel,
         ignore_patterns=engine.ignore_patterns,
     )
 
@@ -209,17 +221,19 @@ def _copy_from_rootfs(
     abs_rootfs = os.path.abspath(from_rootfs)
     full = os.path.normpath(os.path.join(abs_rootfs, src.lstrip("/")))
     if full != abs_rootfs and not full.startswith(abs_rootfs + os.sep):
-        raise BuildError(
-            f"COPY --from source '{src}' escapes the source rootfs."
-        )
+        raise BuildError(f"COPY --from source '{src}' escapes the source rootfs.")
     if not os.path.lexists(full):
-        raise BuildError(
-            f"COPY --from source '{src}' not found in stage."
-        )
+        raise BuildError(f"COPY --from source '{src}' not found in stage.")
     _add_to_file_map(
-        full, dest, is_dir_dest=is_dir_dest, file_map=file_map,
-        uid=uid, gid=gid, mode_override=mode_override,
-        auto_extract=False, src_rel=src,
+        full,
+        dest,
+        is_dir_dest=is_dir_dest,
+        file_map=file_map,
+        uid=uid,
+        gid=gid,
+        mode_override=mode_override,
+        auto_extract=False,
+        src_rel=src,
         ignore_patterns=(),
     )
 
@@ -234,10 +248,8 @@ def _copy_url(
 ) -> None:
     """ADD URL: download the file to dest."""
     if dest.endswith("/"):
-        name = os.path.basename(
-            urllib.parse.urlparse(url).path
-        ) or "index"
-        arcname = (dest.lstrip("/") + name)
+        name = os.path.basename(urllib.parse.urlparse(url).path) or "index"
+        arcname = dest.lstrip("/") + name
     else:
         arcname = dest.lstrip("/")
     opener = urllib.request.build_opener(AuthStrippingRedirectHandler)
@@ -250,7 +262,9 @@ def _copy_url(
         "kind": "content",
         "data": data,
         "mode": mode_override if mode_override is not None else 0o644,
-        "uid": uid, "gid": gid, "mtime": int(time.time()),
+        "uid": uid,
+        "gid": gid,
+        "mtime": int(time.time()),
     }
 
 
@@ -271,7 +285,13 @@ def _add_to_file_map(
         return
     if os.path.isdir(src_full):
         _add_directory_tree(
-            src_full, dest, file_map, uid, gid, mode_override, src_rel,
+            src_full,
+            dest,
+            file_map,
+            uid,
+            gid,
+            mode_override,
+            src_rel,
             ignore_patterns,
         )
         return
@@ -281,8 +301,14 @@ def _add_to_file_map(
             _extract_tar_into_dest(src_full, dest, file_map, uid, gid)
             return
         _add_regular(
-            src_full, dest, is_dir_dest, file_map,
-            uid, gid, mode_override, src_rel,
+            src_full,
+            dest,
+            is_dir_dest,
+            file_map,
+            uid,
+            gid,
+            mode_override,
+            src_rel,
         )
         return
 
@@ -305,8 +331,11 @@ def _add_regular(
     if mode_override is not None:
         mode = mode_override
     file_map[arcname] = {
-        "kind": "file", "src": src_full,
-        "mode": mode, "uid": uid, "gid": gid,
+        "kind": "file",
+        "src": src_full,
+        "mode": mode,
+        "uid": uid,
+        "gid": gid,
         "mtime": int(os.lstat(src_full).st_mtime),
     }
 
@@ -325,8 +354,11 @@ def _add_symlink(
     except OSError:
         return
     file_map[arcname] = {
-        "kind": "symlink", "target": target,
-        "mode": 0o777, "uid": uid, "gid": gid,
+        "kind": "symlink",
+        "target": target,
+        "mode": 0o777,
+        "uid": uid,
+        "gid": gid,
         "mtime": int(os.lstat(src_full).st_mtime),
     }
 
@@ -356,8 +388,11 @@ def _add_directory_tree(
                 except OSError:
                     continue
                 file_map[arc] = {
-                    "kind": "symlink", "target": tgt,
-                    "mode": 0o777, "uid": uid, "gid": gid,
+                    "kind": "symlink",
+                    "target": tgt,
+                    "mode": 0o777,
+                    "uid": uid,
+                    "gid": gid,
                     "mtime": 0,
                 }
                 dirnames.remove(d)
@@ -372,15 +407,14 @@ def _add_directory_tree(
                 file_map[arc] = {
                     "kind": "dir",
                     "mode": mode_override if mode_override is not None else mode,
-                    "uid": uid, "gid": gid, "mtime": 0,
+                    "uid": uid,
+                    "gid": gid,
+                    "mtime": 0,
                 }
         for f in filenames:
             full = os.path.join(dirpath, f)
             src_relpath = os.path.relpath(full, src_full)
-            combined_rel = (
-                (src_rel + "/" + src_relpath)
-                if src_rel and src_rel != "." else src_relpath
-            )
+            combined_rel = (src_rel + "/" + src_relpath) if src_rel and src_rel != "." else src_relpath
             if is_ignored(combined_rel, list(ignore_patterns)):
                 continue
             arc = _make_subpath(dest, rel, f).lstrip("/")
@@ -390,8 +424,11 @@ def _add_directory_tree(
                 except OSError:
                     continue
                 file_map[arc] = {
-                    "kind": "symlink", "target": tgt,
-                    "mode": 0o777, "uid": uid, "gid": gid,
+                    "kind": "symlink",
+                    "target": tgt,
+                    "mode": 0o777,
+                    "uid": uid,
+                    "gid": gid,
                     "mtime": int(os.lstat(full).st_mtime),
                 }
             else:
@@ -402,8 +439,11 @@ def _add_directory_tree(
                 if mode_override is not None:
                     mode = mode_override
                 file_map[arc] = {
-                    "kind": "file", "src": full,
-                    "mode": mode, "uid": uid, "gid": gid,
+                    "kind": "file",
+                    "src": full,
+                    "mode": mode,
+                    "uid": uid,
+                    "gid": gid,
                     "mtime": int(os.lstat(full).st_mtime),
                 }
 
@@ -452,12 +492,17 @@ def _extract_tar_into_dest(
                 file_map[arc] = {
                     "kind": "dir",
                     "mode": stat.S_IMODE(m.mode) or 0o755,
-                    "uid": uid, "gid": gid, "mtime": int(m.mtime),
+                    "uid": uid,
+                    "gid": gid,
+                    "mtime": int(m.mtime),
                 }
             elif m.issym():
                 file_map[arc] = {
-                    "kind": "symlink", "target": m.linkname,
-                    "mode": 0o777, "uid": uid, "gid": gid,
+                    "kind": "symlink",
+                    "target": m.linkname,
+                    "mode": 0o777,
+                    "uid": uid,
+                    "gid": gid,
                     "mtime": int(m.mtime),
                 }
             elif m.isreg():
@@ -466,9 +511,12 @@ def _extract_tar_into_dest(
                     continue
                 data = fobj.read()
                 file_map[arc] = {
-                    "kind": "content", "data": data,
+                    "kind": "content",
+                    "data": data,
                     "mode": stat.S_IMODE(m.mode) or 0o644,
-                    "uid": uid, "gid": gid, "mtime": int(m.mtime),
+                    "uid": uid,
+                    "gid": gid,
+                    "mtime": int(m.mtime),
                 }
 
 
@@ -507,6 +555,4 @@ def _materialise_files(rootfs_dir: str, file_map: dict[str, typing.Any]) -> None
                 with contextlib.suppress(OSError):
                     os.chmod(host, entry.get("mode", 0o644))
         except OSError as exc:
-            raise BuildError(
-                f"Failed to write '{arcname}' into rootfs: {exc}"
-            ) from exc
+            raise BuildError(f"Failed to write '{arcname}' into rootfs: {exc}") from exc

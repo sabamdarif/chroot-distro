@@ -66,9 +66,7 @@ def register_android_ids(rootfs: str) -> None:
 
     try:
         with open(passwd_path, "a") as fh:
-            fh.write(
-                f"aid_{username_result}:x:{uid}:{gid}:Termux:/:/sbin/nologin\n"
-            )
+            fh.write(f"aid_{username_result}:x:{uid}:{gid}:Termux:/:/sbin/nologin\n")
         with open(shadow_path, "a") as fh:
             fh.write(f"aid_{username_result}:*:18446:0:99999:7:::\n")
     except OSError:
@@ -117,15 +115,11 @@ def register_android_ids(rootfs: str) -> None:
             continue
         try:
             with open(group_path, "a") as fh:
-                fh.write(
-                    f"{aid_gname}:x:{g}:root,aid_{username_result}\n"
-                )
+                fh.write(f"{aid_gname}:x:{g}:root,aid_{username_result}\n")
             existing_groups.add(aid_gname)
             if os.path.exists(gshadow_path):
                 with open(gshadow_path, "a") as fh:
-                    fh.write(
-                        f"{aid_gname}:*::root,aid_{username_result}\n"
-                    )
+                    fh.write(f"{aid_gname}:*::root,aid_{username_result}\n")
         except OSError:
             pass
 
@@ -155,4 +149,3 @@ def register_android_ids(rootfs: str) -> None:
                         existing_groups.add(gname)
         except OSError:
             pass
-

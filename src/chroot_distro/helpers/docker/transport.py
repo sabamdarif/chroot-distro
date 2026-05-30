@@ -37,9 +37,7 @@ class AuthStrippingRedirectHandler(urllib.request.HTTPRedirectHandler):
         return new_req
 
 
-_auth_stripping_opener = urllib.request.build_opener(
-    AuthStrippingRedirectHandler
-)
+_auth_stripping_opener = urllib.request.build_opener(AuthStrippingRedirectHandler)
 
 
 def auth_opener():
@@ -82,17 +80,12 @@ def push_denied_msg(image_ref: str, code: int) -> str:
     )
 
 
-_CHALLENGE_PARAM_RE = re.compile(
-    r'(\w+)\s*=\s*(?:"([^"]*)"|([^",\s]+))'
-)
+_CHALLENGE_PARAM_RE = re.compile(r'(\w+)\s*=\s*(?:"([^"]*)"|([^",\s]+))')
 
 
 def _parse_bearer_challenge(header_value: str) -> dict:
     """Return the key=value pairs from a Bearer WWW-Authenticate header."""
-    return {
-        key: (quoted if quoted else bare)
-        for key, quoted, bare in _CHALLENGE_PARAM_RE.findall(header_value)
-    }
+    return {key: (quoted if quoted else bare) for key, quoted, bare in _CHALLENGE_PARAM_RE.findall(header_value)}
 
 
 def env_basic_auth() -> str:
@@ -114,16 +107,15 @@ def env_basic_auth() -> str:
 
 
 def get_auth_token(
-    repo: str, registry: str = "", actions: str = "pull",
+    repo: str,
+    registry: str = "",
+    actions: str = "pull",
 ) -> str:
     """Obtain an OAuth2 token for *repo* with the requested *actions* scope."""
     basic_auth = env_basic_auth()
 
     if not registry:
-        url = (
-            f"{AUTH_URL}?service=registry.docker.io"
-            f"&scope=repository:{repo}:{actions}"
-        )
+        url = f"{AUTH_URL}?service=registry.docker.io&scope=repository:{repo}:{actions}"
         req = urllib.request.Request(url, headers=_ua())
         if basic_auth:
             req.add_header("Authorization", basic_auth)
@@ -133,9 +125,7 @@ def get_auth_token(
         return token if isinstance(token, str) else ""
 
     # Custom registry: probe /v2/ to discover the Bearer realm.
-    probe_req = urllib.request.Request(
-        f"https://{registry}/v2/", headers=_ua()
-    )
+    probe_req = urllib.request.Request(f"https://{registry}/v2/", headers=_ua())
     try:
         with urllib.request.urlopen(probe_req) as resp:
             resp.read()
@@ -156,9 +146,7 @@ def get_auth_token(
             qs_parts.append(f"service={urllib.parse.quote(service, safe='')}")
         qs_parts.append(f"scope=repository:{repo}:{actions}")
         sep = "&" if "?" in realm else "?"
-        token_req = urllib.request.Request(
-            f"{realm}{sep}{'&'.join(qs_parts)}", headers=_ua()
-        )
+        token_req = urllib.request.Request(f"{realm}{sep}{'&'.join(qs_parts)}", headers=_ua())
         if basic_auth:
             token_req.add_header("Authorization", basic_auth)
         with urllib.request.urlopen(token_req) as resp:

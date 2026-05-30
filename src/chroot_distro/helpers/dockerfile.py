@@ -6,11 +6,28 @@ import typing
 # All Dockerfile instructions, per
 # https://docs.docker.com/reference/dockerfile/. MAINTAINER is
 # deprecated but still common in the wild; we accept it.
-_INSTRUCTIONS: frozenset[str] = frozenset({
-    "ADD", "ARG", "CMD", "COPY", "ENTRYPOINT", "ENV", "EXPOSE",
-    "FROM", "HEALTHCHECK", "LABEL", "MAINTAINER", "ONBUILD", "RUN",
-    "SHELL", "STOPSIGNAL", "USER", "VOLUME", "WORKDIR",
-})
+_INSTRUCTIONS: frozenset[str] = frozenset(
+    {
+        "ADD",
+        "ARG",
+        "CMD",
+        "COPY",
+        "ENTRYPOINT",
+        "ENV",
+        "EXPOSE",
+        "FROM",
+        "HEALTHCHECK",
+        "LABEL",
+        "MAINTAINER",
+        "ONBUILD",
+        "RUN",
+        "SHELL",
+        "STOPSIGNAL",
+        "USER",
+        "VOLUME",
+        "WORKDIR",
+    }
+)
 
 # Instructions that may carry a here-doc body (<<TAG ... TAG).
 _HEREDOC_INSTRUCTIONS: frozenset[str] = frozenset({"ADD", "COPY", "RUN"})
@@ -28,6 +45,7 @@ class DockerfileSyntaxError(Exception):
 # ---------------------------------------------------------------------------
 # Top-level entry
 # ---------------------------------------------------------------------------
+
 
 def parse_dockerfile(text: str | bytes) -> tuple[dict[str, str], list[dict[str, typing.Any]]]:
     """Parse Dockerfile content into (directives, instructions).
@@ -146,9 +164,7 @@ def _parse_instructions(raw_lines: list[str], start_idx: int, escape_char: str) 
         while _ends_with_escape(cur, escape_char):
             # Strip the trailing escape character (and any trailing
             # whitespace before it) from this segment.
-            accumulated_parts[-1] = _strip_trailing_escape(
-                accumulated_parts[-1], escape_char
-            )
+            accumulated_parts[-1] = _strip_trailing_escape(accumulated_parts[-1], escape_char)
             i += 1
             # Skip blank lines and comment lines.
             while i < n:
@@ -182,27 +198,20 @@ def _parse_instructions(raw_lines: list[str], start_idx: int, escape_char: str) 
         rest = m.group(2)
 
         if name not in _INSTRUCTIONS:
-            raise DockerfileSyntaxError(
-                f"Unknown instruction '{name}' at line {line_no}."
-            )
+            raise DockerfileSyntaxError(f"Unknown instruction '{name}' at line {line_no}.")
 
         # ONBUILD wraps another instruction. Parse the inner part
         # recursively below.
-        is_onbuild = (name == "ONBUILD")
+        is_onbuild = name == "ONBUILD"
         if is_onbuild:
             # Strip the inner instruction's name and parse the rest as
             # a normal instruction record.
             inner_match = re.match(r"^\s*(\S+)\s*(.*)$", rest)
             if not inner_match:
-                raise DockerfileSyntaxError(
-                    f"ONBUILD without inner instruction at line {line_no}."
-                )
+                raise DockerfileSyntaxError(f"ONBUILD without inner instruction at line {line_no}.")
             inner_name = inner_match.group(1).upper()
             if inner_name not in _INSTRUCTIONS or inner_name == "ONBUILD":
-                raise DockerfileSyntaxError(
-                    f"Invalid ONBUILD inner instruction '{inner_name}' at "
-                    f"line {line_no}."
-                )
+                raise DockerfileSyntaxError(f"Invalid ONBUILD inner instruction '{inner_name}' at line {line_no}.")
             name = inner_name
             rest = inner_match.group(2)
 
@@ -213,14 +222,14 @@ def _parse_instructions(raw_lines: list[str], start_idx: int, escape_char: str) 
         if name in _HEREDOC_INSTRUCTIONS:
             here_tags = _extract_heredoc_tags(value)
             for strip_indent, tag in here_tags:
-                body, i = _collect_heredoc_body(
-                    raw_lines, i + 1, tag, strip_indent
+                body, i = _collect_heredoc_body(raw_lines, i + 1, tag, strip_indent)
+                heredocs.append(
+                    {
+                        "tag": tag,
+                        "strip_indent": strip_indent,
+                        "body": body,
+                    }
                 )
-                heredocs.append({
-                    "tag": tag,
-                    "strip_indent": strip_indent,
-                    "body": body,
-                })
             if not here_tags:
                 i += 1
         else:
@@ -239,15 +248,17 @@ def _parse_instructions(raw_lines: list[str], start_idx: int, escape_char: str) 
         }
 
         if is_onbuild:
-            instructions.append({
-                "name": "ONBUILD",
-                "flags": {},
-                "value": record,        # the wrapped inner instruction
-                "exec_form": False,
-                "heredocs": [],
-                "lineno": line_no,
-                "raw": accumulated,
-            })
+            instructions.append(
+                {
+                    "name": "ONBUILD",
+                    "flags": {},
+                    "value": record,  # the wrapped inner instruction
+                    "exec_form": False,
+                    "heredocs": [],
+                    "lineno": line_no,
+                    "raw": accumulated,
+                }
+            )
         else:
             instructions.append(record)
 
@@ -303,23 +314,20 @@ def _parse_flags(text: str) -> tuple[dict[str, str], str]:
             if after_eq and after_eq[0] in ('"', "'"):
                 # Try shlex over a slice starting at the value char.
                 try:
-                    rest_after = text[m.start() + m.group(0).index("=") + 1:]
+                    rest_after = text[m.start() + m.group(0).index("=") + 1 :]
                     lex = shlex.shlex(rest_after, posix=True)
                     lex.whitespace_split = True
                     lex.commenters = ""
                     val = next(iter(lex))
                     # Skip past the consumed token in the source.
-                    consumed = (
-                        m.start() + m.group(0).index("=") + 1
-                        + _shlex_consumed_len(rest_after, val)
-                    )
+                    consumed = m.start() + m.group(0).index("=") + 1 + _shlex_consumed_len(rest_after, val)
                     flags[key] = val
                     text = text[consumed:]
                     continue
                 except (StopIteration, ValueError):
                     pass
         flags[key] = val
-        text = text[m.end():]
+        text = text[m.end() :]
     return flags, text
 
 
@@ -368,9 +376,7 @@ def _collect_heredoc_body(raw_lines: list[str], start_i: int, tag: str, strip_in
             return "\n".join(body) + ("\n" if body else ""), i + 1
         body.append(line.lstrip("\t") if strip_indent else line)
         i += 1
-    raise DockerfileSyntaxError(
-        f"Unterminated here-doc body for tag '{tag}'."
-    )
+    raise DockerfileSyntaxError(f"Unterminated here-doc body for tag '{tag}'.")
 
 
 def _try_exec_form(value: str) -> tuple[bool, list[str] | None]:
@@ -392,6 +398,7 @@ def _try_exec_form(value: str) -> tuple[bool, list[str] | None]:
 # ---------------------------------------------------------------------------
 # Variable expansion (used by build engine, not during parse)
 # ---------------------------------------------------------------------------
+
 
 def expand_vars(text: str, env: dict[str, str | None]) -> str:
     r"""Expand $VAR, ${VAR}, ${VAR:-default}, ${VAR-default},
@@ -421,10 +428,8 @@ def expand_vars(text: str, env: dict[str, str | None]) -> str:
         if i + 1 < n and text[i + 1] == "{":
             close = text.find("}", i + 2)
             if close < 0:
-                raise DockerfileSyntaxError(
-                    "Unterminated ${...} expression in value."
-                )
-            inner = text[i + 2:close]
+                raise DockerfileSyntaxError("Unterminated ${...} expression in value.")
+            inner = text[i + 2 : close]
             i = close + 1
             out.append(_expand_braced(inner, env))
         else:
@@ -435,7 +440,7 @@ def expand_vars(text: str, env: dict[str, str | None]) -> str:
                 out.append("$")
                 i += 1
             else:
-                name = text[i + 1:j]
+                name = text[i + 1 : j]
                 out.append(_lookup_or_empty(name, env))
                 i = j
     return "".join(out)

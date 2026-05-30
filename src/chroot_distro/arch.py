@@ -8,6 +8,7 @@ from chroot_distro.constants import TERMUX_PREFIX
 # Host/Guest CPU architecture detection
 # ---------------------------------------------------------------------------
 
+
 def get_device_cpu_arch() -> str:
     """Return the host CPU arch in chroot-distro's naming scheme.
 
@@ -44,9 +45,9 @@ def supports_32bit() -> bool:
 
 
 _ELF_MACHINE_MAP = {
-    3:   "i686",     # EM_386
-    40:  "arm",      # EM_ARM
-    62:  "x86_64",   # EM_X86_64
+    3: "i686",  # EM_386
+    40: "arm",  # EM_ARM
+    62: "x86_64",  # EM_X86_64
     183: "aarch64",  # EM_AARCH64
     243: "riscv64",  # EM_RISCV
 }
@@ -76,12 +77,19 @@ def detect_installed_arch(container_name_or_rootfs: str) -> str:
         root = container_name_or_rootfs
     else:
         from chroot_distro.paths import container_rootfs
+
         root = container_rootfs(container_name_or_rootfs)
 
     candidates = [
-        "/usr/bin/bash", "/usr/bin/sh", "/usr/bin/su", "/usr/bin/busybox",
+        "/usr/bin/bash",
+        "/usr/bin/sh",
+        "/usr/bin/su",
+        "/usr/bin/busybox",
         f"{TERMUX_PREFIX}/bin/bash",
-        "/bin/bash", "/bin/sh", "/bin/su", "/bin/busybox",
+        "/bin/bash",
+        "/bin/sh",
+        "/bin/su",
+        "/bin/busybox",
     ]
     for rel in candidates:
         arch = _elf_arch(root + rel)
@@ -94,11 +102,11 @@ _KNOWN_ARCHS = {"aarch64", "arm", "i686", "riscv64", "x86_64"}
 
 # Docker platform strings and alternative names -> chroot-distro arch.
 _DOCKER_TO_PROOT = {
-    "arm64":   "aarch64",
-    "arm/v7":  "arm",
-    "arm":     "arm",
-    "386":     "i686",
-    "amd64":   "x86_64",
+    "arm64": "aarch64",
+    "arm/v7": "arm",
+    "arm": "arm",
+    "386": "i686",
+    "amd64": "x86_64",
     "riscv64": "riscv64",
 }
 
@@ -120,8 +128,8 @@ def normalize_arch(arch: str) -> str | None:
 # Machine string reported by `uname -m` for each arch.
 ARCH_UNAME_M = {
     "aarch64": "aarch64",
-    "arm":     "armv7l",
-    "i686":    "i686",
-    "x86_64":  "x86_64",
+    "arm": "armv7l",
+    "i686": "i686",
+    "x86_64": "x86_64",
     "riscv64": "riscv64",
 }

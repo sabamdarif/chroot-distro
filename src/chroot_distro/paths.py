@@ -60,8 +60,7 @@ def container_locks_for_spec_pair(src_spec: str, dst_spec: str, command: str) ->
         if src_name == dst_name:
             return [ContainerLock(src_name, exclusive=True, command=command)]
         return [
-            ContainerLock(name, exclusive=(name == dst_name), command=command)
-            for name in sorted({src_name, dst_name})
+            ContainerLock(name, exclusive=(name == dst_name), command=command) for name in sorted({src_name, dst_name})
         ]
     if dst_name:
         return [ContainerLock(dst_name, exclusive=True, command=command)]

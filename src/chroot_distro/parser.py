@@ -26,33 +26,41 @@ class _CdArgumentParser(argparse.ArgumentParser):
 # Maps each canonical command to required (arg_name, error_message) pairs.
 REQUIRED_ARGS = {
     "install": [("image_ref", "Docker image reference or archive path/URL is not specified.")],
-    "remove":  [("container_name", "container name is not specified.")],
-    "rename":  [("orig_name", "the original container name is not specified."),
-                ("new_name",  "the new container name is not specified.")],
-    "reset":   [("container_name", "container name is not specified.")],
-    "login":   [("container_name", "container name is not specified.")],
-    "backup":  [("container_name", "container name is not specified.")],
-    "copy":    [("source",      "source path is not specified."),
-                ("destination", "destination path is not specified.")],
-    "sync":    [("source",      "source path is not specified."),
-                ("destination", "destination path is not specified.")],
-    "run":     [("container_name", "container name is not specified.")],
-    "push":    [("image_ref", "image reference is not specified.")],
+    "remove": [("container_name", "container name is not specified.")],
+    "rename": [
+        ("orig_name", "the original container name is not specified."),
+        ("new_name", "the new container name is not specified."),
+    ],
+    "reset": [("container_name", "container name is not specified.")],
+    "login": [("container_name", "container name is not specified.")],
+    "backup": [("container_name", "container name is not specified.")],
+    "copy": [("source", "source path is not specified."), ("destination", "destination path is not specified.")],
+    "sync": [("source", "source path is not specified."), ("destination", "destination path is not specified.")],
+    "run": [("container_name", "container name is not specified.")],
+    "push": [("image_ref", "image reference is not specified.")],
     "unmount": [("container_name", "container name is not specified.")],
 }
 
 
 # Aliases for the canonical command names.
 ALIAS_TO_CANONICAL = {
-    "add": "install", "i": "install", "in": "install", "ins": "install",
+    "add": "install",
+    "i": "install",
+    "in": "install",
+    "ins": "install",
     "rm": "remove",
     "sh": "login",
-    "li": "list", "ls": "list",
-    "bak": "backup", "bkp": "backup",
-    "clear": "clear-cache", "cl": "clear-cache",
+    "li": "list",
+    "ls": "list",
+    "bak": "backup",
+    "bkp": "backup",
+    "clear": "clear-cache",
+    "cl": "clear-cache",
     "cp": "copy",
     "umount": "unmount",
-    "h": "help", "he": "help", "hel": "help",
+    "h": "help",
+    "he": "help",
+    "hel": "help",
 }
 
 
@@ -64,17 +72,11 @@ def _add_login_or_run_common(p):
         _iso.add_argument("--isolated", action="store_true")
         _iso.add_argument("--minimal", action="store_true")
     _sh = p.add_mutually_exclusive_group()
-    _sh.add_argument(
-        "--shared-home", dest="shared_home", action="store_true"
-    )
-    _sh.add_argument(
-        "--termux-home", dest="shared_home", action="store_true"
-    )
+    _sh.add_argument("--shared-home", dest="shared_home", action="store_true")
+    _sh.add_argument("--termux-home", dest="shared_home", action="store_true")
     p.add_argument("--shared-tmp", dest="shared_tmp", action="store_true")
     p.add_argument("--shared-x11", dest="shared_x11", action="store_true")
-    p.add_argument(
-        "-b", "--bind", action="append", metavar="PATH[:PATH]"
-    )
+    p.add_argument("-b", "--bind", action="append", metavar="PATH[:PATH]")
     p.add_argument("--hostname", metavar="STRING")
     p.add_argument("-w", "--work-dir", dest="work_dir", metavar="PATH")
     p.add_argument("-e", "--env", action="append", metavar="VAR=VALUE")
@@ -114,20 +116,17 @@ def build_parser() -> _CdArgumentParser:
 
 
 def _install(sub):
-    p = sub.add_parser(
-        "install", aliases=["add", "i", "in", "ins"], add_help=False
-    )
+    p = sub.add_parser("install", aliases=["add", "i", "in", "ins"], add_help=False)
     p._cd_command = "install"
     p.add_argument("image_ref", nargs="?", default=None, metavar="IMAGE")
     name_grp = p.add_mutually_exclusive_group()
-    name_grp.add_argument(
-        "-n", "--name", dest="custom_container_name", metavar="ALIAS"
-    )
-    name_grp.add_argument(
-        "--override-alias", dest="custom_container_name", metavar="ALIAS"
-    )
+    name_grp.add_argument("-n", "--name", dest="custom_container_name", metavar="ALIAS")
+    name_grp.add_argument("--override-alias", dest="custom_container_name", metavar="ALIAS")
     p.add_argument(
-        "-a", "--architecture", dest="override_arch", metavar="ARCH",
+        "-a",
+        "--architecture",
+        dest="override_arch",
+        metavar="ARCH",
     )
     p.add_argument("-q", "--quiet", action="store_true")
     p.add_argument("-h", "--help", action="store_true")
@@ -183,8 +182,11 @@ def _backup(sub):
     p.add_argument("container_name", nargs="?", default=None)
     p.add_argument("-o", "--output", metavar="FILE")
     p.add_argument(
-        "-c", "--compress", dest="compression",
-        choices=["gzip", "bzip2", "xz", "none"], metavar="TYPE",
+        "-c",
+        "--compress",
+        dest="compression",
+        choices=["gzip", "bzip2", "xz", "none"],
+        metavar="TYPE",
     )
     vq = p.add_mutually_exclusive_group()
     vq.add_argument("-v", "--verbose", action="store_true")
@@ -203,9 +205,7 @@ def _restore(sub):
 
 
 def _clear_cache(sub):
-    p = sub.add_parser(
-        "clear-cache", aliases=["clear", "cl"], add_help=False
-    )
+    p = sub.add_parser("clear-cache", aliases=["clear", "cl"], add_help=False)
     p._cd_command = "clear-cache"
     vq = p.add_mutually_exclusive_group()
     vq.add_argument("-v", "--verbose", action="store_true")
@@ -245,25 +245,43 @@ def _build(sub):
     p.add_argument("path", nargs="?", default=".", metavar="PATH")
     p.add_argument("-f", "--file", dest="dockerfile", metavar="PATH")
     p.add_argument(
-        "-t", "--tag", dest="tags", action="append",
-        default=[], metavar="REF",
+        "-t",
+        "--tag",
+        dest="tags",
+        action="append",
+        default=[],
+        metavar="REF",
     )
     p.add_argument(
-        "--build-arg", dest="build_args", action="append",
-        default=[], metavar="K=V",
+        "--build-arg",
+        dest="build_args",
+        action="append",
+        default=[],
+        metavar="K=V",
     )
     p.add_argument(
-        "-a", "--architecture", dest="override_arch", metavar="ARCH",
+        "-a",
+        "--architecture",
+        dest="override_arch",
+        metavar="ARCH",
     )
     p.add_argument(
-        "--target", dest="target_stage", metavar="STAGE",
+        "--target",
+        dest="target_stage",
+        metavar="STAGE",
     )
     p.add_argument(
-        "-o", "--output", dest="outputs", action="append",
-        default=[], metavar="FILE",
+        "-o",
+        "--output",
+        dest="outputs",
+        action="append",
+        default=[],
+        metavar="FILE",
     )
     p.add_argument(
-        "--install-as", dest="install_as", metavar="NAME",
+        "--install-as",
+        dest="install_as",
+        metavar="NAME",
     )
     p.add_argument("--no-cache", dest="no_cache", action="store_true")
     vq = p.add_mutually_exclusive_group()
@@ -277,7 +295,10 @@ def _push(sub):
     p._cd_command = "push"
     p.add_argument("image_ref", nargs="?", default=None, metavar="IMAGE")
     p.add_argument(
-        "-a", "--architecture", dest="override_arch", metavar="ARCH",
+        "-a",
+        "--architecture",
+        dest="override_arch",
+        metavar="ARCH",
     )
     p.add_argument("-q", "--quiet", action="store_true")
     p.add_argument("-h", "--help", action="store_true")
@@ -297,4 +318,3 @@ def _unmount(sub):
     p._cd_command = "unmount"
     p.add_argument("container_name", nargs="?", default=None)
     p.add_argument("-h", "--help", action="store_true")
-

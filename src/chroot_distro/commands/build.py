@@ -37,6 +37,7 @@ from chroot_distro.progress import fmt_size
 # Top-level command
 # ---------------------------------------------------------------------------
 
+
 def command_build(args: typing.Any) -> None:
     """Implements `chroot-distro build`."""
 
@@ -131,10 +132,7 @@ def command_build(args: typing.Any) -> None:
     if not tags:
         derived = _derive_tag_from_path(build_dir, dockerfile)
         if not derived:
-            crit_error(
-                "cannot derive a tag from the build path. Pass '--tag' "
-                "explicitly (e.g. --tag myapp:latest)."
-            )
+            crit_error("cannot derive a tag from the build path. Pass '--tag' explicitly (e.g. --tag myapp:latest).")
             sys.exit(1)
         tags = [derived]
 
@@ -155,10 +153,7 @@ def command_build(args: typing.Any) -> None:
     for out_file in outputs:
         out_abs = os.path.abspath(os.path.expanduser(out_file))
         if os.path.exists(out_abs):
-            crit_error(
-                f"file '{out_abs}' already exists. "
-                f"Please specify a different name."
-            )
+            crit_error(f"file '{out_abs}' already exists. Please specify a different name.")
             sys.exit(1)
 
     # Acquire one exclusive BuildLock per tag for the duration of the
@@ -233,11 +228,10 @@ def command_build(args: typing.Any) -> None:
                 total_size = sum(layer["size"] for layer in final_stage.layers)
                 log_info("Build complete.")
                 msg()
-                msg(f"{C['CYAN']}Tag(s): "
-                    f"{C['GREEN']}{', '.join(tags)}{C['RST']}")
-                msg(f"{C['CYAN']}Layers: "
-                    f"{C['GREEN']}{len(final_stage.layers)}"
-                    f" ({fmt_size(total_size)} total){C['RST']}")
+                msg(f"{C['CYAN']}Tag(s): {C['GREEN']}{', '.join(tags)}{C['RST']}")
+                msg(
+                    f"{C['CYAN']}Layers: {C['GREEN']}{len(final_stage.layers)} ({fmt_size(total_size)} total){C['RST']}"
+                )
                 msg()
 
             # Optional --install-as: install the built image as a
@@ -247,8 +241,7 @@ def command_build(args: typing.Any) -> None:
 
             # Final hint when no --output and no --install-as were given.
             if not outputs and not install_as and not quiet:
-                msg(f"{C['CYAN']}Install with: "
-                    f"{C['GREEN']}{PROGRAM_NAME} install {primary_tag}{C['RST']}")
+                msg(f"{C['CYAN']}Install with: {C['GREEN']}{PROGRAM_NAME} install {primary_tag}{C['RST']}")
                 msg()
         except KeyboardInterrupt:
             log_error("Aborted by user.")
@@ -260,6 +253,7 @@ def command_build(args: typing.Any) -> None:
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
+
 
 def _parse_build_args(raw: list[str]) -> dict[str, str]:
     out = {}

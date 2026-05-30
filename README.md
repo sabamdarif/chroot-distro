@@ -83,27 +83,31 @@ Chroot-Distro requires Python 3.10 or newer. Since it uses native mount and chro
 
 1. Ensure your device is **rooted** (via Magisk, KernelSU, or APatch).
 2. Install from PyPI:
-   ```sh
-   pip install chroot-distro
-   ```
-   Or from a local git clone:
-   ```sh
-   git clone https://github.com/sabamdarif/chroot-distro
-   cd chroot-distro
-   pip install .
-   ```
+```sh
+pip install chroot-distro
+```
+Or from a local git clone:
+```sh
+git clone https://github.com/sabamdarif/chroot-distro
+cd chroot-distro
+pip install .
+```
 
 ### On a regular Linux host
 
 ```sh
 # On Debian/Ubuntu:
 apt install python3-pip
+```
 
-pip install chroot-distro          # from PyPI
-# or
+```sh
+pip install chroot-distro
+```
+Or from a local git clone:
+```sh
 git clone https://github.com/sabamdarif/chroot-distro
 cd chroot-distro
-pip install .                     # from local checkout
+pip install .
 ```
 
 ---
@@ -733,7 +737,6 @@ Special thanks to:
 - [proot-distro](https://github.com/termux/proot-distro) — The blueprint and inspiration for this project's architecture.
 - [Magisk-Modules-Alt-Repo/chroot-distro](https://github.com/Magisk-Modules-Alt-Repo/chroot-distro)
 - [ravindu644/Ubuntu-Chroot](https://github.com/ravindu644/Ubuntu-Chroot)
-- [gdraheim/docker-systemctl-replacement](https://github.com/gdraheim/docker-systemctl-replacement)
 
 ---
 

@@ -15,8 +15,7 @@ def _read_image_config(container_name: str) -> dict:
         with open(manifest_path) as fh:
             data = json.load(fh)
     except FileNotFoundError:
-        crit_error(f"no image manifest found for container '{container_name}' "
-                   f"which is required for command 'run'.")
+        crit_error(f"no image manifest found for container '{container_name}' which is required for command 'run'.")
         sys.exit(1)
     except (OSError, json.JSONDecodeError) as exc:
         crit_error(f"cannot read manifest.json for '{container_name}': {exc}")
@@ -46,14 +45,15 @@ def command_run(args) -> None:
     elif entrypoint or cmd:
         inner = entrypoint + cmd
     else:
-        crit_error(f"the image manifest for '{container_name}' defines neither "
-                   f"Entrypoint nor Cmd, and no command was given after "
-                   f"'--'.")
+        crit_error(
+            f"the image manifest for '{container_name}' defines neither "
+            f"Entrypoint nor Cmd, and no command was given after "
+            f"'--'."
+        )
         sys.exit(1)
 
     if not inner:
-        crit_error(f"resolved command is empty for container "
-                   f"'{container_name}'.")
+        crit_error(f"resolved command is empty for container '{container_name}'.")
         sys.exit(1)
 
     if not getattr(args, "work_dir", None):

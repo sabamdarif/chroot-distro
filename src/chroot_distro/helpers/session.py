@@ -138,4 +138,3 @@ def reset(name: str) -> None:
         with open(session_file, "w") as f:
             f.write("0")
         fcntl.flock(lock_fh, fcntl.LOCK_UN)
-

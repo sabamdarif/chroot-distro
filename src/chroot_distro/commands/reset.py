@@ -40,8 +40,7 @@ def command_reset(args) -> None:
             pass
 
     if not image_ref:
-        crit_error(f"container '{container_name}' has no OCI "
-                   f"manifest. Reset is supported for OCI images only.")
+        crit_error(f"container '{container_name}' has no OCI manifest. Reset is supported for OCI images only.")
         sys.exit(1)
 
     with ContainerLock(container_name, exclusive=True, command="reset"):

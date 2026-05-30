@@ -26,9 +26,7 @@ def do_arg(engine: typing.Any, instr: dict[str, typing.Any]) -> None:
     """
     key, default = split_arg(instr["value"])
     if not key:
-        raise BuildError(
-            f"Invalid ARG at line {instr['lineno']}: {instr['value']!r}"
-        )
+        raise BuildError(f"Invalid ARG at line {instr['lineno']}: {instr['value']!r}")
     stage = engine.current
     stage.declared_args.add(key)
     if key in engine.user_build_args:
@@ -58,11 +56,7 @@ def do_env(engine: typing.Any, instr: dict[str, typing.Any]) -> None:
     pairs = parse_kv_list(value)
     cfg = engine.current.image_config.setdefault("config", {})
     env_list = cfg.get("Env") or []
-    env_map = {
-        e.split("=", 1)[0]: e.split("=", 1)[1]
-        for e in env_list
-        if isinstance(e, str) and "=" in e
-    }
+    env_map = {e.split("=", 1)[0]: e.split("=", 1)[1] for e in env_list if isinstance(e, str) and "=" in e}
     for k, v in pairs:
         env_map[k] = v
         engine.current.env[k] = v
@@ -106,13 +100,9 @@ def do_workdir(engine: typing.Any, instr: dict[str, typing.Any]) -> None:
     """
     path = str(instr["value"]).strip()
     if not path:
-        raise BuildError(
-            f"WORKDIR with empty path at line {instr['lineno']}."
-        )
+        raise BuildError(f"WORKDIR with empty path at line {instr['lineno']}.")
     if not path.startswith("/"):
-        path = os.path.normpath(
-            os.path.join(engine.current.workdir or "/", path)
-        )
+        path = os.path.normpath(os.path.join(engine.current.workdir or "/", path))
     engine.current.workdir = path
     cfg = engine.current.image_config.setdefault("config", {})
     cfg["WorkingDir"] = path
@@ -140,7 +130,11 @@ def do_workdir(engine: typing.Any, instr: dict[str, typing.Any]) -> None:
     for d in sorted(new_dirs):
         arc = os.path.relpath(d, engine.current.rootfs_dir)
         file_map[arc] = {
-            "kind": "dir", "mode": 0o755, "uid": 0, "gid": 0, "mtime": 0,
+            "kind": "dir",
+            "mode": 0o755,
+            "uid": 0,
+            "gid": 0,
+            "mtime": 0,
         }
 
     tmp_layer_path = os.path.join(
@@ -151,9 +145,7 @@ def do_workdir(engine: typing.Any, instr: dict[str, typing.Any]) -> None:
     final_path = layer_cache_path(digest)
     os.makedirs(os.path.dirname(final_path), exist_ok=True)
     os.replace(tmp_layer_path, final_path)
-    engine.current.layers.append(
-        {"digest": digest, "size": size, "diff_id": diff_id}
-    )
+    engine.current.layers.append({"digest": digest, "size": size, "diff_id": diff_id})
     engine.current.parent_layer_digest = digest
 
 
@@ -203,9 +195,7 @@ def do_stopsignal(engine: typing.Any, instr: dict[str, typing.Any]) -> None:
 def do_shell(engine: typing.Any, instr: dict[str, typing.Any]) -> None:
     """SHELL ["/path", "-flag"]: argv used as the prefix for shell-form RUN."""
     if not instr["exec_form"]:
-        raise BuildError(
-            f"SHELL must be in JSON exec form at line {instr['lineno']}."
-        )
+        raise BuildError(f"SHELL must be in JSON exec form at line {instr['lineno']}.")
     engine.current.shell = list(instr["value"])
     cfg = engine.current.image_config.setdefault("config", {})
     cfg["Shell"] = list(instr["value"])
@@ -227,11 +217,8 @@ def do_healthcheck(engine: typing.Any, instr: dict[str, typing.Any]) -> None:
     # We parse the inner CMD only; HEALTHCHECK flags like --interval
     # are accepted but not enforced under chroot-distro.
     if not upper.startswith("CMD"):
-        raise BuildError(
-            f"HEALTHCHECK must be 'NONE' or 'CMD ...' at line "
-            f"{instr['lineno']}."
-        )
-    rest = value[len("CMD"):].strip()
+        raise BuildError(f"HEALTHCHECK must be 'NONE' or 'CMD ...' at line {instr['lineno']}.")
+    rest = value[len("CMD") :].strip()
     argv = None
     try:
         parsed = json.loads(rest)
@@ -248,13 +235,9 @@ def do_onbuild(engine: typing.Any, instr: dict[str, typing.Any]) -> None:
     """ONBUILD <instr>: queue an instruction to run when this image is FROM-ed."""
     inner = instr["value"]
     if not isinstance(inner, dict):
-        raise BuildError(
-            f"ONBUILD is malformed at line {instr['lineno']}."
-        )
+        raise BuildError(f"ONBUILD is malformed at line {instr['lineno']}.")
     if engine.current is None:
-        raise BuildError(
-            f"ONBUILD before FROM at line {instr['lineno']}."
-        )
+        raise BuildError(f"ONBUILD before FROM at line {instr['lineno']}.")
     cfg = engine.current.image_config.setdefault("config", {})
     triggers = list(cfg.get("OnBuild") or [])
     triggers.append(inner["raw"])
@@ -262,20 +245,20 @@ def do_onbuild(engine: typing.Any, instr: dict[str, typing.Any]) -> None:
 
 
 HANDLERS = {
-    "ADD":         do_add,
-    "ARG":         do_arg,
-    "CMD":         do_cmd,
-    "COPY":        do_copy,
-    "ENTRYPOINT":  do_entrypoint,
-    "ENV":         do_env,
-    "EXPOSE":      do_expose,
+    "ADD": do_add,
+    "ARG": do_arg,
+    "CMD": do_cmd,
+    "COPY": do_copy,
+    "ENTRYPOINT": do_entrypoint,
+    "ENV": do_env,
+    "EXPOSE": do_expose,
     "HEALTHCHECK": do_healthcheck,
-    "LABEL":       do_label,
-    "MAINTAINER":  do_maintainer,
-    "RUN":         do_run,
-    "SHELL":       do_shell,
-    "STOPSIGNAL":  do_stopsignal,
-    "USER":        do_user,
-    "VOLUME":      do_volume,
-    "WORKDIR":     do_workdir,
+    "LABEL": do_label,
+    "MAINTAINER": do_maintainer,
+    "RUN": do_run,
+    "SHELL": do_shell,
+    "STOPSIGNAL": do_stopsignal,
+    "USER": do_user,
+    "VOLUME": do_volume,
+    "WORKDIR": do_workdir,
 }

@@ -16,6 +16,7 @@ from chroot_distro.message import C, msg
 def _make_help_fn(name):
     def help_fn():
         render_page(HELP_PAGES[name])
+
     return help_fn
 
 
@@ -50,14 +51,13 @@ def command_help(args=None) -> None:
 
     section("QUICK START")
     paragraph(
-        "Usage of generic distribution images is straightforward. "
-        "Below is an example for Ubuntu 25.10:",
+        "Usage of generic distribution images is straightforward. Below is an example for Ubuntu 25.10:",
         width,
     )
     msg()
     shell_block(
-        [f"{PROGRAM_NAME} install ubuntu:25.10",
-         f"{PROGRAM_NAME} login ubuntu"], width,
+        [f"{PROGRAM_NAME} install ubuntu:25.10", f"{PROGRAM_NAME} login ubuntu"],
+        width,
     )
     msg()
     paragraph(
@@ -80,8 +80,7 @@ def command_help(args=None) -> None:
 
     section("TROUBLESHOOTING")
     paragraph(
-        "If your terminal (theme) does not work well with colors, "
-        "set this environment variable:",
+        "If your terminal (theme) does not work well with colors, set this environment variable:",
         width,
     )
     msg()
@@ -95,14 +94,12 @@ def command_help(args=None) -> None:
     )
     msg()
     shell_block(
-        ["export CD_DOCKER_AUTH=user:password",
-         f"{PROGRAM_NAME} install ghcr.io/myorg/private-image:tag"],
+        ["export CD_DOCKER_AUTH=user:password", f"{PROGRAM_NAME} install ghcr.io/myorg/private-image:tag"],
         width,
     )
     msg()
     paragraph(
-        "Report utility issues to "
-        "https://github.com/sabamdarif/chroot-distro/issues",
+        "Report utility issues to https://github.com/sabamdarif/chroot-distro/issues",
         width,
     )
 

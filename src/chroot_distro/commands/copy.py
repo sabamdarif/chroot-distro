@@ -72,9 +72,7 @@ def _do_copy(src, dest, verbose, move_mode, recursive):
                         for fname in files:
                             fpath = os.path.join(root, fname)
                             rel = os.path.relpath(fpath, src_path)
-                            log_info(
-                                f"Moving: '{fpath}' -> '{os.path.join(dest_path, rel)}'"
-                            )
+                            log_info(f"Moving: '{fpath}' -> '{os.path.join(dest_path, rel)}'")
                 else:
                     log_info(f"Moving: '{src_path}' -> '{dest_path}'")
             shutil.move(src_path, dest_path)
@@ -82,8 +80,7 @@ def _do_copy(src, dest, verbose, move_mode, recursive):
             log_info("Copying files, this may take a while...")
             copy_fn = _verbose_copy2 if verbose else shutil.copy2
             if os.path.isdir(src_path):
-                shutil.copytree(src_path, dest_path, symlinks=True,
-                                copy_function=copy_fn)
+                shutil.copytree(src_path, dest_path, symlinks=True, copy_function=copy_fn)
             else:
                 if verbose:
                     log_info(f"Copying: '{src_path}' -> '{dest_path}'")

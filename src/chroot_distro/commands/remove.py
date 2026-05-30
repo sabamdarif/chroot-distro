@@ -91,6 +91,7 @@ def command_remove(args) -> None:
 
         on_remove = None
         if verbose:
+
             def on_remove(path):
                 log_info(f"Removed: '{path}'")
 

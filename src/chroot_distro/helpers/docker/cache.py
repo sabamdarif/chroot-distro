@@ -8,9 +8,7 @@ from chroot_distro.constants import LAYER_CACHE_DIR, MANIFEST_CACHE_DIR
 from chroot_distro.helpers.docker.refs import parse_image_ref
 
 # OCI digest grammar
-_DIGEST_RE = re.compile(
-    r"^[A-Za-z0-9]+(?:[+_.\-][A-Za-z0-9]+)*:[A-Fa-f0-9]+$"
-)
+_DIGEST_RE = re.compile(r"^[A-Za-z0-9]+(?:[+_.\-][A-Za-z0-9]+)*:[A-Fa-f0-9]+$")
 
 
 def validate_digest(digest: str) -> str:
@@ -35,8 +33,11 @@ def manifest_cache_path(image_ref: str, arch: str) -> str:
 
 
 def save_manifest_cache(
-    image_ref: str, arch: str,
-    manifest: dict, repo: str, image_config: dict,
+    image_ref: str,
+    arch: str,
+    manifest: dict,
+    repo: str,
+    image_config: dict,
 ) -> None:
     """Persist a manifest + image-config pair under the canonical cache key."""
     payload = {"manifest": manifest, "repo": repo, "image_config": image_config}
@@ -59,6 +60,4 @@ def load_manifest_cache(image_ref: str, arch: str):
 
 def all_layers_cached(layers: list) -> bool:
     """Return True iff every layer's blob file is already on disk."""
-    return all(
-        os.path.isfile(layer_cache_path(layer["digest"])) for layer in layers
-    )
+    return all(os.path.isfile(layer_cache_path(layer["digest"])) for layer in layers)

@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "chroot-distro"
 dynamic = ["version"]
-description = "A proot-distro clone for chroot — Docker-like Linux container management on rooted Android and regular Linux"
+description = "chroot-distro is a lightweight Linux container management utility built around chroot."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "GPL-3.0-only"
@@ -55,7 +55,6 @@ chroot-distro = "chroot_distro.cli:main"
 Homepage = "https://github.com/sabamdarif/chroot-distro"
 Repository = "https://github.com/sabamdarif/chroot-distro"
 "Bug Tracker" = "https://github.com/sabamdarif/chroot-distro/issues"
-Changelog = "https://github.com/sabamdarif/chroot-distro/blob/main/CHANGELOG.md"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/chroot_distro"]

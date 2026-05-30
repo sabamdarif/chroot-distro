@@ -17,24 +17,24 @@ from chroot_distro.progress import (
 )
 
 _COMPRESS_EXTS = (
-    ('.tar.gz',   'gz'),
-    ('.tgz',      'gz'),
-    ('.tar.bz2',  'bz2'),
-    ('.tbz2',     'bz2'),
-    ('.tar.xz',   'xz'),
-    ('.txz',      'xz'),
-    ('.tar.lzma', 'xz'),
-    ('.tlzma',    'xz'),
-    ('.tar',      ''),
+    (".tar.gz", "gz"),
+    (".tgz", "gz"),
+    (".tar.bz2", "bz2"),
+    (".tbz2", "bz2"),
+    (".tar.xz", "xz"),
+    (".txz", "xz"),
+    (".tar.lzma", "xz"),
+    (".tlzma", "xz"),
+    (".tar", ""),
 )
 
-_UNSUPPORTED_EXTS = ('.tar.zst', '.tzst', '.tar.lz4', '.tar.lz')
+_UNSUPPORTED_EXTS = (".tar.zst", ".tzst", ".tar.lz4", ".tar.lz")
 
 _COMPRESSION_ARG_MAP = {
-    'gzip':  'gz',
-    'bzip2': 'bz2',
-    'xz':    'xz',
-    'none':  '',
+    "gzip": "gz",
+    "bzip2": "bz2",
+    "xz": "xz",
+    "none": "",
 }
 
 
@@ -47,17 +47,15 @@ def _compression_mode(filename: str) -> str:
     for ext in _UNSUPPORTED_EXTS:
         if low.endswith(ext):
             raise ValueError(f"Compression format '{ext}' is not supported.")
-    return ''
+    return ""
 
 
 def _iter_entries(root: str, arcroot: str):
     """Yield *(src_path, arcname)* for every entry under *root* in sorted order."""
-    for dirpath, dirnames, filenames in os.walk(
-        root, followlinks=False, topdown=True
-    ):
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False, topdown=True):
         rel = os.path.relpath(dirpath, root)
         dirnames.sort()
-        arc_dir = arcroot if rel == '.' else os.path.join(arcroot, rel)
+        arc_dir = arcroot if rel == "." else os.path.join(arcroot, rel)
 
         yield (dirpath, arc_dir)
 
@@ -92,7 +90,9 @@ class _ReadCounter:
 
 
 def _add_path(
-    tf: tarfile.TarFile, src: str, arcname: str,
+    tf: tarfile.TarFile,
+    src: str,
+    arcname: str,
     on_read=None,
 ) -> None:
     """Add *src* to *tf* as *arcname*, stripping ownership info."""
@@ -101,8 +101,7 @@ def _add_path(
     except OSError:
         return
     m = st.st_mode
-    if (stat.S_ISBLK(m) or stat.S_ISCHR(m)
-            or stat.S_ISFIFO(m) or stat.S_ISSOCK(m)):
+    if stat.S_ISBLK(m) or stat.S_ISCHR(m) or stat.S_ISFIFO(m) or stat.S_ISSOCK(m):
         return
 
     try:
@@ -111,11 +110,11 @@ def _add_path(
         return
     info.uid = 0
     info.gid = 0
-    info.uname = ''
-    info.gname = ''
+    info.uname = ""
+    info.gname = ""
     if stat.S_ISREG(m):
         try:
-            with open(src, 'rb') as fh:
+            with open(src, "rb") as fh:
                 tf.addfile(info, _ReadCounter(fh, on_read) if on_read else fh)
         except OSError:
             pass
@@ -184,11 +183,7 @@ def command_backup(args) -> None:
         if sys.stdout.isatty():
             crit_error("archive data cannot be printed to console. Please specify --output.")
             sys.exit(1)
-        compression = (
-            _COMPRESSION_ARG_MAP[compression_arg]
-            if compression_arg is not None
-            else ''
-        )
+        compression = _COMPRESSION_ARG_MAP[compression_arg] if compression_arg is not None else ""
 
     with ContainerLock(container_name, exclusive=False, command="backup"):
         # 1. Active sessions safety check
@@ -204,14 +199,22 @@ def command_backup(args) -> None:
             sys.exit(1)
 
         _run_backup(
-            container_name, rootfs_dir, manifest_path,
-            output_path, compression, verbose,
+            container_name,
+            rootfs_dir,
+            manifest_path,
+            output_path,
+            compression,
+            verbose,
         )
 
 
 def _run_backup(
-    container_name, rootfs_dir, manifest_path,
-    output_path, compression, verbose,
+    container_name,
+    rootfs_dir,
+    manifest_path,
+    output_path,
+    compression,
+    verbose,
 ):
     log_info(f"Backing up '{container_name}'...")
 
@@ -260,7 +263,7 @@ def _run_backup(
         _draw_bar()
 
     try:
-        tar_mode = f'w:{compression}' if output_path else f'w|{compression}'
+        tar_mode = f"w:{compression}" if output_path else f"w|{compression}"
         if output_path:
             tf = tarfile.open(output_path, mode=tar_mode)  # type: ignore[call-overload]  # noqa: SIM115
         else:

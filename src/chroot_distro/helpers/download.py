@@ -26,12 +26,11 @@ def sha256_file(path: str) -> str:
     return h.hexdigest()
 
 
-def download_file(
-    url: str, dest: str, max_retries: int = 5, retry_delay: int = 5
-) -> None:
+def download_file(url: str, dest: str, max_retries: int = 5, retry_delay: int = 5) -> None:
     """Download *url* to *dest* with progress output, redirects, and retries."""
     req = urllib.request.Request(
-        url, headers={"User-Agent": f"{PROGRAM_NAME}/{PROGRAM_VERSION}"},
+        url,
+        headers={"User-Agent": f"{PROGRAM_NAME}/{PROGRAM_VERSION}"},
     )
     for attempt in range(max_retries):
         try:

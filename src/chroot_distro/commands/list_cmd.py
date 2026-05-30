@@ -10,10 +10,7 @@ def command_list(args) -> None:
     quiet = getattr(args, "quiet", False)
 
     try:
-        entries = sorted(
-            e for e in os.listdir(CONTAINERS_DIR)
-            if os.path.isdir(container_rootfs(e))
-        )
+        entries = sorted(e for e in os.listdir(CONTAINERS_DIR) if os.path.isdir(container_rootfs(e)))
     except OSError:
         entries = []
 
@@ -26,14 +23,12 @@ def command_list(args) -> None:
     if not entries:
         msg(f"{C['YELLOW']}No containers are installed.{C['RST']}")
         msg()
-        msg(f"{C['CYAN']}Install one with: "
-            f"{C['GREEN']}{PROGRAM_NAME} install ubuntu:25.10{C['RST']}")
+        msg(f"{C['CYAN']}Install one with: {C['GREEN']}{PROGRAM_NAME} install ubuntu:25.10{C['RST']}")
     else:
         msg(f"{C['CYAN']}Installed containers:{C['RST']}")
         msg()
         for name in entries:
             msg(f"  {C['CYAN']}* {C['GREEN']}{name}{C['RST']}")
         msg()
-        msg(f"{C['CYAN']}Log in with: "
-            f"{C['GREEN']}{PROGRAM_NAME} login <name>{C['RST']}")
+        msg(f"{C['CYAN']}Log in with: {C['GREEN']}{PROGRAM_NAME} login <name>{C['RST']}")
     msg()

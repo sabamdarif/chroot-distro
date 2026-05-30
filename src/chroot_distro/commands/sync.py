@@ -15,6 +15,7 @@ from chroot_distro.progress import clear_bar, draw_count_bar
 def _file_checksum(path: str) -> int:
     """Return a CRC32 checksum of the file at path."""
     import zlib
+
     crc = 0
     with open(path, "rb") as fh:
         for chunk in iter(lambda: fh.read(65536), b""):
@@ -195,8 +196,7 @@ def _rmtree_robust(path: str) -> None:
             for fname in files:
                 try:
                     fpath = os.path.join(root, fname)
-                    os.chmod(fpath,
-                             os.stat(fpath).st_mode | stat.S_IRUSR | stat.S_IWUSR)
+                    os.chmod(fpath, os.stat(fpath).st_mode | stat.S_IRUSR | stat.S_IWUSR)
                 except OSError:
                     pass
         try:
@@ -215,9 +215,7 @@ def _collect_extras(
     skipped_src_rels: set[str] | frozenset[str] = frozenset(),
 ) -> list[tuple[str, bool]]:
     extras = []
-    for dirpath, dirnames, filenames in os.walk(
-        dest_path, followlinks=False, topdown=True
-    ):
+    for dirpath, dirnames, filenames in os.walk(dest_path, followlinks=False, topdown=True):
         rel_dir = os.path.relpath(dirpath, dest_path)
         dirnames.sort()
         i = 0
@@ -265,13 +263,9 @@ def _collect_entries(src: str) -> tuple[list[tuple[str, str]], set[str]]:
             rel = os.path.relpath(exc.filename, src)
             if rel != ".":
                 skipped_rels.add(rel)
-                log_error(
-                    f"Warning: directory '{exc.filename}' is not readable, skipping."
-                )
+                log_error(f"Warning: directory '{exc.filename}' is not readable, skipping.")
 
-    for dirpath, dirnames, filenames in os.walk(
-        src, followlinks=False, topdown=True, onerror=_on_error
-    ):
+    for dirpath, dirnames, filenames in os.walk(src, followlinks=False, topdown=True, onerror=_on_error):
         rel = os.path.relpath(dirpath, src)
 
         if rel != ".":
@@ -369,28 +363,23 @@ def _do_sync(src, dest, verbose, use_checksum, delete):
 
             m = item_st.st_mode
 
-            if (stat.S_ISBLK(m) or stat.S_ISCHR(m)
-                    or stat.S_ISFIFO(m) or stat.S_ISSOCK(m)):
+            if stat.S_ISBLK(m) or stat.S_ISCHR(m) or stat.S_ISFIFO(m) or stat.S_ISSOCK(m):
                 done += 1
                 _show_progress()
                 continue
 
-            dst_item = (
-                os.path.join(dest_path, rel_path) if rel_path else dest_path
-            )
+            dst_item = os.path.join(dest_path, rel_path) if rel_path else dest_path
 
             if stat.S_ISDIR(m):
                 created = _sync_dir(dst_item, item_st)
                 if verbose and created:
-                    log_info(f"({done + 1}/{total}) New directory: "
-                             f"{os.path.join(dest,rel_path)}")
+                    log_info(f"({done + 1}/{total}) New directory: {os.path.join(dest, rel_path)}")
 
             elif stat.S_ISLNK(m):
                 op = "Modified" if os.path.lexists(dst_item) else "New"
                 changed = _sync_symlink(abs_path, dst_item)
                 if verbose and changed:
-                    log_info(f"({done + 1}/{total}) {op} symlink: "
-                             f"{os.path.join(dest,rel_path)}")
+                    log_info(f"({done + 1}/{total}) {op} symlink: {os.path.join(dest, rel_path)}")
 
             elif stat.S_ISREG(m):
                 if not os.access(abs_path, os.R_OK):
@@ -399,8 +388,7 @@ def _do_sync(src, dest, verbose, use_checksum, delete):
                     op = "Modified" if os.path.lexists(dst_item) else "New"
                     _sync_file(abs_path, item_st, dst_item)
                     if verbose:
-                        log_info(f"({done + 1}/{total}) {op} file: "
-                                 f"{os.path.join(dest,rel_path)}")
+                        log_info(f"({done + 1}/{total}) {op} file: {os.path.join(dest, rel_path)}")
 
             done += 1
             _show_progress()

@@ -18,6 +18,7 @@ def termux_home_owner_ids() -> tuple[int, int]:
     st = os.stat(TERMUX_HOME)
     return st.st_uid, st.st_gid
 
+
 def _read_data_mount() -> tuple[str, str, str] | None:
     """Return (device, mount_point, options) for host /data, or None."""
     try:
@@ -49,11 +50,7 @@ def ensure_data_suid() -> bool:
     if "nosuid" not in opts:
         return True
 
-    new_opts = (
-        opts.replace("nosuid", "suid")
-        .replace("nodev", "dev")
-        .replace("noexec", "exec")
-    )
+    new_opts = opts.replace("nosuid", "suid").replace("nodev", "dev").replace("noexec", "exec")
     mount_arg = f"remount,{new_opts}"
     mount_cmd = ["mount", "-o", mount_arg, device, "/data"]
     try:

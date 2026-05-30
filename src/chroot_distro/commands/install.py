@@ -31,9 +31,18 @@ from chroot_distro.progress import clear_bar
 
 # Archive extensions stripped when deriving a container name from a filename.
 _ARCHIVE_EXTS = (
-    ".tar.gz", ".tgz", ".tar.bz2", ".tbz2", ".tar.xz", ".txz",
-    ".oci.tar.xz", ".oci.tar.gz", ".oci.tar",
-    ".tar.lzma", ".tlzma", ".tar",
+    ".tar.gz",
+    ".tgz",
+    ".tar.bz2",
+    ".tbz2",
+    ".tar.xz",
+    ".txz",
+    ".oci.tar.xz",
+    ".oci.tar.gz",
+    ".oci.tar",
+    ".tar.lzma",
+    ".tlzma",
+    ".tar",
 )
 
 
@@ -53,7 +62,7 @@ def _derive_local_name(path: str) -> str:
     low = base.lower()
     for ext in _ARCHIVE_EXTS:
         if low.endswith(ext):
-            base = base[:-len(ext)]
+            base = base[: -len(ext)]
             break
     base = re.sub(r"[^a-z0-9_.\-]", "-", base.lower())
     base = re.sub(r"^[^a-z0-9]+", "", base)
@@ -77,10 +86,12 @@ def command_install(args) -> None:
     if raw_arch:
         dist_arch = normalize_arch(raw_arch)
         if dist_arch is None:
-            crit_error(f"unknown architecture '{raw_arch}'. "
-                       f"Valid values: aarch64, arm, i686, riscv64, x86_64 "
-                       f"(or Docker format: linux/arm64, linux/amd64, "
-                       f"linux/arm/v7, linux/386, linux/riscv64).")
+            crit_error(
+                f"unknown architecture '{raw_arch}'. "
+                f"Valid values: aarch64, arm, i686, riscv64, x86_64 "
+                f"(or Docker format: linux/arm64, linux/amd64, "
+                f"linux/arm/v7, linux/386, linux/riscv64)."
+            )
             sys.exit(1)
     else:
         dist_arch = device_arch
@@ -89,7 +100,10 @@ def command_install(args) -> None:
     url = image_ref if _is_url(image_ref) else None
 
     install_name = _resolve_install_name(
-        image_ref, local_path, url, custom_container_name,
+        image_ref,
+        local_path,
+        url,
+        custom_container_name,
     )
 
     with ContainerLock(install_name, exclusive=True, command="install"):
@@ -100,16 +114,17 @@ def _resolve_install_name(image_ref, local_path, url, custom_container_name):
     """Decide the on-disk container name. Exits on unresolvable cases."""
     if local_path is not None:
         if not os.path.isfile(local_path):
-            crit_error(f"local file '{local_path}' does not exist "
-                       f"or is not a regular file.")
+            crit_error(f"local file '{local_path}' does not exist or is not a regular file.")
             sys.exit(1)
         if custom_container_name:
             return custom_container_name
         derived = _derive_local_name(local_path)
         if not derived or not is_valid_name(derived):
-            crit_error(f"cannot determine a valid container name from "
-                       f"'{os.path.basename(local_path)}'. "
-                       f"Specify the name with '--name NAME'.")
+            crit_error(
+                f"cannot determine a valid container name from "
+                f"'{os.path.basename(local_path)}'. "
+                f"Specify the name with '--name NAME'."
+            )
             sys.exit(1)
         return derived
 
@@ -119,15 +134,13 @@ def _resolve_install_name(image_ref, local_path, url, custom_container_name):
         url_path = url.split("?")[0].split("#")[0]
         derived = _derive_local_name(url_path)
         if not derived or not is_valid_name(derived):
-            crit_error(f"cannot determine a valid container name from "
-                       f"'{url}'. Specify the name with '--name NAME'.")
+            crit_error(f"cannot determine a valid container name from '{url}'. Specify the name with '--name NAME'.")
             sys.exit(1)
         return derived
 
     derived = custom_container_name if custom_container_name else derive_alias(image_ref)
     if not is_valid_name(derived):
-        crit_error(f"cannot derive a valid container name from "
-                   f"'{image_ref}'. Specify the name with '--name NAME'.")
+        crit_error(f"cannot derive a valid container name from '{image_ref}'. Specify the name with '--name NAME'.")
         sys.exit(1)
     return derived
 
@@ -145,28 +158,21 @@ def _run_install(
 
     if os.path.isdir(rootfs_dir):
         msg()
-        crit_error(f"container '{install_name}' already exists. "
-                   f"Specify a different name with '--name NAME'.")
+        crit_error(f"container '{install_name}' already exists. Specify a different name with '--name NAME'.")
         msg()
-        msg(f"{C['CYAN']}Start shell: "
-            f"{C['GREEN']}{PROGRAM_NAME} login {install_name}{C['RST']}")
-        msg(f"{C['CYAN']}Reinstall:   "
-            f"{C['GREEN']}{PROGRAM_NAME} reset {install_name}{C['RST']}")
-        msg(f"{C['CYAN']}Uninstall:   "
-            f"{C['GREEN']}{PROGRAM_NAME} remove {install_name}{C['RST']}")
+        msg(f"{C['CYAN']}Start shell: {C['GREEN']}{PROGRAM_NAME} login {install_name}{C['RST']}")
+        msg(f"{C['CYAN']}Reinstall:   {C['GREEN']}{PROGRAM_NAME} reset {install_name}{C['RST']}")
+        msg(f"{C['CYAN']}Uninstall:   {C['GREEN']}{PROGRAM_NAME} remove {install_name}{C['RST']}")
         msg()
         sys.exit(1)
 
     if local_path is not None:
-        log_info(f"Installing from '{os.path.basename(local_path)}' "
-                 f"as '{install_name}'...")
+        log_info(f"Installing from '{os.path.basename(local_path)}' as '{install_name}'...")
     elif url is not None:
         log_info(f"Installing from URL '{url}' as '{install_name}'...")
     else:
         last_component = image_ref.rsplit("/", maxsplit=1)[-1]
-        display_ref = (
-            image_ref if ":" in last_component else f"{image_ref}:latest"
-        )
+        display_ref = image_ref if ":" in last_component else f"{image_ref}:latest"
         log_info(f"Installing '{display_ref}' as '{install_name}'...")
 
     os.makedirs(rootfs_dir, exist_ok=True)
@@ -199,10 +205,7 @@ def _run_install(
         # Write manifest.json when metadata is available
         if metadata is not None:
             manifest_data = {
-                "image_ref": (
-                    metadata.get("image_ref") or
-                    (image_ref if local_path is None else "")
-                ),
+                "image_ref": (metadata.get("image_ref") or (image_ref if local_path is None else "")),
                 "arch": metadata.get("arch") or dist_arch,
                 "manifest": metadata.get("manifest", {}),
                 "image_config": metadata.get("image_config", {}),
@@ -245,14 +248,9 @@ def _run_install(
 
     log_info("Finished installation.")
     msg()
-    entrypoint = (
-        (metadata.get("image_config") or {}).get("config", {}).get("Entrypoint")
-        if metadata else None
-    )
+    entrypoint = (metadata.get("image_config") or {}).get("config", {}).get("Entrypoint") if metadata else None
     shell_label = "Start shell:   " if entrypoint else "Start shell:"
-    msg(f"{C['CYAN']}{shell_label} "
-        f"{C['GREEN']}{PROGRAM_NAME} login {install_name}{C['RST']}")
+    msg(f"{C['CYAN']}{shell_label} {C['GREEN']}{PROGRAM_NAME} login {install_name}{C['RST']}")
     if entrypoint:
-        msg(f"{C['CYAN']}Run entrypoint: "
-            f"{C['GREEN']}{PROGRAM_NAME} run {install_name}{C['RST']}")
+        msg(f"{C['CYAN']}Run entrypoint: {C['GREEN']}{PROGRAM_NAME} run {install_name}{C['RST']}")
     msg()

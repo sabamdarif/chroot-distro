@@ -49,9 +49,7 @@ def command_clear_cache(args) -> None:
                 if verbose:
                     for dirpath, _dirs, filenames in os.walk(entry.path):
                         for fname in filenames:
-                            log_info(
-                                f"Removing: '{os.path.join(dirpath, fname)}'"
-                            )
+                            log_info(f"Removing: '{os.path.join(dirpath, fname)}'")
                 shutil.rmtree(entry.path)
             else:
                 if verbose:

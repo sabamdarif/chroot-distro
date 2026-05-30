@@ -12,11 +12,8 @@ log = logging.getLogger(__name__)
 
 def decode_mount_path(path: str) -> str:
     """Decode octal escape sequences (like \\040 for space) in /proc/mounts paths."""
-    return re.sub(
-        r'\\([0-7]{3})',
-        lambda m: chr(int(m.group(1), 8)),
-        path
-    )
+    return re.sub(r"\\([0-7]{3})", lambda m: chr(int(m.group(1), 8)), path)
+
 
 def get_active_mounts(rootfs: str) -> list[str]:
     """Parse /proc/mounts and return all active mount points nested under or equal to rootfs.
@@ -49,6 +46,7 @@ def get_active_mounts(rootfs: str) -> list[str]:
     active_mounts.sort(key=lambda p: len(p.split(os.sep)), reverse=True)
     return active_mounts
 
+
 def is_mounted(target: str) -> bool:
     """Check if a specific path is currently a mount point."""
     target_abs = os.path.realpath(target)
@@ -67,6 +65,7 @@ def is_mounted(target: str) -> bool:
     except OSError:
         pass
     return False
+
 
 def safe_mount(source: str, target: str) -> None:
     """Safely mount source to target using bind mount.
@@ -90,14 +89,10 @@ def safe_mount(source: str, target: str) -> None:
         return
 
     try:
-        subprocess.run(
-            ["mount", "--bind", source_abs, target],
-            check=True,
-            capture_output=True,
-            text=True
-        )
+        subprocess.run(["mount", "--bind", source_abs, target], check=True, capture_output=True, text=True)
     except subprocess.CalledProcessError as e:
         raise MountError(f"Failed to mount {source} to {target}: {e.stderr.strip()}") from e
+
 
 def safe_unmount(target: str) -> None:
     """Safely unmount a target path.
@@ -108,29 +103,23 @@ def safe_unmount(target: str) -> None:
         return
 
     try:
-        subprocess.run(
-            ["umount", target],
-            check=True,
-            capture_output=True,
-            text=True
-        )
+        subprocess.run(["umount", target], check=True, capture_output=True, text=True)
     except subprocess.CalledProcessError as e:
         warn(f"Standard umount failed for {target} ({e.stderr.strip()}). Trying lazy umount...")
         try:
-            subprocess.run(
-                ["umount", "-l", target],
-                check=True,
-                capture_output=True,
-                text=True
-            )
+            subprocess.run(["umount", "-l", target], check=True, capture_output=True, text=True)
         except subprocess.CalledProcessError as e_lazy:
-            raise MountError(f"Failed to unmount {target} (lazy umount also failed): {e_lazy.stderr.strip()}") from e_lazy
+            raise MountError(
+                f"Failed to unmount {target} (lazy umount also failed): {e_lazy.stderr.strip()}"
+            ) from e_lazy
+
 
 def unmount_all(rootfs: str) -> None:
     """Unmount all active mount points nested under rootfs in correct order."""
     mounts = get_active_mounts(rootfs)
     for m in mounts:
         safe_unmount(m)
+
 
 def ensure_no_mounts(rootfs: str) -> None:
     """Verify that no mount points exist under rootfs.
@@ -222,4 +211,3 @@ def apply_special_mount(rootfs: str, sm) -> bool:
 
     log.debug(f"Mounted {sm.fstype} at {sm.target}")
     return True
-

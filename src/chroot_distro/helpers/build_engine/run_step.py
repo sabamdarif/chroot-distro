@@ -52,20 +52,20 @@ def do_run(engine: typing.Any, instr: dict[str, typing.Any]) -> None:
 
     # Cache lookup.
     extra = _run_extra_inputs(engine)
-    recipe = compute_recipe_hash(
-        stage.parent_layer_digest, instr, extra_inputs=extra
-    )
+    recipe = compute_recipe_hash(stage.parent_layer_digest, instr, extra_inputs=extra)
     if not engine.no_cache:
         hit = cache_lookup(recipe)
         if hit is not None:
             cached_path = layer_cache_path(hit["layer_digest"])
             if os.path.isfile(cached_path):
                 apply_layer(cached_path, stage.rootfs_dir)
-                stage.layers.append({
-                    "digest": hit["layer_digest"],
-                    "size": hit["size"],
-                    "diff_id": hit["diff_id"],
-                })
+                stage.layers.append(
+                    {
+                        "digest": hit["layer_digest"],
+                        "size": hit["size"],
+                        "diff_id": hit["diff_id"],
+                    }
+                )
                 stage.parent_layer_digest = hit["layer_digest"]
                 return
 
@@ -73,10 +73,7 @@ def do_run(engine: typing.Any, instr: dict[str, typing.Any]) -> None:
     before = snapshot(stage.rootfs_dir)
     exit_code = _exec_chroot(engine, stage, command, stdin_input)
     if exit_code != 0:
-        raise BuildError(
-            f"RUN command failed at line {instr['lineno']} "
-            f"with exit code {exit_code}."
-        )
+        raise BuildError(f"RUN command failed at line {instr['lineno']} with exit code {exit_code}.")
 
     engine.log("Capturing filesystem changes...")
     after = snapshot(stage.rootfs_dir)
@@ -86,24 +83,20 @@ def do_run(engine: typing.Any, instr: dict[str, typing.Any]) -> None:
     if not (paths_to_pack or deleted):
         engine.log("No filesystem changes; emitting an empty layer.")
     else:
-        engine.log(
-            f"Packing layer: {len(added)} added, "
-            f"{len(modified)} modified, {len(deleted)} deleted..."
-        )
+        engine.log(f"Packing layer: {len(added)} added, {len(modified)} modified, {len(deleted)} deleted...")
 
-    tmp_layer_path = os.path.join(
-        engine.tmp_root, f"layer-{stage.index}-{len(stage.layers)}.tar.gz"
-    )
+    tmp_layer_path = os.path.join(engine.tmp_root, f"layer-{stage.index}-{len(stage.layers)}.tar.gz")
     digest, size, diff_id = write_layer_tar(
-        stage.rootfs_dir, paths_to_pack, deleted, tmp_layer_path,
+        stage.rootfs_dir,
+        paths_to_pack,
+        deleted,
+        tmp_layer_path,
     )
     final_path = layer_cache_path(digest)
     os.makedirs(os.path.dirname(final_path), exist_ok=True)
     os.replace(tmp_layer_path, final_path)
 
-    stage.layers.append(
-        {"digest": digest, "size": size, "diff_id": diff_id}
-    )
+    stage.layers.append({"digest": digest, "size": size, "diff_id": diff_id})
     stage.parent_layer_digest = digest
     cache_record(recipe, digest, diff_id, size, {})
 
@@ -115,12 +108,7 @@ def _run_extra_inputs(engine: typing.Any) -> str:
     return "\n".join(f"{k}={v}" for k, v in items)
 
 
-def _exec_chroot(
-    engine: typing.Any,
-    stage: typing.Any,
-    command: list[str],
-    stdin_input: str | None
-) -> int:
+def _exec_chroot(engine: typing.Any, stage: typing.Any, command: list[str], stdin_input: str | None) -> int:
     """Invoke chroot against *stage*'s rootfs to execute *command*."""
     rootfs = stage.rootfs_dir
 
@@ -147,8 +135,7 @@ def _exec_chroot(
     child_env = _build_child_env(stage)
 
     if not engine.quiet and not engine.verbose:
-        log_info(f"Running step (user={stage.user or 'root'}, "
-                 f"cwd={stage.workdir or '/'})...")
+        log_info(f"Running step (user={stage.user or 'root'}, cwd={stage.workdir or '/'})...")
 
     resolved_binds = bindings.get_bindings(rootfs=rootfs, minimal=True)
 
@@ -161,10 +148,7 @@ def _exec_chroot(
         for src, dst in resolved_binds:
             mount_manager.safe_mount(src, dst)
 
-        stdin_arg = (
-            subprocess.PIPE if stdin_input is not None
-            else subprocess.DEVNULL
-        )
+        stdin_arg = subprocess.PIPE if stdin_input is not None else subprocess.DEVNULL
         proc = subprocess.Popen(
             chroot_args,
             env=child_env,

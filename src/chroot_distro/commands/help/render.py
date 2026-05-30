@@ -45,8 +45,10 @@ def term_width() -> int:
 def _wrap(text: str, width: int) -> list:
     width = max(4, width)
     lines = textwrap.wrap(
-        text, width=width,
-        break_long_words=False, break_on_hyphens=False,
+        text,
+        width=width,
+        break_long_words=False,
+        break_on_hyphens=False,
     )
     return lines or [""]
 
@@ -61,8 +63,7 @@ def section(label: str) -> None:
     msg()
 
 
-def paragraph(text: str, width: int, indent: int = 2,
-              color: str | None = None) -> None:
+def paragraph(text: str, width: int, indent: int = 2, color: str | None = None) -> None:
     color = color or C["CYAN"]
     pad = " " * indent
     avail = max(8, width - indent)
@@ -77,8 +78,7 @@ def usage_line(usage: str, width: int) -> None:
     parts = usage.split(" ", 1)
     sub = parts[0]
     rest = parts[1] if len(parts) > 1 else ""
-    head = (f"  {C['BGREEN']}{PROGRAM_NAME}{C['RST']}"
-            f" {C['UGREEN']}{sub}{C['RST']}")
+    head = f"  {C['BGREEN']}{PROGRAM_NAME}{C['RST']} {C['UGREEN']}{sub}{C['RST']}"
     head_visible = 2 + len(PROGRAM_NAME) + 1 + len(sub)
     if not rest:
         msg(head)
@@ -124,11 +124,7 @@ def options_block(options, width: int) -> None:
     for i, (name, desc) in enumerate(options):
         wrapped = _wrap(desc, desc_col)
         if len(name) <= opt_col:
-            head = (
-                f"  {C['GREEN']}{name}{C['RST']}"
-                f"{' ' * (opt_col - len(name))}  "
-                f"{C['CYAN']}{wrapped[0]}{C['RST']}"
-            )
+            head = f"  {C['GREEN']}{name}{C['RST']}{' ' * (opt_col - len(name))}  {C['CYAN']}{wrapped[0]}{C['RST']}"
             msg(head)
             for line in wrapped[1:]:
                 msg(f"{cont}{C['CYAN']}{line}{C['RST']}")
@@ -168,13 +164,8 @@ def commands_block(commands, width: int) -> None:
         desc = entry[1]
         warn = entry[2] if len(entry) > 2 else None
         wrapped = _wrap(desc, desc_col)
-        head = (
-            f"  {C['GREEN']}{name}{C['RST']}"
-            f"{' ' * (name_col - len(name))}  "
-            f"{C['CYAN']}{wrapped[0]}{C['RST']}"
-        )
-        if warn and len(wrapped) == 1 and \
-                len(wrapped[0]) + 1 + len(warn) <= desc_col:
+        head = f"  {C['GREEN']}{name}{C['RST']}{' ' * (name_col - len(name))}  {C['CYAN']}{wrapped[0]}{C['RST']}"
+        if warn and len(wrapped) == 1 and len(wrapped[0]) + 1 + len(warn) <= desc_col:
             msg(f"{head} {C['RED']}{warn}{C['RST']}")
             continue
         msg(head)
@@ -193,10 +184,7 @@ def shell_block(examples, width: int) -> None:
         for i, line in enumerate(wrapped):
             suffix = "" if i == last else f" {C['CYAN']}\\{C['RST']}"
             if i == 0:
-                msg(
-                    f"  {C['YELLOW']}{_PROMPT}{C['RST']} "
-                    f"{C['GREEN']}{line}{C['RST']}{suffix}"
-                )
+                msg(f"  {C['YELLOW']}{_PROMPT}{C['RST']} {C['GREEN']}{line}{C['RST']}{suffix}")
             else:
                 msg(f"    {C['GREEN']}{line}{C['RST']}{suffix}")
 
@@ -211,10 +199,7 @@ def bullets_block(bullets, width: int) -> None:
 
     if narrow:
         for label, comment in bullets:
-            msg(
-                f"  {C['CYAN']}{_BULLET}{C['RST']} "
-                f"{C['YELLOW']}{label}{C['RST']}"
-            )
+            msg(f"  {C['CYAN']}{_BULLET}{C['RST']} {C['YELLOW']}{label}{C['RST']}")
             if comment:
                 paragraph(f"({comment})", width, indent=6)
         return
@@ -232,22 +217,19 @@ def bullets_block(bullets, width: int) -> None:
             for line in wrapped[1:]:
                 msg(f"{cont}{C['CYAN']}{line}{C['RST']}")
         else:
-            msg(
-                f"  {C['CYAN']}{_BULLET}{C['RST']} "
-                f"{C['YELLOW']}{label}{C['RST']}"
-            )
+            msg(f"  {C['CYAN']}{_BULLET}{C['RST']} {C['YELLOW']}{label}{C['RST']}")
 
 
 def footer(width: int) -> None:
     msg()
     msg(_hrule(width, _RULE_SINGLE, C["CYAN"]))
     paragraph(
-        f"{CANONICAL_PROGRAM_NAME} version '{PROGRAM_VERSION}' by "
-        f"{PROGRAM_AUTHOR}.",
-        width, indent=0, color=C["ICYAN"],
+        f"{CANONICAL_PROGRAM_NAME} version '{PROGRAM_VERSION}' by {PROGRAM_AUTHOR}.",
+        width,
+        indent=0,
+        color=C["ICYAN"],
     )
     msg()
-
 
 
 def render_page(page: dict[str, typing.Any]) -> None:

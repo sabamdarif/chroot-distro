@@ -20,9 +20,7 @@ def resolve_rootfs_path(rootfs: str, guest_path: str) -> str:
         if os.path.isabs(target):
             guest_path = os.path.normpath(target)
         else:
-            guest_path = os.path.normpath(
-                os.path.join(os.path.dirname(guest_path), target)
-            )
+            guest_path = os.path.normpath(os.path.join(os.path.dirname(guest_path), target))
     raise OSError(errno.ELOOP, "Too many levels of symbolic links", guest_path)
 
 
@@ -280,7 +278,10 @@ def sync_passwd_to_path_owner(
         pass
     set_passwd_uid_gid(rootfs, username, st.st_uid, st.st_gid)
     release_passwd_uid_conflicts(
-        rootfs, username, st.st_uid, st.st_gid,
+        rootfs,
+        username,
+        st.st_uid,
+        st.st_gid,
     )
     return True
 

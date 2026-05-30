@@ -54,8 +54,7 @@ def command_push(args: typing.Any) -> None:
     display_registry = registry or "docker.io"
 
     if not quiet:
-        log_info(f"Pushing '{image_ref}' ({target_arch}) "
-                 f"to '{display_registry}'...")
+        log_info(f"Pushing '{image_ref}' ({target_arch}) to '{display_registry}'...")
 
     try:
         with BuildLock(image_ref, target_arch, command="push"):
@@ -84,13 +83,9 @@ def command_push(args: typing.Any) -> None:
 
     log_info("Push complete.")
     msg()
-    msg(f"{C['CYAN']}Repository: "
-        f"{C['GREEN']}{result['registry']}/{result['repo']}{C['RST']}")
-    msg(f"{C['CYAN']}Tag:        "
-        f"{C['GREEN']}{result['tag']}{C['RST']}")
+    msg(f"{C['CYAN']}Repository: {C['GREEN']}{result['registry']}/{result['repo']}{C['RST']}")
+    msg(f"{C['CYAN']}Tag:        {C['GREEN']}{result['tag']}{C['RST']}")
     if result.get("manifest_digest"):
-        msg(f"{C['CYAN']}Digest:     "
-            f"{C['GREEN']}{result['manifest_digest']}{C['RST']}")
-    msg(f"{C['CYAN']}Uploaded:   "
-        f"{C['GREEN']}{fmt_size(result['bytes_uploaded'])}{C['RST']}")
+        msg(f"{C['CYAN']}Digest:     {C['GREEN']}{result['manifest_digest']}{C['RST']}")
+    msg(f"{C['CYAN']}Uploaded:   {C['GREEN']}{fmt_size(result['bytes_uploaded'])}{C['RST']}")
     msg()

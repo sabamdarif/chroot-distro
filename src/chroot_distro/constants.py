@@ -18,24 +18,23 @@ os.umask(0o022)
 # ---------------------------------------------------------------------------
 
 TERMUX_APP_PACKAGE = os.environ.get("TERMUX_APP__PACKAGE_NAME", "com.termux")
-TERMUX_HOME = os.environ.get(
-    "TERMUX__HOME", f"/data/data/{TERMUX_APP_PACKAGE}/files/home"
-)
-TERMUX_PREFIX = os.environ.get(
-    "TERMUX__PREFIX", f"/data/data/{TERMUX_APP_PACKAGE}/files/usr"
-)
+TERMUX_HOME = os.environ.get("TERMUX__HOME", f"/data/data/{TERMUX_APP_PACKAGE}/files/home")
+TERMUX_PREFIX = os.environ.get("TERMUX__PREFIX", f"/data/data/{TERMUX_APP_PACKAGE}/files/usr")
+
 
 def _detect_termux() -> bool:
     """Return True when at least two Termux/Android indicators are present."""
     checks = (
-        ("android" in platform.platform().lower()
+        (
+            "android" in platform.platform().lower()
             or os.path.exists("/system/build.prop")
-            or os.path.exists("/data/app")),
-        bool(os.environ.get("TERMUX_APP__APP_VERSION_NAME")
-            or os.environ.get("TERMUX_VERSION")),
+            or os.path.exists("/data/app")
+        ),
+        bool(os.environ.get("TERMUX_APP__APP_VERSION_NAME") or os.environ.get("TERMUX_VERSION")),
         os.access(TERMUX_PREFIX, os.R_OK | os.X_OK),
     )
     return sum(checks) >= 2
+
 
 IS_TERMUX: bool = _detect_termux()
 
@@ -47,12 +46,8 @@ if IS_TERMUX:
     RUNTIME_DIR = os.path.join(TERMUX_PREFIX, "var", "lib", PROGRAM_NAME)
     BASE_CACHE_DIR = os.path.join(RUNTIME_DIR, "cache")
 else:
-    _xdg_data = os.environ.get("XDG_DATA_HOME") or os.path.join(
-        os.path.expanduser("~"), ".local", "share"
-    )
-    _xdg_cache = os.environ.get("XDG_CACHE_HOME") or os.path.join(
-        os.path.expanduser("~"), ".cache"
-    )
+    _xdg_data = os.environ.get("XDG_DATA_HOME") or os.path.join(os.path.expanduser("~"), ".local", "share")
+    _xdg_cache = os.environ.get("XDG_CACHE_HOME") or os.path.join(os.path.expanduser("~"), ".cache")
     RUNTIME_DIR = os.path.join(_xdg_data, PROGRAM_NAME)
     BASE_CACHE_DIR = os.path.join(_xdg_cache, PROGRAM_NAME)
 
@@ -75,7 +70,4 @@ if IS_TERMUX:
         f":{TERMUX_PREFIX}/bin:/system/bin:/system/xbin"
     )
 else:
-    DEFAULT_PATH_ENV = (
-        "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-        ":/usr/local/games:/usr/games"
-    )
+    DEFAULT_PATH_ENV = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/local/games:/usr/games"

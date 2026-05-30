@@ -102,6 +102,7 @@ def record(
 # Recipe-hash construction
 # ---------------------------------------------------------------------------
 
+
 def _canonical_value(value: typing.Any) -> str:
     if isinstance(value, list):
         return json.dumps(value, separators=(",", ":"))

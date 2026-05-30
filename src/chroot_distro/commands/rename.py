@@ -39,23 +39,23 @@ def command_rename(args) -> None:
         ContainerLock(second, exclusive=True, command="rename"),
     ):
         # 1. Active sessions check on orig
-            active_pids = session.get_active_chroot_pids(orig)
-            if active_pids:
-                crit_error(f"Cannot rename container '{orig}': It has active sessions (PIDs: {active_pids}).")
-                sys.exit(1)
+        active_pids = session.get_active_chroot_pids(orig)
+        if active_pids:
+            crit_error(f"Cannot rename container '{orig}': It has active sessions (PIDs: {active_pids}).")
+            sys.exit(1)
 
-            # 2. Mount check on orig
-            try:
-                mount_manager.ensure_no_mounts(orig_rootfs)
-            except Exception as e:
-                crit_error(f"Failed mount safety check: {e}")
-                sys.exit(1)
+        # 2. Mount check on orig
+        try:
+            mount_manager.ensure_no_mounts(orig_rootfs)
+        except Exception as e:
+            crit_error(f"Failed mount safety check: {e}")
+            sys.exit(1)
 
-            log_info(f"Renaming '{orig}' to '{new}'...")
-            try:
-                os.rename(orig_dir, new_dir)
-            except OSError as exc:
-                log_error(f"Failed to rename container: {exc}")
-                sys.exit(1)
+        log_info(f"Renaming '{orig}' to '{new}'...")
+        try:
+            os.rename(orig_dir, new_dir)
+        except OSError as exc:
+            log_error(f"Failed to rename container: {exc}")
+            sys.exit(1)
 
-            log_info("Finished renaming the container.")
+        log_info("Finished renaming the container.")
