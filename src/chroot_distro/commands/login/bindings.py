@@ -106,32 +106,41 @@ def _docker_cgroup_specials() -> list[SpecialMount]:
     """
     specials = []
 
+    # On Android, the /sys/fs/cgroup directory is in the read-only sysfs.
+    # We must mount a writeable tmpfs over /sys/fs/cgroup first, so that we can
+    # create the controllers' mountpoint subdirectories.
+    specials.append(SpecialMount(
+        fstype="tmpfs",
+        source="tmpfs",
+        target="/sys/fs/cgroup",
+        options="mode=0755",
+        mkdir=True,
+        optional=True,
+    ))
+
     # Legacy cgroup devices controller
     # Required by Docker daemon to set up device access policies for containers
-    if not os.path.isdir("/sys/fs/cgroup/devices"):
-        if _fs_supported("cgroup"):    # NOTE: "cgroup" not "cgroup2"
-            specials.append(SpecialMount(
-                fstype="cgroup",
-                source="cgroup",
-                target="/sys/fs/cgroup/devices",
-                options="devices",
-                mkdir=True,
-                check="cgroup",
-                optional=True,
-            ))
+    if _fs_supported("cgroup"):    # NOTE: "cgroup" not "cgroup2"
+        specials.append(SpecialMount(
+            fstype="cgroup",
+            source="cgroup",
+            target="/sys/fs/cgroup/devices",
+            options="devices",
+            mkdir=True,
+            check="cgroup",
+            optional=True,
+        ))
 
-    # cpuset controller (required by many Docker networking setups)
-    if not os.path.isdir("/sys/fs/cgroup/cpuset"):
-        if _fs_supported("cgroup"):
-            specials.append(SpecialMount(
-                fstype="cgroup",
-                source="cgroup",
-                target="/sys/fs/cgroup/cpuset",
-                options="cpuset",
-                mkdir=True,
-                check="cgroup",
-                optional=True,
-            ))
+        # cpuset controller (required by many Docker networking setups)
+        specials.append(SpecialMount(
+            fstype="cgroup",
+            source="cgroup",
+            target="/sys/fs/cgroup/cpuset",
+            options="cpuset",
+            mkdir=True,
+            check="cgroup",
+            optional=True,
+        ))
 
     return specials
 

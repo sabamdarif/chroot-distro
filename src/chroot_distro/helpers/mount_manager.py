@@ -174,7 +174,14 @@ def apply_special_mount(rootfs: str, sm) -> bool:
 
     # Create mount point inside rootfs
     if sm.mkdir:
-        os.makedirs(target, exist_ok=True)
+        try:
+            os.makedirs(target, exist_ok=True)
+        except OSError as e:
+            msg = f"Failed to create mount target directory {target}: {e}"
+            if sm.optional:
+                warn(msg)
+                return False
+            raise RuntimeError(msg) from e
     elif not os.path.exists(target):
         warn(f"Mount target {target} does not exist and mkdir=False, skipping")
         return False
