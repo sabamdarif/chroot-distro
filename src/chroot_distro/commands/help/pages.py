@@ -7,6 +7,19 @@ from chroot_distro.constants import (
     TERMUX_APP_PACKAGE,
 )
 
+_ISOLATED_OPT = (
+    "--isolated",
+    "Enable Isolated Mode. On Termux, skip Android system, storage, and "
+    "$PREFIX bindings unless requested with --shared-* or --bind. On Linux, "
+    "skip default /tmp and /tmp/.X11-unix unless --shared-tmp or --shared-x11.",
+)
+_MINIMAL_OPT = (
+    "--minimal",
+    "Bare minimum chroot: bind only core pseudo-filesystems (/dev, /proc, /sys, "
+    "and /run, /dev/pts, /dev/shm when present). Stripped guest environment. "
+    "Mutually exclusive with --isolated.",
+)
+
 HELP_PAGES: dict[str, dict[str, typing.Any]] = {
     "build": {
         "usage": "build [OPTIONS] [PATH]",
@@ -319,29 +332,8 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
                 "'uid' (numeric UID), "
                 "'uid:gid' (numeric UID and GID).",
             ),
-            *(
-                [
-                    (
-                        "--isolated",
-                        "Enable Isolated Mode. No host file system bindings created "
-                        "unless user manually requested specific directories to be bound.",
-                    )
-                ]
-                if IS_TERMUX
-                else []
-            ),
-            *(
-                [
-                    (
-                        "--minimal",
-                        "Enable Isolated Mode with bare minimum configuration. "
-                        "Only /dev, /proc and /sys are bound. Specific features "
-                        "may only be enabled through command line options.",
-                    )
-                ]
-                if IS_TERMUX
-                else []
-            ),
+            _ISOLATED_OPT,
+            _MINIMAL_OPT,
             (
                 "--shared-home",
                 "Bind host home directory into the container."
@@ -350,7 +342,11 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
             (
                 "--shared-tmp",
                 "Bind host tmp directory to /tmp."
-                + (" Takes priority over Isolated Mode. Already included in default mode." if IS_TERMUX else ""),
+                + (
+                    " Takes priority over Isolated Mode. Already included in default mode."
+                    if IS_TERMUX
+                    else " On Linux, included by default unless --isolated."
+                ),
             ),
             (
                 "--shared-x11",
@@ -358,13 +354,13 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
                 + (
                     " Takes priority over Isolated Mode. Inherited by --shared-tmp. Already included in default mode."
                     if IS_TERMUX
-                    else ""
+                    else " On Linux, included by default unless --isolated."
                 ),
             ),
             (
                 "-b, --bind [SRC:DEST]",
                 "Custom filesystem binding. Can be specified multiple times."
-                + (" Takes priority over Isolated Mode." if IS_TERMUX else ""),
+                + (" Takes priority over Isolated Mode." if IS_TERMUX else " Honored in all modes."),
             ),
             ("--hostname [TEXT]", "Customize the system hostname."),
             ("-w, --work-dir [PATH]", "Set the initial working directory."),
@@ -513,29 +509,8 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
                 "'uid' (numeric UID), "
                 "'uid:gid' (numeric UID and GID).",
             ),
-            *(
-                [
-                    (
-                        "--isolated",
-                        "Enable Isolated Mode. No host file system bindings created "
-                        "unless user manually requested specific directories to be bound.",
-                    )
-                ]
-                if IS_TERMUX
-                else []
-            ),
-            *(
-                [
-                    (
-                        "--minimal",
-                        "Enable Isolated Mode with bare minimum configuration. "
-                        "Only /dev, /proc and /sys are bound. Specific features "
-                        "may only be enabled through command line options.",
-                    )
-                ]
-                if IS_TERMUX
-                else []
-            ),
+            _ISOLATED_OPT,
+            _MINIMAL_OPT,
             (
                 "--shared-home",
                 "Bind host home directory into the container."
@@ -544,7 +519,11 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
             (
                 "--shared-tmp",
                 "Bind host tmp directory to /tmp."
-                + (" Takes priority over Isolated Mode. Already included in default mode." if IS_TERMUX else ""),
+                + (
+                    " Takes priority over Isolated Mode. Already included in default mode."
+                    if IS_TERMUX
+                    else " On Linux, included by default unless --isolated."
+                ),
             ),
             (
                 "--shared-x11",
@@ -552,13 +531,13 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
                 + (
                     " Takes priority over Isolated Mode. Inherited by --shared-tmp. Already included in default mode."
                     if IS_TERMUX
-                    else ""
+                    else " On Linux, included by default unless --isolated."
                 ),
             ),
             (
                 "-b, --bind [SRC:DEST]",
                 "Custom filesystem binding. Can be specified multiple times."
-                + (" Takes priority over Isolated Mode." if IS_TERMUX else ""),
+                + (" Takes priority over Isolated Mode." if IS_TERMUX else " Honored in all modes."),
             ),
             ("--hostname [TEXT]", "Customize the system hostname."),
             ("-w, --work-dir [PATH]", "Set the initial working directory."),

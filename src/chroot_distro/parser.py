@@ -2,7 +2,7 @@ import argparse
 import sys
 from typing import NoReturn
 
-from chroot_distro.constants import IS_TERMUX, PROGRAM_NAME
+from chroot_distro.constants import PROGRAM_NAME
 from chroot_distro.message import crit_error, msg
 
 
@@ -67,10 +67,9 @@ ALIAS_TO_CANONICAL = {
 def _add_login_or_run_common(p):
     """Options shared by both `login` and `run`."""
     p.add_argument("-u", "--user", default="root")
-    if IS_TERMUX:
-        _iso = p.add_mutually_exclusive_group()
-        _iso.add_argument("--isolated", action="store_true")
-        _iso.add_argument("--minimal", action="store_true")
+    _iso = p.add_mutually_exclusive_group()
+    _iso.add_argument("--isolated", action="store_true")
+    _iso.add_argument("--minimal", action="store_true")
     _sh = p.add_mutually_exclusive_group()
     _sh.add_argument("--shared-home", dest="shared_home", action="store_true")
     _sh.add_argument("--termux-home", dest="shared_home", action="store_true")

@@ -411,22 +411,24 @@ chroot-distro login ubuntu --get-chroot-cmd
 | Option | Description |
 |---|---|
 | `-u`, `--user USER` | Log in as USER (default: `root`). Accepts `name`, numeric `uid`, `name:group`, or `uid:gid`. |
+| `--isolated` | Reduce host exposure. On Termux: skip Android system, storage, and `$PREFIX` binds unless you opt in with `--shared-*` or `--bind`. On Linux: skip default `/tmp` and `/tmp/.X11-unix` unless `--shared-tmp` or `--shared-x11`. Mutually exclusive with `--minimal`. |
+| `--minimal` | Bare minimum chroot: core pseudo-filesystems only (`/dev`, `/proc`, `/sys`, plus `/run`, `/dev/pts`, `/dev/shm` when present). Stripped guest environment. Mutually exclusive with `--isolated`. |
 | `--shared-home` | Bind the invoking user's host home into the guest home (or `/root` for root). On Termux, binds `TERMUX_HOME`. |
 | `--termux-home` | Alias for `--shared-home` (proot-distro compatibility). |
-| `--shared-tmp` | Bind host tmp (`/tmp` on Linux, `$PREFIX/tmp` on Termux) to `/tmp` in the guest. |
-| `--shared-x11` | Bind the host X11 socket directory to `/tmp/.X11-unix` in the guest. |
+| `--shared-tmp` | Bind host tmp (`/tmp` on Linux, `$PREFIX/tmp` on Termux) to `/tmp` in the guest. On Linux, included by default unless `--isolated`. |
+| `--shared-x11` | Bind the host X11 socket directory to `/tmp/.X11-unix` in the guest. On Linux, included by default unless `--isolated`. |
 | `-b`, `--bind SRC[:DST]` | Bind-mount a custom host path (repeatable). `DST` must be an absolute guest path. |
 | `--hostname STRING` | Hostname inside the container (default: `localhost`). |
 | `-w`, `--work-dir PATH` | Initial working directory (default: user's home). |
 | `-e`, `--env VAR=VALUE` | Set a guest environment variable (repeatable). |
 | `--get-chroot-cmd` | Print the fully assembled `env` + `chroot` command line and exit. |
 
-**Options available only on Termux (Android):**
+#### Host bindings (Linux, default mode)
 
-| Option | Description |
-|---|---|
-| `--isolated` | Skip non-essential host bindings (storage, Termux app paths, Android system paths). Mutually exclusive with `--minimal`. |
-| `--minimal` | Bare minimum: only `/dev`, `/proc`, `/sys`. Mutually exclusive with `--isolated`. |
+Without `--isolated` or `--minimal`, host `/tmp` and `/tmp/.X11-unix`
+(when present) are bind-mounted into the guest. Use `--isolated` to
+skip those defaults, or `--minimal` for only core pseudo-filesystems.
+Home is never bind-mounted unless you pass `--shared-home`.
 
 #### Host bindings (Termux, default mode)
 
@@ -967,8 +969,6 @@ cp src/chroot_distro/completions/chroot-distro.fish \
   mounting, or chunked uploads.
 - **No live state migration**: `backup`/`restore` capture the rootfs and
   manifest, not in-memory process state.
-- **Termux-only flags on non-Termux hosts**: `--isolated` and `--minimal`
-  are only exposed when running on Termux.
 
 ---
 

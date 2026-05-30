@@ -371,6 +371,49 @@ def test_special_mounts_termux_all():
         assert "tmpfs" in fstypes
 
 
+def test_get_bindings_isolated_linux():
+    from chroot_distro.commands.login.bindings import get_bindings
+
+    with patch("os.path.exists", return_value=True), \
+         patch("chroot_distro.commands.login.bindings.IS_TERMUX", False):
+        binds = get_bindings(
+            rootfs="/fake/rootfs",
+            minimal=False,
+            isolated=True,
+            shared_tmp=False,
+            shared_x11=False,
+        )
+        srcs = {src for src, _ in binds}
+        assert "/tmp" not in srcs
+        assert "/tmp/.X11-unix" not in srcs
+
+        binds_tmp = get_bindings(
+            rootfs="/fake/rootfs",
+            minimal=False,
+            isolated=True,
+            shared_tmp=True,
+        )
+        tmp_binds = [src for src, _ in binds_tmp if src == "/tmp"]
+        assert len(tmp_binds) == 1
+
+
+def test_get_bindings_minimal_linux():
+    from chroot_distro.commands.login.bindings import get_bindings
+
+    with patch("os.path.exists", return_value=True), \
+         patch("chroot_distro.commands.login.bindings.IS_TERMUX", False):
+        binds = get_bindings(
+            rootfs="/fake/rootfs",
+            minimal=True,
+            isolated=False,
+        )
+        srcs = {src for src, _ in binds}
+        assert "/tmp" not in srcs
+        assert "/dev" in srcs
+        assert "/proc" in srcs
+        assert "/sys" in srcs
+
+
 def test_get_bindings_shared_tmp_termux():
     from chroot_distro.commands.login.bindings import get_bindings, TERMUX_PREFIX
 

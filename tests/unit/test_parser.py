@@ -1,3 +1,5 @@
+import pytest
+
 from chroot_distro.parser import ALIAS_TO_CANONICAL, build_parser
 
 
@@ -34,5 +36,18 @@ def test_parser_login():
     # positional arguments after the login command are consumed by login_cmd (without '--')
     assert args.login_cmd == ["whoami"]
     assert unknown == []
+
+
+def test_parser_login_isolated():
+    parser = build_parser()
+    args = parser.parse_args(["login", "alpine", "--isolated"])
+    assert args.isolated is True
+    assert args.minimal is False
+
+
+def test_parser_login_isolated_minimal_exclusive():
+    parser = build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["login", "alpine", "--isolated", "--minimal"])
 
 
