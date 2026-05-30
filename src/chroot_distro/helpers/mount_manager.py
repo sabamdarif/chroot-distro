@@ -1,10 +1,13 @@
 import contextlib
+import logging
 import os
 import re
 import subprocess
 
 from chroot_distro.exceptions import MountError
 from chroot_distro.message import warn
+
+log = logging.getLogger(__name__)
 
 
 def decode_mount_path(path: str) -> str:
@@ -167,7 +170,7 @@ def apply_special_mount(rootfs: str, sm) -> bool:
     """
     # Kernel check
     if sm.check and not _fs_supported(sm.check):
-        warn(f"Skipping {sm.fstype} mount: '{sm.check}' not in /proc/filesystems")
+        log.debug(f"Skipping {sm.fstype} mount: '{sm.check}' not in /proc/filesystems")
         return False
 
     target = os.path.join(rootfs, sm.target.lstrip("/"))
@@ -179,11 +182,11 @@ def apply_special_mount(rootfs: str, sm) -> bool:
         except OSError as e:
             msg = f"Failed to create mount target directory {target}: {e}"
             if sm.optional:
-                warn(msg)
+                log.debug(msg)
                 return False
             raise RuntimeError(msg) from e
     elif not os.path.exists(target):
-        warn(f"Mount target {target} does not exist and mkdir=False, skipping")
+        log.debug(f"Mount target {target} does not exist and mkdir=False, skipping")
         return False
 
     # Check if already mounted
@@ -206,18 +209,17 @@ def apply_special_mount(rootfs: str, sm) -> bool:
     except subprocess.TimeoutExpired:
         msg = f"mount timeout for {sm.fstype} at {target}"
         if sm.optional:
-            warn(msg)
+            log.debug(msg)
             return False
         raise RuntimeError(msg)
 
     if result.returncode != 0:
         msg = f"mount -t {sm.fstype} failed: {result.stderr.strip()}"
         if sm.optional:
-            warn(msg)
+            log.debug(msg)
             return False
         raise RuntimeError(msg)
 
-    from chroot_distro.message import log_info
-    log_info(f"Mounted {sm.fstype} at {sm.target}")
+    log.debug(f"Mounted {sm.fstype} at {sm.target}")
     return True
 
