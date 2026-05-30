@@ -44,8 +44,11 @@ def test_register_android_ids_basic(tmp_path):
          patch("os.getgid", return_value=10123), \
          patch("pwd.getpwuid", return_value=mock_pw), \
          patch("os.getgroups", return_value=[10123, 9999]), \
-         patch("grp.getgrgid", side_effect=mock_getgrgid):
-        
+         patch("grp.getgrgid", side_effect=mock_getgrgid), \
+         patch(
+             "chroot_distro.helpers.rootfs.termux_home_owner_ids",
+             return_value=(10123, 10123),
+         ):
         register_android_ids(str(tmp_path))
 
     # Assert user entries were added to passwd/shadow
@@ -57,8 +60,9 @@ def test_register_android_ids_basic(tmp_path):
 
     # Assert GID entries and Android specific groups were added to group
     group_content = group_path.read_text()
-    # User's groups:
-    assert "aid_u0_a123:x:10123:root,aid_u0_a123" in group_content
+    # Termux app primary GID (from TERMUX_HOME ownership, not hardcoded):
+    assert "termux:x:10123:" in group_content
+    assert "aid_u0_a123:x:10123:" not in group_content
     assert "aid_everybody:x:9999:root,aid_u0_a123" in group_content
     # Android specific groups:
     assert "aid_inet:x:3003:" in group_content
@@ -66,9 +70,8 @@ def test_register_android_ids_basic(tmp_path):
     assert "aid_bluetooth:x:1002:" in group_content
     assert "aid_admin:x:3005:" in group_content
 
-    # Assert gshadow entries for user groups
+    # Assert gshadow entries for supplementary host groups (not termux primary gid)
     gshadow_content = gshadow_path.read_text()
-    assert "aid_u0_a123:*::root,aid_u0_a123" in gshadow_content
     assert "aid_everybody:*::root,aid_u0_a123" in gshadow_content
 
 
@@ -89,8 +92,11 @@ def test_register_android_ids_idempotent(tmp_path):
          patch("os.getgid", return_value=10123), \
          patch("pwd.getpwuid", return_value=mock_pw), \
          patch("os.getgroups", return_value=[10123]), \
-         patch("grp.getgrgid", return_value=mock_gr1):
-        
+         patch("grp.getgrgid", return_value=mock_gr1), \
+         patch(
+             "chroot_distro.helpers.rootfs.termux_home_owner_ids",
+             return_value=(10123, 10123),
+         ):
         # Run first time
         register_android_ids(str(tmp_path))
         
@@ -98,6 +104,7 @@ def test_register_android_ids_idempotent(tmp_path):
         register_android_ids(str(tmp_path))
 
     group_content = group_path.read_text()
+    assert group_content.count("termux:x:10123:") == 1
     # Check that aid_inet appears exactly once
     assert group_content.count("aid_inet:x:3003:") == 1
     # Check that user group and other Android groups are also present

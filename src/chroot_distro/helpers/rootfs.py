@@ -8,6 +8,7 @@ from chroot_distro.constants import (
     DEFAULT_PRIMARY_NS,
     DEFAULT_SECONDARY_NS,
 )
+from chroot_distro.helpers.android import termux_home_owner_ids
 
 
 def write_resolv_conf(rootfs: str) -> None:
@@ -73,6 +74,11 @@ def register_android_ids(rootfs: str) -> None:
     except OSError:
         pass
 
+    try:
+        _, termux_gid = termux_home_owner_ids()
+    except OSError:
+        termux_gid = gid
+
     seen: set[int] = set()
     all_gids: list[int] = []
     for g in [gid, *os.getgroups()]:
@@ -80,20 +86,45 @@ def register_android_ids(rootfs: str) -> None:
             seen.add(g)
             all_gids.append(g)
 
+    existing_groups: set[str] = set()
+    if os.path.exists(group_path):
+        try:
+            with open(group_path) as fh:
+                for line in fh:
+                    parts = line.strip().split(":")
+                    if parts and parts[0]:
+                        existing_groups.add(parts[0])
+        except OSError:
+            pass
+
+    if os.path.exists(group_path) and "termux" not in existing_groups:
+        try:
+            with open(group_path, "a") as fh:
+                fh.write(f"termux:x:{termux_gid}:\n")
+            existing_groups.add("termux")
+        except OSError:
+            pass
+
     for g in all_gids:
+        if g == termux_gid:
+            continue
         try:
             gname = grp.getgrgid(g).gr_name
         except KeyError:
             continue
+        aid_gname = f"aid_{gname}"
+        if aid_gname in existing_groups:
+            continue
         try:
             with open(group_path, "a") as fh:
                 fh.write(
-                    f"aid_{gname}:x:{g}:root,aid_{username_result}\n"
+                    f"{aid_gname}:x:{g}:root,aid_{username_result}\n"
                 )
+            existing_groups.add(aid_gname)
             if os.path.exists(gshadow_path):
                 with open(gshadow_path, "a") as fh:
                     fh.write(
-                        f"aid_{gname}:*::root,aid_{username_result}\n"
+                        f"{aid_gname}:*::root,aid_{username_result}\n"
                     )
         except OSError:
             pass
@@ -116,21 +147,12 @@ def register_android_ids(rootfs: str) -> None:
     ]
 
     if os.path.exists(group_path):
-        existing_groups = set()
-        try:
-            with open(group_path, "r") as fh:
-                for line in fh:
-                    parts = line.strip().split(":")
-                    if parts and parts[0]:
-                        existing_groups.add(parts[0])
-        except OSError:
-            pass
-
         try:
             with open(group_path, "a") as fh:
                 for gname, gline in android_groups:
                     if gname not in existing_groups:
                         fh.write(gline + "\n")
+                        existing_groups.add(gname)
         except OSError:
             pass
 
