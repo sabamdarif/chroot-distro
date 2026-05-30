@@ -32,15 +32,17 @@ def get_reexec_argv() -> list[str]:
     return args
 
 
-def _find_escalation_tool() -> list[str] | None:
+def _find_escalation_tool(use_sudo: bool = False) -> list[str] | None:
     """Find the best escalation tool depending on the environment."""
     if IS_TERMUX:
-        # In Termux, try 'sudo' wrapper (from agnostic-apollo/sudo package) first,
-        # then fall back to standard 'su'.
-        if shutil.which("sudo"):
-            return ["sudo"]
-        if shutil.which("su"):
-            return ["su", "-c"]
+        # In Termux, prefer 'su' (real root) over 'sudo' (which might be fake root via proot).
+        # If use_sudo is True, we try 'sudo' first.
+        tools = ["su", "sudo"] if not use_sudo else ["sudo", "su"]
+        for tool in tools:
+            if tool == "su" and shutil.which("su"):
+                return ["su", "-c"]
+            if tool == "sudo" and shutil.which("sudo"):
+                return ["sudo"]
     else:
         # In normal Linux, try sudo -> doas -> pkexec -> su in order of preference.
         if shutil.which("sudo"):
@@ -55,7 +57,7 @@ def _find_escalation_tool() -> list[str] | None:
     return None
 
 
-def elevate_or_die() -> None:
+def elevate_or_die(use_sudo: bool = False) -> None:
     """Attempt to re-execute the current script with root privileges.
 
     If already elevating (to prevent infinite loops) or if no escalation tool is found,
@@ -70,7 +72,7 @@ def elevate_or_die() -> None:
             "Privilege elevation loop detected. The tool is still not running as root."
         )
 
-    tool_cmd = _find_escalation_tool()
+    tool_cmd = _find_escalation_tool(use_sudo=use_sudo)
     if not tool_cmd:
         raise RootRequiredError(
             "chroot-distro requires root privileges, but no privilege elevation tool "

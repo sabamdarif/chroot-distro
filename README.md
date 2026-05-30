@@ -111,6 +111,8 @@ pip install .                     # from local checkout
 
 On startup, mutating commands verify if the program is being run by a user with root privileges (UID `0`). If not, the program automatically attempts to elevate itself using standard tools (`sudo`, `doas`, `pkexec`, or `su`). You can opt out of this auto-elevation by passing `--no-elevate` or setting the environment variable `CHROOT_DISTRO_NO_ELEVATE=1`.
 
+On Termux (Android), privilege auto-elevation prioritizes `su` (real root) over `sudo` (which might be fake/proot-faked root). You can override this preference and force standard `sudo` elevation by passing `--use-sudo` or setting the environment variable `CHROOT_DISTRO_USE_SUDO=1`.
+
 ---
 
 ## Quick start
@@ -564,6 +566,8 @@ Since Chroot-Distro must run as root, all runtime files are placed in root's hom
 | `XDG_DATA_HOME` | Customizes base data directory (default: `/root/.local/share`). |
 | `XDG_CACHE_HOME` | Customizes base cache directory (default: `/root/.cache`). |
 | `COLUMNS` | Fallback terminal width for help rendering. |
+| `CHROOT_DISTRO_USE_SUDO` | Set to `1` to force using `sudo` first for privilege elevation on Termux. |
+| `CHROOT_DISTRO_NO_ELEVATE` | Set to `1` to disable privilege auto-elevation. |
 
 ---
 

@@ -58,7 +58,7 @@ def test_build_chroot_args_fault_tolerant_cd():
         inner_cmd=["/bin/bash", "-l"]
     )
 
-    assert "chroot" in args
+    assert args[0].endswith("chroot")
     assert "--userspec=1000:1000" in args
     assert "--groups=1000,4" in args
     assert "/fake/rootfs" in args
@@ -85,37 +85,7 @@ def test_build_chroot_args_no_workdir():
     assert args[-2:] == ["/bin/bash", "-l"]
 
 
-@patch("chroot_distro.commands.login.resolve_rootfs_path")
-@patch("os.path.exists")
-@patch("os.stat")
-@patch("os.chown")
-@patch("os.chmod")
-def test_fix_sudo_permissions(mock_chmod, mock_chown, mock_stat, mock_exists, mock_resolve):
-    from chroot_distro.commands.login import _fix_sudo_permissions
 
-    # Mock resolution and existence of files
-    mock_resolve.side_effect = lambda rf, gp: rf + gp
-    mock_exists.return_value = True
-
-    # Setup stat return values: say UID/GID are 1000 (needs change) and mode is incorrect
-    mock_stat_obj = MagicMock()
-    mock_stat_obj.st_uid = 1000
-    mock_stat_obj.st_gid = 1000
-    mock_stat_obj.st_mode = 0o100644  # regular file, mode 644
-    mock_stat.return_value = mock_stat_obj
-
-    _fix_sudo_permissions("/fake/rootfs")
-
-    # Verify os.chown was called for targets
-    assert mock_chown.call_count >= 4
-    mock_chown.assert_any_call("/fake/rootfs/usr/bin/sudo", 0, 0)
-    mock_chown.assert_any_call("/fake/rootfs/etc/sudoers", 0, 0)
-
-    # Verify os.chmod was called only for paths with mismatched permissions
-    # sudo (needs 4755 != 644) and sudoers (needs 440 != 644)
-    assert mock_chmod.call_count == 2
-    mock_chmod.assert_any_call("/fake/rootfs/usr/bin/sudo", 0o4755)
-    mock_chmod.assert_any_call("/fake/rootfs/etc/sudoers", 0o440)
 
 
 def test_get_bindings_home_sharing():
@@ -161,3 +131,11 @@ def test_get_bindings_home_sharing():
         )
         home_binds = [dst for src, dst in binds if dst.endswith("/home/saba")]
         assert len(home_binds) == 1
+
+
+def test_build_chroot_args_termux_chroot_resolution():
+    with patch("chroot_distro.commands.login.chroot_cmd.IS_TERMUX", True), \
+         patch("chroot_distro.commands.login.chroot_cmd.TERMUX_PREFIX", "/fake/termux/usr"), \
+         patch("os.path.isfile", side_effect=lambda p: p == "/fake/termux/usr/bin/chroot"):
+        args = build_chroot_args(rootfs="/fake/rootfs")
+        assert args[0] == "/fake/termux/usr/bin/chroot"

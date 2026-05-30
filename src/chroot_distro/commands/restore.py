@@ -254,12 +254,16 @@ def command_restore(args) -> None:
                     else:
                         with contextlib.suppress(OSError):
                             os.chmod(dest, mode)
+                    with contextlib.suppress(OSError):
+                        os.lchown(dest, member.uid, member.gid)
 
                 elif member.issym():
                     parent = os.path.dirname(dest)
                     if parent:
                         os.makedirs(parent, exist_ok=True)
                     os.symlink(member.linkname, dest)
+                    with contextlib.suppress(OSError):
+                        os.lchown(dest, member.uid, member.gid)
 
                 elif member.islnk():
                     _, link_src = _dest_path(member.linkname)
@@ -270,6 +274,8 @@ def command_restore(args) -> None:
                         os.makedirs(parent, exist_ok=True)
                     try:
                         shutil.copy2(link_src, dest)
+                        with contextlib.suppress(OSError):
+                            os.lchown(dest, member.uid, member.gid)
                         if member.mode:
                             with contextlib.suppress(OSError):
                                 os.chmod(dest, stat.S_IMODE(member.mode))
@@ -290,6 +296,8 @@ def command_restore(args) -> None:
                                 if not chunk:
                                     break
                                 out.write(chunk)
+                        with contextlib.suppress(OSError):
+                            os.lchown(dest, member.uid, member.gid)
                         with contextlib.suppress(OSError):
                             os.chmod(dest, stat.S_IMODE(member.mode))
                     except OSError:

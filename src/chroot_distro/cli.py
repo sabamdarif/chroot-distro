@@ -56,7 +56,7 @@ def _sigquit_to_keyboard_interrupt(_signum, _frame):
     raise KeyboardInterrupt()
 
 
-def _ensure_root_user(no_elevate: bool = False) -> None:
+def _ensure_root_user(no_elevate: bool = False, use_sudo: bool = False) -> None:
     """Ensure that we are running as root, elevating if necessary/possible.
 
     Unlike proot-distro (which is rootless), chroot-distro uses the host's
@@ -71,7 +71,7 @@ def _ensure_root_user(no_elevate: bool = False) -> None:
         )
 
     from chroot_distro.elevate import elevate_or_die
-    elevate_or_die()
+    elevate_or_die(use_sudo=use_sudo)
 
 
 def _dispatch_help(raw_args) -> bool:
@@ -203,8 +203,12 @@ def main() -> None:
             getattr(args, "no_elevate", False)
             or os.environ.get("CHROOT_DISTRO_NO_ELEVATE") == "1"
         )
+        use_sudo = (
+            getattr(args, "use_sudo", False)
+            or os.environ.get("CHROOT_DISTRO_USE_SUDO") == "1"
+        )
         try:
-            _ensure_root_user(no_elevate=no_elevate)
+            _ensure_root_user(no_elevate=no_elevate, use_sudo=use_sudo)
         except RootRequiredError as e:
             msg()
             crit_error(str(e))

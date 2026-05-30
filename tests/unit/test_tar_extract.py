@@ -60,3 +60,34 @@ def test_extract_tar_to_rootfs():
         assert not os.path.exists(os.path.join(rootfs_dir, "dir2", "temp_old.txt"))
         assert os.path.exists(os.path.join(rootfs_dir, "dir2", "temp.txt"))
         assert not os.path.exists(os.path.join(rootfs_dir, "dir1", "file1.txt"))
+
+
+from unittest.mock import patch
+
+@patch("os.lchown")
+def test_extract_tar_preserves_ownership(mock_lchown):
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        tar_path = os.path.join(tmp_dir, "test.tar")
+        rootfs_dir = os.path.join(tmp_dir, "rootfs")
+        os.makedirs(rootfs_dir)
+
+        src_dir = os.path.join(tmp_dir, "src")
+        os.makedirs(src_dir)
+
+        file_path = os.path.join(src_dir, "file.txt")
+        with open(file_path, "w") as f:
+            f.write("hello")
+
+        # Manually write file with custom UID/GID to tarball
+        with tarfile.open(tar_path, "w") as tar:
+            member = tar.gettarinfo(file_path, arcname="file.txt")
+            member.uid = 1005
+            member.gid = 1006
+            with open(file_path, "rb") as f_in:
+                tar.addfile(member, f_in)
+
+        # Extract
+        extract_tar_to_rootfs(tar_path, rootfs_dir)
+
+        # Verify os.lchown was called for file.txt with custom UID/GID
+        mock_lchown.assert_any_call(os.path.join(rootfs_dir, "file.txt"), 1005, 1006)

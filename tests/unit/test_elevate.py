@@ -45,12 +45,19 @@ def test_get_reexec_argv_python_script():
 
 @patch("chroot_distro.elevate.IS_TERMUX", True)
 def test_find_escalation_tool_termux():
-    # Termux: sudo first, then su
+    # Termux default: su first, then sudo
     with patch("shutil.which", side_effect=lambda cmd: "/usr/bin/" + cmd if cmd in ("sudo", "su") else None):
-        assert _find_escalation_tool() == ["sudo"]
+        assert _find_escalation_tool() == ["su", "-c"]
+
+    # Termux with use_sudo=True: sudo first, then su
+    with patch("shutil.which", side_effect=lambda cmd: "/usr/bin/" + cmd if cmd in ("sudo", "su") else None):
+        assert _find_escalation_tool(use_sudo=True) == ["sudo"]
 
     with patch("shutil.which", side_effect=lambda cmd: "/usr/bin/" + cmd if cmd == "su" else None):
         assert _find_escalation_tool() == ["su", "-c"]
+
+    with patch("shutil.which", side_effect=lambda cmd: "/usr/bin/" + cmd if cmd == "sudo" else None):
+        assert _find_escalation_tool() == ["sudo"]
 
     with patch("shutil.which", return_value=None):
         assert _find_escalation_tool() is None

@@ -1,4 +1,7 @@
+import os
 import shlex
+
+from chroot_distro.constants import IS_TERMUX, TERMUX_PREFIX
 
 
 def build_chroot_args(
@@ -16,7 +19,13 @@ def build_chroot_args(
     set we wrap the inner command with ``sh -c 'cd <dir> && exec …'``
     so the directory change happens **inside** the chroot namespace.
     """
-    args = ["chroot"]
+    chroot_exe = "chroot"
+    if IS_TERMUX:
+        termux_chroot = os.path.join(TERMUX_PREFIX, "bin", "chroot")
+        if os.path.isfile(termux_chroot):
+            chroot_exe = termux_chroot
+
+    args = [chroot_exe]
 
     # 1. Handle user and group specifications
     if login_uid is not None:

@@ -40,13 +40,14 @@ def extract_tar_to_rootfs(
 
     # All regular files written; now copy hard links. shutil.copy2
     # preserves mtime, which was already set above.
-    for dest, src in deferred_links:
+    for dest, src, uid, gid in deferred_links:
         if os.path.lexists(dest):
             with contextlib.suppress(OSError):
                 os.remove(dest)
         if os.path.isfile(src):
             with contextlib.suppress(OSError):
                 shutil.copy2(src, dest)
+                os.lchown(dest, uid, gid)
 
     # Stamp directory mtimes last (writing files into a dir bumps it).
     for path, mtime in reversed(deferred_dirs):
@@ -89,6 +90,8 @@ def _process_member(member, tf, rootfs_dir, *, strip, handle_whiteouts,
         os.makedirs(dest, exist_ok=True)
         with contextlib.suppress(OSError):
             os.chmod(dest, stat.S_IMODE(member.mode) | stat.S_IRWXU)
+        with contextlib.suppress(OSError):
+            os.lchown(dest, member.uid, member.gid)
         deferred_dirs.append((dest, member.mtime))
 
     elif member.issym():
@@ -136,6 +139,8 @@ def _write_symlink(dest: str, member) -> None:
     except OSError:
         return
     with contextlib.suppress(OSError):
+        os.lchown(dest, member.uid, member.gid)
+    with contextlib.suppress(OSError):
         os.utime(dest, (member.mtime, member.mtime), follow_symlinks=False)
 
 
@@ -148,7 +153,7 @@ def _defer_hardlink(member, rootfs_dir, strip, dest, deferred_links):
     if any(p in ("..", "") for p in rel_lparts):
         return
     link_src = os.path.join(rootfs_dir, *rel_lparts)
-    deferred_links.append((dest, link_src))
+    deferred_links.append((dest, link_src, member.uid, member.gid))
 
 
 def _write_regular(dest: str, member, tf) -> None:
@@ -161,6 +166,8 @@ def _write_regular(dest: str, member, tf) -> None:
     try:
         with open(dest, "wb") as out:
             shutil.copyfileobj(fobj, out, 1 << 17)  # 128 KiB chunks
+        with contextlib.suppress(OSError):
+            os.lchown(dest, member.uid, member.gid)
         with contextlib.suppress(OSError):
             os.chmod(dest, stat.S_IMODE(member.mode))
         with contextlib.suppress(OSError):

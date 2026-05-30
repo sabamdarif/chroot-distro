@@ -248,6 +248,9 @@ def _check_shell_available(rootfs, container_path, login_shell, container_name):
     sys.exit(1)
 
 
+
+
+
 def _command_login_inner(container_name: str, args) -> None:
     rootfs = container_rootfs(container_name)
     if not os.path.isdir(rootfs):
@@ -362,6 +365,8 @@ def _command_login_inner(container_name: str, args) -> None:
                 session.decrement(container_name)
                 crit_error(f"Failed to mount bindings: {e}")
                 sys.exit(1)
+
+
 
     chroot_args = build_chroot_args(
         rootfs=rootfs,
