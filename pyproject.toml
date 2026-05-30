@@ -1,10 +1,10 @@
 [build-system]
-requires = ["hatchling", "hatch-vcs"]
+requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
 name = "chroot-distro"
-dynamic = ["version"]
+version = "1.5.6"
 description = "chroot-distro is a lightweight Linux container management utility built around chroot."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -58,12 +58,6 @@ Repository = "https://github.com/sabamdarif/chroot-distro"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/chroot_distro"]
-
-[tool.hatch.version]
-source = "vcs"
-
-[tool.hatch.version.raw-options]
-local_scheme = "no-local-version"
 
 [tool.ruff]
 line-length = 120
