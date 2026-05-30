@@ -4,7 +4,9 @@ from unittest.mock import patch
 import pytest
 
 from chroot_distro.helpers.x11 import (
+    GUEST_XAUTHORITY_PATH,
     guest_can_read_auth,
+    provision_guest_xauthority,
     resolve_host_x11_env,
     resolve_invoking_uid,
     x11_auth_bind_path,
@@ -128,3 +130,72 @@ def test_get_bindings_x11_auth_binds():
     srcs = {src for src, _ in binds}
     assert xauth in srcs
     assert "/tmp/.X11-unix" in srcs
+
+
+def test_provision_guest_xauthority(tmp_path):
+    rootfs = tmp_path / "rootfs"
+    rootfs.mkdir()
+    host_xauth = tmp_path / "host.xauth"
+    host_xauth.write_bytes(b"\x00")
+
+    guest_file = rootfs / "var" / "tmp" / ".chroot-distro-xauthority"
+
+    def fake_run(cmd, capture_output, check):
+        if cmd[:4] == ["xauth", "-f", str(host_xauth), "nextract"]:
+            guest_file.parent.mkdir(parents=True, exist_ok=True)
+            guest_file.write_bytes(b"guest-cookie")
+            return type("R", (), {"returncode": 0})()
+        return type("R", (), {"returncode": 1})()
+
+    with patch("shutil.which", return_value="/usr/bin/xauth"), patch(
+        "subprocess.run", side_effect=fake_run
+    ), patch("os.chown"), patch("os.path.isfile", return_value=True):
+        result = provision_guest_xauthority(
+            str(rootfs),
+            host_xauthority=str(host_xauth),
+            display=":1",
+            guest_uid=1001,
+            guest_gid=1001,
+        )
+
+    assert result == GUEST_XAUTHORITY_PATH
+    assert guest_file.is_file()
+    assert oct(guest_file.stat().st_mode & 0o777) == "0o600"
+
+
+def test_discover_runtime_xauthority(tmp_path):
+    from chroot_distro.helpers.x11 import _discover_runtime_xauthority
+
+    runtime = tmp_path / "run" / "user" / "1000"
+    runtime.mkdir(parents=True)
+    older = runtime / ".mutter-Xwaylandauth.old"
+    newer = runtime / ".mutter-Xwaylandauth.new"
+    older.write_text("a")
+    newer.write_text("b")
+
+    with patch("chroot_distro.helpers.x11.os.path.isdir", return_value=True), patch(
+        "chroot_distro.helpers.x11.glob.glob",
+        side_effect=lambda pattern: (
+            [str(older), str(newer)]
+            if "mutter-Xwaylandauth" in pattern
+            else []
+        ),
+    ), patch("chroot_distro.helpers.x11.os.path.isfile", return_value=True), patch(
+        "chroot_distro.helpers.x11.os.path.getmtime",
+        side_effect=lambda p: 1.0 if str(p).endswith("old") else 2.0,
+    ):
+        assert _discover_runtime_xauthority(1000) == str(newer)
+
+
+def test_provision_guest_xauthority_no_xauth(tmp_path):
+    with patch("shutil.which", return_value=None):
+        assert (
+            provision_guest_xauthority(
+                str(tmp_path),
+                host_xauthority="/home/user/.Xauthority",
+                display=":1",
+                guest_uid=1001,
+                guest_gid=1001,
+            )
+            is None
+        )

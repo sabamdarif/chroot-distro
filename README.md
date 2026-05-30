@@ -429,9 +429,14 @@ Without `--isolated` or `--minimal`, host `/tmp` and `/tmp/.X11-unix`
 (when present) are bind-mounted into the guest. When X11 sharing is
 active, `DISPLAY`, `XAUTHORITY`, and `XDG_RUNTIME_DIR` are forwarded from
 the invoking user's desktop session; the X authority file is bind-mounted
-when it lives outside `/run` (which is already shared). If the guest
-user's UID does not match the host file owner, GUI apps may still fail —
-use `--shared-home`, `xhost +SI:localuser:GUEST`, or a UID-matched user.
+when it lives outside `/run` (which is already shared). Compositors such as
+niri with xwayland-satellite often authenticate X11 clients by Unix-socket
+UID instead of an on-disk cookie; with `--shared-x11`, chroot-distro aligns
+the guest user's UID to the invoking host user without bind-mounting home. If
+a cookie file exists but the guest cannot read it, the cookie is copied into
+`/var/tmp/.chroot-distro-xauthority` (requires `xauth` on the host). If that
+fails, use `--shared-home`, `xhost +SI:localuser:GUEST`, or a UID-matched
+user.
 Use `--isolated` to skip those defaults, or `--minimal` for only core
 pseudo-filesystems. Home is never bind-mounted unless you pass
 `--shared-home`.

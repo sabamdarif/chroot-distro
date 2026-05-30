@@ -2,8 +2,14 @@
 
 from __future__ import annotations
 
+import contextlib
+import glob
 import os
 import pwd
+import shutil
+import subprocess
+
+GUEST_XAUTHORITY_PATH = "/var/tmp/.chroot-distro-xauthority"
 
 
 def resolve_invoking_uid() -> int:
@@ -34,6 +40,25 @@ def _is_safe_auth_path(path: str, uid: int, home: str | None) -> bool:
     return False
 
 
+def _discover_runtime_xauthority(uid: int) -> str | None:
+    """Find Xwayland auth files under /run/user/<uid> when XAUTHORITY is unset."""
+    runtime = f"/run/user/{uid}"
+    if not os.path.isdir(runtime):
+        return None
+    candidates: list[str] = []
+    for pattern in (
+        ".mutter-Xwaylandauth.*",
+        ".X11-Xwaylandauth.*",
+        "xauth_*",
+        ".xauth*",
+    ):
+        candidates.extend(glob.glob(os.path.join(runtime, pattern)))
+    files = [path for path in candidates if os.path.isfile(path)]
+    if not files:
+        return None
+    return max(files, key=os.path.getmtime)
+
+
 def resolve_host_x11_env() -> tuple[dict[str, str], list[str]]:
     """Return X11 env vars and host paths that must be bind-mounted for auth.
 
@@ -59,6 +84,11 @@ def resolve_host_x11_env() -> tuple[dict[str, str], list[str]]:
         fallback = os.path.join(home, ".Xauthority")
         if os.path.isfile(fallback):
             env["XAUTHORITY"] = fallback
+
+    if "XAUTHORITY" not in env:
+        discovered = _discover_runtime_xauthority(uid)
+        if discovered:
+            env["XAUTHORITY"] = discovered
 
     xauthority = env.get("XAUTHORITY", "")
     if xauthority and os.path.isfile(xauthority):
@@ -101,3 +131,65 @@ def x11_auth_bind_path(xauthority: str) -> str | None:
     if real.startswith(runtime + os.sep) or real == runtime:
         return None
     return real
+
+
+def _display_names(display: str) -> list[str]:
+    """Return display names to try with xauth, most specific first."""
+    names: list[str] = []
+    if display:
+        names.append(display)
+        if display.startswith(":"):
+            names.append(f"unix{display}")
+            names.append(f"unix/{display.lstrip(':')}")
+    return names
+
+
+def provision_guest_xauthority(
+    rootfs: str,
+    *,
+    host_xauthority: str,
+    display: str,
+    guest_uid: int,
+    guest_gid: int,
+) -> str | None:
+    """Copy the host display cookie into the rootfs for an unprivileged guest UID.
+
+    chroot-distro runs as root on the host and can read the session cookie even
+    when the guest UID cannot.  The copy lives under ``/var/tmp`` (not bind-mounted).
+    """
+    if not display or not host_xauthority or not os.path.isfile(host_xauthority):
+        return None
+    if shutil.which("xauth") is None:
+        return None
+
+    guest_host_path = os.path.join(rootfs, GUEST_XAUTHORITY_PATH.lstrip("/"))
+    try:
+        os.makedirs(os.path.dirname(guest_host_path), exist_ok=True)
+    except OSError:
+        return None
+
+    with contextlib.suppress(OSError):
+        os.remove(guest_host_path)
+
+    for name in _display_names(display):
+        try:
+            result = subprocess.run(
+                ["xauth", "-f", host_xauthority, "nextract", guest_host_path, name],
+                capture_output=True,
+                check=False,
+            )
+        except OSError:
+            return None
+        if result.returncode == 0 and os.path.isfile(guest_host_path):
+            try:
+                os.chown(guest_host_path, guest_uid, guest_gid)
+                os.chmod(guest_host_path, 0o600)
+            except OSError:
+                with contextlib.suppress(OSError):
+                    os.remove(guest_host_path)
+                return None
+            return GUEST_XAUTHORITY_PATH
+        with contextlib.suppress(OSError):
+            os.remove(guest_host_path)
+
+    return None

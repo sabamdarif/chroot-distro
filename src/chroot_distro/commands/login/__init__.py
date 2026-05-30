@@ -21,6 +21,7 @@ from chroot_distro.commands.login.passwd import (
     find_user_groups,
     read_group_gid,
     read_passwd_field,
+    reown_home_tree_for_uid,
     resolve_host_home,
     resolve_rootfs_path,
     set_passwd_uid_gid,
@@ -37,7 +38,9 @@ from chroot_distro.constants import (
 from chroot_distro.helpers.android import ensure_data_suid, termux_home_owner_ids
 from chroot_distro.helpers.x11 import (
     guest_can_read_auth,
+    provision_guest_xauthority,
     resolve_host_x11_env,
+    resolve_invoking_uid,
     x11_auth_bind_path,
 )
 from chroot_distro.locking import ContainerLock
@@ -407,12 +410,31 @@ def _command_login_inner(container_name: str, args) -> None:
         inject_termux_profile(rootfs, child_env)
 
     x11_auth_binds: list[str] = []
-    if (
-        not IS_TERMUX
-        and dist_type == "normal"
-        and not minimal
-        and (shared_x11 or not isolated)
-    ):
+    if not IS_TERMUX and dist_type == "normal" and not minimal and (shared_x11 or not isolated):
+        if not use_shared_home and login_user != "root" and login_uid is not None:
+            invoking_uid = resolve_invoking_uid()
+            if int(login_uid) != invoking_uid:
+                host_home = resolve_host_home(login_user)
+                if host_home and os.path.isdir(host_home):
+                    old_uid = int(login_uid)
+                    if sync_passwd_to_path_owner(rootfs, login_user, host_home):
+                        user = _resolve_login_user(
+                            rootfs,
+                            container_name,
+                            login_user,
+                        )
+                        login_uid = user["uid"]
+                        login_gid = user["gid"]
+                        groups = user["groups"]
+                        if login_home and login_home != "/":
+                            reown_home_tree_for_uid(
+                                rootfs,
+                                login_home,
+                                old_uid,
+                                int(login_uid),
+                                int(login_gid),
+                            )
+
         x11_env, resolved_x11_binds = resolve_host_x11_env()
         user_env_keys = {entry.partition("=")[0] for entry in extra_env if "=" in entry}
         for key, val in x11_env.items():
@@ -426,12 +448,23 @@ def _command_login_inner(container_name: str, args) -> None:
             x11_auth_binds.append(bind_path)
 
         if xauth and login_uid is not None and not guest_can_read_auth(int(login_uid), xauth):
-            warn(
-                f"X authority file '{xauth}' is not readable by guest UID {login_uid}; "
-                f"GUI apps may fail. Try --shared-home, run "
-                f"'xhost +SI:localuser:{login_user}' on the host, or use a "
-                f"UID-matched user."
+            guest_xauth = provision_guest_xauthority(
+                rootfs,
+                host_xauthority=xauth,
+                display=child_env.get("DISPLAY", ""),
+                guest_uid=int(login_uid),
+                guest_gid=int(login_gid) if login_gid is not None else int(login_uid),
             )
+            if guest_xauth and "XAUTHORITY" not in user_env_keys:
+                child_env["XAUTHORITY"] = guest_xauth
+                x11_auth_binds = [p for p in x11_auth_binds if os.path.realpath(p) != os.path.realpath(xauth)]
+            else:
+                warn(
+                    f"X authority file '{xauth}' is not readable by guest UID "
+                    f"{login_uid}; could not copy cookie with xauth. GUI apps may "
+                    f"fail. Install xauth on the host, or try --shared-home, "
+                    f"'xhost +SI:localuser:{login_user}', or a UID-matched user."
+                )
 
     # 1. Resolve all bind mounts
     resolved_binds = bindings.get_bindings(

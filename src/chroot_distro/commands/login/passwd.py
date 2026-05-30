@@ -1,3 +1,4 @@
+import contextlib
 import errno
 import os
 import stat
@@ -303,6 +304,38 @@ def sync_passwd_to_home_owner(
     except OSError:
         return False
     return sync_passwd_to_path_owner(rootfs, username, home_host)
+
+
+def reown_home_tree_for_uid(
+    rootfs: str,
+    guest_home: str,
+    old_uid: int,
+    new_uid: int,
+    new_gid: int,
+) -> None:
+    """Reassign files in *guest_home* from *old_uid* to (*new_uid*, *new_gid*)."""
+    if not guest_home or guest_home == "/":
+        return
+    try:
+        home_path = resolve_rootfs_path(rootfs, guest_home)
+    except OSError:
+        return
+    if not os.path.isdir(home_path):
+        return
+
+    def _maybe_reown(path: str) -> None:
+        try:
+            st = os.stat(path, follow_symlinks=False)
+        except OSError:
+            return
+        if st.st_uid == old_uid:
+            with contextlib.suppress(OSError):
+                os.chown(path, new_uid, new_gid)
+
+    for dirpath, dirnames, filenames in os.walk(home_path):
+        _maybe_reown(dirpath)
+        for name in dirnames + filenames:
+            _maybe_reown(os.path.join(dirpath, name))
 
 
 def find_user_groups(rootfs: str, username: str, primary_gid: str) -> list[str]:
