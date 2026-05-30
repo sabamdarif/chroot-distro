@@ -174,3 +174,34 @@ def test_special_mounts_termux_all():
         assert "cgroup" in fstypes
         assert "tmpfs" in fstypes
 
+
+def test_get_bindings_shared_tmp_termux():
+    from chroot_distro.commands.login.bindings import get_bindings, TERMUX_PREFIX
+
+    # 1. Termux environment with shared_tmp=True, dist_type="normal"
+    with patch("os.path.exists", return_value=True), \
+         patch("chroot_distro.commands.login.bindings.IS_TERMUX", True):
+        binds = get_bindings(
+            rootfs="/fake/rootfs",
+            shared_tmp=True,
+            dist_type="normal"
+        )
+        # Should map host TERMUX_PREFIX/tmp to container /tmp
+        expected_src = f"{TERMUX_PREFIX}/tmp"
+        expected_dst = "/fake/rootfs/tmp"
+        assert (expected_src, expected_dst) in binds
+
+    # 2. Termux environment with shared_x11=True, dist_type="normal"
+    with patch("os.path.exists", return_value=True), \
+         patch("chroot_distro.commands.login.bindings.IS_TERMUX", True):
+        binds = get_bindings(
+            rootfs="/fake/rootfs",
+            shared_x11=True,
+            dist_type="normal"
+        )
+        # Should map host TERMUX_PREFIX/tmp/.X11-unix to container /tmp/.X11-unix
+        expected_src = f"{TERMUX_PREFIX}/tmp/.X11-unix"
+        expected_dst = "/fake/rootfs/tmp/.X11-unix"
+        assert (expected_src, expected_dst) in binds
+
+

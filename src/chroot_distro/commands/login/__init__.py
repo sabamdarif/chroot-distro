@@ -347,6 +347,7 @@ def _command_login_inner(container_name: str, args) -> None:
         shared_x11=shared_x11,
         custom_binds=custom_binds,
         login_home=login_home or "/root",
+        dist_type=dist_type,
     )
 
     # 2. Increment session counter and mount if first session

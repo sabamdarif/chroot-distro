@@ -288,7 +288,8 @@ def get_bindings(
     shared_tmp: bool = False,
     shared_x11: bool = False,
     custom_binds: list[str] | None = None,
-    login_home: str = "/root"
+    login_home: str = "/root",
+    dist_type: str = "normal",
 ) -> list[tuple[str, str]]:
     """Assemble all (source, target_in_rootfs) bind mounts based on configurations."""
     binds = []
@@ -345,14 +346,26 @@ def get_bindings(
         binds.append((host_home, login_home))
 
     # 4. Shared Tmp
-    if (shared_tmp or (not isolated and not IS_TERMUX)) and os.path.exists("/tmp"):
-        binds.append(("/tmp", "/tmp"))
+    if IS_TERMUX:
+        if shared_tmp and dist_type != "termux":
+            host_tmp = f"{TERMUX_PREFIX}/tmp"
+            if os.path.exists(host_tmp):
+                binds.append((host_tmp, "/tmp"))
+    else:
+        if (shared_tmp or not isolated) and os.path.exists("/tmp"):
+            binds.append(("/tmp", "/tmp"))
 
     # 5. Shared X11 socket
-    if shared_x11 or (not isolated and not IS_TERMUX):
-        x11_path = "/tmp/.X11-unix"
-        if os.path.exists(x11_path):
-            binds.append((x11_path, x11_path))
+    if IS_TERMUX:
+        if shared_x11 and dist_type != "termux":
+            host_x11 = f"{TERMUX_PREFIX}/tmp/.X11-unix"
+            if os.path.exists(host_x11):
+                binds.append((host_x11, "/tmp/.X11-unix"))
+    else:
+        if shared_x11 or not isolated:
+            x11_path = "/tmp/.X11-unix"
+            if os.path.exists(x11_path):
+                binds.append((x11_path, x11_path))
 
     # 6. Custom binds specified by the user
     # Format: host_path:guest_path or host_path
