@@ -1,6 +1,6 @@
-#compdef chroot-distro pd
+#compdef chroot-distro
 #
-# Zsh completion for chroot-distro and pd
+# Zsh completion for chroot-distro
 #
 # Install:
 #   cp _chroot-distro /usr/share/zsh/site-functions/_chroot-distro
@@ -51,6 +51,8 @@ _chroot_distro() {
 
     _arguments -C \
         '(-h --help)'{-h,--help}'[show help]' \
+        '--no-elevate[do not auto-elevate to root]' \
+        '--use-sudo[on Termux, prefer sudo over su for elevation]' \
         '1:command:->command' \
         '*:: :->args'
 
@@ -72,6 +74,7 @@ _chroot_distro() {
                 'run:run the image entrypoint/cmd in a container'
                 'build:build an OCI image from a Dockerfile'
                 'push:push a locally built image to a registry'
+                'unmount:unmount a container filesystem'
                 'help:show help'
             )
             _describe 'command' subcommands
@@ -87,7 +90,8 @@ _chroot_distro() {
                 install)
                     _arguments \
                         '(-h --help)'{-h,--help}'[show help]' \
-                        '(-n --name)'{-n,--name}'[install under a custom container name]:alias' \
+                        '(-n --name --override-alias)'{-n,--name}'[install under a custom container name]:alias' \
+                        '(-n --name --override-alias)'--override-alias'[install under a custom container name]:alias' \
                         '(-a --architecture)'{-a,--architecture}'[target CPU architecture]:arch:(aarch64 arm i686 riscv64 x86_64)' \
                         '(-q --quiet)'{-q,--quiet}'[suppress non-error output]' \
                         '1:docker image or local archive:_files'
@@ -125,13 +129,11 @@ _chroot_distro() {
                     _login_args=(
                         '(-h --help)'{-h,--help}'[show help]'
                         '(-u --user)'{-u,--user}'[run as this user (default\: root)]:user'
-                        '(-P --redirect-ports)'{-P,--redirect-ports}'[redirect ports below 1024]'
-                        '--shared-home[mount home inside container]'
+                        '(--shared-home --termux-home)--shared-home[bind host home into guest home]'
+                        '(--shared-home --termux-home)--termux-home[same as --shared-home; Termux alias]'
                         '--shared-tmp[share /tmp with the host]'
                         '--shared-x11[share the X11 socket (/tmp/.X11-unix)]'
                         '*'{-b,--bind}'[bind-mount PATH\[:DEST\] into the container]:path:_files'
-                        '--emulator[path to QEMU user-mode emulator binary]:path:_files'
-                        '--kernel[fake kernel release string]:string'
                         '--hostname[hostname visible inside the container]:string'
                         '(-w --work-dir)'{-w,--work-dir}'[initial working directory]:path:_directories'
                         '*'{-e,--env}'[set environment variable]:VAR=VALUE'
@@ -140,11 +142,8 @@ _chroot_distro() {
                         '*:inner command:_command_names -e'
                     )
                     _chroot_distro_is_termux && _login_args+=(
-                        '(--isolated --minimal)--isolated[isolated mode]'
-                        '(--isolated --minimal)--minimal[minimal isolated mode]'
-                        '--no-link2symlink[disable chroot link2symlink extension]'
-                        '--no-sysvipc[disable SysV IPC emulation]'
-                        '--no-kill-on-exit[do not kill child processes when session ends]'
+                        '(--isolated --minimal)--isolated[skip non-essential host bindings]'
+                        '(--isolated --minimal)--minimal[bare /dev, /proc, /sys only]'
                     )
                     _arguments -s "${_login_args[@]}"
                     ;;
@@ -214,13 +213,11 @@ _chroot_distro() {
                     _run_args=(
                         '(-h --help)'{-h,--help}'[show help]'
                         '(-u --user)'{-u,--user}'[run as this user (default\: root)]:user'
-                        '(-P --redirect-ports)'{-P,--redirect-ports}'[redirect ports below 1024]'
-                        '--shared-home[mount home inside container]'
+                        '(--shared-home --termux-home)--shared-home[bind host home into guest home]'
+                        '(--shared-home --termux-home)--termux-home[same as --shared-home; Termux alias]'
                         '--shared-tmp[share /tmp with the host]'
                         '--shared-x11[share the X11 socket (/tmp/.X11-unix)]'
                         '*'{-b,--bind}'[bind-mount PATH\[:DEST\] into the container]:path:_files'
-                        '--emulator[path to QEMU user-mode emulator binary]:path:_files'
-                        '--kernel[fake kernel release string]:string'
                         '--hostname[hostname visible inside the container]:string'
                         '(-w --work-dir)'{-w,--work-dir}'[initial working directory]:path:_directories'
                         '*'{-e,--env}'[set environment variable]:VAR=VALUE'
@@ -229,13 +226,17 @@ _chroot_distro() {
                         '*:arguments'
                     )
                     _chroot_distro_is_termux && _run_args+=(
-                        '(--isolated --minimal)--isolated[isolated mode]'
-                        '(--isolated --minimal)--minimal[minimal isolated mode]'
-                        '--no-link2symlink[disable chroot link2symlink extension]'
-                        '--no-sysvipc[disable SysV IPC emulation]'
-                        '--no-kill-on-exit[do not kill child processes when session ends]'
+                        '(--isolated --minimal)--isolated[skip non-essential host bindings]'
+                        '(--isolated --minimal)--minimal[bare /dev, /proc, /sys only]'
                     )
                     _arguments -s "${_run_args[@]}"
+                    ;;
+
+                # -----------------------------------------------------------
+                unmount)
+                    _arguments \
+                        '(-h --help)'{-h,--help}'[show help]' \
+                        '1:container:_chroot_distro_containers'
                     ;;
 
                 # -----------------------------------------------------------
@@ -247,7 +248,6 @@ _chroot_distro() {
                         '*--build-arg[set a build-time ARG (repeatable)]:K=V' \
                         '(-a --architecture)'{-a,--architecture}'[target CPU architecture]:arch:(aarch64 arm i686 riscv64 x86_64)' \
                         '--target[stop after this named build stage]:stage' \
-                        '--emulator[path to QEMU user-mode emulator binary]:path:_files' \
                         '*'{-o,--output}'[write OCI tarball to FILE (repeatable)]:file:_files' \
                         '--install-as[install image as a local container after build]:name:_chroot_distro_containers' \
                         '--no-cache[disable per-instruction build cache]' \
@@ -271,7 +271,7 @@ _chroot_distro() {
                     topics=(
                         install remove rename reset login list
                         backup restore clear-cache copy sync run
-                        build push
+                        build push unmount
                     )
                     _describe 'topic' topics
                     ;;

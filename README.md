@@ -43,12 +43,15 @@ exporting it as a standalone OCI tarball.
    * [`copy`](#copy--copy-files-to-or-from-a-container)
    * [`sync`](#sync--synchronize-files-to-or-from-a-container)
    * [`clear-cache`](#clear-cache--delete-the-download-cache)
-6. [How Chroot-Distro works](#how-chroot-distro-works)
-7. [Storage layout](#storage-layout)
-8. [Environment variables](#environment-variables)
-9. [Shell completions](#shell-completions)
-10. [Limitations](#limitations)
-11. [Donate / Support](#donate--support)
+   * [`help`](#help--show-command-help)
+6. [Global options](#global-options)
+7. [Command aliases](#command-aliases)
+8. [How Chroot-Distro works](#how-chroot-distro-works)
+9. [Storage layout](#storage-layout)
+10. [Environment variables](#environment-variables)
+11. [Shell completions](#shell-completions)
+12. [Limitations](#limitations)
+13. [Donate / Support](#donate--support)
 
 ---
 
@@ -69,8 +72,6 @@ Typical use cases:
 - Building custom OCI images from a Dockerfile on-device, without a Docker daemon.
 - Trying a distribution non-destructively: install, mess around,
   `chroot-distro remove` when done.
-
-The CLI is exposed both as `chroot-distro` and the shorter alias `cd` (provided it does not conflict with your shell's built-in `cd`).
 
 ---
 
@@ -127,8 +128,8 @@ chroot-distro install ubuntu:24.04
 # Start a shell inside the container
 chroot-distro login ubuntu
 
-# Same thing, but using the short command alias
-cd sh ubuntu
+# Same thing, using the login alias
+chroot-distro sh ubuntu
 
 # Run a single command and exit
 chroot-distro login ubuntu -- /bin/uname -a
@@ -157,8 +158,49 @@ chroot-distro remove ubuntu
 
 ## Commands reference
 
-Every command supports `--help` (also `-h`, `--usage`), which prints
-help text laid out for the current terminal width.
+Every subcommand supports `--help` (also `-h`), which prints help text
+laid out for the current terminal width.
+
+### Summary
+
+| Command | Aliases | Description |
+|---|---|---|
+| `install` | `add`, `i`, `in`, `ins` | Install a container from an image or archive |
+| `remove` | `rm` | Delete a container |
+| `rename` | — | Rename a container |
+| `reset` | — | Reinstall from cached manifest |
+| `login` | `sh` | Interactive shell (or custom command) |
+| `list` | `li`, `ls` | List installed containers |
+| `backup` | `bak`, `bkp` | Archive a container |
+| `restore` | — | Restore from backup |
+| `clear-cache` | `clear`, `cl` | Delete download/build cache |
+| `copy` | `cp` | Copy files host ↔ container |
+| `sync` | — | Synchronize files host ↔ container |
+| `run` | — | Run image Entrypoint/Cmd |
+| `build` | — | Build image from Dockerfile |
+| `push` | — | Push built image to registry |
+| `unmount` | `umount` | Unmount bindings and end sessions |
+| `help` | `h`, `he`, `hel` | Show help for a command |
+
+## Global options
+
+These flags appear **before** the subcommand (e.g. `chroot-distro --no-elevate list`):
+
+| Option | Description |
+|---|---|
+| `-h`, `--help` | Show top-level help. |
+| `--no-elevate` | Do not auto-elevate to root (same as `CHROOT_DISTRO_NO_ELEVATE=1`). |
+| `--use-sudo` | On Termux, prefer `sudo` over `su` for elevation (same as `CHROOT_DISTRO_USE_SUDO=1`). |
+
+## Command aliases
+
+The CLI accepts the canonical names above plus short aliases (see table). For example:
+
+```sh
+chroot-distro sh ubuntu       # same as chroot-distro login ubuntu
+chroot-distro ins alpine
+chroot-distro umount ubuntu
+```
 
 ### `install` — Install a container
 
@@ -173,9 +215,13 @@ Pull a Docker/OCI image and create a container from it, extract a local archive 
 
 | Option | Description |
 |---|---|
-| `-n`, `--name NAME` | Set a custom local name for the container. Defaults to the image name or archive filename. Must start with a letter/digit and contain only letters, digits, `_`, `.`, `-`. |
+| `-n`, `--name NAME` | Set a custom local name for the container (mutually exclusive with `--override-alias`). |
+| `--override-alias NAME` | Same as `-n` / `--name`. |
 | `-a`, `--architecture ARCH` | Override the target CPU architecture. Accepts native names (`aarch64`, `arm`, `i686`, `riscv64`, `x86_64`) or Docker platforms (`linux/arm64`, `linux/amd64`, etc.). Defaults to host. |
 | `-q`, `--quiet` | Suppress non-error output. |
+| `-h`, `--help` | Show command help. |
+
+Container names must start with a letter or digit and contain only letters, digits, `_`, `.`, `-`.
 
 #### From a OCI registry
 
@@ -226,6 +272,7 @@ By default, the built image is stored in the local manifest cache under the tag 
 | `--no-cache` | Disable build caching. |
 | `-v`, `--verbose` | Echo each instruction and stream `RUN` output. |
 | `-q`, `--quiet` | Suppress non-error output. |
+| `-h`, `--help` | Show command help. |
 
 **Supported Dockerfile instructions:**
 `FROM`, `RUN`, `COPY` (with `--from`, `--chown`, `--chmod`), `ADD`, `CMD`, `ENTRYPOINT`, `ENV`, `ARG`, `LABEL`, `MAINTAINER`, `USER`, `WORKDIR`, `EXPOSE`, `VOLUME`, `STOPSIGNAL`, `HEALTHCHECK`, `SHELL`, `ONBUILD`.
@@ -253,6 +300,7 @@ Set `CD_DOCKER_AUTH=username:password` for authentication.
 |---|---|
 | `-a`, `--architecture ARCH` | Push the manifest built for the given architecture. Default: host. |
 | `-q`, `--quiet` | Suppress non-error output. |
+| `-h`, `--help` | Show command help. |
 
 ---
 
@@ -270,21 +318,23 @@ Spawn an interactive shell (or a custom command) inside an installed container. 
 | Option | Description |
 |---|---|
 | `-u`, `--user USER` | Log in as USER (default: `root`). Accepts username (`name`), numeric `uid`, or `name:group` / `uid:gid`. |
-| `--shared-home` | Bind the host user's home directory into the container (mounted at the guest user's home path). |
-| `--shared-tmp` | Bind the host tmp directory (`$PREFIX/tmp` on Termux) to `/tmp` inside the container. |
+| `--shared-home` | Bind the invoking user's host home into the guest home (at `--user`'s home path, or `/root` for root). On Termux, binds `TERMUX_HOME`. |
+| `--termux-home` | Alias for `--shared-home` (proot-distro compatibility). |
+| `--shared-tmp` | Bind the host tmp directory (`/tmp` on Linux, `$PREFIX/tmp` on Termux) to `/tmp` inside the container. |
 | `--shared-x11` | Bind the host X11 socket directory to `/tmp/.X11-unix` inside the container. |
-| `-b`, `--bind SRC[:DST]` | Bind-mount a custom host path (repeatable). `DST` must be an absolute path. |
+| `-b`, `--bind SRC[:DST]` | Bind-mount a custom host path (repeatable). `DST` must be an absolute guest path. |
 | `--hostname STRING` | Customize hostname inside the container (default: `localhost`). |
 | `-w`, `--work-dir PATH` | Set the initial working directory (default: user's home directory). |
 | `-e`, `--env VAR=VALUE` | Set an environment variable in the guest (repeatable). |
 | `--get-chroot-cmd` | Print the fully assembled `env` + `chroot` command line and exit. |
+| `-h`, `--help` | Show command help. |
 
-**Android/Termux-Specific Options:**
+**Termux-only options** (`--isolated` and `--minimal` are mutually exclusive):
 
 | Option | Description |
 |---|---|
-| `--isolated` | Skip non-essential host bindings (SD Card, Termux app paths, Android system paths). |
-| `--minimal` | Bare-minimum environment: only binds `/dev`, `/proc`, `/sys`. Disables supplementary Android GID mapping. |
+| `--isolated` | Skip non-essential host bindings (storage, Termux app paths, Android system paths). |
+| `--minimal` | Bare-minimum environment: only binds `/dev`, `/proc`, `/sys`. |
 
 #### Host bindings (Termux, default mode)
 Without `--isolated` or `--minimal`, the following host paths are bind-mounted inside the container when present and readable:
@@ -360,6 +410,7 @@ Show all installed containers. Does not require root.
 | Option | Description |
 |---|---|
 | `-q`, `--quiet` | Print only container names, one per line. |
+| `-h`, `--help` | Show command help. |
 
 ---
 
@@ -378,6 +429,7 @@ Before deletion, Chroot-Distro verifies active mounts using `/proc/mounts` and p
 |---|---|
 | `-v`, `--verbose` | Log each deleted file. |
 | `-q`, `--quiet` | Suppress non-error output. |
+| `-h`, `--help` | Show command help. |
 
 ---
 
@@ -390,6 +442,10 @@ Aliases: umount
 
 Safely unmount a container's filesystem bindings. If there are active chroot processes running in the container, it sends `SIGTERM` (falling back to `SIGKILL` if they do not exit within 2 seconds) to terminate them, resets the active session counter to `0`, and unmounts all bind mounts cleanly.
 
+| Option | Description |
+|---|---|
+| `-h`, `--help` | Show command help. |
+
 ---
 
 ### `rename` — Rename a container
@@ -400,6 +456,11 @@ chroot-distro rename OLDNAME NEWNAME
 
 Rename a container from `OLDNAME` to `NEWNAME`.
 
+| Option | Description |
+|---|---|
+| `-q`, `--quiet` | Suppress non-error output. |
+| `-h`, `--help` | Show command help. |
+
 ---
 
 ### `reset` — Reinstall a container from scratch
@@ -409,6 +470,11 @@ chroot-distro reset CONTAINER
 ```
 
 Remove the container rootfs and reinstall it from the Docker image manifest cached at install time. **All data inside the container is lost.**
+
+| Option | Description |
+|---|---|
+| `-q`, `--quiet` | Suppress non-error output. |
+| `-h`, `--help` | Show command help. |
 
 ---
 
@@ -429,6 +495,7 @@ Create a TAR archive of the container containing `<name>/manifest.json` and `<na
 | `-c`, `--compress TYPE` | Force compression: `gzip`, `bzip2`, `xz`, or `none`. |
 | `-v`, `--verbose` | Log each archived file. |
 | `-q`, `--quiet` | Suppress non-error output. |
+| `-h`, `--help` | Show command help. |
 
 File ownership is zeroed out in the archive (`uid=gid=0`). Block/character devices, FIFOs, and sockets are silently skipped. Before archiving, permissions are adjusted to ensure the rootfs is readable.
 
@@ -450,6 +517,7 @@ Restore a container from a TAR archive. Reads from stdin when `BACKUP_FILE` is o
 |---|---|
 | `-v`, `--verbose` | Log each extracted file. |
 | `-q`, `--quiet` | Suppress non-error output. |
+| `-h`, `--help` | Show command help. |
 
 **Requirements:**
 Files must be stored under a subdirectory named after the container (e.g. `<name>/rootfs/`). The existing rootfs is cleared on the first match. Hard links inside the archive are materialized as independent file copies via `shutil.copy2` to preserve filesystem isolation.
@@ -473,6 +541,7 @@ Copy files between the host filesystem and a container rootfs, or between two co
 | `-m`, `--move` | Move instead of copying (deletes source after success). |
 | `-v`, `--verbose` | Log each copied file. |
 | `-q`, `--quiet` | Suppress non-error output. |
+| `-h`, `--help` | Show command help. |
 
 ---
 
@@ -496,6 +565,7 @@ Files are written atomically using a temp file (`.~cd_sync` -> `os.replace`) to 
 | `-d`, `--delete` | Remove extra files in destination. |
 | `-v`, `--verbose` | Log each synced/deleted entry. |
 | `-q`, `--quiet` | Suppress non-error output. |
+| `-h`, `--help` | Show command help. |
 
 ---
 
@@ -507,6 +577,23 @@ Aliases: clear, cl
 ```
 
 Remove all entries from the cache directory (registry layers, manifests, build cache index).
+
+| Option | Description |
+|---|---|
+| `-v`, `--verbose` | List removed cache entries. |
+| `-q`, `--quiet` | Suppress non-error output. |
+| `-h`, `--help` | Show command help. |
+
+---
+
+### `help` — Show command help
+
+```
+chroot-distro help [COMMAND]
+Aliases: h, he, hel
+```
+
+Print detailed help for `COMMAND`, or general usage when omitted.
 
 ---
 
@@ -573,21 +660,29 @@ Since Chroot-Distro must run as root, all runtime files are placed in root's hom
 
 ## Shell completions
 
-Completion scripts are installed for Bash, Zsh, and Fish:
-
-### Zsh
-Copy the script to your functions path:
-```sh
-mkdir -p ~/.zsh/completions
-cp src/chroot_distro/completions/_chroot-distro ~/.zsh/completions/_chroot-distro
-# Add 'fpath=(~/.zsh/completions $fpath)' to .zshrc before compinit
-```
+Completion scripts for `chroot-distro` live under `src/chroot_distro/completions/`. They cover all subcommands, global flags (`--no-elevate`, `--use-sudo`), and per-command options (including `login`/`run` flags such as `--shared-home`, `--termux-home`, `--get-chroot-cmd`, and Termux-only `--isolated` / `--minimal`).
 
 ### Bash
 ```sh
 mkdir -p ~/.local/share/bash-completion/completions
 cp src/chroot_distro/completions/chroot-distro.bash \
    ~/.local/share/bash-completion/completions/chroot-distro
+```
+
+### Zsh
+```sh
+mkdir -p ~/.zsh/completions
+cp src/chroot_distro/completions/_chroot-distro ~/.zsh/completions/_chroot-distro
+# Add to ~/.zshrc before compinit:
+#   fpath=(~/.zsh/completions $fpath)
+#   compinit
+```
+
+### Fish
+```sh
+mkdir -p ~/.config/fish/completions
+cp src/chroot_distro/completions/chroot-distro.fish \
+   ~/.config/fish/completions/chroot-distro.fish
 ```
 
 ---

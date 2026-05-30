@@ -50,7 +50,6 @@ dev = [
 
 [project.scripts]
 chroot-distro = "chroot_distro.cli:main"
-cd = "chroot_distro.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/sabamdarif/chroot-distro"

@@ -1,4 +1,4 @@
-# Bash completion for chroot-distro and pd
+# Bash completion for chroot-distro
 #
 # Install system-wide:
 #   cp chroot-distro.bash /usr/share/bash-completion/completions/chroot-distro
@@ -36,12 +36,17 @@ _chroot_distro() {
     local cur prev words cword
     _init_completion || return
 
-    local -r _all_commands="install remove rename reset login list backup restore
-        clear-cache copy sync run build push help"
+    local -r _all_commands="install add i in ins remove rm rename reset login sh list li ls
+        backup bak bkp restore clear-cache clear cl copy cp sync run build push
+        unmount umount help h he hel"
 
     # Complete the subcommand itself
     if [[ ${cword} -eq 1 ]]; then
-        COMPREPLY=($(compgen -W "${_all_commands}" -- "${cur}"))
+        if [[ "${cur}" == -* ]]; then
+            COMPREPLY=($(compgen -W "-h --help --no-elevate --use-sudo" -- "${cur}"))
+        else
+            COMPREPLY=($(compgen -W "${_all_commands}" -- "${cur}"))
+        fi
         return
     fi
 
@@ -59,7 +64,7 @@ _chroot_distro() {
                     return ;;
             esac
             if [[ "${cur}" == -* ]]; then
-                COMPREPLY=($(compgen -W "-n --name -a --architecture -q --quiet -h --help" -- "${cur}"))
+                COMPREPLY=($(compgen -W "-n --name --override-alias -a --architecture -q --quiet -h --help" -- "${cur}"))
             elif [[ "${cur}" == /* || "${cur}" == ./* || "${cur}" == ../* ]]; then
                 _filedir
             fi
@@ -105,18 +110,14 @@ _chroot_distro() {
             case "${prev}" in
                 -u|--user)      return ;;
                 -b|--bind)      _filedir;    return ;;
-                --emulator)     _filedir;    return ;;
-                --kernel)       return ;;
                 --hostname)     return ;;
                 -w|--work-dir)  _filedir -d; return ;;
                 -e|--env)       return ;;
             esac
             if [[ "${cur}" == -* ]]; then
-                local opts="-u --user -P --redirect-ports --shared-home --shared-tmp --shared-x11
-                    -b --bind --emulator --kernel --hostname -w --work-dir
-                    -e --env --get-chroot-cmd -h --help"
-                _chroot_distro_is_termux && \
-                    opts+=" --isolated --minimal --no-link2symlink --no-sysvipc --no-kill-on-exit"
+                local opts="-u --user --shared-home --termux-home --shared-tmp --shared-x11
+                    -b --bind --hostname -w --work-dir -e --env --get-chroot-cmd -h --help"
+                _chroot_distro_is_termux && opts+=" --isolated --minimal"
                 COMPREPLY=($(compgen -W "${opts}" -- "${cur}"))
             else
                 COMPREPLY=($(compgen -W "$(_chroot_distro_get_containers)" -- "${cur}"))
@@ -162,7 +163,7 @@ _chroot_distro() {
         # -----------------------------------------------------------------------
         copy)
             if [[ "${cur}" == -* ]]; then
-                COMPREPLY=($(compgen -W "--verbose --quiet --move --recursive --help" -- "${cur}"))
+                COMPREPLY=($(compgen -W "-v --verbose -q --quiet -m --move -r --recursive -h --help" -- "${cur}"))
             else
                 # Support container:path notation: complete container names
                 # (no colon yet) or paths (colon already present → filesystem)
@@ -211,19 +212,24 @@ _chroot_distro() {
             case "${prev}" in
                 -u|--user)      return ;;
                 -b|--bind)      _filedir;    return ;;
-                --emulator)     _filedir;    return ;;
-                --kernel)       return ;;
                 --hostname)     return ;;
                 -w|--work-dir)  _filedir -d; return ;;
                 -e|--env)       return ;;
             esac
             if [[ "${cur}" == -* ]]; then
-                local opts="-u --user -P --redirect-ports --shared-home --shared-tmp --shared-x11
-                    -b --bind --emulator --kernel --hostname -w --work-dir
-                    -e --env --get-chroot-cmd -h --help"
-                _chroot_distro_is_termux && \
-                    opts+=" --isolated --minimal --no-link2symlink --no-sysvipc --no-kill-on-exit"
+                local opts="-u --user --shared-home --termux-home --shared-tmp --shared-x11
+                    -b --bind --hostname -w --work-dir -e --env --get-chroot-cmd -h --help"
+                _chroot_distro_is_termux && opts+=" --isolated --minimal"
                 COMPREPLY=($(compgen -W "${opts}" -- "${cur}"))
+            else
+                COMPREPLY=($(compgen -W "$(_chroot_distro_get_containers)" -- "${cur}"))
+            fi
+            ;;
+
+        # -----------------------------------------------------------------------
+        unmount|umount)
+            if [[ "${cur}" == -* ]]; then
+                COMPREPLY=($(compgen -W "-h --help" -- "${cur}"))
             else
                 COMPREPLY=($(compgen -W "$(_chroot_distro_get_containers)" -- "${cur}"))
             fi
@@ -244,9 +250,6 @@ _chroot_distro() {
                     return ;;
                 --target)
                     return ;;
-                --emulator)
-                    _filedir
-                    return ;;
                 -o|--output)
                     _filedir
                     return ;;
@@ -256,7 +259,7 @@ _chroot_distro() {
             esac
             if [[ "${cur}" == -* ]]; then
                 COMPREPLY=($(compgen -W "-f --file -t --tag --build-arg -a --architecture
-                    --target --emulator -o --output --install-as --no-cache
+                    --target -o --output --install-as --no-cache
                     -v --verbose -q --quiet -h --help" -- "${cur}"))
             else
                 _filedir -d
@@ -277,7 +280,7 @@ _chroot_distro() {
 
         # -----------------------------------------------------------------------
         help)
-            local topics="install remove rename reset login list backup restore clear-cache copy sync run build push"
+            local topics="install remove rename reset login list backup restore clear-cache copy sync run build push unmount"
             COMPREPLY=($(compgen -W "${topics}" -- "${cur}"))
             ;;
 
@@ -285,4 +288,3 @@ _chroot_distro() {
 }
 
 complete -F _chroot_distro chroot-distro
-complete -F _chroot_distro pd
