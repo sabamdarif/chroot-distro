@@ -15,12 +15,15 @@ from chroot_distro.commands.login.env import (
     read_manifest_env,
     resolve_term,
 )
+from chroot_distro.helpers.android import ensure_data_suid, termux_home_owner_ids
 from chroot_distro.commands.login.passwd import (
+    align_user_to_termux_owner,
     find_passwd_by_uid,
     find_user_groups,
     read_group_gid,
     read_passwd_field,
     resolve_rootfs_path,
+    sync_passwd_to_home_owner,
 )
 from chroot_distro.constants import (
     DEFAULT_PATH_ENV,
@@ -292,8 +295,35 @@ def _command_login_inner(container_name: str, args) -> None:
         groups = user["groups"]
         login_home = user["home"]
         login_shell = user["shell"]
+        passwd_home = login_home
 
-        if login_home and login_home != "/":
+        if IS_TERMUX and use_shared_home and not minimal:
+            try:
+                termux_owner_uid, termux_owner_gid = termux_home_owner_ids()
+                if align_user_to_termux_owner(
+                    rootfs,
+                    login_user,
+                    termux_owner_uid,
+                    termux_owner_gid,
+                ):
+                    user = _resolve_login_user(
+                        rootfs, container_name, login_user,
+                    )
+                    login_uid = user["uid"]
+                    login_gid = user["gid"]
+                    groups = user["groups"]
+            except OSError as exc:
+                warn(f"cannot align user for Termux home: {exc}")
+        elif IS_TERMUX and not minimal and login_home:
+            if sync_passwd_to_home_owner(rootfs, login_user, login_home):
+                user = _resolve_login_user(
+                    rootfs, container_name, login_user,
+                )
+                login_uid = user["uid"]
+                login_gid = user["gid"]
+                groups = user["groups"]
+
+        if login_home and login_home != "/" and login_home == passwd_home:
             try:
                 host_home_path = resolve_rootfs_path(rootfs, login_home)
                 home_exists = os.path.isdir(host_home_path)
@@ -353,6 +383,8 @@ def _command_login_inner(container_name: str, args) -> None:
     # 2. Increment session counter and mount if first session
     sess_count = session.increment(container_name)
     if sess_count == 1:
+        if IS_TERMUX and not isolated and not minimal:
+            ensure_data_suid()
         # Pre-clean stale mounts if any
         with contextlib.suppress(Exception):
             mount_manager.unmount_all(rootfs)

@@ -73,3 +73,4 @@ webroot
 .claude/
 .gemini/
 proot-distro/
+/skills-lock.json

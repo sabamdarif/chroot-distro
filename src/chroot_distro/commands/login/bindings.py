@@ -2,7 +2,12 @@ import logging
 import os
 from dataclasses import dataclass
 
-from chroot_distro.constants import IS_TERMUX, TERMUX_APP_PACKAGE, TERMUX_PREFIX
+from chroot_distro.constants import (
+    IS_TERMUX,
+    TERMUX_APP_PACKAGE,
+    TERMUX_HOME,
+    TERMUX_PREFIX,
+)
 
 log = logging.getLogger(__name__)
 
@@ -324,6 +329,8 @@ def get_bindings(
 
     # 2. Android-specific bindings (system and storage)
     if IS_TERMUX and not isolated:
+        if os.path.isdir("/data"):
+            binds.append(("/data", "/data"))
         for src, dst in system_bindings():
             binds.append((src, dst))
         for src, dst in storage_bindings():
@@ -351,8 +358,12 @@ def get_bindings(
     should_share = shared_home or (
         not isolated and not IS_TERMUX and login_home == "/root"
     )
-    if should_share and host_home and os.path.exists(host_home) and login_home:
-        binds.append((host_home, login_home))
+    if should_share:
+        if IS_TERMUX and shared_home:
+            if os.path.isdir(TERMUX_HOME) and login_home:
+                binds.append((TERMUX_HOME, login_home))
+        elif host_home and os.path.exists(host_home) and login_home:
+            binds.append((host_home, login_home))
 
     # 4. Shared Tmp
     if IS_TERMUX:

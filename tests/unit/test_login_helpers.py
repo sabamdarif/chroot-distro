@@ -132,6 +132,81 @@ def test_get_bindings_home_sharing():
         home_binds = [dst for src, dst in binds if dst.endswith("/home/saba")]
         assert len(home_binds) == 1
 
+    # 4. On Termux with --termux-home, bind TERMUX_HOME onto the guest passwd home
+    termux_home = "/data/data/com.termux/files/home"
+    guest_home = "/home/saba"
+    with patch("os.path.exists", return_value=True), \
+         patch("os.path.isdir", return_value=True), \
+         patch("chroot_distro.commands.login.bindings.IS_TERMUX", True), \
+         patch("chroot_distro.commands.login.bindings.TERMUX_HOME", termux_home), \
+         patch("chroot_distro.commands.login.bindings.system_bindings", return_value=[]), \
+         patch("chroot_distro.commands.login.bindings.storage_bindings", return_value=[]), \
+         patch("chroot_distro.commands.login.bindings.android_data_bindings", return_value=[]), \
+         patch("chroot_distro.commands.login.bindings.TERMUX_PREFIX", "/data/data/com.termux/files/usr"):
+        binds = get_bindings(
+            rootfs="/fake/rootfs",
+            minimal=False,
+            isolated=False,
+            shared_home=True,
+            login_home=guest_home,
+        )
+        termux_binds = [
+            (src, dst) for src, dst in binds
+            if src == termux_home and dst.endswith("/home/saba")
+        ]
+        assert len(termux_binds) == 1
+        data_binds = [
+            (src, dst) for src, dst in binds
+            if src == "/data" and dst.endswith("data")
+        ]
+        assert len(data_binds) == 1
+
+
+def test_align_user_to_termux_owner(tmp_path):
+    from chroot_distro.commands.login.passwd import align_user_to_termux_owner
+
+    rootfs = tmp_path / "rootfs"
+    etc = rootfs / "etc"
+    etc.mkdir(parents=True)
+    (etc / "passwd").write_text(
+        "root:x:0:0:root:/root:/bin/bash\n"
+        "saba:x:1000:1000:Saba:/home/saba:/bin/bash\n",
+        encoding="utf-8",
+    )
+    (etc / "shadow").write_text(
+        "root:*:1::::::\n"
+        "saba:*:1::::::\n",
+        encoding="utf-8",
+    )
+    assert align_user_to_termux_owner(str(rootfs), "saba", 10328, 10328)
+    passwd = (etc / "passwd").read_text(encoding="utf-8")
+    assert "saba:x:10328:10328:" in passwd
+    shadow = (etc / "shadow").read_text(encoding="utf-8")
+    assert shadow.startswith("root:")
+    assert "saba:*:10328:10328:" in shadow
+
+
+def test_termux_home_owner_ids(tmp_path):
+    from chroot_distro.helpers.android import termux_home_owner_ids
+
+    home = tmp_path / "home"
+    home.mkdir()
+    uid, gid = os.getuid(), os.getgid()
+    os.chown(home, uid, gid)
+    with patch("chroot_distro.helpers.android.TERMUX_HOME", str(home)):
+        assert termux_home_owner_ids() == (uid, gid)
+
+
+def test_ensure_data_suid_skips_when_already_suid():
+    from chroot_distro.helpers.android import ensure_data_suid
+
+    with patch("chroot_distro.helpers.android.IS_TERMUX", True), \
+         patch(
+             "chroot_distro.helpers.android._read_data_mount",
+             return_value=("tmpfs", "/data", "rw,seclabel,suid"),
+         ):
+        assert ensure_data_suid() is True
+
 
 def test_build_chroot_args_termux_chroot_resolution():
     with patch("chroot_distro.commands.login.chroot_cmd.IS_TERMUX", True), \

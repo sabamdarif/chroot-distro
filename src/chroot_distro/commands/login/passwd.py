@@ -77,6 +77,116 @@ def read_group_gid(rootfs: str, group: str) -> str:
     return ""
 
 
+def set_passwd_uid_gid(
+    rootfs: str,
+    username: str,
+    uid: int,
+    gid: int,
+) -> bool:
+    """Update a user's uid/gid in container ``/etc/passwd`` and ``/etc/shadow``."""
+    try:
+        passwd_path = resolve_rootfs_path(rootfs, "/etc/passwd")
+    except OSError:
+        return False
+
+    uid_s, gid_s = str(uid), str(gid)
+    changed = False
+    try:
+        with open(passwd_path) as fh:
+            lines = fh.readlines()
+    except OSError:
+        return False
+
+    new_lines: list[str] = []
+    for line in lines:
+        parts = line.rstrip("\n").split(":")
+        if not parts or parts[0] != username:
+            new_lines.append(line)
+            continue
+        if len(parts) < 7:
+            new_lines.append(line)
+            continue
+        if parts[2] == uid_s and parts[3] == gid_s:
+            new_lines.append(line)
+            continue
+        parts[2] = uid_s
+        parts[3] = gid_s
+        new_lines.append(":".join(parts) + "\n")
+        changed = True
+
+    if not changed:
+        return False
+
+    try:
+        with open(passwd_path, "w") as fh:
+            fh.writelines(new_lines)
+    except OSError:
+        return False
+
+    try:
+        shadow_path = resolve_rootfs_path(rootfs, "/etc/shadow")
+    except OSError:
+        return True
+
+    try:
+        with open(shadow_path) as fh:
+            shadow_lines = fh.readlines()
+    except OSError:
+        return True
+
+    shadow_out: list[str] = []
+    for line in shadow_lines:
+        parts = line.rstrip("\n").split(":")
+        if parts and parts[0] == username and len(parts) >= 4:
+            parts[2] = uid_s
+            parts[3] = gid_s
+            shadow_out.append(":".join(parts) + "\n")
+        else:
+            shadow_out.append(line)
+
+    try:
+        with open(shadow_path, "w") as fh:
+            fh.writelines(shadow_out)
+    except OSError:
+        pass
+    return True
+
+
+def align_user_to_termux_owner(
+    rootfs: str,
+    username: str,
+    uid: int,
+    gid: int,
+) -> bool:
+    """Map a container passwd user to the Termux app uid/gid for ``--termux-home``.
+
+    proot-distro keeps ``HOME`` as the distro path (e.g. ``/home/saba``) and bind-mounts
+    ``TERMUX_HOME`` onto it; the guest user must use the same numeric ids as the Termux
+    app that owns those files.
+    """
+    return set_passwd_uid_gid(rootfs, username, uid, gid)
+
+
+def sync_passwd_to_home_owner(
+    rootfs: str,
+    username: str,
+    home_guest_path: str,
+) -> bool:
+    """Match passwd uid/gid to the on-disk home directory owner.
+
+    After ``--termux-home``, passwd may still list the Termux app uid while the
+    container's real ``/home/user`` tree on disk is owned by the original distro ids.
+    """
+    if not home_guest_path or home_guest_path == "/":
+        return False
+    try:
+        home_host = resolve_rootfs_path(rootfs, home_guest_path)
+        st = os.stat(home_host)
+    except OSError:
+        return False
+    return set_passwd_uid_gid(rootfs, username, st.st_uid, st.st_gid)
+
+
 def find_user_groups(rootfs: str, username: str, primary_gid: str) -> list[str]:
     """Return a list of group GIDs that the user belongs to (primary + supplementary)."""
     gids = []

@@ -1,6 +1,74 @@
+import logging
 import os
+import subprocess
 
-from chroot_distro.constants import IS_TERMUX
+from chroot_distro.constants import IS_TERMUX, TERMUX_HOME
+from chroot_distro.message import warn
+
+log = logging.getLogger(__name__)
+
+
+def termux_home_owner_ids() -> tuple[int, int]:
+    """Return (uid, gid) of the Termux app user that owns ``TERMUX_HOME``.
+
+    Uses filesystem ownership so this stays correct when ``chroot-distro`` runs
+    elevated (``getuid()`` may be 0 while the home directory is still owned by
+    the Termux app UID).
+    """
+    st = os.stat(TERMUX_HOME)
+    return st.st_uid, st.st_gid
+
+def _read_data_mount() -> tuple[str, str, str] | None:
+    """Return (device, mount_point, options) for host /data, or None."""
+    try:
+        with open("/proc/mounts") as fh:
+            for line in fh:
+                parts = line.split()
+                if len(parts) >= 4 and parts[1] == "/data":
+                    return parts[0], parts[1], parts[3]
+    except OSError:
+        pass
+    return None
+
+
+def ensure_data_suid() -> bool:
+    """Remount host /data with suid when nosuid is set (required for sudo in chroot).
+
+    Only replaces nosuid/nodev/noexec flags; preserves other mount options to avoid
+    EINVAL from stripping lazytime, seclabel, etc.
+    """
+    if not IS_TERMUX:
+        return False
+
+    entry = _read_data_mount()
+    if not entry:
+        log.debug("ensure_data_suid: /data not found in /proc/mounts")
+        return False
+
+    device, _mount_point, opts = entry
+    if "nosuid" not in opts:
+        return True
+
+    new_opts = (
+        opts.replace("nosuid", "suid")
+        .replace("nodev", "dev")
+        .replace("noexec", "exec")
+    )
+    mount_arg = f"remount,{new_opts}"
+    mount_cmd = ["mount", "-o", mount_arg, device, "/data"]
+    try:
+        subprocess.run(
+            mount_cmd,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        log.info("Remounted /data with suid enabled")
+        return True
+    except (OSError, subprocess.CalledProcessError) as exc:
+        warn(f"Failed to enable SUID on /data (remount failed): {exc}")
+        return False
+
 
 ANDROID_GROUPS = {
     "aid_inet": 3003,
