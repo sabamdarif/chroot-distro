@@ -38,7 +38,7 @@ _chroot_distro() {
 
     local -r _all_commands="install add i in ins remove rm rename reset login sh list li ls
         backup bak bkp restore clear-cache clear cl copy cp sync run build push
-        unmount umount help h he hel"
+        unmount umount um help h he hel"
 
     # Complete the subcommand itself
     if [[ ${cword} -eq 1 ]]; then
@@ -227,7 +227,7 @@ _chroot_distro() {
             ;;
 
         # -----------------------------------------------------------------------
-        unmount|umount)
+        unmount|umount|um)
             if [[ "${cur}" == -* ]]; then
                 COMPREPLY=($(compgen -W "-h --help" -- "${cur}"))
             else

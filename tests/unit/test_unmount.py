@@ -21,8 +21,14 @@ def test_parser_unmount():
     assert args.command == "umount"
     assert args.container_name == "debian"
 
+    # Test basic parsing of 'um' alias
+    args = parser.parse_args(["um", "debian"])
+    assert args.command == "um"
+    assert args.container_name == "debian"
+
     # Test alias mapping
     assert ALIAS_TO_CANONICAL["umount"] == "unmount"
+    assert ALIAS_TO_CANONICAL["um"] == "unmount"
 
 
 @patch("chroot_distro.commands.unmount.container_rootfs", return_value="/mock/containers/alpine/rootfs")

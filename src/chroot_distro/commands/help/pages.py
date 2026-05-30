@@ -433,7 +433,7 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
     },
     "unmount": {
         "usage": "unmount CONTAINER",
-        "aliases": ("umount",),
+        "aliases": ("umount", "um"),
         "summary": ("Safely unmount a container, stopping all active sessions and resetting the session counter to 0."),
         "options": [
             ("-h, --help", "Show this help."),

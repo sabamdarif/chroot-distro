@@ -572,7 +572,7 @@ subtrees can always be removed.
 
 ```
 chroot-distro unmount CONTAINER
-Aliases: umount
+Aliases: umount, um
 ```
 
 Safely unmount a container's bind mounts. If chroot processes are still

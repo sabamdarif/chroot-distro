@@ -58,6 +58,7 @@ ALIAS_TO_CANONICAL = {
     "cl": "clear-cache",
     "cp": "copy",
     "umount": "unmount",
+    "um": "unmount",
     "h": "help",
     "he": "help",
     "hel": "help",
@@ -313,7 +314,7 @@ def _run(sub):
 
 
 def _unmount(sub):
-    p = sub.add_parser("unmount", aliases=["umount"], add_help=False)
+    p = sub.add_parser("unmount", aliases=["umount", "um"], add_help=False)
     p._cd_command = "unmount"
     p.add_argument("container_name", nargs="?", default=None)
     p.add_argument("-h", "--help", action="store_true")
