@@ -97,3 +97,40 @@ def register_android_ids(rootfs: str) -> None:
                     )
         except OSError:
             pass
+
+    # Ensure Android-specific groups exist in /etc/group
+    android_groups = [
+        ("aid_inet", "aid_inet:x:3003:"),
+        ("aid_net_raw", "aid_net_raw:x:3004:"),
+        ("aid_bluetooth", "aid_bluetooth:x:1002:"),
+        ("aid_graphics", "aid_graphics:x:1003:"),
+        ("aid_input", "aid_input:x:1004:"),
+        ("aid_audio", "aid_audio:x:1005:"),
+        ("aid_video", "aid_video:x:1006:"),
+        ("aid_drm", "aid_drm:x:1007:"),
+        ("aid_wifi", "aid_wifi:x:1010:"),
+        ("aid_usb", "aid_usb:x:1018:"),
+        ("aid_bt_admin", "aid_bt_admin:x:3001:"),
+        ("aid_bt_net", "aid_bt_net:x:3002:"),
+        ("aid_admin", "aid_admin:x:3005:"),
+    ]
+
+    if os.path.exists(group_path):
+        existing_groups = set()
+        try:
+            with open(group_path, "r") as fh:
+                for line in fh:
+                    parts = line.strip().split(":")
+                    if parts and parts[0]:
+                        existing_groups.add(parts[0])
+        except OSError:
+            pass
+
+        try:
+            with open(group_path, "a") as fh:
+                for gname, gline in android_groups:
+                    if gname not in existing_groups:
+                        fh.write(gline + "\n")
+        except OSError:
+            pass
+
