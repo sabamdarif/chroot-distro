@@ -91,7 +91,7 @@ def test_build_chroot_args_no_workdir():
 def test_get_bindings_home_sharing():
     from chroot_distro.commands.login.bindings import get_bindings
 
-    # 1. With login_home="/root", it should automatically share the home directory
+    # 1. Root without --shared-home: no host home bind (matches proot-distro)
     with patch("os.path.exists", return_value=True), \
          patch("chroot_distro.commands.login.bindings.IS_TERMUX", False):
         binds = get_bindings(
@@ -101,7 +101,19 @@ def test_get_bindings_home_sharing():
             shared_home=False,
             login_home="/root"
         )
-        # Check that "/root" is bind-mounted (mapped to rootfs path)
+        home_binds = [dst for src, dst in binds if dst.endswith("/root")]
+        assert len(home_binds) == 0
+
+    # 1b. Root with --shared-home: host home bind-mounted to /root
+    with patch("os.path.exists", return_value=True), \
+         patch("chroot_distro.commands.login.bindings.IS_TERMUX", False):
+        binds = get_bindings(
+            rootfs="/fake/rootfs",
+            minimal=False,
+            isolated=False,
+            shared_home=True,
+            login_home="/root"
+        )
         home_binds = [dst for src, dst in binds if dst.endswith("/root")]
         assert len(home_binds) == 1
 
@@ -160,6 +172,115 @@ def test_get_bindings_home_sharing():
             if src == "/data" and dst.endswith("data")
         ]
         assert len(data_binds) == 1
+
+
+def test_resolve_host_home_uses_sudo_user_not_container_name():
+    from chroot_distro.commands.login.passwd import resolve_host_home
+
+    with patch("os.getuid", return_value=0), \
+         patch.dict(os.environ, {
+             "HOME": "/root",
+             "USER": "root",
+             "SUDO_USER": "sabamdarif",
+         }, clear=False), \
+         patch("pwd.getpwnam", side_effect=lambda n: type(
+             "pw", (), {"pw_dir": f"/host/home/{n}"}
+         )()):
+        assert resolve_host_home("saba") == "/host/home/sabamdarif"
+        assert resolve_host_home("root") == "/root"
+
+
+def test_resolve_host_home_returns_none_for_unknown_guest_user():
+    from chroot_distro.commands.login.passwd import resolve_host_home
+
+    with patch("os.getuid", return_value=0), \
+         patch.dict(os.environ, {"HOME": "/root", "USER": "root"}, clear=False), \
+         patch("pwd.getpwnam", side_effect=KeyError("missing")):
+        assert resolve_host_home("saba") is None
+        assert resolve_host_home("root") == "/root"
+
+
+def test_sync_passwd_to_path_owner(tmp_path):
+    from chroot_distro.commands.login.passwd import sync_passwd_to_path_owner
+
+    rootfs = tmp_path / "rootfs"
+    etc = rootfs / "etc"
+    etc.mkdir(parents=True)
+    host_dir = tmp_path / "hosthome"
+    host_dir.mkdir()
+    uid, gid = os.getuid(), os.getgid()
+    os.chown(host_dir, uid, gid)
+    (etc / "passwd").write_text(
+        "ubuntu:x:1000:1000:Ubuntu:/home/ubuntu:/bin/bash\n"
+        "saba:x:1001:1001:Saba:/home/saba:/bin/bash\n",
+        encoding="utf-8",
+    )
+    assert sync_passwd_to_path_owner(str(rootfs), "saba", str(host_dir))
+    passwd = (etc / "passwd").read_text(encoding="utf-8")
+    assert f"saba:x:{uid}:{gid}:" in passwd
+    assert f"ubuntu:x:{uid}:{gid}:" not in passwd
+
+
+def test_sync_passwd_to_path_owner_skips_root(tmp_path):
+    from chroot_distro.commands.login.passwd import sync_passwd_to_path_owner
+
+    rootfs = tmp_path / "rootfs"
+    etc = rootfs / "etc"
+    etc.mkdir(parents=True)
+    host_dir = tmp_path / "hosthome"
+    host_dir.mkdir()
+    os.chown(host_dir, os.getuid(), os.getgid())
+    (etc / "passwd").write_text(
+        "root:x:0:0:root:/root:/bin/bash\n",
+        encoding="utf-8",
+    )
+    assert not sync_passwd_to_path_owner(str(rootfs), "root", str(host_dir))
+    assert (etc / "passwd").read_text(encoding="utf-8") == (
+        "root:x:0:0:root:/root:/bin/bash\n"
+    )
+
+
+def test_release_passwd_uid_conflicts(tmp_path):
+    from chroot_distro.commands.login.passwd import (
+        release_passwd_uid_conflicts,
+        set_passwd_uid_gid,
+    )
+
+    rootfs = tmp_path / "rootfs"
+    etc = rootfs / "etc"
+    etc.mkdir(parents=True)
+    (etc / "passwd").write_text(
+        "root:x:1000:1000:root:/root:/bin/bash\n"
+        "ubuntu:x:1000:1000:Ubuntu:/home/ubuntu:/bin/bash\n"
+        "saba:x:1001:1001:Saba:/home/saba:/bin/bash\n",
+        encoding="utf-8",
+    )
+    uid, gid = 1000, 1000
+    set_passwd_uid_gid(str(rootfs), "saba", uid, gid)
+    release_passwd_uid_conflicts(str(rootfs), "saba", uid, gid)
+    passwd = (etc / "passwd").read_text(encoding="utf-8")
+    assert f"saba:x:{uid}:{gid}:" in passwd
+    assert "root:x:0:0:" in passwd
+    assert f"ubuntu:x:{uid}:{gid}:" not in passwd
+
+
+def test_sync_passwd_to_home_owner(tmp_path):
+    from chroot_distro.commands.login.passwd import sync_passwd_to_home_owner
+
+    rootfs = tmp_path / "rootfs"
+    home = rootfs / "home" / "saba"
+    home.mkdir(parents=True)
+    uid, gid = os.getuid(), os.getgid()
+    os.chown(home, uid, gid)
+    etc = rootfs / "etc"
+    etc.mkdir()
+    (etc / "passwd").write_text(
+        "saba:x:10328:10328:Saba:/home/saba:/bin/bash\n",
+        encoding="utf-8",
+    )
+    assert sync_passwd_to_home_owner(str(rootfs), "saba", "/home/saba")
+    passwd = (etc / "passwd").read_text(encoding="utf-8")
+    assert f"saba:x:{uid}:{gid}:" in passwd
 
 
 def test_align_user_to_termux_owner(tmp_path):

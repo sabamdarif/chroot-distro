@@ -23,7 +23,10 @@ from chroot_distro.commands.login.passwd import (
     read_group_gid,
     read_passwd_field,
     resolve_rootfs_path,
+    resolve_host_home,
+    set_passwd_uid_gid,
     sync_passwd_to_home_owner,
+    sync_passwd_to_path_owner,
 )
 from chroot_distro.constants import (
     DEFAULT_PATH_ENV,
@@ -297,15 +300,41 @@ def _command_login_inner(container_name: str, args) -> None:
         login_shell = user["shell"]
         passwd_home = login_home
 
-        if IS_TERMUX and use_shared_home and not minimal:
+        if use_shared_home and not minimal:
             try:
-                termux_owner_uid, termux_owner_gid = termux_home_owner_ids()
-                if align_user_to_termux_owner(
-                    rootfs,
-                    login_user,
-                    termux_owner_uid,
-                    termux_owner_gid,
-                ):
+                if IS_TERMUX:
+                    termux_owner_uid, termux_owner_gid = termux_home_owner_ids()
+                    aligned = align_user_to_termux_owner(
+                        rootfs,
+                        login_user,
+                        termux_owner_uid,
+                        termux_owner_gid,
+                    )
+                else:
+                    host_home = resolve_host_home(login_user)
+                    if not host_home or not os.path.isdir(host_home):
+                        crit_error(
+                            f"cannot determine host home for --shared-home "
+                            f"with user '{login_user}'. Run via sudo from your "
+                            f"normal user account (so SUDO_USER is set), or add "
+                            f"--bind HOST_HOME:{login_home}."
+                        )
+                        sys.exit(1)
+                    if login_user == "root":
+                        set_passwd_uid_gid(rootfs, "root", 0, 0)
+                        aligned = True
+                    else:
+                        aligned = sync_passwd_to_path_owner(
+                            rootfs, login_user, host_home,
+                        )
+                        if not aligned:
+                            crit_error(
+                                f"refusing to map user '{login_user}' to root for "
+                                f"--shared-home (host home resolved to '{host_home}'). "
+                                f"Run via sudo from your normal user account."
+                            )
+                            sys.exit(1)
+                if aligned:
                     user = _resolve_login_user(
                         rootfs, container_name, login_user,
                     )
@@ -313,8 +342,8 @@ def _command_login_inner(container_name: str, args) -> None:
                     login_gid = user["gid"]
                     groups = user["groups"]
             except OSError as exc:
-                warn(f"cannot align user for Termux home: {exc}")
-        elif IS_TERMUX and not minimal and login_home:
+                warn(f"cannot align user for shared home: {exc}")
+        elif not use_shared_home and not minimal and login_home:
             if sync_passwd_to_home_owner(rootfs, login_user, login_home):
                 user = _resolve_login_user(
                     rootfs, container_name, login_user,
@@ -377,6 +406,7 @@ def _command_login_inner(container_name: str, args) -> None:
         shared_x11=shared_x11,
         custom_binds=custom_binds,
         login_home=login_home or "/root",
+        login_user=login_user,
         dist_type=dist_type,
     )
 

@@ -2,6 +2,7 @@ import logging
 import os
 from dataclasses import dataclass
 
+from chroot_distro.commands.login.passwd import resolve_host_home
 from chroot_distro.constants import (
     IS_TERMUX,
     TERMUX_APP_PACKAGE,
@@ -303,6 +304,7 @@ def get_bindings(
     shared_x11: bool = False,
     custom_binds: list[str] | None = None,
     login_home: str = "/root",
+    login_user: str = "root",
     dist_type: str = "normal",
 ) -> list[tuple[str, str]]:
     """Assemble all (source, target_in_rootfs) bind mounts based on configurations."""
@@ -341,28 +343,15 @@ def get_bindings(
             binds.append((TERMUX_PREFIX, TERMUX_PREFIX))
 
     # 3. Shared Home Directory
-    # Default behavior is sharing home in non-isolated/non-minimal mode for the root user.
-    # For non-root guest users, we only share home if explicitly requested via shared_home.
-    # We also resolve the host home directory, taking sudo into account.
-    host_home = None
-    sudo_user = os.environ.get("SUDO_USER")
-    if sudo_user:
-        try:
-            import pwd
-            host_home = pwd.getpwnam(sudo_user).pw_dir
-        except Exception:
-            pass
-    if not host_home:
-        host_home = os.environ.get("HOME") or os.path.expanduser("~")
+    # Only when --shared-home / --termux-home is set (matches proot-distro).
+    host_home = resolve_host_home(login_user)
 
-    should_share = shared_home or (
-        not isolated and not IS_TERMUX and login_home == "/root"
-    )
+    should_share = shared_home
     if should_share:
         if IS_TERMUX and shared_home:
             if os.path.isdir(TERMUX_HOME) and login_home:
                 binds.append((TERMUX_HOME, login_home))
-        elif host_home and os.path.exists(host_home) and login_home:
+        elif host_home and os.path.isdir(host_home) and login_home:
             binds.append((host_home, login_home))
 
     # 4. Shared Tmp
