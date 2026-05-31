@@ -89,7 +89,7 @@ effective user for mutating operations must be **root** (see
 3. Install Chroot-Distro:
 
 ```sh
-pkg install python
+pkg install python mount-utils
 pip install chroot-distro
 ```
 
