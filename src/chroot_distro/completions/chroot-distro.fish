@@ -150,8 +150,6 @@ complete -c chroot-distro -f -n '__fish_seen_subcommand_from login; and __chroot
 complete -c chroot-distro -f -n '__fish_seen_subcommand_from login' \
     -l shared-home        -d 'Bind host home into guest home'
 complete -c chroot-distro -f -n '__fish_seen_subcommand_from login' \
-    -l termux-home        -d 'Same as --shared-home (Termux alias)'
-complete -c chroot-distro -f -n '__fish_seen_subcommand_from login' \
     -l shared-tmp         -d 'Share /tmp with the host'
 complete -c chroot-distro -f -n '__fish_seen_subcommand_from login' \
     -l shared-x11         -d 'Share the X11 socket (/tmp/.X11-unix)'
@@ -258,8 +256,6 @@ complete -c chroot-distro -f -n '__fish_seen_subcommand_from run; and __chroot_d
     -l minimal            -d 'Bare /dev, /proc, /sys only'
 complete -c chroot-distro -f -n '__fish_seen_subcommand_from run' \
     -l shared-home        -d 'Bind host home into guest home'
-complete -c chroot-distro -f -n '__fish_seen_subcommand_from run' \
-    -l termux-home        -d 'Same as --shared-home (Termux alias)'
 complete -c chroot-distro -f -n '__fish_seen_subcommand_from run' \
     -l shared-tmp         -d 'Share /tmp with the host'
 complete -c chroot-distro -f -n '__fish_seen_subcommand_from run' \

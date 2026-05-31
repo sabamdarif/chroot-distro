@@ -414,7 +414,6 @@ chroot-distro login ubuntu --get-chroot-cmd
 | `--isolated` | Reduce host exposure. On Termux: skip Android system, storage, and `$PREFIX` binds unless you opt in with `--shared-*` or `--bind`. On Linux: skip default `/tmp` and `/tmp/.X11-unix` unless `--shared-tmp` or `--shared-x11`. Mutually exclusive with `--minimal`. |
 | `--minimal` | Bare minimum chroot: core pseudo-filesystems only (`/dev`, `/proc`, `/sys`, plus `/run`, `/dev/pts`, `/dev/shm` when present). Stripped guest environment. Mutually exclusive with `--isolated`. |
 | `--shared-home` | Bind the invoking user's host home into the guest home (or `/root` for root). On Termux, binds `TERMUX_HOME`. |
-| `--termux-home` | Alias for `--shared-home` (proot-distro compatibility). |
 | `--shared-tmp` | Bind host tmp (`/tmp` on Linux, `$PREFIX/tmp` on Termux) to `/tmp` in the guest. On Linux, included by default unless `--isolated`. |
 | `--shared-x11` | Bind the host X11 socket directory to `/tmp/.X11-unix` in the guest. On Linux, also forwards `DISPLAY`, `XAUTHORITY`, and `XDG_RUNTIME_DIR` from the invoking user's session and bind-mounts the authority file when needed. Included by default unless `--isolated`. On Termux, opt-in only (termux-x11 often works with `--shared-tmp` alone). |
 | `-b`, `--bind SRC[:DST]` | Bind-mount a custom host path (repeatable). `DST` must be an absolute guest path. |
@@ -924,7 +923,7 @@ Completion scripts for Bash, Zsh, and Fish live in
 
 They complete subcommands, global flags (`--no-elevate`, `--use-sudo`),
 and per-command options (including `login`/`run` flags such as
-`--shared-home`, `--termux-home`, `--get-chroot-cmd`, and Termux-only
+`--shared-home`, `--get-chroot-cmd`, and Termux-only
 `--isolated` / `--minimal`).
 
 If your shell does not pick them up automatically, install them manually:

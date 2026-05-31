@@ -144,7 +144,7 @@ def test_get_bindings_home_sharing():
         home_binds = [dst for src, dst in binds if dst.endswith("/home/saba")]
         assert len(home_binds) == 1
 
-    # 4. On Termux with --termux-home, bind TERMUX_HOME onto the guest passwd home
+    # 4. On Termux with --shared-home, bind TERMUX_HOME onto the guest passwd home
     termux_home = "/data/data/com.termux/files/home"
     guest_home = "/home/saba"
     with patch("os.path.exists", return_value=True), \

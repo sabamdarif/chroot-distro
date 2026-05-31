@@ -157,7 +157,7 @@ def align_user_to_termux_owner(
     uid: int,
     gid: int,
 ) -> bool:
-    """Map a container passwd user to the Termux app uid/gid for ``--termux-home``.
+    """Map a container passwd user to the Termux app uid/gid for ``--shared-home``.
 
     proot-distro keeps ``HOME`` as the distro path (e.g. ``/home/saba``) and bind-mounts
     ``TERMUX_HOME`` onto it; the guest user must use the same numeric ids as the Termux
@@ -294,7 +294,7 @@ def sync_passwd_to_home_owner(
 ) -> bool:
     """Match passwd uid/gid to the on-disk home directory owner inside rootfs.
 
-    After ``--termux-home``, passwd may still list the Termux app uid while the
+    After ``--shared-home`` on Termux, passwd may still list the Termux app uid while the
     container's real ``/home/user`` tree on disk is owned by the original distro ids.
     """
     if not home_guest_path or home_guest_path == "/":

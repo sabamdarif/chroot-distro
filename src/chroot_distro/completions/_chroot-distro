@@ -129,8 +129,7 @@ _chroot_distro() {
                     _login_args=(
                         '(-h --help)'{-h,--help}'[show help]'
                         '(-u --user)'{-u,--user}'[run as this user (default\: root)]:user'
-                        '(--shared-home --termux-home)--shared-home[bind host home into guest home]'
-                        '(--shared-home --termux-home)--termux-home[same as --shared-home; Termux alias]'
+                        '--shared-home[bind host home into guest home]'
                         '--shared-tmp[share /tmp with the host]'
                         '--shared-x11[share the X11 socket (/tmp/.X11-unix)]'
                         '*'{-b,--bind}'[bind-mount PATH\[:DEST\] into the container]:path:_files'
@@ -213,8 +212,7 @@ _chroot_distro() {
                     _run_args=(
                         '(-h --help)'{-h,--help}'[show help]'
                         '(-u --user)'{-u,--user}'[run as this user (default\: root)]:user'
-                        '(--shared-home --termux-home)--shared-home[bind host home into guest home]'
-                        '(--shared-home --termux-home)--termux-home[same as --shared-home; Termux alias]'
+                        '--shared-home[bind host home into guest home]'
                         '--shared-tmp[share /tmp with the host]'
                         '--shared-x11[share the X11 socket (/tmp/.X11-unix)]'
                         '*'{-b,--bind}'[bind-mount PATH\[:DEST\] into the container]:path:_files'

@@ -361,7 +361,7 @@ def get_bindings(
             binds.append((TERMUX_PREFIX, TERMUX_PREFIX))
 
     # 3. Shared Home Directory
-    # Only when --shared-home / --termux-home is set (matches proot-distro).
+    # Only when --shared-home is set (matches proot-distro).
     host_home = resolve_host_home(login_user)
 
     should_share = shared_home

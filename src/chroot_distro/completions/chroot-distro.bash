@@ -115,7 +115,7 @@ _chroot_distro() {
                 -e|--env)       return ;;
             esac
             if [[ "${cur}" == -* ]]; then
-                local opts="-u --user --shared-home --termux-home --shared-tmp --shared-x11
+                local opts="-u --user --shared-home --shared-tmp --shared-x11
                     -b --bind --hostname -w --work-dir -e --env --get-chroot-cmd -h --help"
                 _chroot_distro_is_termux && opts+=" --isolated --minimal"
                 COMPREPLY=($(compgen -W "${opts}" -- "${cur}"))
@@ -217,7 +217,7 @@ _chroot_distro() {
                 -e|--env)       return ;;
             esac
             if [[ "${cur}" == -* ]]; then
-                local opts="-u --user --shared-home --termux-home --shared-tmp --shared-x11
+                local opts="-u --user --shared-home --shared-tmp --shared-x11
                     -b --bind --hostname -w --work-dir -e --env --get-chroot-cmd -h --help"
                 _chroot_distro_is_termux && opts+=" --isolated --minimal"
                 COMPREPLY=($(compgen -W "${opts}" -- "${cur}"))
