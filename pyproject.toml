@@ -108,3 +108,6 @@ strict_equality = true
 module = "tests.*"
 disallow_untyped_defs = false
 disallow_incomplete_defs = false
+
+[dependency-groups]
+dev = ["build>=1.5.0", "twine>=6.2.0"]
