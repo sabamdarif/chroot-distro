@@ -45,13 +45,14 @@ def test_unmount_container_not_installed(mock_crit_error, mock_isdir, mock_rootf
     mock_crit_error.assert_called_once_with("container 'alpine' is not installed.")
 
 
+@patch("chroot_distro.commands.unmount.namespace.get_live_holder", return_value=None)
 @patch("chroot_distro.commands.unmount.container_rootfs", return_value="/mock/containers/alpine/rootfs")
 @patch("os.path.isdir", return_value=True)
 @patch("chroot_distro.commands.unmount.ContainerLock")
 @patch("chroot_distro.commands.unmount.session")
 @patch("chroot_distro.commands.unmount.mount_manager")
 @patch("chroot_distro.commands.unmount.log_info")
-def test_unmount_no_active_sessions(mock_log, mock_mount, mock_session, mock_lock, mock_isdir, mock_rootfs):
+def test_unmount_no_active_sessions(mock_log, mock_mount, mock_session, mock_lock, mock_isdir, mock_rootfs, *_mocks):
     args = MagicMock()
     args.container_name = "alpine"
 
@@ -62,10 +63,11 @@ def test_unmount_no_active_sessions(mock_log, mock_mount, mock_session, mock_loc
 
     mock_lock.assert_called_once_with("alpine", exclusive=True, command="unmount")
     mock_session.reset.assert_called_once_with("alpine")
-    mock_mount.unmount_all.assert_called_once_with("/mock/containers/alpine/rootfs")
+    mock_mount.unmount_all.assert_called_once_with("/mock/containers/alpine/rootfs", holder=None)
     mock_log.assert_any_call("Container 'alpine' successfully unmounted.")
 
 
+@patch("chroot_distro.commands.unmount.namespace.get_live_holder", return_value=None)
 @patch("chroot_distro.commands.unmount.container_rootfs", return_value="/mock/containers/alpine/rootfs")
 @patch("os.path.isdir", return_value=True)
 @patch("chroot_distro.commands.unmount.ContainerLock")
@@ -74,7 +76,9 @@ def test_unmount_no_active_sessions(mock_log, mock_mount, mock_session, mock_loc
 @patch("chroot_distro.commands.unmount.log_info")
 @patch("os.kill")
 @patch("chroot_distro.commands.unmount.time")
-def test_unmount_with_active_sessions_sigterm(mock_time, mock_kill, mock_log, mock_mount, mock_session, mock_lock, mock_isdir, mock_rootfs):
+def test_unmount_with_active_sessions_sigterm(
+    mock_time, mock_kill, mock_log, mock_mount, mock_session, mock_lock, mock_isdir, mock_rootfs, *_mocks
+):
     """Processes exit after SIGTERM — no SIGKILL needed."""
     args = MagicMock()
     args.container_name = "alpine"
@@ -99,10 +103,11 @@ def test_unmount_with_active_sessions_sigterm(mock_time, mock_kill, mock_log, mo
         call(456, signal.SIGTERM),
     ])
     mock_session.reset.assert_called_once_with("alpine")
-    mock_mount.unmount_all.assert_called_once_with("/mock/containers/alpine/rootfs")
+    mock_mount.unmount_all.assert_called_once_with("/mock/containers/alpine/rootfs", holder=None)
     mock_log.assert_any_call("Container 'alpine' successfully unmounted.")
 
 
+@patch("chroot_distro.commands.unmount.namespace.get_live_holder", return_value=None)
 @patch("chroot_distro.commands.unmount.container_rootfs", return_value="/mock/containers/alpine/rootfs")
 @patch("os.path.isdir", return_value=True)
 @patch("chroot_distro.commands.unmount.ContainerLock")
@@ -111,7 +116,9 @@ def test_unmount_with_active_sessions_sigterm(mock_time, mock_kill, mock_log, mo
 @patch("chroot_distro.commands.unmount.log_info")
 @patch("os.kill")
 @patch("chroot_distro.commands.unmount.time")
-def test_unmount_with_active_sessions_sigkill(mock_time, mock_kill, mock_log, mock_mount, mock_session, mock_lock, mock_isdir, mock_rootfs):
+def test_unmount_with_active_sessions_sigkill(
+    mock_time, mock_kill, mock_log, mock_mount, mock_session, mock_lock, mock_isdir, mock_rootfs, *_mocks
+):
     """Process survives SIGTERM; falls back to SIGKILL."""
     args = MagicMock()
     args.container_name = "alpine"
@@ -143,5 +150,31 @@ def test_unmount_with_active_sessions_sigkill(mock_time, mock_kill, mock_log, mo
         call(123, signal.SIGKILL),
     ])
     mock_session.reset.assert_called_once_with("alpine")
-    mock_mount.unmount_all.assert_called_once_with("/mock/containers/alpine/rootfs")
+    mock_mount.unmount_all.assert_called_once_with("/mock/containers/alpine/rootfs", holder=None)
     mock_log.assert_any_call("Container 'alpine' successfully unmounted.")
+
+
+@patch("chroot_distro.commands.unmount.namespace.clear_isolation_mode")
+@patch("chroot_distro.commands.unmount.namespace.release_holder")
+@patch("chroot_distro.commands.unmount.namespace.get_live_holder")
+@patch("chroot_distro.commands.unmount.container_rootfs", return_value="/mock/containers/alpine/rootfs")
+@patch("os.path.isdir", return_value=True)
+@patch("chroot_distro.commands.unmount.ContainerLock")
+@patch("chroot_distro.commands.unmount.session")
+@patch("chroot_distro.commands.unmount.mount_manager")
+@patch("chroot_distro.commands.unmount.log_info")
+def test_unmount_releases_namespace_holder(
+    mock_log, mock_mount, mock_session, mock_lock, mock_isdir, mock_rootfs, mock_get_holder, mock_release, mock_clear
+):
+    holder = MagicMock()
+    mock_get_holder.return_value = holder
+    mock_session.get_active_chroot_pids.return_value = []
+    mock_mount.get_active_mounts.return_value = []
+
+    args = MagicMock()
+    args.container_name = "alpine"
+    command_unmount(args)
+
+    mock_mount.unmount_all.assert_called_once_with("/mock/containers/alpine/rootfs", holder=holder)
+    mock_release.assert_called_once_with("alpine")
+    mock_clear.assert_called_once_with("alpine")

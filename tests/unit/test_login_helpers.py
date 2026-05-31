@@ -346,10 +346,25 @@ def test_special_mounts_default():
         
         # In non-Termux/Linux by default, it should at least return devpts
         assert len(specials) >= 1
+        assert not any(s.fstype == "proc" for s in specials)
         devpts_mount = [s for s in specials if s.fstype == "devpts"]
         assert len(devpts_mount) == 1
         assert devpts_mount[0].target == "/dev/pts"
         assert devpts_mount[0].optional is False
+
+
+def test_special_mounts_isolated_includes_proc():
+    from chroot_distro.commands.login.bindings import get_special_mounts
+
+    with patch("os.path.exists", return_value=False), \
+         patch("chroot_distro.commands.login.bindings.IS_TERMUX", False), \
+         patch("chroot_distro.commands.login.bindings._fs_supported", return_value=True):
+        specials = get_special_mounts("/fake/rootfs", isolated=True)
+        proc_mounts = [s for s in specials if s.fstype == "proc"]
+        assert len(proc_mounts) == 1
+        assert proc_mounts[0].target == "/proc"
+        assert proc_mounts[0].optional is False
+        assert specials[0].fstype == "proc"
 
 
 def test_special_mounts_termux_all():
@@ -384,6 +399,7 @@ def test_get_bindings_isolated_linux():
             shared_x11=False,
         )
         srcs = {src for src, _ in binds}
+        assert "/proc" not in srcs
         assert "/tmp" not in srcs
         assert "/tmp/.X11-unix" not in srcs
 

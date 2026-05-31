@@ -9,9 +9,11 @@ from chroot_distro.constants import (
 
 _ISOLATED_OPT = (
     "--isolated",
-    "Enable Isolated Mode. On Termux, skip Android system, storage, and "
-    "$PREFIX bindings unless requested with --shared-* or --bind. On Linux, "
-    "skip default /tmp and /tmp/.X11-unix unless --shared-tmp or --shared-x11.",
+    "Enable Isolated Mode: fewer host bind mounts plus Linux namespace isolation "
+    "(mount, PID, UTS, IPC via unshare/nsenter). On Termux, skip Android system, "
+    "storage, and $PREFIX bindings unless requested with --shared-* or --bind. "
+    "On Linux, skip default /tmp and /tmp/.X11-unix unless --shared-tmp or "
+    "--shared-x11. Not a full container runtime (no network namespace).",
 )
 _MINIMAL_OPT = (
     "--minimal",

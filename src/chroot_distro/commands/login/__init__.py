@@ -6,6 +6,7 @@ import subprocess
 import sys
 
 import chroot_distro.helpers.mount_manager as mount_manager
+import chroot_distro.helpers.namespace as namespace
 import chroot_distro.helpers.session as session
 from chroot_distro.commands.login import bindings
 from chroot_distro.commands.login.chroot_cmd import build_chroot_args
@@ -36,6 +37,7 @@ from chroot_distro.constants import (
     TERMUX_PREFIX,
 )
 from chroot_distro.helpers.android import ensure_data_suid, termux_home_owner_ids
+from chroot_distro.helpers.namespace import NamespaceError
 from chroot_distro.helpers.x11 import (
     guest_can_read_auth,
     provision_guest_xauthority,
@@ -481,21 +483,50 @@ def _command_login_inner(container_name: str, args) -> None:
         dist_type=dist_type,
     )
 
+    use_namespaces = isolated and not minimal
+    holder = None
+
+    try:
+        host_mounts_exist = bool(mount_manager.get_active_mounts(rootfs))
+        namespace.check_isolation_conflicts(
+            container_name,
+            use_namespaces=use_namespaces,
+            host_mounts_exist=host_mounts_exist,
+        )
+    except NamespaceError as exc:
+        crit_error(str(exc))
+        sys.exit(1)
+
     # 2. Increment session counter and mount if first session
     sess_count = session.increment(container_name)
     if sess_count == 1:
+        if use_namespaces:
+            try:
+                holder = namespace.acquire_holder(container_name)
+                namespace.write_isolation_mode(container_name, namespace.ISOLATION_MODE_NAMESPACE)
+                if not namespace.make_mount_private(holder):
+                    warn("Failed to set mount propagation to rprivate in isolated namespace.")
+            except NamespaceError as exc:
+                session.decrement(container_name)
+                crit_error(str(exc))
+                sys.exit(1)
+        else:
+            namespace.write_isolation_mode(container_name, namespace.ISOLATION_MODE_HOST)
+
         if IS_TERMUX and not isolated and not minimal:
             ensure_data_suid()
         # Pre-clean stale mounts if any
         with contextlib.suppress(Exception):
-            mount_manager.unmount_all(rootfs)
+            mount_manager.unmount_all(rootfs, holder=holder)
         # Phase 1: bind mounts
         for src, dst in resolved_binds:
             try:
-                mount_manager.safe_mount(src, dst)
+                mount_manager.safe_mount(src, dst, holder=holder)
             except Exception as e:
-                # Clean up and rollback
-                mount_manager.unmount_all(rootfs)
+                mount_manager.unmount_all(rootfs, holder=holder)
+                if holder is not None:
+                    namespace.release_holder(container_name)
+                    namespace.clear_isolation_mode(container_name)
                 session.decrement(container_name)
                 crit_error(f"Failed to mount bindings: {e}")
                 sys.exit(1)
@@ -504,18 +535,30 @@ def _command_login_inner(container_name: str, args) -> None:
         try:
             specials = bindings.get_special_mounts(
                 rootfs,
+                isolated=use_namespaces,
                 enable_usb=not minimal,
                 enable_binfmt=not minimal,
                 enable_docker_cgroup=not minimal,
                 enable_shm=not minimal,
             )
             for sm in specials:
-                mount_manager.apply_special_mount(rootfs, sm)
+                mount_manager.apply_special_mount(rootfs, sm, holder=holder)
         except Exception as e:
-            # Clean up and rollback
-            mount_manager.unmount_all(rootfs)
+            mount_manager.unmount_all(rootfs, holder=holder)
+            if holder is not None:
+                namespace.release_holder(container_name)
+                namespace.clear_isolation_mode(container_name)
             session.decrement(container_name)
             crit_error(f"Failed to apply special mounts: {e}")
+            sys.exit(1)
+    elif use_namespaces:
+        holder = namespace.get_live_holder(container_name)
+        if holder is None:
+            session.decrement(container_name)
+            crit_error(
+                f"Namespace holder for '{container_name}' is not running. "
+                f"Run '{PROGRAM_NAME} unmount {container_name}' and try again."
+            )
             sys.exit(1)
 
     chroot_args = build_chroot_args(
@@ -527,30 +570,34 @@ def _command_login_inner(container_name: str, args) -> None:
         inner_cmd=inner,
     )
 
+    exec_argv = chroot_args
+    if holder is not None:
+        exec_argv = holder.run_argv(chroot_args)
+
     if getattr(args, "get_chroot_cmd", False):
-        # Print command line representation
         parts = ["env", "-i"]
         for k, v in child_env.items():
-            # escape values
             parts.append(f"{k}={shlex.quote(v)}")
-        parts.extend(shlex.quote(a) for a in chroot_args)
+        parts.extend(shlex.quote(a) for a in exec_argv)
         print(" \\\n  ".join(parts))
 
-        # Decrement counter since we didn't actually login
         sess_count = session.decrement(container_name)
         if sess_count == 0:
-            mount_manager.unmount_all(rootfs)
+            mount_manager.unmount_all(rootfs, holder=holder)
+            if holder is not None:
+                namespace.release_holder(container_name)
+                namespace.clear_isolation_mode(container_name)
         sys.exit(0)
 
-    # 4. Run the chroot process using subprocess.run, preserving the environment
-    # child_env is passed directly to env parameter of subprocess.run
     try:
-        subprocess.run(chroot_args, env=child_env, check=False)
+        subprocess.run(exec_argv, env=child_env, check=False)
     finally:
-        # Decrement session counter and unmount if last session
         sess_count = session.decrement(container_name)
         if sess_count == 0:
-            mount_manager.unmount_all(rootfs)
+            mount_manager.unmount_all(rootfs, holder=holder)
+            if holder is not None:
+                namespace.release_holder(container_name)
+                namespace.clear_isolation_mode(container_name)
 
 
 __all__ = ("command_login",)

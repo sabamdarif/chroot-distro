@@ -59,15 +59,15 @@ _chroot_distro() {
 
 	# Map aliases to canonical command names (mirrors parser.py ALIAS_TO_CANONICAL)
 	case "${command}" in
-	add|i|in|ins) command=install ;;
+	add | i | in | ins) command=install ;;
 	rm) command=remove ;;
 	sh) command=login ;;
-	li|ls) command=list ;;
-	bak|bkp) command=backup ;;
-	clear|cl) command=clear-cache ;;
+	li | ls) command=list ;;
+	bak | bkp) command=backup ;;
+	clear | cl) command=clear-cache ;;
 	cp) command=copy ;;
-	umount|um) command=unmount ;;
-	h|he|hel) command=help ;;
+	umount | um) command=unmount ;;
+	h | he | hel) command=help ;;
 	esac
 
 	case "${command}" in
@@ -141,9 +141,8 @@ _chroot_distro() {
 		-e | --env) return ;;
 		esac
 		if [[ "${cur}" == -* ]]; then
-			local opts="-u --user --shared-home --shared-tmp --shared-x11
+			local opts="-u --user --isolated --minimal --shared-home --shared-tmp --shared-x11
                     -b --bind --hostname -w --work-dir -e --env --get-chroot-cmd -h --help"
-			_chroot_distro_is_termux && opts+=" --isolated --minimal"
 			_chroot_distro_compgen_words "${opts}" "${cur}"
 		else
 			_chroot_distro_compgen_words "$(_chroot_distro_get_containers)" "${cur}"
@@ -251,9 +250,8 @@ _chroot_distro() {
 		-e | --env) return ;;
 		esac
 		if [[ "${cur}" == -* ]]; then
-			local opts="-u --user --shared-home --shared-tmp --shared-x11
+			local opts="-u --user --isolated --minimal --shared-home --shared-tmp --shared-x11
                     -b --bind --hostname -w --work-dir -e --env --get-chroot-cmd -h --help"
-			_chroot_distro_is_termux && opts+=" --isolated --minimal"
 			_chroot_distro_compgen_words "${opts}" "${cur}"
 		else
 			_chroot_distro_compgen_words "$(_chroot_distro_get_containers)" "${cur}"

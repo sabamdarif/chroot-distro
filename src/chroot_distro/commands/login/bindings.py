@@ -81,14 +81,17 @@ def _usb_specials() -> list[SpecialMount]:
     ]
 
 
-def _binfmt_misc_special() -> SpecialMount | None:
+def _binfmt_misc_special(*, fresh_proc: bool = False) -> SpecialMount | None:
     """Mount binfmt_misc inside the chroot if the host hasn't already done it.
 
     On regular Linux with systemd: already mounted → comes in via /proc bind → return None.
     On Android: the kernel supports it but nothing mounts it → mount it ourselves.
+
+    When *fresh_proc* is True (--isolated), /proc is a new procfs mount in the PID
+    namespace, so binfmt_misc must be mounted explicitly when supported.
     """
     # Already mounted? The 'register' file only appears when binfmt_misc is mounted.
-    if os.path.exists("/proc/sys/fs/binfmt_misc/register"):
+    if not fresh_proc and os.path.exists("/proc/sys/fs/binfmt_misc/register"):
         return None  # host already has it; will appear in chroot via /proc bind
 
     if not _fs_supported("binfmt_misc"):
@@ -161,6 +164,7 @@ def _docker_cgroup_specials() -> list[SpecialMount]:
 def get_special_mounts(
     rootfs: str,
     *,
+    isolated: bool = False,
     enable_usb: bool = True,
     enable_binfmt: bool = True,
     enable_docker_cgroup: bool = True,  # enabled by default per user request
@@ -171,6 +175,20 @@ def get_special_mounts(
     Caller is responsible for actually running them via apply_special_mount().
     """
     specials: list[SpecialMount] = []
+
+    # PID-namespace-aware procfs (must not bind-mount host /proc when isolated).
+    if isolated:
+        specials.append(
+            SpecialMount(
+                fstype="proc",
+                source="proc",
+                target="/proc",
+                options="",
+                mkdir=True,
+                check="proc",
+                optional=False,
+            )
+        )
 
     # Devpts overmount to isolate chroot login session PTYs
     specials.append(
@@ -189,7 +207,7 @@ def get_special_mounts(
         specials.extend(_usb_specials())
 
     if enable_binfmt:
-        sm = _binfmt_misc_special()
+        sm = _binfmt_misc_special(fresh_proc=isolated)
         if sm:
             specials.append(sm)
 
@@ -331,7 +349,9 @@ def get_bindings(
     # 1. Base Linux mounts (always needed for chroot to function correctly)
     # Target paths are absolute guest paths (e.g. /dev) which we will mount nested under rootfs.
     binds.append(("/dev", "/dev"))
-    binds.append(("/proc", "/proc"))
+    # Host /proc bind breaks PID namespace isolation; mount procfs in get_special_mounts().
+    if not isolated:
+        binds.append(("/proc", "/proc"))
     binds.append(("/sys", "/sys"))
 
     # Check if host /dev/pts and /dev/shm exist and mount them

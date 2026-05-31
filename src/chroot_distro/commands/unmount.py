@@ -5,6 +5,7 @@ import sys
 import time
 
 import chroot_distro.helpers.mount_manager as mount_manager
+import chroot_distro.helpers.namespace as namespace
 import chroot_distro.helpers.session as session
 from chroot_distro.locking import ContainerLock
 from chroot_distro.message import crit_error, log_info, warn
@@ -66,15 +67,21 @@ def command_unmount(args) -> None:
         log_info(f"Setting active sessions count for '{container_name}' to 0.")
         session.reset(container_name)
 
+        holder = namespace.get_live_holder(container_name)
+
         # 3. Unmount all nested mounts under rootfs
         log_info("Unmounting active mount points under rootfs...")
         try:
-            mount_manager.unmount_all(rootfs_dir)
+            mount_manager.unmount_all(rootfs_dir, holder=holder)
         except Exception as e:
             crit_error(f"Failed to unmount: {e}")
             sys.exit(1)
 
-        # Check if anything is still mounted
+        if holder is not None:
+            namespace.release_holder(container_name)
+            namespace.clear_isolation_mode(container_name)
+            holder = None
+
         remaining_mounts = mount_manager.get_active_mounts(rootfs_dir)
         if remaining_mounts:
             warn(f"Some active mounts remain: {remaining_mounts}")

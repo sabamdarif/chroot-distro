@@ -172,12 +172,10 @@ _chroot_distro() {
 				'(-w --work-dir)'{-w,--work-dir}'[initial working directory]:path:_directories'
 				'*'{-e,--env}'[set environment variable]:VAR=VALUE'
 				'--get-chroot-cmd[print the chroot command line and exit]'
+				'(isolated minimal)--isolated[fewer host binds + mount/PID/UTS/IPC namespaces]'
+				'(isolated minimal)--minimal[bare /dev, /proc, /sys only]'
 				'1:container:_chroot_distro_containers'
 				'*:inner command:_command_names -e'
-			)
-			_chroot_distro_is_termux && _login_args+=(
-				'(--isolated --minimal)--isolated[skip non-essential host bindings]'
-				'(--isolated --minimal)--minimal[bare /dev, /proc, /sys only]'
 			)
 			_arguments -s "${_login_args[@]}"
 			;;
@@ -255,12 +253,10 @@ _chroot_distro() {
 				'(-w --work-dir)'{-w,--work-dir}'[initial working directory]:path:_directories'
 				'*'{-e,--env}'[set environment variable]:VAR=VALUE'
 				'--get-chroot-cmd[print the chroot command line and exit]'
+				'(isolated minimal)--isolated[fewer host binds + mount/PID/UTS/IPC namespaces]'
+				'(isolated minimal)--minimal[bare /dev, /proc, /sys only]'
 				'1:container:_chroot_distro_containers'
 				'*:arguments'
-			)
-			_chroot_distro_is_termux && _run_args+=(
-				'(--isolated --minimal)--isolated[skip non-essential host bindings]'
-				'(--isolated --minimal)--minimal[bare /dev, /proc, /sys only]'
 			)
 			_arguments -s "${_run_args[@]}"
 			;;

@@ -210,9 +210,9 @@ complete -c chroot-distro -f -n __chroot_distro_seen_login \
     -a '(__chroot_distro_containers)' -d 'Container'
 complete -c chroot-distro -f -n __chroot_distro_seen_login \
     -s u -l user       -r -d 'Run as this user (default: root)'
-complete -c chroot-distro -f -n '__chroot_distro_seen_login; and __chroot_distro_is_termux' \
-    -l isolated           -d 'Skip non-essential host bindings'
-complete -c chroot-distro -f -n '__chroot_distro_seen_login; and __chroot_distro_is_termux' \
+complete -c chroot-distro -f -n __chroot_distro_seen_login \
+    -l isolated           -d 'Fewer host binds + mount/PID/UTS/IPC namespaces'
+complete -c chroot-distro -f -n __chroot_distro_seen_login \
     -l minimal            -d 'Bare /dev, /proc, /sys only'
 complete -c chroot-distro -f -n __chroot_distro_seen_login \
     -l shared-home        -d 'Bind host home into guest home'
@@ -317,9 +317,9 @@ complete -c chroot-distro -f -n '__fish_seen_subcommand_from run' \
     -a '(__chroot_distro_containers)' -d 'Container'
 complete -c chroot-distro -f -n '__fish_seen_subcommand_from run' \
     -s u -l user       -r -d 'Run as this user (default: root)'
-complete -c chroot-distro -f -n '__fish_seen_subcommand_from run; and __chroot_distro_is_termux' \
-    -l isolated           -d 'Skip non-essential host bindings'
-complete -c chroot-distro -f -n '__fish_seen_subcommand_from run; and __chroot_distro_is_termux' \
+complete -c chroot-distro -f -n '__fish_seen_subcommand_from run' \
+    -l isolated           -d 'Fewer host binds + mount/PID/UTS/IPC namespaces'
+complete -c chroot-distro -f -n '__fish_seen_subcommand_from run' \
     -l minimal            -d 'Bare /dev, /proc, /sys only'
 complete -c chroot-distro -f -n '__fish_seen_subcommand_from run' \
     -l shared-home        -d 'Bind host home into guest home'

@@ -74,3 +74,4 @@ webroot
 .gemini/
 proot-distro/
 /skills-lock.json
+/Ubuntu-Chroot

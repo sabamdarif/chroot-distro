@@ -411,7 +411,7 @@ chroot-distro login ubuntu --get-chroot-cmd
 | Option | Description |
 |---|---|
 | `-u`, `--user USER` | Log in as USER (default: `root`). Accepts `name`, numeric `uid`, `name:group`, or `uid:gid`. |
-| `--isolated` | Reduce host exposure. On Termux: skip Android system, storage, and `$PREFIX` binds unless you opt in with `--shared-*` or `--bind`. On Linux: skip default `/tmp` and `/tmp/.X11-unix` unless `--shared-tmp` or `--shared-x11`. Mutually exclusive with `--minimal`. |
+| `--isolated` | Reduce host exposure and enable namespace isolation (mount, PID, UTS, IPC via `unshare`/`nsenter`). On Termux: also skip Android system, storage, and `$PREFIX` binds unless you opt in with `--shared-*` or `--bind`. On Linux: skip default `/tmp` and `/tmp/.X11-unix` unless `--shared-tmp` or `--shared-x11`. Mutually exclusive with `--minimal`. |
 | `--minimal` | Bare minimum chroot: core pseudo-filesystems only (`/dev`, `/proc`, `/sys`, plus `/run`, `/dev/pts`, `/dev/shm` when present). Stripped guest environment. Mutually exclusive with `--isolated`. |
 | `--shared-home` | Bind the invoking user's host home into the guest home (or `/root` for root). On Termux, binds `TERMUX_HOME`. |
 | `--shared-tmp` | Bind host tmp (`/tmp` on Linux, `$PREFIX/tmp` on Termux) to `/tmp` in the guest. On Linux, included by default unless `--isolated`. |
@@ -439,6 +439,20 @@ user.
 Use `--isolated` to skip those defaults, or `--minimal` for only core
 pseudo-filesystems. Home is never bind-mounted unless you pass
 `--shared-home`.
+
+#### Namespace isolation (`--isolated`)
+
+With `--isolated`, chroot-distro creates a per-container namespace holder
+(`unshare`) and runs bind mounts, special mounts, and `chroot` inside that
+environment (`nsenter`). Supported namespaces: **mount**, **PID**, **UTS**,
+and **IPC** (each is used only if the kernel supports it; mount is
+required). This is inspired by [Ubuntu-Chroot](Ubuntu-Chroot/tools/chroot.sh)
+and is **not** a full container runtime: there is no network namespace, no
+user namespace mapping, and no image layering.
+
+Do not mix `--isolated` and non-isolated logins on the same container
+without running `chroot-distro unmount <name>` first. Concurrent
+`--isolated` sessions share the same holder and mounts.
 
 #### Host bindings (Termux, default mode)
 
@@ -958,8 +972,9 @@ cp src/chroot_distro/completions/chroot-distro.fish \
 - **Kernel features**: FUSE modules, real `iptables`, custom cgroup
   hierarchies, and similar kernel-module features may not work inside the
   guest.
-- **Namespaces**: Chroot-Distro is not a full container runtime — no
-  network/PID/IPC namespace isolation comparable to Docker or Podman.
+- **Namespaces**: `--isolated` provides mount/PID/UTS/IPC isolation via
+  `unshare`/`nsenter`, but there is no network namespace and no parity with
+  Docker or Podman.
 - **Bind mount hygiene**: crashed sessions or orphan processes can leave
   mounts busy; `unmount` and lazy unmount mitigate this but orphaned
   processes should be cleaned up.
