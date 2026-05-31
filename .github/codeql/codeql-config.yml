@@ -1,0 +1,8 @@
+name: chroot-distro CodeQL config
+
+paths:
+    - src/chroot_distro
+
+paths-ignore:
+    - tests
+    - "**/*.md"
