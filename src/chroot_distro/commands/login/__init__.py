@@ -12,7 +12,6 @@ from chroot_distro.commands.login import bindings
 from chroot_distro.commands.login.chroot_cmd import build_chroot_args
 from chroot_distro.commands.login.env import (
     IMAGE_ENV_BLOCKED,
-    display_env_value,
     inject_termux_profile,
     read_manifest_env,
     resolve_term,
@@ -584,8 +583,8 @@ def _command_login_inner(container_name: str, args) -> None:
 
     if getattr(args, "get_chroot_cmd", False):
         parts = ["env", "-i"]
-        for k, v in child_env.items():
-            parts.append(f"{k}={shlex.quote(display_env_value(k, v))}")
+        for k in child_env:
+            parts.append(f"{k}={shlex.quote('<redacted>')}")
         parts.extend(shlex.quote(a) for a in exec_argv)
         print(" \\\n  ".join(parts))
 

@@ -1,3 +1,4 @@
+import contextlib
 import json
 import os
 import shlex
@@ -12,6 +13,7 @@ from chroot_distro.helpers.build_engine.parsing import (
     to_argv,
 )
 from chroot_distro.helpers.build_engine.run_step import do_run
+from chroot_distro.helpers.build_engine.users import resolve_user_for_chroot
 from chroot_distro.helpers.docker import layer_cache_path
 from chroot_distro.helpers.layer_diff import write_files_layer
 
@@ -117,9 +119,11 @@ def do_workdir(engine: typing.Any, instr: dict[str, typing.Any]) -> None:
         if not os.path.lexists(cur):
             new_dirs.append(cur)
         cur = os.path.dirname(cur)
+    uid, gid = resolve_user_for_chroot(engine.current.rootfs_dir, engine.current.user)
     try:
         os.makedirs(host_path, exist_ok=True)
-        os.chmod(host_path, 0o711)
+        os.chown(host_path, uid, gid)
+        os.chmod(host_path, 0o700)
     except OSError:
         return
 
@@ -129,11 +133,14 @@ def do_workdir(engine: typing.Any, instr: dict[str, typing.Any]) -> None:
     file_map = {}
     for d in sorted(new_dirs):
         arc = os.path.relpath(d, engine.current.rootfs_dir)
+        with contextlib.suppress(OSError):
+            os.chown(d, uid, gid)
+            os.chmod(d, 0o700)
         file_map[arc] = {
             "kind": "dir",
-            "mode": 0o711,
-            "uid": 0,
-            "gid": 0,
+            "mode": 0o700,
+            "uid": uid,
+            "gid": gid,
             "mtime": 0,
         }
 

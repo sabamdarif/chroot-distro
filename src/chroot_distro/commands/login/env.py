@@ -66,11 +66,6 @@ def is_sensitive_env_key(key: str) -> bool:
     return bool(_SENSITIVE_ENV_KEY_RE.search(key))
 
 
-def display_env_value(key: str, value: str) -> str:
-    """Return a safe representation of an env value for logs and debug output."""
-    return "<redacted>" if is_sensitive_env_key(key) else value
-
-
 def read_manifest_env(container_dir: str) -> list:
     """Return image Env entries from manifest.json, or [] if absent/invalid."""
     manifest_path = os.path.join(container_dir, "manifest.json")
