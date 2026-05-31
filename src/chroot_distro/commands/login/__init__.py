@@ -12,6 +12,7 @@ from chroot_distro.commands.login import bindings
 from chroot_distro.commands.login.chroot_cmd import build_chroot_args
 from chroot_distro.commands.login.env import (
     IMAGE_ENV_BLOCKED,
+    display_env_value,
     inject_termux_profile,
     read_manifest_env,
     resolve_term,
@@ -379,7 +380,7 @@ def _command_login_inner(container_name: str, args) -> None:
                     uid_int = int(login_uid) if login_uid is not None else 0
                     gid_int = int(login_gid) if login_gid is not None else 0
                     os.chown(host_home_path, uid_int, gid_int)
-                    os.chmod(host_home_path, 0o755)
+                    os.chmod(host_home_path, 0o700)
                 except Exception as e:
                     warn(f"failed to create home directory {login_home}: {e}")
 
@@ -409,7 +410,14 @@ def _command_login_inner(container_name: str, args) -> None:
         child_env["PATH"] = ":".join(components)
 
     if dist_type == "normal" and IS_TERMUX and not isolated and not minimal:
-        inject_termux_profile(rootfs, child_env)
+        profile_uid = int(login_uid) if login_uid is not None else 0
+        profile_gid = int(login_gid) if login_gid is not None else profile_uid
+        inject_termux_profile(
+            rootfs,
+            child_env,
+            owner_uid=profile_uid,
+            owner_gid=profile_gid,
+        )
 
     x11_auth_binds: list[str] = []
     if not IS_TERMUX and dist_type == "normal" and not minimal and (shared_x11 or not isolated):
@@ -577,7 +585,7 @@ def _command_login_inner(container_name: str, args) -> None:
     if getattr(args, "get_chroot_cmd", False):
         parts = ["env", "-i"]
         for k, v in child_env.items():
-            parts.append(f"{k}={shlex.quote(v)}")
+            parts.append(f"{k}={shlex.quote(display_env_value(k, v))}")
         parts.extend(shlex.quote(a) for a in exec_argv)
         print(" \\\n  ".join(parts))
 

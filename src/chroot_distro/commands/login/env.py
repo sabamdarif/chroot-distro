@@ -8,6 +8,20 @@ from chroot_distro.constants import TERMUX_PREFIX
 # Conservative identifier syntax for env var names: a leading letter or
 # underscore followed by letters, digits, or underscores.
 _VALID_ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_SENSITIVE_ENV_KEY_RE = re.compile(
+    r"(?i)(^|_)(password|passwd|secret|token|api[_-]?key|auth|credential|private[_-]?key)($|_)"
+)
+
+
+# Vars that must never be logged or written to profile snippets.
+_SENSITIVE_ENV_KEYS = frozenset(
+    {
+        "CD_DOCKER_AUTH",
+        "PD_DOCKER_AUTH",
+        "GITHUB_TOKEN",
+        "GH_TOKEN",
+    }
+)
 
 
 # Vars the image Env must not override.
@@ -45,6 +59,18 @@ _PROFILE_INJECT_SKIP = frozenset(
 )
 
 
+def is_sensitive_env_key(key: str) -> bool:
+    """Return True when an env var name likely carries a secret value."""
+    if key in _SENSITIVE_ENV_KEYS:
+        return True
+    return bool(_SENSITIVE_ENV_KEY_RE.search(key))
+
+
+def display_env_value(key: str, value: str) -> str:
+    """Return a safe representation of an env value for logs and debug output."""
+    return "<redacted>" if is_sensitive_env_key(key) else value
+
+
 def read_manifest_env(container_dir: str) -> list:
     """Return image Env entries from manifest.json, or [] if absent/invalid."""
     manifest_path = os.path.join(container_dir, "manifest.json")
@@ -57,7 +83,13 @@ def read_manifest_env(container_dir: str) -> list:
         return []
 
 
-def inject_termux_profile(rootfs: str, env: dict) -> None:
+def inject_termux_profile(
+    rootfs: str,
+    env: dict,
+    *,
+    owner_uid: int | None = None,
+    owner_gid: int | None = None,
+) -> None:
     """Write a profile.d snippet that re-applies the login-time environment."""
     profile_d = os.path.join(rootfs, "etc", "profile.d")
     if not os.path.isdir(profile_d):
@@ -78,7 +110,7 @@ def inject_termux_profile(rootfs: str, env: dict) -> None:
     ]
 
     for key in sorted(env):
-        if key in _PROFILE_INJECT_SKIP:
+        if key in _PROFILE_INJECT_SKIP or is_sensitive_env_key(key):
             continue
         if not _VALID_ENV_KEY_RE.match(key):
             continue
@@ -90,7 +122,9 @@ def inject_termux_profile(rootfs: str, env: dict) -> None:
     try:
         with open(snippet, "w") as fh:
             fh.write(content)
-        os.chmod(snippet, 0o644)
+        os.chmod(snippet, 0o600)
+        if owner_uid is not None and owner_gid is not None:
+            os.chown(snippet, owner_uid, owner_gid)
     except OSError:
         pass
 

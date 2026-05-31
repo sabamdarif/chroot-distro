@@ -119,7 +119,7 @@ def do_workdir(engine: typing.Any, instr: dict[str, typing.Any]) -> None:
         cur = os.path.dirname(cur)
     try:
         os.makedirs(host_path, exist_ok=True)
-        os.chmod(host_path, 0o755)
+        os.chmod(host_path, 0o711)
     except OSError:
         return
 
@@ -131,7 +131,7 @@ def do_workdir(engine: typing.Any, instr: dict[str, typing.Any]) -> None:
         arc = os.path.relpath(d, engine.current.rootfs_dir)
         file_map[arc] = {
             "kind": "dir",
-            "mode": 0o755,
+            "mode": 0o711,
             "uid": 0,
             "gid": 0,
             "mtime": 0,

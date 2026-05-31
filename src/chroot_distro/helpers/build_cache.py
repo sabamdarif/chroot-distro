@@ -30,7 +30,7 @@ def _index_lock() -> typing.Iterator[None]:
         yield
         return
     try:
-        fd = os.open(_INDEX_LOCK_PATH, os.O_RDWR | os.O_CREAT, 0o644)
+        fd = os.open(_INDEX_LOCK_PATH, os.O_RDWR | os.O_CREAT, 0o600)
     except OSError:
         yield
         return
