@@ -90,7 +90,7 @@ def test_get_bindings_home_sharing():
 
     # 1. Root without --shared-home: no host home bind (matches proot-distro)
     with patch("os.path.exists", return_value=True), patch("chroot_distro.commands.login.bindings.IS_TERMUX", False):
-        binds = get_bindings(
+        binds, _ = get_bindings(
             rootfs="/fake/rootfs", minimal=False, isolated=False, shared_home=False, login_home="/root"
         )
         home_binds = [dst for src, dst in binds if dst.endswith("/root")]
@@ -98,14 +98,14 @@ def test_get_bindings_home_sharing():
 
     # 1b. Root with --shared-home: host home bind-mounted to /root
     with patch("os.path.exists", return_value=True), patch("chroot_distro.commands.login.bindings.IS_TERMUX", False):
-        binds = get_bindings(rootfs="/fake/rootfs", minimal=False, isolated=False, shared_home=True, login_home="/root")
+        binds, _ = get_bindings(rootfs="/fake/rootfs", minimal=False, isolated=False, shared_home=True, login_home="/root")
         home_binds = [dst for src, dst in binds if dst.endswith("/root")]
         assert len(home_binds) == 1
 
     # 2. With login_home="/home/saba", it should NOT automatically share the home directory
     # unless shared_home=True is explicitly passed.
     with patch("os.path.exists", return_value=True), patch("chroot_distro.commands.login.bindings.IS_TERMUX", False):
-        binds = get_bindings(
+        binds, _ = get_bindings(
             rootfs="/fake/rootfs", minimal=False, isolated=False, shared_home=False, login_home="/home/saba"
         )
         home_binds = [dst for src, dst in binds if dst.endswith("/home/saba")]
@@ -113,7 +113,7 @@ def test_get_bindings_home_sharing():
 
     # 3. With login_home="/home/saba" and shared_home=True, it should share it
     with patch("os.path.exists", return_value=True), patch("chroot_distro.commands.login.bindings.IS_TERMUX", False):
-        binds = get_bindings(
+        binds, _ = get_bindings(
             rootfs="/fake/rootfs", minimal=False, isolated=False, shared_home=True, login_home="/home/saba"
         )
         home_binds = [dst for src, dst in binds if dst.endswith("/home/saba")]
@@ -132,7 +132,7 @@ def test_get_bindings_home_sharing():
         patch("chroot_distro.commands.login.bindings.android_data_bindings", return_value=[]),
         patch("chroot_distro.commands.login.bindings.TERMUX_PREFIX", "/data/data/com.termux/files/usr"),
     ):
-        binds = get_bindings(
+        binds, _ = get_bindings(
             rootfs="/fake/rootfs",
             minimal=False,
             isolated=False,
@@ -369,19 +369,19 @@ def test_get_bindings_isolated_linux():
     from chroot_distro.commands.login.bindings import get_bindings
 
     with patch("os.path.exists", return_value=True), patch("chroot_distro.commands.login.bindings.IS_TERMUX", False):
-        binds = get_bindings(
+        binds, _ = get_bindings(
             rootfs="/fake/rootfs",
             minimal=False,
             isolated=True,
             shared_tmp=False,
-            shared_x11=False,
+            shared_display=False,
         )
         srcs = {src for src, _ in binds}
         assert "/proc" not in srcs
         assert "/tmp" not in srcs
         assert "/tmp/.X11-unix" not in srcs
 
-        binds_tmp = get_bindings(
+        binds_tmp, _ = get_bindings(
             rootfs="/fake/rootfs",
             minimal=False,
             isolated=True,
@@ -395,7 +395,7 @@ def test_get_bindings_minimal_linux():
     from chroot_distro.commands.login.bindings import get_bindings
 
     with patch("os.path.exists", return_value=True), patch("chroot_distro.commands.login.bindings.IS_TERMUX", False):
-        binds = get_bindings(
+        binds, _ = get_bindings(
             rootfs="/fake/rootfs",
             minimal=True,
             isolated=False,
@@ -412,15 +412,15 @@ def test_get_bindings_shared_tmp_termux():
 
     # 1. Termux environment with shared_tmp=True, dist_type="normal"
     with patch("os.path.exists", return_value=True), patch("chroot_distro.commands.login.bindings.IS_TERMUX", True):
-        binds = get_bindings(rootfs="/fake/rootfs", shared_tmp=True, dist_type="normal")
+        binds, _ = get_bindings(rootfs="/fake/rootfs", shared_tmp=True, dist_type="normal")
         # Should map host TERMUX_PREFIX/tmp to container /tmp
         expected_src = f"{TERMUX_PREFIX}/tmp"
         expected_dst = "/fake/rootfs/tmp"
         assert (expected_src, expected_dst) in binds
 
-    # 2. Termux environment with shared_x11=True, dist_type="normal"
+    # 2. Termux environment with shared_display=True, dist_type="normal"
     with patch("os.path.exists", return_value=True), patch("chroot_distro.commands.login.bindings.IS_TERMUX", True):
-        binds = get_bindings(rootfs="/fake/rootfs", shared_x11=True, dist_type="normal")
+        binds, _ = get_bindings(rootfs="/fake/rootfs", shared_display=True, dist_type="normal")
         # Should map host TERMUX_PREFIX/tmp/.X11-unix to container /tmp/.X11-unix
         expected_src = f"{TERMUX_PREFIX}/tmp/.X11-unix"
         expected_dst = "/fake/rootfs/tmp/.X11-unix"

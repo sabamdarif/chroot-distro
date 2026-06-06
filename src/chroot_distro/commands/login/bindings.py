@@ -336,15 +336,21 @@ def get_bindings(
     isolated: bool = False,
     shared_home: bool = False,
     shared_tmp: bool = False,
-    shared_x11: bool = False,
-    x11_auth_binds: list[str] | None = None,
+    shared_display: bool = False,
+    display_auth_binds: list[str] | None = None,
     custom_binds: list[str] | None = None,
     login_home: str = "/root",
     login_user: str = "root",
     dist_type: str = "normal",
-) -> list[tuple[str, str]]:
-    """Assemble all (source, target_in_rootfs) bind mounts based on configurations."""
+) -> tuple[list[tuple[str, str]], list[str]]:
+    """Assemble all (source, target_in_rootfs) bind mounts based on configurations.
+
+    Returns:
+        (resolved_binds, rslave_targets) — rslave_targets lists absolute
+        guest paths that should get ``mount --make-rslave`` after binding.
+    """
     binds = []
+    rslave_targets: list[str] = []
 
     # 1. Base Linux mounts (always needed for chroot to function correctly)
     # Target paths are absolute guest paths (e.g. /dev) which we will mount nested under rootfs.
@@ -362,10 +368,16 @@ def get_bindings(
 
     if os.path.exists("/run"):
         binds.append(("/run", "/run"))
+        # Mark /run for rslave propagation so new sockets (Wayland,
+        # PipeWire, PulseAudio, D-Bus) created after mount are visible.
+        rslave_targets.append(os.path.join(rootfs, "run"))
 
     # If minimal mode is enabled, we only bind the bare systems (/dev, /proc, /sys, /run)
     if minimal:
-        return [(src, os.path.join(rootfs, dst.lstrip("/"))) for src, dst in binds]
+        return (
+            [(src, os.path.join(rootfs, dst.lstrip("/"))) for src, dst in binds],
+            [],
+        )
 
     # 2. Android-specific bindings (system and storage)
     if IS_TERMUX and not isolated:
@@ -402,22 +414,22 @@ def get_bindings(
         if (shared_tmp or not isolated) and os.path.exists("/tmp"):
             binds.append(("/tmp", "/tmp"))
 
-    # 5. Shared X11 socket
+    # 5. Display sharing (X11 + Wayland + Sound + D-Bus)
     if IS_TERMUX:
-        if shared_x11 and dist_type != "termux":
+        if shared_display and dist_type != "termux":
             host_x11 = f"{TERMUX_PREFIX}/tmp/.X11-unix"
             if os.path.exists(host_x11):
                 binds.append((host_x11, "/tmp/.X11-unix"))
     else:
-        if shared_x11 or not isolated:
+        if shared_display or not isolated:
             x11_path = "/tmp/.X11-unix"
             if os.path.exists(x11_path):
                 binds.append((x11_path, x11_path))
 
-    # 5b. X11 authority file binds (Linux only; runtime dir is covered by /run)
-    if not IS_TERMUX and (shared_x11 or not isolated) and x11_auth_binds:
+    # 5b. Display auth file binds (Linux only; runtime dir is covered by /run)
+    if not IS_TERMUX and (shared_display or not isolated) and display_auth_binds:
         bound_srcs = {src for src, _ in binds}
-        for path in x11_auth_binds:
+        for path in display_auth_binds:
             if os.path.exists(path) and path not in bound_srcs:
                 binds.append((path, path))
                 bound_srcs.add(path)
@@ -439,4 +451,4 @@ def get_bindings(
         resolved_dst = os.path.join(rootfs, dst.lstrip("/"))
         resolved_binds.append((src, resolved_dst))
 
-    return resolved_binds
+    return resolved_binds, rslave_targets

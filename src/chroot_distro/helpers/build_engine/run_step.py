@@ -137,16 +137,16 @@ def _exec_chroot(engine: typing.Any, stage: typing.Any, command: list[str], stdi
     if not engine.quiet and not engine.verbose:
         log_info(f"Running step (user={stage.user or 'root'}, cwd={stage.workdir or '/'})...")
 
-    resolved_binds = bindings.get_bindings(rootfs=rootfs, minimal=True)
+    resolved_binds, _ = bindings.get_bindings(rootfs=rootfs, minimal=True)
 
     # Pre-clean stale mounts if any
     with contextlib.suppress(Exception):
         mount_manager.unmount_all(rootfs)
 
     try:
-        # Perform mounting
         for src, dst in resolved_binds:
-            mount_manager.safe_mount(src, dst)
+            is_run = (os.path.realpath(dst) == os.path.realpath(os.path.join(rootfs, "run")))
+            mount_manager.safe_mount(src, dst, recursive=is_run)
 
         stdin_arg = subprocess.PIPE if stdin_input is not None else subprocess.DEVNULL
         proc = subprocess.Popen(

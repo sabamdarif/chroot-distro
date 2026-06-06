@@ -40,6 +40,15 @@ IMAGE_ENV_BLOCKED = frozenset(
         "PULSE_SERVER",
         "TERM",
         "COLORTERM",
+        # Display / Wayland / Sound / D-Bus — session-specific, from host
+        "DISPLAY",
+        "WAYLAND_DISPLAY",
+        "XAUTHORITY",
+        "XDG_RUNTIME_DIR",
+        "DBUS_SESSION_BUS_ADDRESS",
+        "XDG_SESSION_TYPE",
+        "XDG_CURRENT_DESKTOP",
+        "DESKTOP_SESSION",
     }
 )
 
@@ -55,6 +64,16 @@ _PROFILE_INJECT_SKIP = frozenset(
         "PATH",
         "LD_PRELOAD",
         "LD_LIBRARY_PATH",
+        # Display / Wayland / Sound / D-Bus — per-session, not for profile
+        "DISPLAY",
+        "WAYLAND_DISPLAY",
+        "XAUTHORITY",
+        "XDG_RUNTIME_DIR",
+        "DBUS_SESSION_BUS_ADDRESS",
+        "PULSE_SERVER",
+        "XDG_SESSION_TYPE",
+        "XDG_CURRENT_DESKTOP",
+        "DESKTOP_SESSION",
     }
 )
 

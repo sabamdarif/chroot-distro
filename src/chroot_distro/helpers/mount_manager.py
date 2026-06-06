@@ -87,7 +87,12 @@ def _run_mount_cmd(cmd: list[str], holder: NamespaceHolder | None) -> subprocess
     return subprocess.run(cmd, capture_output=True, text=True, check=False)
 
 
-def safe_mount(source: str, target: str, holder: NamespaceHolder | None = None) -> None:
+def safe_mount(
+    source: str,
+    target: str,
+    holder: NamespaceHolder | None = None,
+    recursive: bool = False,
+) -> None:
     """Safely mount source to target using bind mount.
 
     Creates target directory or file if they do not exist.
@@ -107,7 +112,8 @@ def safe_mount(source: str, target: str, holder: NamespaceHolder | None = None) 
         return
 
     try:
-        result = _run_mount_cmd(["mount", "--bind", source_abs, target], holder)
+        cmd = ["mount", "--rbind" if recursive else "--bind", source_abs, target]
+        result = _run_mount_cmd(cmd, holder)
         if result.returncode != 0:
             raise subprocess.CalledProcessError(
                 result.returncode,
@@ -118,6 +124,36 @@ def safe_mount(source: str, target: str, holder: NamespaceHolder | None = None) 
     except subprocess.CalledProcessError as e:
         stderr = (e.stderr or "").strip() if hasattr(e, "stderr") else ""
         raise MountError(f"Failed to mount {source} to {target}: {stderr}") from e
+
+
+def make_rslave(target: str, holder: NamespaceHolder | None = None) -> bool:
+    """Set recursive slave mount propagation on *target*.
+
+    This ensures that new mounts on the host (e.g. sockets created in
+    /run/user/<uid> after the bind mount) propagate into the chroot,
+    matching distrobox's ``--volume /run:/run:rslave`` behaviour.
+
+    Returns True on success, False on failure (non-fatal).
+    """
+    target_abs = os.path.realpath(target)
+    if not is_mounted(target_abs, holder=holder):
+        return False
+    try:
+        result = _run_mount_cmd(
+            ["mount", "--make-rslave", target_abs], holder
+        )
+        if result.returncode != 0:
+            log.debug(
+                "make-rslave failed for %s: %s",
+                target_abs,
+                (result.stderr or "").strip(),
+            )
+            return False
+    except Exception:
+        log.debug("make-rslave exception for %s", target_abs, exc_info=True)
+        return False
+    log.debug("Set rslave propagation on %s", target_abs)
+    return True
 
 
 def safe_unmount(target: str, holder: NamespaceHolder | None = None) -> None:

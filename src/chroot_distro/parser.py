@@ -105,7 +105,10 @@ def _add_login_or_run_common(p):
     _iso.add_argument("--minimal", action="store_true")
     p.add_argument("--shared-home", dest="shared_home", action="store_true")
     p.add_argument("--shared-tmp", dest="shared_tmp", action="store_true")
-    p.add_argument("--shared-x11", dest="shared_x11", action="store_true")
+    p.add_argument("--shared-display", dest="shared_display", action="store_true",
+                   help="Share X11, Wayland, sound, and D-Bus with the container")
+    p.add_argument("--shared-x11", dest="shared_display", action="store_true",
+                   help="Alias for --shared-display (backward compatibility)")
     p.add_argument("-b", "--bind", action="append", metavar="PATH[:PATH]")
     p.add_argument("--hostname", metavar="STRING")
     p.add_argument("-w", "--work-dir", dest="work_dir", metavar="PATH")

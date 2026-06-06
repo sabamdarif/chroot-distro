@@ -75,6 +75,7 @@ def test_resolve_host_x11_env_sudo_fallback(tmp_path):
 
     with (
         patch.dict(os.environ, {"SUDO_UID": "1000"}, clear=True),
+        patch("chroot_distro.helpers.x11.get_invoking_env", return_value={}),
         patch("chroot_distro.helpers.x11.resolve_invoking_uid", return_value=1000),
         patch("chroot_distro.helpers.x11._invoking_home", return_value=str(home)),
         patch("os.path.isdir", side_effect=lambda p: p == "/run/user/1000" or str(p).endswith("1000")),
@@ -124,10 +125,10 @@ def test_get_bindings_x11_auth_binds():
 
     xauth = "/home/alice/.Xauthority"
     with patch("os.path.exists", return_value=True), patch("chroot_distro.commands.login.bindings.IS_TERMUX", False):
-        binds = get_bindings(
+        binds, _ = get_bindings(
             rootfs="/fake/rootfs",
-            shared_x11=True,
-            x11_auth_binds=[xauth],
+            shared_display=True,
+            display_auth_binds=[xauth],
         )
     srcs = {src for src, _ in binds}
     assert xauth in srcs
@@ -143,7 +144,7 @@ def test_provision_guest_xauthority(tmp_path):
     guest_file = rootfs / "var" / "tmp" / ".chroot-distro-xauthority"
 
     def fake_run(cmd, capture_output, check):
-        if cmd[:4] == ["xauth", "-f", str(host_xauth), "nextract"]:
+        if cmd[:4] == ["xauth", "-f", str(host_xauth), "extract"]:
             guest_file.parent.mkdir(parents=True, exist_ok=True)
             guest_file.write_bytes(b"guest-cookie")
             return type("R", (), {"returncode": 0})()
@@ -205,3 +206,26 @@ def test_provision_guest_xauthority_no_xauth(tmp_path):
             )
             is None
         )
+
+
+def test_get_host_env_var():
+    from chroot_distro.helpers.x11 import get_host_env_var
+
+    # 1. Variable is in os.environ
+    with patch.dict(os.environ, {"TEST_VAR": "env_val"}, clear=True):
+        assert get_host_env_var("TEST_VAR", "fallback") == "env_val"
+
+    # 2. Variable is in invoking_env
+    with (
+        patch.dict(os.environ, {}, clear=True),
+        patch("chroot_distro.helpers.x11.get_invoking_env", return_value={"TEST_VAR": "invoking_val"}),
+    ):
+        assert get_host_env_var("TEST_VAR", "fallback") == "invoking_val"
+
+    # 3. Variable is in neither, returns fallback
+    with (
+        patch.dict(os.environ, {}, clear=True),
+        patch("chroot_distro.helpers.x11.get_invoking_env", return_value={}),
+    ):
+        assert get_host_env_var("TEST_VAR", "fallback") == "fallback"
+

@@ -20,6 +20,59 @@ def resolve_invoking_uid() -> int:
     return os.getuid()
 
 
+_INVOKING_ENV_CACHE: dict[str, str] | None = None
+
+
+def _get_ppid(pid: int) -> int | None:
+    try:
+        with open(f"/proc/{pid}/stat", "r") as f:
+            stat = f.read()
+        rpar = stat.rfind(")")
+        if rpar == -1:
+            return None
+        fields = stat[rpar + 2:].split()
+        return int(fields[1])
+    except Exception:
+        return None
+
+
+def get_invoking_env() -> dict[str, str]:
+    """Walk up process tree to find first process owned by invoking UID, return its env."""
+    global _INVOKING_ENV_CACHE
+    if _INVOKING_ENV_CACHE is not None:
+        return _INVOKING_ENV_CACHE
+
+    invoking_uid = resolve_invoking_uid()
+    pid = os.getpid()
+    while pid and pid > 1:
+        try:
+            uid = os.stat(f"/proc/{pid}").st_uid
+            if uid == invoking_uid:
+                with open(f"/proc/{pid}/environ", "rb") as f:
+                    content = f.read()
+                env = {}
+                for line in content.split(b"\0"):
+                    if b"=" in line:
+                        k, v = line.split(b"=", 1)
+                        env[k.decode("utf-8", errors="replace")] = v.decode("utf-8", errors="replace")
+                _INVOKING_ENV_CACHE = env
+                return env
+        except Exception:
+            pass
+        pid = _get_ppid(pid)
+    _INVOKING_ENV_CACHE = {}
+    return {}
+
+
+def get_host_env_var(var: str, fallback: str = "") -> str:
+    """Get env var from current environment, or invoking shell's environment if running under sudo."""
+    val = os.environ.get(var, "")
+    if val:
+        return val
+    invoking_env = get_invoking_env()
+    return invoking_env.get(var, "") or fallback
+
+
 def _invoking_home(uid: int) -> str | None:
     try:
         return pwd.getpwuid(uid).pw_dir
@@ -73,9 +126,12 @@ def resolve_host_x11_env() -> tuple[dict[str, str], list[str]]:
     bind_paths: list[str] = []
 
     for var in ("DISPLAY", "XAUTHORITY", "XDG_RUNTIME_DIR"):
-        val = os.environ.get(var, "")
+        val = get_host_env_var(var)
         if val:
             env[var] = val
+
+    if "DISPLAY" not in env:
+        env["DISPLAY"] = ":0"
 
     if "XDG_RUNTIME_DIR" not in env and os.path.isdir(runtime):
         env["XDG_RUNTIME_DIR"] = runtime
@@ -171,7 +227,7 @@ def provision_guest_xauthority(
     for name in _display_names(display):
         try:
             result = subprocess.run(
-                ["xauth", "-f", host_xauthority, "nextract", guest_host_path, name],
+                ["xauth", "-f", host_xauthority, "extract", guest_host_path, name],
                 capture_output=True,
                 check=False,
             )

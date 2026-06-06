@@ -38,10 +38,10 @@ from chroot_distro.constants import (
 )
 from chroot_distro.helpers.android import ensure_data_suid, termux_home_owner_ids
 from chroot_distro.helpers.namespace import NamespaceError
+from chroot_distro.helpers.display import resolve_display_env
 from chroot_distro.helpers.x11 import (
     guest_can_read_auth,
     provision_guest_xauthority,
-    resolve_host_x11_env,
     resolve_invoking_uid,
     x11_auth_bind_path,
 )
@@ -280,7 +280,7 @@ def _command_login_inner(container_name: str, args) -> None:
     minimal = getattr(args, "minimal", False)
     use_shared_home = getattr(args, "shared_home", False)
     shared_tmp = getattr(args, "shared_tmp", False)
-    shared_x11 = getattr(args, "shared_x11", False)
+    shared_display = getattr(args, "shared_display", False)
     custom_binds = getattr(args, "bind", []) or []
     extra_env = getattr(args, "env", []) or []
     login_cmd = getattr(args, "login_cmd", []) or []
@@ -424,7 +424,7 @@ def _command_login_inner(container_name: str, args) -> None:
         )
 
     x11_auth_binds: list[str] = []
-    if not IS_TERMUX and dist_type == "normal" and not minimal and (shared_x11 or not isolated):
+    if not IS_TERMUX and dist_type == "normal" and not minimal and (shared_display or not isolated):
         if not use_shared_home and login_user != "root" and login_uid is not None:
             invoking_uid = resolve_invoking_uid()
             if int(login_uid) != invoking_uid:
@@ -449,7 +449,7 @@ def _command_login_inner(container_name: str, args) -> None:
                                 int(login_gid),
                             )
 
-        x11_env, resolved_x11_binds = resolve_host_x11_env()
+        x11_env, resolved_x11_binds = resolve_display_env()
         user_env_keys = {entry.partition("=")[0] for entry in extra_env if "=" in entry}
         for key, val in x11_env.items():
             if key not in user_env_keys:
@@ -481,14 +481,14 @@ def _command_login_inner(container_name: str, args) -> None:
                 )
 
     # 1. Resolve all bind mounts
-    resolved_binds = bindings.get_bindings(
+    resolved_binds, rslave_targets = bindings.get_bindings(
         rootfs=rootfs,
         minimal=minimal,
         isolated=isolated,
         shared_home=use_shared_home,
         shared_tmp=shared_tmp,
-        shared_x11=shared_x11,
-        x11_auth_binds=x11_auth_binds,
+        shared_display=shared_display,
+        display_auth_binds=x11_auth_binds,
         custom_binds=custom_binds,
         login_home=login_home or "/root",
         login_user=login_user,
@@ -534,7 +534,8 @@ def _command_login_inner(container_name: str, args) -> None:
             # Phase 1: bind mounts
             for src, dst in resolved_binds:
                 try:
-                    mount_manager.safe_mount(src, dst, holder=holder)
+                    is_run = (os.path.realpath(dst) == os.path.realpath(os.path.join(rootfs, "run")))
+                    mount_manager.safe_mount(src, dst, holder=holder, recursive=is_run)
                 except Exception as e:
                     mount_manager.unmount_all(rootfs, holder=holder)
                     if holder is not None:
@@ -543,6 +544,10 @@ def _command_login_inner(container_name: str, args) -> None:
                     session.decrement(container_name, lock_fh=lock_fh)
                     crit_error(f"Failed to mount bindings: {e}")
                     sys.exit(1)
+
+            # Phase 1a: apply rslave propagation for display socket forwarding
+            for rslave_path in rslave_targets:
+                mount_manager.make_rslave(rslave_path, holder=holder)
 
             # Phase 1b: fix /tmp permissions when shared from Termux
             # Termux's $PREFIX/tmp is owned by the app UID with mode 700,
