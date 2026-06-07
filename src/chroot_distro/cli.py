@@ -208,7 +208,9 @@ def main() -> None:
         msg()
         crit_error("Aborted by user.")
         msg()
-        sys.exit(1)
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(1)
     except NotImplementedError as e:
         msg()
         crit_error(str(e))

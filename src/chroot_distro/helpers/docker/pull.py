@@ -120,15 +120,21 @@ def _download_layers_parallel(
 
         workers = min(workers_limit, len(pending))
         log_info(f"Downloading {len(pending)} layer(s) with {workers} workers...")
-        with ThreadPoolExecutor(max_workers=workers) as executor:
+        executor = ThreadPoolExecutor(max_workers=workers)
+        try:
             futures = {executor.submit(_download_one, item): item for item in pending}
-            try:
-                for future in as_completed(futures):
-                    future.result()
-            except KeyboardInterrupt:
-                abort_event.set()
-                executor.shutdown(wait=False, cancel_futures=True)
-                raise
+            for future in as_completed(futures):
+                future.result()
+        except KeyboardInterrupt:
+            abort_event.set()
+            executor.shutdown(wait=False, cancel_futures=True)
+            raise
+        except Exception:
+            abort_event.set()
+            executor.shutdown(wait=False, cancel_futures=True)
+            raise
+        else:
+            executor.shutdown(wait=True)
     finally:
         if aggregate is not None:
             aggregate.clear()

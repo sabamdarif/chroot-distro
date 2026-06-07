@@ -523,7 +523,8 @@ def _download_multi(
 
     success = False
     try:
-        with ThreadPoolExecutor(max_workers=len(segments)) as pool:
+        pool = ThreadPoolExecutor(max_workers=len(segments))
+        try:
             futures = {
                 pool.submit(
                     _download_segment,
@@ -537,20 +538,21 @@ def _download_multi(
                 for seg in segments
             }
             for future in as_completed(futures):
-                try:
-                    future.result()
-                except _RangeNotSupportedError as exc:
-                    abort_event.set()
-                    pool.shutdown(wait=False, cancel_futures=True)
-                    raise _FallbackToSingleError from exc
-                except KeyboardInterrupt:
-                    abort_event.set()
-                    pool.shutdown(wait=False, cancel_futures=True)
-                    raise
-                except Exception:
-                    abort_event.set()
-                    pool.shutdown(wait=False, cancel_futures=True)
-                    raise
+                future.result()
+        except _RangeNotSupportedError as exc:
+            abort_event.set()
+            pool.shutdown(wait=False, cancel_futures=True)
+            raise _FallbackToSingleError from exc
+        except KeyboardInterrupt:
+            abort_event.set()
+            pool.shutdown(wait=False, cancel_futures=True)
+            raise
+        except Exception:
+            abort_event.set()
+            pool.shutdown(wait=False, cancel_futures=True)
+            raise
+        else:
+            pool.shutdown(wait=True)
 
         clear_bar()
         log_info("Assembling segments...")
@@ -673,10 +675,7 @@ def download_file(url: str, dest: str) -> None:
         elif probe.content_length <= 0:
             log_info("Unknown content length, using single connection.")
         else:
-            log_info(
-                f"Range supported, content length {fmt_size(probe.content_length)}. "
-                f"Using segmented download."
-            )
+            log_info(f"Range supported, content length {fmt_size(probe.content_length)}. Using segmented download.")
             try:
                 _download_multi(url, dest, probe, connections, bucket)
                 return

@@ -175,77 +175,83 @@ def download_blob(
                 if len(segments) == 1:
                     raise _FallbackToSingleError
 
-                # Pre-fill byte progress with already downloaded bytes
-                if byte_progress:
+                progress = byte_progress or AggregateByteProgress(probe.content_length, label=expected_hex[:12])
+                try:
+                    # Pre-fill byte progress with already downloaded bytes
                     already_downloaded = 0
                     for seg in segments:
                         if os.path.isfile(seg.tmp_path):
                             already_downloaded += os.path.getsize(seg.tmp_path)
                     if already_downloaded:
-                        byte_progress.add(already_downloaded)
+                        progress.add(already_downloaded)
 
-                original_parsed = urllib.parse.urlparse(url)
-                final_parsed = urllib.parse.urlparse(probe.final_url)
-                seg_headers = {**_ua()}
-                if token and original_parsed.netloc == final_parsed.netloc:
-                    seg_headers["Authorization"] = f"Bearer {token}"
+                    original_parsed = urllib.parse.urlparse(url)
+                    final_parsed = urllib.parse.urlparse(probe.final_url)
+                    seg_headers = {**_ua()}
+                    if token and original_parsed.netloc == final_parsed.netloc:
+                        seg_headers["Authorization"] = f"Bearer {token}"
 
-                local_abort = abort_event or threading.Event()
-                with ThreadPoolExecutor(max_workers=len(segments)) as pool:
-                    futures = {
-                        pool.submit(
-                            _download_segment,
-                            seg,
-                            probe.final_url,
-                            seg_headers,
-                            byte_progress,
-                            local_abort,
-                            bucket,
-                        ): seg
-                        for seg in segments
-                    }
-                    for future in as_completed(futures):
-                        try:
+                    local_abort = abort_event or threading.Event()
+                    pool = ThreadPoolExecutor(max_workers=len(segments))
+                    try:
+                        futures = {
+                            pool.submit(
+                                _download_segment,
+                                seg,
+                                probe.final_url,
+                                seg_headers,
+                                progress,
+                                local_abort,
+                                bucket,
+                            ): seg
+                            for seg in segments
+                        }
+                        for future in as_completed(futures):
                             future.result()
-                        except KeyboardInterrupt:
-                            local_abort.set()
-                            pool.shutdown(wait=False, cancel_futures=True)
-                            raise
-                        except Exception as exc:
-                            local_abort.set()
-                            pool.shutdown(wait=False, cancel_futures=True)
-                            raise _FallbackToSingleError from exc
+                    except KeyboardInterrupt:
+                        local_abort.set()
+                        pool.shutdown(wait=False, cancel_futures=True)
+                        raise
+                    except Exception as exc:
+                        local_abort.set()
+                        pool.shutdown(wait=False, cancel_futures=True)
+                        raise _FallbackToSingleError from exc
+                    else:
+                        pool.shutdown(wait=True)
 
-                success = False
-                try:
-                    with atomic_replace(dest) as tmp:
-                        with open(tmp, "wb") as out:
-                            for seg in sorted(segments, key=lambda s: s.index):
-                                with open(seg.tmp_path, "rb") as inp:
-                                    shutil.copyfileobj(inp, out, length=1 << 20)
-                            out.flush()
-                            os.fsync(out.fileno())
+                    success = False
+                    try:
+                        with atomic_replace(dest) as tmp:
+                            with open(tmp, "wb") as out:
+                                for seg in sorted(segments, key=lambda s: s.index):
+                                    with open(seg.tmp_path, "rb") as inp:
+                                        shutil.copyfileobj(inp, out, length=1 << 20)
+                                out.flush()
+                                os.fsync(out.fileno())
 
-                        # Verify the temp file BEFORE replacing dest
-                        hasher = hashlib.sha256()
-                        with open(tmp, "rb") as fh:
-                            for chunk in iter(lambda: fh.read(262144), b""):
-                                hasher.update(chunk)
-                        actual_hex = hasher.hexdigest()
-                        if actual_hex != expected_hex.lower():
-                            raise RuntimeError(
-                                f"Layer integrity check failed for digest '{digest}': "
-                                f"expected {expected_hex}, got {actual_hex}."
-                            )
-                    success = True
-                    return dest
-                finally:
-                    if success:
-                        for seg in segments:
+                            # Verify the temp file BEFORE replacing dest
+                            hasher = hashlib.sha256()
+                            with open(tmp, "rb") as fh:
+                                for chunk in iter(lambda: fh.read(262144), b""):
+                                    hasher.update(chunk)
+                            actual_hex = hasher.hexdigest()
+                            if actual_hex != expected_hex.lower():
+                                raise RuntimeError(
+                                    f"Layer integrity check failed for digest '{digest}': "
+                                    f"expected {expected_hex}, got {actual_hex}."
+                                )
+                        success = True
+                        return dest
+                    finally:
+                        if success:
+                            for seg in segments:
+                                with contextlib.suppress(OSError):
+                                    os.remove(seg.tmp_path)
                             with contextlib.suppress(OSError):
-                                os.remove(seg.tmp_path)
-                        with contextlib.suppress(OSError):
-                            os.remove(chunks_meta_path)
+                                os.remove(chunks_meta_path)
+                finally:
+                    if byte_progress is None:
+                        progress.clear()
         except _FallbackToSingleError:
             pass
         except Exception:

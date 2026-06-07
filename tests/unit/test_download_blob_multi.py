@@ -198,11 +198,12 @@ class TestDownloadBlobSegmented:
                 final_url="https://cdn.example.com/final.blob",
                 range_ok=True,
             )
+
             # Mock _download_segment to write part of the content to seg.tmp_path
             def mock_download_segment(seg, url, headers, progress, abort, bucket=None):
                 with open(seg.tmp_path, "wb") as f:
                     f.write(content[seg.start : seg.end + 1])
- 
+
             with (
                 mock.patch("chroot_distro.helpers.docker.layers._probe_blob", return_value=probe_result),
                 mock.patch("chroot_distro.helpers.docker.layers._download_segment", side_effect=mock_download_segment),
@@ -390,6 +391,7 @@ class TestDownloadBlobSegmented:
                             if self.bytes_read >= 1024 * 1024:
                                 chunk0_path = f"{path}.chunk0.tmp"
                                 import time
+
                                 for _ in range(50):
                                     if os.path.isfile(chunk0_path) and os.path.getsize(chunk0_path) == 4 * 1024 * 1024:
                                         break
@@ -468,3 +470,92 @@ class TestDownloadBlobSegmented:
             assert not os.path.isfile(chunks_json)
             assert not os.path.isfile(f"{path}.chunk0.tmp")
             assert not os.path.isfile(f"{path}.chunk1.tmp")
+
+    def test_segmented_download_with_local_progress(self, mock_cache_path, tmp_path):
+        digest, path = mock_cache_path
+        content = b"A" * (8 * 1024 * 1024)
+        import hashlib
+
+        expected_hex = hashlib.sha256(content).hexdigest()
+        digest = f"sha256:{expected_hex}"
+        path = str(tmp_path / f"layer_{expected_hex}")
+
+        with mock.patch("chroot_distro.helpers.docker.layers.layer_cache_path", return_value=path):
+            probe_result = _ProbeResult(
+                content_length=len(content),
+                final_url="https://cdn.example.com/final.blob",
+                range_ok=True,
+            )
+
+            # Mock _download_segment to write part of the content
+            def mock_download_segment(seg, url, headers, progress, abort, bucket=None):
+                assert progress is not None
+                with open(seg.tmp_path, "wb") as f:
+                    f.write(content[seg.start : seg.end + 1])
+
+            # Spy on AggregateByteProgress class
+            from chroot_distro.progress import AggregateByteProgress
+
+            mock_progress = mock.MagicMock(spec=AggregateByteProgress)
+
+            with (
+                mock.patch("chroot_distro.helpers.docker.layers._probe_blob", return_value=probe_result),
+                mock.patch("chroot_distro.helpers.docker.layers._download_segment", side_effect=mock_download_segment),
+                mock.patch(
+                    "chroot_distro.helpers.docker.layers.AggregateByteProgress", return_value=mock_progress
+                ) as mock_class,
+            ):
+                result_path = download_blob(
+                    repo="library/nextcloud",
+                    digest=digest,
+                    token="test_token",
+                    connections=2,
+                    byte_progress=None,
+                )
+
+                mock_class.assert_called_once_with(len(content), label=expected_hex[:12])
+                mock_progress.clear.assert_called_once()
+
+        assert result_path == path
+
+    def test_segmented_download_keyboard_interrupt_propagation(self, mock_cache_path, tmp_path):
+        digest, path = mock_cache_path
+        content = b"A" * (8 * 1024 * 1024)
+        import hashlib
+
+        expected_hex = hashlib.sha256(content).hexdigest()
+        digest = f"sha256:{expected_hex}"
+        path = str(tmp_path / f"layer_{expected_hex}")
+
+        with mock.patch("chroot_distro.helpers.docker.layers.layer_cache_path", return_value=path):
+            probe_result = _ProbeResult(
+                content_length=len(content),
+                final_url="https://cdn.example.com/final.blob",
+                range_ok=True,
+            )
+
+            def mock_download_segment_ki(seg, url, headers, progress, abort, bucket=None):
+                raise KeyboardInterrupt
+
+            from concurrent.futures import ThreadPoolExecutor
+
+            real_pool = ThreadPoolExecutor(max_workers=2)
+            spy_shutdown = mock.MagicMock(wraps=real_pool.shutdown)
+            real_pool.shutdown = spy_shutdown
+
+            with (
+                mock.patch("chroot_distro.helpers.docker.layers._probe_blob", return_value=probe_result),
+                mock.patch(
+                    "chroot_distro.helpers.docker.layers._download_segment", side_effect=mock_download_segment_ki
+                ),
+                mock.patch("chroot_distro.helpers.docker.layers.ThreadPoolExecutor", return_value=real_pool),
+            ):
+                with pytest.raises(KeyboardInterrupt):
+                    download_blob(
+                        repo="library/nextcloud",
+                        digest=digest,
+                        token="test_token",
+                        connections=2,
+                    )
+
+                spy_shutdown.assert_called_with(wait=False, cancel_futures=True)
