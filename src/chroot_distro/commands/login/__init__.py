@@ -63,7 +63,17 @@ def command_login(args) -> None:
 
 def _detect_dist_type(rootfs: str) -> str:
     termux_usr = rootfs + TERMUX_PREFIX
-    if os.path.isfile(os.path.join(termux_usr, "bin", "login")):
+    login_path = os.path.join(termux_usr, "bin", "login")
+    if os.path.isfile(login_path):
+        # Guard against false positives caused by bind-mounted /data.
+        # When a prior session bind-mounts host /data into rootfs, the
+        # host Termux login binary appears at the checked path even for
+        # normal Linux distros (Ubuntu, Debian, etc.).
+        # Disambiguate: every normal distro ships /usr/bin as part of its
+        # own filesystem (FHS standard).  No bind mount creates /usr/bin,
+        # and Termux containers do not have it.
+        if os.path.isdir(os.path.join(rootfs, "usr", "bin")):
+            return "normal"
         return "termux"
     return "normal"
 
