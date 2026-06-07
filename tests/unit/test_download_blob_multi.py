@@ -131,6 +131,42 @@ class TestProbeBlob:
             result = _probe_blob("https://registry-1.docker.io/v2/f", {})
         assert result is None
 
+    def test_no_accept_ranges_but_range_works(self):
+        """HEAD omits Accept-Ranges; GET bytes=0-0 → 206.
+
+        Verifies the two-stage probe works through the blob auth_opener path.
+        """
+        head_resp = _FakeResp(
+            status=200,
+            headers={"Content-Length": "1048576"},  # no Accept-Ranges!
+            url="https://cdn.example.com/final.blob",
+        )
+        get_resp = _FakeResp(
+            status=206,
+            headers={"Content-Range": "bytes 0-0/1048576"},
+            body=b"\x00",
+            url="https://cdn.example.com/final.blob",
+        )
+
+        mock_opener = mock.MagicMock()
+        call_count = 0
+
+        def _open_side_effect(req, *a, **kw):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return head_resp
+            return get_resp
+
+        mock_opener.open.side_effect = _open_side_effect
+        with mock.patch("chroot_distro.helpers.docker.layers.auth_opener", return_value=mock_opener):
+            result = _probe_blob("https://registry-1.docker.io/v2/f", {})
+
+        assert result is not None
+        assert result.range_ok is True
+        assert result.content_length == 1048576
+        assert call_count == 2  # HEAD + GET
+
 
 # ---------------------------------------------------------------------------
 # download_blob segmented tests

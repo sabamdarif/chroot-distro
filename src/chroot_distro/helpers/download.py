@@ -1,9 +1,11 @@
 import contextlib
+import functools
 import hashlib
 import json
 import os
 import shutil
 import threading
+import ssl
 import time
 import urllib.error
 import urllib.request
@@ -31,6 +33,17 @@ __all__ = ("download_file", "sha256_file")
 _MAX_RETRIES = 3
 _RETRY_DELAYS = (1, 2, 4)  # seconds between retries (exponential backoff)
 _READ_CHUNK = 262144  # 256 KiB — balances syscall overhead vs memory
+_SOCKET_TIMEOUT = 30  # seconds — prevents threads from blocking in read() forever
+
+# Transient error types worth retrying.
+_TRANSIENT_ERRORS = (
+    ssl.SSLError,
+    ConnectionResetError,
+    ConnectionAbortedError,
+    BrokenPipeError,
+    TimeoutError,
+    OSError,
+)
 
 
 def _ua_headers() -> dict[str, str]:
@@ -41,9 +54,11 @@ def _is_retriable(exc: BaseException) -> bool:
     """Return True for transient server or connection failures."""
     if isinstance(exc, urllib.error.HTTPError):
         return exc.code >= 500
-    return isinstance(exc, ConnectionError) or (
-        isinstance(exc, urllib.error.URLError) and isinstance(exc.reason, ConnectionError)
-    )
+    if isinstance(exc, _TRANSIENT_ERRORS):
+        return True
+    if isinstance(exc, urllib.error.URLError):
+        return isinstance(exc.reason, _TRANSIENT_ERRORS)
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -83,34 +98,21 @@ class _FallbackToSingleError(Exception):
 # ---------------------------------------------------------------------------
 
 
-def _probe_server(url: str, headers: dict[str, str]) -> "_ProbeResult | None":
-    """Send HEAD (or fallback GET Range:0-0) to discover size + Range support.
+def _range_probe(
+    url: str,
+    headers: dict[str, str],
+    open_fn: "functools.partial[object] | None" = None,
+) -> "_ProbeResult | None":
+    """Lightweight GET Range:bytes=0-0 probe to test actual Range support.
 
-    Returns *None* on any network error so the caller can fall back silently.
+    Returns a ``_ProbeResult`` or *None* on network error.
     """
-    # --- 1st try: HEAD ---
-    try:
-        head_req = urllib.request.Request(url, headers=headers, method="HEAD")
-        with urllib.request.urlopen(head_req) as resp:
-            content_length = int(resp.headers.get("Content-Length", 0))
-            accept_ranges = (resp.headers.get("Accept-Ranges", "")).lower()
-            range_ok = accept_ranges == "bytes"
-            return _ProbeResult(
-                content_length=content_length,
-                final_url=resp.url,
-                range_ok=range_ok,
-            )
-    except urllib.error.HTTPError as exc:
-        if exc.code != 405:
-            return None  # non-405 → give up probing
-    except (OSError, urllib.error.URLError):
-        return None
-
-    # --- 2nd try: GET Range: bytes=0-0 ---
+    if open_fn is None:
+        open_fn = functools.partial(urllib.request.urlopen, timeout=_SOCKET_TIMEOUT)
     try:
         range_headers = {**headers, "Range": "bytes=0-0", "Accept-Encoding": "identity"}
         range_req = urllib.request.Request(url, headers=range_headers)
-        with urllib.request.urlopen(range_req) as resp:
+        with open_fn(range_req) as resp:
             resp.read(1)  # consume minimal body
             if resp.status == 206:
                 # Parse Content-Range: bytes 0-0/TOTAL
@@ -132,6 +134,81 @@ def _probe_server(url: str, headers: dict[str, str]) -> "_ProbeResult | None":
             )
     except (OSError, urllib.error.URLError):
         return None
+
+
+def _probe_url(
+    url: str,
+    headers: dict[str, str],
+    open_fn: "functools.partial[object] | None" = None,
+) -> "_ProbeResult | None":
+    """Discover file size and Range support for *url*.
+
+    Strategy (two-stage):
+
+    1. **HEAD** — fast, no body.  If the response contains
+       ``Accept-Ranges: bytes`` we're done.
+    2. **GET Range: bytes=0-0** — sent when HEAD succeeds but omits
+       ``Accept-Ranges`` (common on CDNs), *or* when HEAD returns 405.
+       A 206 reply proves Range support; a 200 reply means no support.
+
+    *open_fn* defaults to ``urllib.request.urlopen`` but can be replaced
+    (e.g. with ``auth_opener().open``) for authenticated registries.
+
+    Returns *None* on any network error so the caller can fall back.
+    """
+    if open_fn is None:
+        open_fn = functools.partial(urllib.request.urlopen, timeout=_SOCKET_TIMEOUT)
+
+    # --- 1st try: HEAD ---
+    need_range_probe = False
+    try:
+        head_req = urllib.request.Request(url, headers=headers, method="HEAD")
+        with open_fn(head_req) as resp:
+            content_length = int(resp.headers.get("Content-Length", 0))
+            accept_ranges = (resp.headers.get("Accept-Ranges", "")).lower()
+            final_url = resp.url
+            if accept_ranges == "bytes":
+                return _ProbeResult(
+                    content_length=content_length,
+                    final_url=final_url,
+                    range_ok=True,
+                )
+            if accept_ranges == "none":
+                # Server explicitly says no ranges.
+                return _ProbeResult(
+                    content_length=content_length,
+                    final_url=final_url,
+                    range_ok=False,
+                )
+            # No Accept-Ranges header — many CDNs omit it but still
+            # support Range requests.  Fall through to the GET probe.
+            need_range_probe = content_length > 0
+            if not need_range_probe:
+                return _ProbeResult(
+                    content_length=content_length,
+                    final_url=final_url,
+                    range_ok=False,
+                )
+    except urllib.error.HTTPError as exc:
+        if exc.code != 405:
+            return None  # non-405 → give up probing
+        need_range_probe = True
+    except (OSError, urllib.error.URLError):
+        return None
+
+    # --- 2nd try: GET Range: bytes=0-0 ---
+    if need_range_probe:
+        return _range_probe(url, headers, open_fn)
+
+    return None  # pragma: no cover
+
+
+def _probe_server(url: str, headers: dict[str, str]) -> "_ProbeResult | None":
+    """Send HEAD (or fallback GET Range:0-0) to discover size + Range support.
+
+    Returns *None* on any network error so the caller can fall back silently.
+    """
+    return _probe_url(url, headers)
 
 
 # ---------------------------------------------------------------------------
@@ -168,6 +245,17 @@ def _compute_segments(total: int, n: int, dest: str) -> list[_Segment]:
 # ---------------------------------------------------------------------------
 
 
+def _interruptible_sleep(seconds: float, abort_event: threading.Event) -> None:
+    """Sleep for *seconds* but wake up early if *abort_event* is set."""
+    remaining = seconds
+    while remaining > 0:
+        if abort_event.is_set():
+            raise KeyboardInterrupt
+        step = min(remaining, 0.5)
+        time.sleep(step)
+        remaining -= step
+
+
 def _download_segment(
     seg: _Segment,
     url: str,
@@ -201,7 +289,7 @@ def _download_segment(
             }
             req = urllib.request.Request(url, headers=headers)
             mode = "ab" if downloaded > 0 else "wb"
-            with opener.open(req) as resp, open(seg.tmp_path, mode) as fh:
+            with opener.open(req, timeout=_SOCKET_TIMEOUT) as resp, open(seg.tmp_path, mode) as fh:
                 if resp.status != 206:
                     raise _RangeNotSupportedError(f"Expected 206, got {resp.status}")
                 unsent = 0  # bytes not yet reported to aggregate
@@ -233,7 +321,7 @@ def _download_segment(
             raise
         except BaseException as exc:
             if _is_retriable(exc) and attempt < _MAX_RETRIES:
-                time.sleep(_RETRY_DELAYS[attempt])
+                _interruptible_sleep(_RETRY_DELAYS[attempt], abort_event)
                 if os.path.isfile(seg.tmp_path):
                     downloaded = os.path.getsize(seg.tmp_path)
                 continue
@@ -404,7 +492,11 @@ def _download_single(url: str, dest: str) -> None:
             time.sleep(delay)
 
         try:
-            with atomic_replace(dest) as tmp, urllib.request.urlopen(req) as resp, open(tmp, "wb") as fh:
+            with (
+                atomic_replace(dest) as tmp,
+                urllib.request.urlopen(req, timeout=_SOCKET_TIMEOUT) as resp,
+                open(tmp, "wb") as fh,
+            ):
                 total = int(resp.headers.get("Content-Length", 0))
                 downloaded = 0
                 while True:
@@ -453,12 +545,22 @@ def download_file(url: str, dest: str) -> None:
         with loading_line("Connecting..."):
             probe = _probe_server(url, _ua_headers())
 
-        if probe is not None and probe.range_ok and probe.content_length > 0:
+        if probe is None:
+            log_info("Server probe failed, falling back to single connection.")
+        elif not probe.range_ok:
+            log_info("Server does not support Range requests, using single connection.")
+        elif probe.content_length <= 0:
+            log_info("Unknown content length, using single connection.")
+        else:
+            log_info(
+                f"Range supported, content length {fmt_size(probe.content_length)}. "
+                f"Using segmented download."
+            )
             try:
                 _download_multi(url, dest, probe, connections)
                 return
             except _FallbackToSingleError:
-                log_info("Range download not possible, falling back to single connection.")
+                log_info("Segments too small for splitting, falling back to single connection.")
             except KeyboardInterrupt:
                 clear_bar()
                 raise

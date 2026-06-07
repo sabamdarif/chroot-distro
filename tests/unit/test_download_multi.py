@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import io
 import os
+import ssl
 import threading
+import urllib.error
 from unittest import mock
 
 import pytest
@@ -13,6 +15,7 @@ from chroot_distro.helpers.download import (
     _compute_segments,
     _concat_chunks,
     _download_segment,
+    _is_retriable,
     _probe_server,
     _ProbeResult,
     _RangeNotSupportedError,
@@ -455,3 +458,162 @@ class TestConstants:
 
         monkeypatch.setenv("CD_DOWNLOAD_WORKERS", "abc")
         assert layer_download_workers() == DEFAULT_LAYER_DOWNLOAD_WORKERS
+
+
+# ---------------------------------------------------------------------------
+# Two-stage Range detection tests
+# ---------------------------------------------------------------------------
+
+
+class TestTwoStageRangeDetection:
+    """Tests for the two-stage HEAD → GET probe strategy."""
+
+    def test_head_no_accept_ranges_but_range_works(self):
+        """HEAD omits Accept-Ranges header; GET bytes=0-0 → 206.
+
+        This is the primary scenario that was broken before: many CDNs
+        support Range requests but don't include Accept-Ranges in HEAD.
+        """
+        head_resp = _FakeResp(
+            status=200,
+            headers={"Content-Length": "1048576"},  # no Accept-Ranges!
+            url="http://cdn.example.com/final.tar",
+        )
+        get_resp = _FakeResp(
+            status=206,
+            headers={"Content-Range": "bytes 0-0/1048576"},
+            body=b"\x00",
+            url="http://cdn.example.com/final.tar",
+        )
+
+        call_count = 0
+
+        def _urlopen_side_effect(req, *a, **kw):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                # HEAD request
+                return head_resp
+            # GET Range:0-0 request
+            return get_resp
+
+        with mock.patch("urllib.request.urlopen", side_effect=_urlopen_side_effect):
+            result = _probe_server("http://example.com/file.tar", {})
+
+        assert result is not None
+        assert result.range_ok is True
+        assert result.content_length == 1048576
+        assert call_count == 2  # HEAD + GET
+
+    def test_head_no_accept_ranges_and_range_fails(self):
+        """HEAD omits Accept-Ranges; GET bytes=0-0 → 200 (no range support)."""
+        head_resp = _FakeResp(
+            status=200,
+            headers={"Content-Length": "1048576"},
+            url="http://example.com/file.tar",
+        )
+        get_resp = _FakeResp(
+            status=200,
+            headers={"Content-Length": "1048576"},
+            body=b"\x00",
+            url="http://example.com/file.tar",
+        )
+
+        call_count = 0
+
+        def _urlopen_side_effect(req, *a, **kw):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return head_resp
+            return get_resp
+
+        with mock.patch("urllib.request.urlopen", side_effect=_urlopen_side_effect):
+            result = _probe_server("http://example.com/file.tar", {})
+
+        assert result is not None
+        assert result.range_ok is False
+        assert call_count == 2
+
+    def test_head_accept_ranges_none_skips_get_probe(self):
+        """Accept-Ranges: none → don't bother with GET probe."""
+        resp = _FakeResp(
+            status=200,
+            headers={"Content-Length": "1024", "Accept-Ranges": "none"},
+            url="http://example.com/file.tar",
+        )
+
+        call_count = 0
+
+        def _urlopen_side_effect(req, *a, **kw):
+            nonlocal call_count
+            call_count += 1
+            return resp
+
+        with mock.patch("urllib.request.urlopen", side_effect=_urlopen_side_effect):
+            result = _probe_server("http://example.com/file.tar", {})
+
+        assert result is not None
+        assert result.range_ok is False
+        assert call_count == 1  # Only HEAD, no GET probe
+
+    def test_head_zero_content_length_skips_get_probe(self):
+        """HEAD returns no Content-Length → no point probing ranges."""
+        resp = _FakeResp(
+            status=200,
+            headers={},  # no Content-Length, no Accept-Ranges
+            url="http://example.com/file.tar",
+        )
+
+        call_count = 0
+
+        def _urlopen_side_effect(req, *a, **kw):
+            nonlocal call_count
+            call_count += 1
+            return resp
+
+        with mock.patch("urllib.request.urlopen", side_effect=_urlopen_side_effect):
+            result = _probe_server("http://example.com/file.tar", {})
+
+        assert result is not None
+        assert result.range_ok is False
+        assert call_count == 1  # Only HEAD, no GET probe
+
+
+# ---------------------------------------------------------------------------
+# _is_retriable tests
+# ---------------------------------------------------------------------------
+
+
+class TestIsRetriable:
+    """Tests for _is_retriable() expanded coverage."""
+
+    def test_timeout_error(self):
+        assert _is_retriable(TimeoutError("connection timed out")) is True
+
+    def test_ssl_error(self):
+        assert _is_retriable(ssl.SSLError("SSL handshake failed")) is True
+
+    def test_connection_reset(self):
+        assert _is_retriable(ConnectionResetError("reset by peer")) is True
+
+    def test_broken_pipe(self):
+        assert _is_retriable(BrokenPipeError("broken pipe")) is True
+
+    def test_os_error(self):
+        assert _is_retriable(OSError("network unreachable")) is True
+
+    def test_http_500(self):
+        exc = urllib.error.HTTPError("http://x", 500, "Server Error", {}, None)
+        assert _is_retriable(exc) is True
+
+    def test_http_404_not_retriable(self):
+        exc = urllib.error.HTTPError("http://x", 404, "Not Found", {}, None)
+        assert _is_retriable(exc) is False
+
+    def test_value_error_not_retriable(self):
+        assert _is_retriable(ValueError("bad value")) is False
+
+    def test_url_error_with_timeout_reason(self):
+        exc = urllib.error.URLError(TimeoutError("timed out"))
+        assert _is_retriable(exc) is True
