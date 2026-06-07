@@ -20,13 +20,13 @@ from chroot_distro.helpers.docker.transport import (
     registry_base_url,
 )
 from chroot_distro.helpers.download import (
+    _SOCKET_TIMEOUT,
     _compute_segments,
     _download_segment,
     _FallbackToSingleError,
+    _probe_url,
     _ProbeResult,
     _Segment,
-    _SOCKET_TIMEOUT,
-    _probe_url,
 )
 from chroot_distro.helpers.tar_extract import extract_tar_to_rootfs
 from chroot_distro.message import warn

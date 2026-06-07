@@ -4,13 +4,15 @@ import hashlib
 import json
 import os
 import shutil
-import threading
 import ssl
+import threading
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+from http.client import HTTPResponse
 
 from chroot_distro.atomic import atomic_replace
 from chroot_distro.constants import (
@@ -101,7 +103,7 @@ class _FallbackToSingleError(Exception):
 def _range_probe(
     url: str,
     headers: dict[str, str],
-    open_fn: "functools.partial[object] | None" = None,
+    open_fn: "Callable[..., HTTPResponse] | None" = None,
 ) -> "_ProbeResult | None":
     """Lightweight GET Range:bytes=0-0 probe to test actual Range support.
 
@@ -139,7 +141,7 @@ def _range_probe(
 def _probe_url(
     url: str,
     headers: dict[str, str],
-    open_fn: "functools.partial[object] | None" = None,
+    open_fn: "Callable[..., HTTPResponse] | None" = None,
 ) -> "_ProbeResult | None":
     """Discover file size and Range support for *url*.
 

@@ -83,6 +83,7 @@ ignore = ["E501", "PT012", "PLC0415"]
 [tool.pyright]
 include = ["src"]
 pythonVersion = "3.10"
+pythonPlatform = "Linux"
 typeCheckingMode = "standard"
 
 [tool.mypy]
