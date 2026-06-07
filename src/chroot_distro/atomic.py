@@ -6,13 +6,12 @@ import tempfile
 
 def _fsync_directory(dir_path: str) -> None:
     """Fsync a directory to ensure rename/link metadata reaches disk."""
-    if sys.platform == "win32":
-        return
-    fd = os.open(dir_path, os.O_RDONLY)  # type: ignore[unreachable]
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
+    if sys.platform != "win32":
+        fd = os.open(dir_path, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
 
 
 @contextlib.contextmanager

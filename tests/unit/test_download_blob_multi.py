@@ -388,6 +388,12 @@ class TestDownloadBlobSegmented:
 
                         def read(self, n):
                             if self.bytes_read >= 1024 * 1024:
+                                chunk0_path = f"{path}.chunk0.tmp"
+                                import time
+                                for _ in range(50):
+                                    if os.path.isfile(chunk0_path) and os.path.getsize(chunk0_path) == 4 * 1024 * 1024:
+                                        break
+                                    time.sleep(0.1)
                                 raise ConnectionResetError("Connection reset by peer")
                             chunk = b"A" * min(n, 1024 * 1024 - self.bytes_read)
                             self.bytes_read += len(chunk)
