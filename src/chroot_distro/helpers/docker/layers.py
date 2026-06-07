@@ -92,9 +92,17 @@ def download_blob(
     Streams the bytes through sha256 and verifies the result against the
     expected *digest* before promoting the .tmp file.
 
-    Retries up to ``_MAX_RETRIES`` times on transient network / SSL
+    Retries up to the configured retry limit times on transient network / SSL
     failures with exponential backoff.
     """
+    from chroot_distro.constants import download_max_retries, download_rate_limit
+    from chroot_distro.rate_limit import TokenBucket
+
+    max_retries = download_max_retries()
+    retry_backoff = tuple(min(2**i, 30) for i in range(max_retries))
+    rate = download_rate_limit()
+    bucket = TokenBucket(rate) if rate > 0 else None
+
     dest = layer_cache_path(digest)
     if os.path.isfile(dest):
         return dest
@@ -192,6 +200,7 @@ def download_blob(
                             seg_headers,
                             byte_progress,
                             local_abort,
+                            bucket,
                         ): seg
                         for seg in segments
                     }
@@ -243,10 +252,10 @@ def download_blob(
             raise
 
     last_exc: BaseException | None = None
-    for attempt in range(_MAX_RETRIES + 1):
+    for attempt in range(max_retries + 1):
         if attempt > 0:
-            delay = _RETRY_BACKOFF[min(attempt - 1, len(_RETRY_BACKOFF) - 1)]
-            warn(f"Retry {attempt}/{_MAX_RETRIES} in {delay}s (reason: {last_exc})...")
+            delay = retry_backoff[attempt - 1] if attempt - 1 < len(retry_backoff) else 30
+            warn(f"Retry {attempt}/{max_retries} in {delay}s (reason: {last_exc})...")
             time.sleep(delay)
 
         headers = {**_ua()}
@@ -262,6 +271,8 @@ def download_blob(
                     total = int(resp.headers.get("Content-Length", 0))
                     downloaded = 0
                     unsent = 0  # bytes not yet reported to aggregate
+                    if byte_progress is None:
+                        draw_bytes_bar(0, total, noun="downloaded")
                     while True:
                         if abort_event is not None and abort_event.is_set():
                             raise KeyboardInterrupt
@@ -272,6 +283,8 @@ def download_blob(
                         hasher.update(chunk)
                         chunk_len = len(chunk)
                         downloaded += chunk_len
+                        if bucket:
+                            bucket.consume(chunk_len)
                         if byte_progress is not None:
                             unsent += chunk_len
                             if unsent >= REDRAW_THRESHOLD_BYTES:
@@ -297,7 +310,7 @@ def download_blob(
         except BaseException as exc:
             if byte_progress is None:
                 clear_bar()
-            if _is_retryable(exc) and attempt < _MAX_RETRIES:
+            if _is_retryable(exc) and attempt < max_retries:
                 last_exc = exc
                 continue
             raise
@@ -308,7 +321,7 @@ def download_blob(
 
     # Should never reach here, but satisfy the type checker.
     raise RuntimeError(  # pragma: no cover
-        f"Download failed for '{digest}' after {_MAX_RETRIES} retries."
+        f"Download failed for '{digest}' after {max_retries} retries."
     )
 
 

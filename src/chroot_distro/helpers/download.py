@@ -29,13 +29,17 @@ from chroot_distro.progress import (
     fmt_size,
     loading_line,
 )
+from chroot_distro.rate_limit import TokenBucket
 
 __all__ = ("download_file", "sha256_file")
 
-_MAX_RETRIES = 3
-_RETRY_DELAYS = (1, 2, 4)  # seconds between retries (exponential backoff)
 _READ_CHUNK = 262144  # 256 KiB — balances syscall overhead vs memory
 _SOCKET_TIMEOUT = 30  # seconds — prevents threads from blocking in read() forever
+
+# Maximum number of reconnection attempts for a single chunk (PyLoad §6).
+# This is the outer reconnection cap; each reconnection attempt itself
+# retries up to _max_retries times internally.
+_MAX_RECONNECTIONS = 10
 
 # Transient error types worth retrying.
 _TRANSIENT_ERRORS = (
@@ -61,6 +65,18 @@ def _is_retriable(exc: BaseException) -> bool:
     if isinstance(exc, urllib.error.URLError):
         return isinstance(exc.reason, _TRANSIENT_ERRORS)
     return False
+
+
+def _get_max_retries() -> int:
+    """Return the configured max retry count (reads once per call)."""
+    from chroot_distro.constants import download_max_retries
+
+    return download_max_retries()
+
+
+def _get_retry_delays(max_retries: int) -> tuple[float, ...]:
+    """Generate exponential backoff delays for *max_retries* attempts."""
+    return tuple(min(2**i, 30) for i in range(max_retries))
 
 
 # ---------------------------------------------------------------------------
@@ -243,7 +259,7 @@ def _compute_segments(total: int, n: int, dest: str) -> list[_Segment]:
 
 
 # ---------------------------------------------------------------------------
-# Per-segment download
+# Per-segment download (PyLoad §4 + §6 resilience)
 # ---------------------------------------------------------------------------
 
 
@@ -264,12 +280,22 @@ def _download_segment(
     ua_headers: dict[str, str],
     aggregate: "AggregateByteProgress | None",
     abort_event: threading.Event,
+    bucket: "TokenBucket | None" = None,
 ) -> None:
     """Download one byte-range segment to *seg.tmp_path*.
 
-    Raises ``_RangeNotSupportedError`` if the server responds 200 instead of 206.
+    Implements PyLoad §6 per-chunk reconnection: if the connection drops
+    mid-stream, the segment resumes from where it left off (adjusting the
+    ``Range`` header) rather than failing the entire multi-segment download.
+
+    Falls back via ``_RangeNotSupportedError`` if the server responds 200
+    instead of 206, or ``416 Range Not Satisfiable``.
+
     Raises ``KeyboardInterrupt`` if *abort_event* is set.
     """
+    max_retries = _get_max_retries()
+    retry_delays = _get_retry_delays(max_retries)
+
     downloaded = 0
     if os.path.isfile(seg.tmp_path):
         downloaded = os.path.getsize(seg.tmp_path)
@@ -281,53 +307,92 @@ def _download_segment(
     # Each thread gets its own opener to avoid urllib's internal
     # connection serialisation when sharing the default global opener.
     opener = urllib.request.build_opener()
-    for attempt in range(_MAX_RETRIES + 1):
-        try:
-            start_pos = seg.start + downloaded
-            headers = {
-                **ua_headers,
-                "Range": f"bytes={start_pos}-{seg.end}",
-                "Accept-Encoding": "identity",  # critical: no gzip, breaks range math
-            }
-            req = urllib.request.Request(url, headers=headers)
-            mode = "ab" if downloaded > 0 else "wb"
-            with opener.open(req, timeout=_SOCKET_TIMEOUT) as resp, open(seg.tmp_path, mode) as fh:
-                if resp.status != 206:
-                    raise _RangeNotSupportedError(f"Expected 206, got {resp.status}")
-                unsent = 0  # bytes not yet reported to aggregate
-                while True:
-                    if abort_event.is_set():
-                        raise KeyboardInterrupt
-                    chunk = resp.read(_READ_CHUNK)
-                    if not chunk:
-                        break
-                    fh.write(chunk)
-                    if aggregate:
-                        unsent += len(chunk)
-                        if unsent >= REDRAW_THRESHOLD_BYTES:
-                            aggregate.add(unsent)
-                            unsent = 0
-                # flush remaining unsent bytes
-                if aggregate and unsent:
-                    aggregate.add(unsent)
-                fh.flush()
-                os.fsync(fh.fileno())
-            # verify size
-            actual = os.path.getsize(seg.tmp_path)
-            if actual != expected:
-                raise RuntimeError(f"Segment {seg.index}: expected {expected} bytes, got {actual}")
-            return
-        except _RangeNotSupportedError:
-            raise  # not retriable; bubble up immediately
-        except KeyboardInterrupt:
-            raise
-        except BaseException as exc:
-            if _is_retriable(exc) and attempt < _MAX_RETRIES:
-                _interruptible_sleep(_RETRY_DELAYS[attempt], abort_event)
+
+    reconnections = 0
+    while reconnections <= _MAX_RECONNECTIONS:
+        for attempt in range(max_retries + 1):
+            try:
+                start_pos = seg.start + downloaded
+                headers = {
+                    **ua_headers,
+                    "Range": f"bytes={start_pos}-{seg.end}",
+                    "Accept-Encoding": "identity",  # critical: no gzip, breaks range math
+                }
+                req = urllib.request.Request(url, headers=headers)
+                mode = "ab" if downloaded > 0 else "wb"
+                with opener.open(req, timeout=_SOCKET_TIMEOUT) as resp, open(seg.tmp_path, mode) as fh:
+                    # 416 Range Not Satisfiable → server lost range support mid-download
+                    if resp.status == 416:
+                        raise _RangeNotSupportedError(
+                            f"Server returned 416 Range Not Satisfiable for segment {seg.index}"
+                        )
+                    if resp.status != 206:
+                        raise _RangeNotSupportedError(f"Expected 206, got {resp.status}")
+                    unsent = 0  # bytes not yet reported to aggregate
+                    while True:
+                        if abort_event.is_set():
+                            raise KeyboardInterrupt
+                        chunk = resp.read(_READ_CHUNK)
+                        if not chunk:
+                            break
+                        fh.write(chunk)
+                        downloaded += len(chunk)
+                        if bucket:
+                            bucket.consume(len(chunk))
+                        if aggregate:
+                            unsent += len(chunk)
+                            if unsent >= REDRAW_THRESHOLD_BYTES:
+                                aggregate.add(unsent)
+                                unsent = 0
+                    # flush remaining unsent bytes
+                    if aggregate and unsent:
+                        aggregate.add(unsent)
+                    fh.flush()
+                    os.fsync(fh.fileno())
+                # verify size
+                actual = os.path.getsize(seg.tmp_path)
+                if actual != expected:
+                    raise RuntimeError(f"Segment {seg.index}: expected {expected} bytes, got {actual}")
+                return
+            except _RangeNotSupportedError:
+                raise  # not retriable; bubble up immediately
+            except urllib.error.HTTPError as exc:
+                if exc.code == 416:
+                    raise _RangeNotSupportedError(
+                        f"Server returned 416 Range Not Satisfiable for segment {seg.index}"
+                    ) from exc
+                if _is_retriable(exc) and attempt < max_retries:
+                    _interruptible_sleep(retry_delays[attempt], abort_event)
+                    if os.path.isfile(seg.tmp_path):
+                        downloaded = os.path.getsize(seg.tmp_path)
+                    continue
+                raise
+            except KeyboardInterrupt:
+                raise
+            except BaseException as exc:
+                if _is_retriable(exc) and attempt < max_retries:
+                    _interruptible_sleep(retry_delays[attempt], abort_event)
+                    if os.path.isfile(seg.tmp_path):
+                        downloaded = os.path.getsize(seg.tmp_path)
+                    continue
+                # All retries exhausted for this reconnection attempt.
+                # PyLoad §6: reconnect the chunk from where we left off.
                 if os.path.isfile(seg.tmp_path):
                     downloaded = os.path.getsize(seg.tmp_path)
-                continue
-            raise
+                if downloaded >= expected:
+                    return  # actually complete
+                reconnections += 1
+                if reconnections > _MAX_RECONNECTIONS:
+                    raise
+                # Recreate the opener for a fresh connection
+                opener = urllib.request.build_opener()
+                break  # break the retry loop, re-enter the reconnection loop
+
+    # Exhausted all reconnection attempts
+    raise RuntimeError(
+        f"Segment {seg.index}: exhausted {_MAX_RECONNECTIONS} reconnection attempts "
+        f"(downloaded {downloaded}/{expected} bytes)"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -345,6 +410,29 @@ def _concat_chunks(segments: list[_Segment], dest: str) -> None:
         os.fsync(out.fileno())
 
 
+def _concat_chunks_inplace(segments: list[_Segment], dest: str) -> None:
+    """PyLoad §4.5 chunk-0 append assembly.
+
+    Appends subsequent chunks into chunk0 in-place, then renames to *dest*.
+    Saves disk space (no full-size temp copy) but is less crash-safe than
+    :func:`_concat_chunks`.
+    """
+    ordered = sorted(segments, key=lambda s: s.index)
+    base = ordered[0].tmp_path
+    with open(base, "ab") as out:
+        for seg in ordered[1:]:
+            with open(seg.tmp_path, "rb") as inp:
+                while True:
+                    buf = inp.read(1 << 15)  # 32 KiB buffers per PyLoad
+                    if not buf:
+                        break
+                    out.write(buf)
+            os.remove(seg.tmp_path)
+        out.flush()
+        os.fsync(out.fileno())
+    os.replace(base, dest)
+
+
 # ---------------------------------------------------------------------------
 # Multi-connection orchestrator
 # ---------------------------------------------------------------------------
@@ -355,6 +443,7 @@ def _download_multi(
     dest: str,
     probe: _ProbeResult,
     connections: int,
+    bucket: "TokenBucket | None" = None,
 ) -> None:
     """Download *url* to *dest* using multiple parallel Range connections."""
     chunks_meta_path = f"{dest}.chunks.json"
@@ -443,6 +532,7 @@ def _download_multi(
                     ua,
                     aggregate,
                     abort_event,
+                    bucket,
                 ): seg
                 for seg in segments
             }
@@ -483,14 +573,21 @@ def _download_multi(
 # ---------------------------------------------------------------------------
 
 
-def _download_single(url: str, dest: str) -> None:
+def _download_single(
+    url: str,
+    dest: str,
+    bucket: "TokenBucket | None" = None,
+) -> None:
     """Download *url* to *dest* with a single connection (original path)."""
+    max_retries = _get_max_retries()
+    retry_delays = _get_retry_delays(max_retries)
+
     req = urllib.request.Request(url, headers=_ua_headers())
     last_exc: BaseException | None = None
-    for attempt in range(_MAX_RETRIES + 1):
+    for attempt in range(max_retries + 1):
         if attempt > 0:
-            delay = _RETRY_DELAYS[attempt - 1]
-            warn(f"Retry {attempt}/{_MAX_RETRIES} in {delay}s (reason: {last_exc})...")
+            delay = retry_delays[attempt - 1]
+            warn(f"Retry {attempt}/{max_retries} in {delay}s (reason: {last_exc})...")
             time.sleep(delay)
 
         try:
@@ -501,13 +598,27 @@ def _download_single(url: str, dest: str) -> None:
             ):
                 total = int(resp.headers.get("Content-Length", 0))
                 downloaded = 0
+                # Draw initial 0% bar immediately
+                draw_bytes_bar(0, total, noun="downloaded")
+                last_speed_time = time.monotonic()
+                last_speed_bytes = 0
+                speed = 0.0
                 while True:
                     chunk = resp.read(65536)
                     if not chunk:
                         break
                     fh.write(chunk)
                     downloaded += len(chunk)
-                    draw_bytes_bar(downloaded, total, noun="downloaded")
+                    if bucket:
+                        bucket.consume(len(chunk))
+                    # Update speed every ~0.5s
+                    now = time.monotonic()
+                    dt = now - last_speed_time
+                    if dt >= 0.5:
+                        speed = (downloaded - last_speed_bytes) / dt
+                        last_speed_bytes = downloaded
+                        last_speed_time = now
+                    draw_bytes_bar(downloaded, total, noun="downloaded", speed=speed)
                 fh.flush()
                 os.fsync(fh.fileno())
             clear_bar()
@@ -518,7 +629,7 @@ def _download_single(url: str, dest: str) -> None:
             raise
         except BaseException as exc:
             clear_bar()
-            if _is_retriable(exc) and attempt < _MAX_RETRIES:
+            if _is_retriable(exc) and attempt < max_retries:
                 last_exc = exc
                 continue
             msg()
@@ -537,10 +648,18 @@ def download_file(url: str, dest: str) -> None:
     Uses multiple parallel Range connections when ``CD_DOWNLOAD_WORKERS > 1``
     and the server advertises ``Accept-Ranges`` support.  Falls back to a
     single connection automatically on any incompatibility.
+
+    Bandwidth can be limited via ``CD_DOWNLOAD_RATE_LIMIT`` (e.g. ``"5M"``
+    for 5 MiB/s).  Retry count is configurable via ``CD_DOWNLOAD_MAX_RETRIES``
+    (default 3).
     """
-    from chroot_distro.constants import layer_download_workers
+    from chroot_distro.constants import download_rate_limit, layer_download_workers
 
     connections = layer_download_workers()
+
+    # Create a shared rate limiter (0 = unlimited)
+    rate = download_rate_limit()
+    bucket = TokenBucket(rate) if rate > 0 else None
 
     if connections > 1:
         # Probe with immediate spinner feedback
@@ -559,7 +678,7 @@ def download_file(url: str, dest: str) -> None:
                 f"Using segmented download."
             )
             try:
-                _download_multi(url, dest, probe, connections)
+                _download_multi(url, dest, probe, connections, bucket)
                 return
             except _FallbackToSingleError:
                 log_info("Segments too small for splitting, falling back to single connection.")
@@ -571,7 +690,7 @@ def download_file(url: str, dest: str) -> None:
                 raise RuntimeError(f"Cannot download {url}: {exc}") from exc
 
     # Single-connection fallback
-    _download_single(url, dest)
+    _download_single(url, dest, bucket)
 
 
 def sha256_file(path: str) -> str:

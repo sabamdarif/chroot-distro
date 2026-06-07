@@ -86,6 +86,44 @@ def layer_download_workers() -> int:
 # — segmented download (per-file multi-connection) —
 MIN_SEGMENT_BYTES = 4 * 1024 * 1024  # 4 MiB — don't split below this per segment
 
+DEFAULT_DOWNLOAD_MAX_RETRIES = 3
+MAX_DOWNLOAD_RETRIES = 20
+
+
+def download_max_retries() -> int:
+    """Return max retry count from ``CD_DOWNLOAD_MAX_RETRIES``.
+
+    Values below 0 are raised to 0; values above ``MAX_DOWNLOAD_RETRIES``
+    are capped.  Non-integers fall back to ``DEFAULT_DOWNLOAD_MAX_RETRIES``.
+    """
+    raw = os.environ.get("CD_DOWNLOAD_MAX_RETRIES", "").strip()
+    if not raw:
+        return DEFAULT_DOWNLOAD_MAX_RETRIES
+    try:
+        count = int(raw, 10)
+    except ValueError:
+        return DEFAULT_DOWNLOAD_MAX_RETRIES
+    return max(0, min(count, MAX_DOWNLOAD_RETRIES))
+
+
+def download_rate_limit() -> int:
+    """Return bandwidth cap in bytes/sec from ``CD_DOWNLOAD_RATE_LIMIT``.
+
+    Accepts human-readable suffixes: ``K`` (KiB), ``M`` (MiB), ``G`` (GiB).
+    Examples: ``"5M"`` → 5 MiB/s, ``"500K"`` → 500 KiB/s, ``"0"`` → unlimited.
+    Returns ``0`` (unlimited) when unset or on parse error.
+    """
+    raw = os.environ.get("CD_DOWNLOAD_RATE_LIMIT", "").strip().upper()
+    if not raw:
+        return 0
+    multipliers = {"K": 1024, "M": 1024 * 1024, "G": 1024 * 1024 * 1024}
+    try:
+        if raw[-1] in multipliers:
+            return max(0, int(raw[:-1]) * multipliers[raw[-1]])
+        return max(0, int(raw))
+    except (ValueError, IndexError):
+        return 0
+
 
 if IS_TERMUX:
     DEFAULT_PATH_ENV = (

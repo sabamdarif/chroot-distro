@@ -1,11 +1,14 @@
 import contextlib
 import os
+import sys
 import tempfile
 
 
 def _fsync_directory(dir_path: str) -> None:
     """Fsync a directory to ensure rename/link metadata reaches disk."""
-    fd = os.open(dir_path, os.O_RDONLY)
+    if sys.platform == "win32":
+        return
+    fd = os.open(dir_path, os.O_RDONLY)  # type: ignore[unreachable]
     try:
         os.fsync(fd)
     finally:

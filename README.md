@@ -933,6 +933,8 @@ paths on Linux are typically under `/root/.local/share/` and
 | `XDG_CACHE_HOME` | Base for `$XDG_CACHE_HOME/chroot-distro/` on non-Termux hosts. Default: `~/.cache`. |
 | `CD_DOCKER_AUTH` | Registry credentials as `username:password` or `username:PAT` (colon required). Used by `install`, `build` (`FROM` pulls), and `push`. `PD_DOCKER_AUTH` is accepted as a fallback. |
 | `CD_DOWNLOAD_WORKERS` | Parallel registry layer downloads during `install` (default `4`, maximum `10`). Invalid values use the default; out-of-range values are clamped. |
+| `CD_DOWNLOAD_RATE_LIMIT` | Bandwidth limit for downloads (e.g., `5M` for 5 MiB/s, default `0` = unlimited). Supports suffixes `K`, `M`, `G` (case-insensitive). |
+| `CD_DOWNLOAD_MAX_RETRIES` | Maximum retry attempts per connection failure (default `3`, clamped between `0` and `20`). |
 | `CD_FORCE_NO_COLORS` | When set, disables ANSI colours in Chroot-Distro output. |
 | `CHROOT_DISTRO_NO_ELEVATE` | When set to `1`, disables privilege auto-elevation (same as `--no-elevate`). |
 | `CHROOT_DISTRO_USE_SUDO` | When set to `1`, prefer `sudo` over `su` on Termux (same as `--use-sudo`). |
@@ -1051,5 +1053,6 @@ DJkMCnBAFG14TV3BqZKmbbjD8Pi1zKLLG6
 
 - [proot-distro](https://github.com/termux/proot-distro) — architecture
   and CLI design inspiration.
+- [pyLoad](https://github.com/pyload/pyload) — sliding-window speed tracking, token-bucket rate limiting, and connection resilience algorithms.
 - [Magisk-Modules-Alt-Repo/chroot-distro](https://github.com/Magisk-Modules-Alt-Repo/chroot-distro)
 - [ravindu644/Ubuntu-Chroot](https://github.com/ravindu644/Ubuntu-Chroot)

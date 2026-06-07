@@ -2,7 +2,9 @@ import contextlib
 import itertools
 import sys
 import threading
+import time
 import typing
+from collections import deque
 
 from chroot_distro.message import C, is_quiet, tty_safe_for_writes
 
@@ -18,6 +20,17 @@ def fmt_size(n_bytes: int) -> str:
     if n_bytes >= 1 << 10:
         return f"{n_bytes / (1 << 10):.1f} KiB"
     return f"{n_bytes} B"
+
+
+def _fmt_speed(bps: float) -> str:
+    """Return a human-readable speed string (B/s, KiB/s, MiB/s, GiB/s)."""
+    if bps >= 1 << 30:
+        return f"{bps / (1 << 30):.1f} GiB/s"
+    if bps >= 1 << 20:
+        return f"{bps / (1 << 20):.1f} MiB/s"
+    if bps >= 1 << 10:
+        return f"{bps / (1 << 10):.1f} KiB/s"
+    return f"{bps:.0f} B/s"
 
 
 class ByteCounter:
@@ -56,19 +69,21 @@ def draw_bytes_bar(
     *,
     label: str = "",
     noun: str = "processed",
+    speed: float = 0.0,
 ) -> None:
     """Draw a [####----] progress line keyed by byte counts."""
     if not progress_active() or not tty_safe_for_writes():
         return
     pfx = f"{C['BLUE']}[{C['GREEN']}*{C['BLUE']}] {C['CYAN']}"
     head = f"{label}: " if label else ""
+    speed_str = f"  {_fmt_speed(speed)}" if speed > 0 else ""
     if sys.stderr.isatty():
         if total:
             pct = min(done * 100 // total, 100)
             bar = "#" * (pct // 5) + "-" * (20 - pct // 5)
-            line = f"\r{pfx}{head}[{bar}] {pct:3d}%  {fmt_size(done)} / {fmt_size(total)}\033[K{C['RST']}"
+            line = f"\r{pfx}{head}[{bar}] {pct:3d}%  {fmt_size(done)} / {fmt_size(total)}{speed_str}\033[K{C['RST']}"
         else:
-            line = f"\r{pfx}{head}{fmt_size(done)} {noun}...\033[K{C['RST']}"
+            line = f"\r{pfx}{head}{fmt_size(done)} {noun}...{speed_str}\033[K{C['RST']}"
         sys.stderr.write(line)
         sys.stderr.flush()
     else:
@@ -195,8 +210,19 @@ def loading_line(
         clear_bar()
 
 
+# ---------------------------------------------------------------------------
+# Sliding-window speed tracker (PyLoad §4.4)
+# ---------------------------------------------------------------------------
+
+_SPEED_WINDOW_SECS = 3.0  # sliding window duration for speed calculation
+
+
 class AggregateByteProgress:
-    """Thread-safe byte counter that drives one shared progress bar."""
+    """Thread-safe byte counter that drives one shared progress bar.
+
+    Tracks download speed via a 3-second sliding window of
+    ``(timestamp, cumulative_bytes)`` samples (PyLoad §4.4).
+    """
 
     def __init__(self, total: int = 0, *, label: str = "") -> None:
         self._lock = threading.Lock()
@@ -204,13 +230,50 @@ class AggregateByteProgress:
         self._total = total
         self._label = label
         self._last_shown = 0
+        # Sliding window: deque of (monotonic_time, cumulative_bytes)
+        self._samples: deque[tuple[float, int]] = deque()
+        self._start_time = time.monotonic()
+        # Draw the initial 0% bar immediately so the user sees feedback
+        draw_bytes_bar(0, total, label=label, noun="downloaded")
 
     def add(self, nbytes: int) -> None:
         with self._lock:
             self._done += nbytes
+            now = time.monotonic()
+            self._samples.append((now, self._done))
+            # Trim samples older than the window
+            cutoff = now - _SPEED_WINDOW_SECS
+            while self._samples and self._samples[0][0] < cutoff:
+                self._samples.popleft()
+            speed = self._speed_locked()
             if self._done == self._total or self._done - self._last_shown >= REDRAW_THRESHOLD_BYTES:
                 self._last_shown = self._done
-                draw_bytes_bar(self._done, self._total, label=self._label, noun="downloaded")
+                draw_bytes_bar(
+                    self._done,
+                    self._total,
+                    label=self._label,
+                    noun="downloaded",
+                    speed=speed,
+                )
+
+    def _speed_locked(self) -> float:
+        """Return current speed in bytes/sec from the sliding window.
+
+        Must be called while holding ``self._lock``.
+        """
+        if len(self._samples) < 2:
+            return 0.0
+        oldest_t, oldest_b = self._samples[0]
+        newest_t, newest_b = self._samples[-1]
+        dt = newest_t - oldest_t
+        if dt <= 0:
+            return 0.0
+        return (newest_b - oldest_b) / dt
+
+    def speed(self) -> float:
+        """Return current download speed in bytes/sec (thread-safe)."""
+        with self._lock:
+            return self._speed_locked()
 
     def clear(self) -> None:
         clear_bar()

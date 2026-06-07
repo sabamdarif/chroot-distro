@@ -198,12 +198,11 @@ class TestDownloadBlobSegmented:
                 final_url="https://cdn.example.com/final.blob",
                 range_ok=True,
             )
-
             # Mock _download_segment to write part of the content to seg.tmp_path
-            def mock_download_segment(seg, url, headers, progress, abort):
+            def mock_download_segment(seg, url, headers, progress, abort, bucket=None):
                 with open(seg.tmp_path, "wb") as f:
                     f.write(content[seg.start : seg.end + 1])
-
+ 
             with (
                 mock.patch("chroot_distro.helpers.docker.layers._probe_blob", return_value=probe_result),
                 mock.patch("chroot_distro.helpers.docker.layers._download_segment", side_effect=mock_download_segment),
@@ -238,7 +237,7 @@ class TestDownloadBlobSegmented:
             )
 
             # Write bad data
-            def mock_download_segment_bad(seg, url, headers, progress, abort):
+            def mock_download_segment_bad(seg, url, headers, progress, abort, bucket=None):
                 with open(seg.tmp_path, "wb") as f:
                     f.write(b"B" * (seg.end - seg.start + 1))
 
@@ -277,7 +276,7 @@ class TestDownloadBlobSegmented:
 
             captured_headers = []
 
-            def mock_dl_segment(seg, url, headers, progress, abort):
+            def mock_dl_segment(seg, url, headers, progress, abort, bucket=None):
                 captured_headers.append(headers)
                 with open(seg.tmp_path, "wb") as f:
                     f.write(content[seg.start : seg.end + 1])
@@ -335,7 +334,7 @@ class TestDownloadBlobSegmented:
             )
 
             # Mock _download_segment to fail
-            def mock_dl_segment_error(seg, url, headers, progress, abort):
+            def mock_dl_segment_error(seg, url, headers, progress, abort, bucket=None):
                 raise RuntimeError("segment download failed")
 
             # Mock single connection download as success
@@ -406,6 +405,7 @@ class TestDownloadBlobSegmented:
             with (
                 mock.patch("chroot_distro.helpers.docker.layers._probe_blob", return_value=probe_result),
                 mock.patch("urllib.request.build_opener", return_value=mock_opener_first),
+                mock.patch("chroot_distro.helpers.download._interruptible_sleep"),
             ):
                 with pytest.raises(Exception):
                     download_blob(
@@ -440,6 +440,7 @@ class TestDownloadBlobSegmented:
             with (
                 mock.patch("chroot_distro.helpers.docker.layers._probe_blob", return_value=probe_result),
                 mock.patch("urllib.request.build_opener", return_value=mock_opener_second),
+                mock.patch("chroot_distro.helpers.download._interruptible_sleep"),
             ):
                 result_path = download_blob(
                     repo="library/nextcloud",
