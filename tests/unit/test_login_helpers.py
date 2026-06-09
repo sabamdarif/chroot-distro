@@ -47,10 +47,15 @@ def test_resolve_term_exists_termux(tmp_path):
     assert res == "xterm-ghostty"
 
 
-def test_build_chroot_args_fault_tolerant_cd():
-    # Test that when a workdir is specified, it wraps the command with a fault-tolerant cd.
+def test_build_chroot_args_fault_tolerant_cd(tmp_path):
+    # Test that when a workdir is specified AND /bin/sh exists, it wraps the command with a fault-tolerant cd.
+    rootfs = tmp_path / "rootfs"
+    (rootfs / "bin").mkdir(parents=True)
+    (rootfs / "bin" / "sh").touch()
+    (rootfs / "bin" / "sh").chmod(0o755)
+
     args = build_chroot_args(
-        rootfs="/fake/rootfs",
+        rootfs=str(rootfs),
         login_uid="1000",
         login_gid="1000",
         groups=["1000", "4"],
@@ -61,7 +66,7 @@ def test_build_chroot_args_fault_tolerant_cd():
     assert args[0].endswith("chroot")
     assert "--userspec=1000:1000" in args
     assert "--groups=1000,4" in args
-    assert "/fake/rootfs" in args
+    assert str(rootfs) in args
 
     # Verify the wrapped cd command structure
     assert "/bin/sh" in args
@@ -83,6 +88,44 @@ def test_build_chroot_args_no_workdir():
     # When no workdir is specified, it should NOT wrap it with cd.
     assert "/bin/sh" not in args
     assert args[-2:] == ["/bin/bash", "-l"]
+
+
+def test_build_chroot_args_distroless_no_shell(tmp_path):
+    """Distroless images without /bin/sh should skip the cd wrapper."""
+    rootfs = tmp_path / "rootfs"
+    rootfs.mkdir()
+    # No /bin/sh created — simulates a distroless image like cloudflare/cloudflared
+
+    args = build_chroot_args(
+        rootfs=str(rootfs),
+        login_uid="65532",
+        login_gid="65532",
+        workdir="/home/nonroot",
+        inner_cmd=["/usr/local/bin/cloudflared", "--help"],
+    )
+
+    assert args[0].endswith("chroot")
+    assert str(rootfs) in args
+    # /bin/sh should NOT be in the args — no shell wrapper
+    assert "/bin/sh" not in args
+    assert "-c" not in args
+    # The command should be appended directly
+    assert args[-2:] == ["/usr/local/bin/cloudflared", "--help"]
+
+
+def test_build_chroot_args_distroless_workdir_root(tmp_path):
+    """Distroless images with workdir='/' should not attempt any wrapping."""
+    rootfs = tmp_path / "rootfs"
+    rootfs.mkdir()
+
+    args = build_chroot_args(
+        rootfs=str(rootfs),
+        workdir="/",
+        inner_cmd=["/cloudflared", "tunnel"],
+    )
+
+    assert "/bin/sh" not in args
+    assert args[-2:] == ["/cloudflared", "tunnel"]
 
 
 def test_get_bindings_home_sharing():
