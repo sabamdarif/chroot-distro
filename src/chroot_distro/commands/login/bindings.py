@@ -10,6 +10,7 @@ from chroot_distro.constants import (
     TERMUX_PREFIX,
 )
 from chroot_distro.helpers import nvidia as nvidia_helper
+from chroot_distro.helpers.rootfs import host_resolv_conf_path
 
 log = logging.getLogger(__name__)
 
@@ -373,6 +374,19 @@ def get_bindings(
         # Mark /run for rslave propagation so new sockets (Wayland,
         # PipeWire, PulseAudio, D-Bus) created after mount are visible.
         rslave_targets.append(os.path.join(rootfs, "run"))
+
+    # Keep guest DNS in sync with the host (Termux: $PREFIX/etc/resolv.conf).
+    # Bind-mounting avoids broken systemd-resolved symlinks once /run is shared.
+    host_resolv = host_resolv_conf_path()
+    custom_resolv_bound = False
+    if custom_binds:
+        for entry in custom_binds:
+            dst = entry.split(":", 1)[1] if ":" in entry else entry
+            if dst.rstrip("/") == "/etc/resolv.conf":
+                custom_resolv_bound = True
+                break
+    if host_resolv and not custom_resolv_bound:
+        binds.append((host_resolv, "/etc/resolv.conf"))
 
     # If minimal mode is enabled, we only bind the bare systems (/dev, /proc, /sys, /run)
     if minimal:

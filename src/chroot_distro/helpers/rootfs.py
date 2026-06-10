@@ -7,18 +7,83 @@ import stat
 from chroot_distro.constants import (
     DEFAULT_PRIMARY_NS,
     DEFAULT_SECONDARY_NS,
+    IS_TERMUX,
+    TERMUX_PREFIX,
 )
 from chroot_distro.helpers.android import termux_home_owner_ids
 
+# Local stub resolvers that only work when the matching daemon runs in the
+# same network namespace (e.g. systemd-resolved on the host).
+_LOOPBACK_NAMESERVERS = frozenset({"127.0.0.1", "127.0.0.53", "::1", "0.0.0.0"})
+
+_SYSTEMD_UPSTREAM_RESOLV = "/run/systemd/resolve/resolv.conf"
+
+
+def host_resolv_conf_path() -> str | None:
+    """Return the host path to resolv.conf, or None when unavailable."""
+    path = os.path.join(TERMUX_PREFIX, "etc", "resolv.conf") if IS_TERMUX else "/etc/resolv.conf"
+    if os.path.isfile(path) or os.path.islink(path):
+        return path
+    return None
+
+
+def _parse_nameservers(content: str) -> list[str]:
+    servers: list[str] = []
+    seen: set[str] = set()
+    for line in content.splitlines():
+        parts = line.strip().split()
+        if len(parts) >= 2 and parts[0] == "nameserver":
+            ns = parts[1]
+            if ns in _LOOPBACK_NAMESERVERS or ns in seen:
+                continue
+            seen.add(ns)
+            servers.append(ns)
+    return servers
+
+
+def _read_resolv_nameservers(path: str) -> list[str]:
+    """Read usable nameserver entries from *path*, following symlinks."""
+    try:
+        real = os.path.realpath(path)
+        with open(real) as fh:
+            content = fh.read()
+    except OSError:
+        return []
+
+    servers = _parse_nameservers(content)
+    if servers:
+        return servers
+
+    # systemd-resolved stub (127.0.0.53) — read upstream servers instead.
+    if "127.0.0.53" in content and os.path.isfile(_SYSTEMD_UPSTREAM_RESOLV):
+        try:
+            with open(_SYSTEMD_UPSTREAM_RESOLV) as fh:
+                return _parse_nameservers(fh.read())
+        except OSError:
+            pass
+    return []
+
+
+def host_nameservers() -> list[str]:
+    """Return DNS servers configured on the host, if any."""
+    host_path = host_resolv_conf_path()
+    if not host_path:
+        return []
+    return _read_resolv_nameservers(host_path)
+
 
 def write_resolv_conf(rootfs: str) -> None:
-    """Replace /etc/resolv.conf with a plain file containing default DNS servers."""
+    """Replace guest /etc/resolv.conf with a plain file using host DNS servers."""
     path = os.path.join(rootfs, "etc", "resolv.conf")
+    servers = host_nameservers()
+    if not servers:
+        servers = [DEFAULT_PRIMARY_NS, DEFAULT_SECONDARY_NS]
+
     with contextlib.suppress(OSError):
         os.remove(path)
     with open(path, "w") as fh:
-        fh.write(f"nameserver {DEFAULT_PRIMARY_NS}\n")
-        fh.write(f"nameserver {DEFAULT_SECONDARY_NS}\n")
+        for ns in servers:
+            fh.write(f"nameserver {ns}\n")
 
 
 def write_hosts(rootfs: str) -> None:

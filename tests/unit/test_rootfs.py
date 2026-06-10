@@ -1,6 +1,69 @@
+import os
 from unittest.mock import MagicMock, patch
 
-from chroot_distro.helpers.rootfs import register_android_ids
+from chroot_distro.helpers.rootfs import (
+    host_nameservers,
+    host_resolv_conf_path,
+    register_android_ids,
+    write_resolv_conf,
+)
+
+
+def test_host_resolv_conf_path_termux(tmp_path):
+    prefix = tmp_path / "usr"
+    etc = prefix / "etc"
+    etc.mkdir(parents=True)
+    (etc / "resolv.conf").write_text("nameserver 192.0.2.1\n")
+
+    with (
+        patch("chroot_distro.helpers.rootfs.IS_TERMUX", True),
+        patch("chroot_distro.helpers.rootfs.TERMUX_PREFIX", str(prefix)),
+    ):
+        assert host_resolv_conf_path() == str(etc / "resolv.conf")
+        assert host_nameservers() == ["192.0.2.1"]
+
+
+def test_host_nameservers_skips_systemd_stub(tmp_path):
+    run = tmp_path / "run" / "systemd" / "resolve"
+    run.mkdir(parents=True)
+    (run / "stub-resolv.conf").write_text("nameserver 127.0.0.53\n")
+    (run / "resolv.conf").write_text("nameserver 192.0.2.2\nnameserver 192.0.2.3\n")
+    resolv = tmp_path / "etc" / "resolv.conf"
+    resolv.parent.mkdir(parents=True)
+    os.symlink("../run/systemd/resolve/stub-resolv.conf", resolv)
+
+    with (
+        patch("chroot_distro.helpers.rootfs.host_resolv_conf_path", return_value=str(resolv)),
+        patch("chroot_distro.helpers.rootfs._SYSTEMD_UPSTREAM_RESOLV", str(run / "resolv.conf")),
+    ):
+        assert host_nameservers() == ["192.0.2.2", "192.0.2.3"]
+
+
+def test_write_resolv_conf_uses_host_nameservers(tmp_path):
+    rootfs = tmp_path / "rootfs"
+    etc = rootfs / "etc"
+    etc.mkdir(parents=True)
+    (etc / "resolv.conf").symlink_to("/run/systemd/resolve/stub-resolv.conf")
+
+    with patch("chroot_distro.helpers.rootfs.host_nameservers", return_value=["192.0.2.4", "192.0.2.5"]):
+        write_resolv_conf(str(rootfs))
+
+    content = (etc / "resolv.conf").read_text()
+    assert content == "nameserver 192.0.2.4\nnameserver 192.0.2.5\n"
+    assert not (etc / "resolv.conf").is_symlink()
+
+
+def test_write_resolv_conf_falls_back_to_defaults(tmp_path):
+    rootfs = tmp_path / "rootfs"
+    etc = rootfs / "etc"
+    etc.mkdir(parents=True)
+
+    with patch("chroot_distro.helpers.rootfs.host_nameservers", return_value=[]):
+        write_resolv_conf(str(rootfs))
+
+    content = (etc / "resolv.conf").read_text()
+    assert "nameserver 8.8.8.8" in content
+    assert "nameserver 8.8.4.4" in content
 
 
 def test_register_android_ids_basic(tmp_path):
