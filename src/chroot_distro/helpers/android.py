@@ -110,19 +110,42 @@ def configure_android_rootfs(rootfs: str) -> None:
     except OSError:
         return
 
-    # 2. Add missing Android groups or append root to them
+    # 1.5 Check if _apt exists in passwd
+    has_apt = False
+    passwd_path = os.path.join(rootfs, "etc", "passwd")
+    if os.path.exists(passwd_path):
+        try:
+            with open(passwd_path) as f:
+                for line in f:
+                    if line.startswith("_apt:"):
+                        has_apt = True
+                        break
+        except OSError:
+            pass
+
+    # 2. Add missing Android groups or append root (and _apt) to them
     modified = False
     for gname, gid in ANDROID_GROUPS.items():
         if gname not in existing_groups:
             # Format: group_name:password:GID:user_list
-            existing_groups[gname] = [gname, "x", str(gid), "root"]
+            users = ["root"]
+            if has_apt and gname in ("aid_inet", "aid_net_raw"):
+                users.append("_apt")
+            existing_groups[gname] = [gname, "x", str(gid), ",".join(users)]
             modified = True
         else:
-            # Group exists, ensure root is in user list
+            # Group exists, ensure root and _apt are in user list
             parts = existing_groups[gname]
             users = parts[3].split(",") if len(parts) > 3 and parts[3] else []
+            group_modified = False
             if "root" not in users:
                 users.append("root")
+                group_modified = True
+            if has_apt and gname in ("aid_inet", "aid_net_raw") and "_apt" not in users:
+                users.append("_apt")
+                group_modified = True
+
+            if group_modified:
                 if len(parts) <= 3:
                     parts.append(",".join(users))
                 else:
@@ -155,66 +178,39 @@ def configure_android_rootfs(rootfs: str) -> None:
             pass
 
     # 4. _apt permission fix for Debian/Ubuntu based distros
-    passwd_path = os.path.join(rootfs, "etc", "passwd")
-    if os.path.exists(passwd_path):
+    if has_apt and os.path.exists(passwd_path):
         try:
-            has_apt = False
+            # 4a. Update _apt's primary GID to 3003 (aid_inet) in /etc/passwd
+            passwd_lines = []
+            passwd_modified = False
+            _apt_uid = 100  # Default fallback
             with open(passwd_path) as f:
-                for line in f:
-                    if line.startswith("_apt:"):
-                        has_apt = True
-                        break
-            if has_apt:
-                # We need to change ownership of apt dirs, but we must resolve the uid/gid of _apt
-                # Since we don't have chroot running yet, we can do it via os.chown if uid/gid are standard
-                # Or we can do it when chroot is available. Let's try standard _apt UID or skip it here.
-                # In standard debian/ubuntu, _apt uid is typically 100.
-                # But it's safer to just do it via usermod inside chroot later, or here using chown.
-                # Let's chown the dirs /var/lib/apt and /var/cache/apt to 100:3003 (aid_inet is 3003)
-                # which matches usermod behavior.
-                for apt_dir in ("var/lib/apt", "var/cache/apt"):
-                    full_apt_dir = os.path.join(rootfs, apt_dir)
-                    if os.path.exists(full_apt_dir):
-                        try:
-                            # 3003 is aid_inet GID. For uid, we can try to find _apt uid from passwd.
-                            _apt_uid = 100  # Default fallback
-                            with open(passwd_path) as f:
-                                for line in f:
-                                    if line.startswith("_apt:"):
-                                        parts = line.split(":")
-                                        if len(parts) >= 3:
-                                            _apt_uid = int(parts[2])
-                                            break
-                            os.chown(full_apt_dir, _apt_uid, 3003)
-                            for root, dirs, files in os.walk(full_apt_dir):
-                                for d in dirs:
-                                    os.chown(os.path.join(root, d), _apt_uid, 3003)
-                                for file in files:
-                                    os.chown(os.path.join(root, file), _apt_uid, 3003)
-                        except Exception:
-                            pass
+                for raw_line in f:
+                    parts = raw_line.rstrip("\n").split(":")
+                    out_line = raw_line
+                    if parts and parts[0] == "_apt" and len(parts) >= 4:
+                        _apt_uid = int(parts[2])
+                        if parts[3] != "3003":
+                            parts[3] = "3003"
+                            out_line = ":".join(parts) + "\n"
+                            passwd_modified = True
+                    passwd_lines.append(out_line)
+            if passwd_modified:
+                with open(passwd_path, "w") as f:
+                    f.writelines(passwd_lines)
 
-                # Add _apt to aid_inet and aid_net_raw groups so apt's
-                # sandboxed processes can create network sockets on Android.
-                if os.path.exists(group_path):
-                    _apt_net_groups = {"aid_inet", "aid_net_raw"}
+            # 4b. Chown apt directories
+            for apt_dir in ("var/lib/apt", "var/cache/apt"):
+                full_apt_dir = os.path.join(rootfs, apt_dir)
+                if os.path.exists(full_apt_dir):
                     try:
-                        with open(group_path) as f:
-                            lines = f.readlines()
-                        modified = False
-                        for i, line in enumerate(lines):
-                            parts = line.strip().split(":")
-                            if len(parts) >= 4 and parts[0] in _apt_net_groups:
-                                members = [m for m in parts[3].split(",") if m]
-                                if "_apt" not in members:
-                                    members.append("_apt")
-                                    parts[3] = ",".join(members)
-                                    lines[i] = ":".join(parts) + "\n"
-                                    modified = True
-                        if modified:
-                            with open(group_path, "w") as f:
-                                f.writelines(lines)
-                    except OSError:
+                        os.chown(full_apt_dir, _apt_uid, 3003)
+                        for root, dirs, files in os.walk(full_apt_dir):
+                            for d in dirs:
+                                os.chown(os.path.join(root, d), _apt_uid, 3003)
+                            for file in files:
+                                os.chown(os.path.join(root, file), _apt_uid, 3003)
+                    except Exception:
                         pass
         except OSError:
             pass
