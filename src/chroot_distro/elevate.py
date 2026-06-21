@@ -101,22 +101,21 @@ def elevate_or_die() -> None:
 
     tool_name = tool_cmd[0]
 
+    # Prefix the re-executed program with `env VAR=value ...` so the
+    # forwarded variables are set by the root-side `env` binary. This is
+    # independent of the elevation tool's own environment policy (sudoers
+    # env_keep / -E, doas keepenv, pkexec sanitisation), which can otherwise
+    # silently drop CD_USE_NS and skip namespace isolation.
+    env_prefix = ["env", *env_assignments] if env_assignments else []
+
     # Construct the final command line
     if tool_cmd[-1] == "-c":
-        # su -c "<command string>": embed the assignments via `env` so they
-        # are applied for the re-executed process.
-        inner = ["env", *env_assignments, *reexec_argv] if env_assignments else reexec_argv
-        cmd_str = shlex.join(inner)
+        # su -c "<command string>": the whole invocation is a single string.
+        cmd_str = shlex.join([*env_prefix, *reexec_argv])
         full_argv = [*tool_cmd, cmd_str]
-    elif tool_name == "pkexec":
-        # pkexec does not accept VAR=value assignments before the command,
-        # so prefix the program with `env VAR=value ...`.
-        prefix = ["env", *env_assignments] if env_assignments else []
-        full_argv = [*tool_cmd, *prefix, *reexec_argv]
     else:
-        # sudo and doas both accept `VAR=value` assignments placed before the
-        # command to run; this works even when env_keep / -E is disabled.
-        full_argv = [*tool_cmd, *env_assignments, *reexec_argv]
+        # sudo / doas / pkexec: run `env VAR=value <reexec>` as root.
+        full_argv = [*tool_cmd, *env_prefix, *reexec_argv]
 
     try:
         os.execvp(full_argv[0], full_argv)
