@@ -16,12 +16,23 @@ from chroot_distro.exceptions import ChrootDistroError
 
 log = logging.getLogger(__name__)
 
-_PROBE_FLAGS = ("--pid", "--mount", "--uts", "--ipc")
+# Namespaces that must all be available for isolation to be acquired. The
+# pre-flight check in command_login is all-or-nothing over this set, so it is
+# kept to the widely supported namespaces; missing any of them means a full
+# fall back to host mode rather than a half-isolated session.
+_REQUIRED_PROBE_FLAGS = ("--pid", "--mount", "--uts", "--ipc")
+# The cgroup namespace is acquired opportunistically: it is added to the
+# holder when the kernel supports it (probe_unshare_flags drops unsupported
+# flags), but it is NOT part of the strict pre-check because several Android
+# kernels lack cgroupns and we still want pid/mount/uts/ipc isolation there.
+_OPTIONAL_PROBE_FLAGS = ("--cgroup",)
+_PROBE_FLAGS = _REQUIRED_PROBE_FLAGS + _OPTIONAL_PROBE_FLAGS
 _LONG_TO_SHORT = {
     "--mount": "-m",
     "--uts": "-u",
     "--ipc": "-i",
     "--pid": "-p",
+    "--cgroup": "-C",
 }
 
 ISOLATION_MODE_NAMESPACE = "namespace"
@@ -149,7 +160,7 @@ def probe_unshare_flags() -> list[str]:
     return supported
 
 
-def probe_namespace_support(flags: tuple[str, ...] = _PROBE_FLAGS) -> list[str]:
+def probe_namespace_support(flags: tuple[str, ...] = _REQUIRED_PROBE_FLAGS) -> list[str]:
     """Return the subset of *flags* the kernel does NOT support.
 
     Probes each flag with `unshare <flag> true` without entering any
