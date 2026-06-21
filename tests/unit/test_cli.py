@@ -7,13 +7,9 @@ from chroot_distro.exceptions import RootRequiredError
 
 
 def test_ensure_root_user():
-    # As non-root with no_elevate=True, it should raise RootRequiredError
-    with patch("os.getuid", return_value=1000), pytest.raises(RootRequiredError):
-        _ensure_root_user(no_elevate=True)
-
-    # As non-root with no_elevate=False, it should call elevate_or_die
+    # As non-root, it should call elevate_or_die
     with patch("os.getuid", return_value=1000), patch("chroot_distro.elevate.elevate_or_die") as mock_elevate:
-        _ensure_root_user(no_elevate=False)
+        _ensure_root_user()
         mock_elevate.assert_called_once()
 
     # As root, it should pass without raising and not call elevate_or_die
@@ -69,18 +65,6 @@ def test_main_login_requires_root():
             main()
         assert exc_info.value.code == 1
 
-
-def test_main_no_elevate_flag():
-    # When --no-elevate is passed, it should exit with 1 immediately without calling elevate_or_die
-    with (
-        patch("sys.argv", ["chroot-distro", "--no-elevate", "login", "alpine"]),
-        patch("os.getuid", return_value=1000),
-        patch("chroot_distro.elevate.elevate_or_die") as mock_elevate,
-    ):
-        with pytest.raises(SystemExit) as exc_info:
-            main()
-        assert exc_info.value.code == 1
-        mock_elevate.assert_not_called()
 
 
 @patch("chroot_distro.cli.IS_TERMUX", True)

@@ -69,8 +69,6 @@ _chroot_distro() {
 
 	_arguments -C \
 		'(-h --help)'{-h,--help}'[show help]' \
-		'--no-elevate[do not auto-elevate to root]' \
-		'--use-sudo[on Termux, prefer sudo over su for elevation]' \
 		'1:command:->command' \
 		'*:: :->args'
 

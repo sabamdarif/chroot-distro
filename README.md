@@ -128,15 +128,8 @@ pip install .
 ### First-run check
 
 On startup, commands that modify containers or mounts verify that the
-effective UID is `0`. If not, Chroot-Distro re-executes itself using, in
-order: `sudo`, `doas`, `pkexec`, or `su`.
-
-| Situation | Behaviour |
-|---|---|
-| Default | Auto-elevate when not root. |
-| `--no-elevate` or `CHROOT_DISTRO_NO_ELEVATE=1` | Skip elevation; exit with an error if not root. |
-| Termux, default | Prefer `su` (real root) over `sudo`. |
-| Termux, `--use-sudo` or `CHROOT_DISTRO_USE_SUDO=1` | Prefer `sudo` for elevation. |
+effective UID is `0`. If not, Chroot-Distro auto-elevates when not root by
+re-executing itself using, in order: `sudo`, `doas`, `pkexec`, or `su`.
 
 `list`, `ps`, `search`, `info`, and `help` do not require root on Termux and
 are never re-executed. On regular Linux, `list`, `ps`, and `info` still
@@ -204,8 +197,6 @@ laid out for the current terminal width.
 | Option | Description |
 |---|---|
 | `-h`, `--help` | Show top-level help. |
-| `--no-elevate` | Do not auto-elevate to root (`CHROOT_DISTRO_NO_ELEVATE=1`). |
-| `--use-sudo` | On Termux, prefer `sudo` over `su` (`CHROOT_DISTRO_USE_SUDO=1`). |
 
 Short aliases are accepted for many commands (`sh` → `login`, `rm` →
 `remove`, `ins` → `install`, etc.); each section below lists them.
@@ -1151,8 +1142,6 @@ paths on Linux are typically under `/root/.local/share/` and
 | `CD_DOWNLOAD_RATE_LIMIT` | Bandwidth limit for downloads (e.g., `5M` for 5 MiB/s, default `0` = unlimited). Supports suffixes `K`, `M`, `G` (case-insensitive). |
 | `CD_DOWNLOAD_MAX_RETRIES` | Maximum retry attempts per connection failure (default `3`, clamped between `0` and `20`). |
 | `CD_FORCE_NO_COLORS` | When set, disables ANSI colours in Chroot-Distro output. |
-| `CHROOT_DISTRO_NO_ELEVATE` | When set to `1`, disables privilege auto-elevation (same as `--no-elevate`). |
-| `CHROOT_DISTRO_USE_SUDO` | When set to `1`, prefer `sudo` over `su` on Termux (same as `--use-sudo`). |
 | `COLUMNS` | Fallback terminal width for `--help` rendering. |
 | `TERM`, `COLORTERM` | Inherited into the guest (always; even in `--minimal`). `TERM` defaults to `xterm-256color` when unset on the host. |
 
@@ -1208,10 +1197,9 @@ Completion scripts for Bash, Zsh, and Fish live in
 - `_chroot-distro`
 - `chroot-distro.fish`
 
-They complete subcommands, global flags (`--no-elevate`, `--use-sudo`),
-and per-command options (including `login`/`run` flags such as
-`--shared-home`, `--shared-display`, `--get-chroot-cmd`, `--isolated`,
-and `--minimal`).
+They complete subcommands, global flags, and per-command options (including
+`login`/`run` flags such as `--shared-home`, `--shared-display`,
+`--get-chroot-cmd`, `--isolated`, and `--minimal`).
 
 If your shell does not pick them up automatically, install them manually:
 

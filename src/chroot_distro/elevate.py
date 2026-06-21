@@ -14,8 +14,7 @@ def is_root() -> bool:
 
 def get_reexec_argv() -> list[str]:
     """Build the argument list for re-executing the current process."""
-    # Filter out '--no-elevate' to prevent it from propagating to the child
-    args = [arg for arg in sys.argv if arg != "--no-elevate"]
+    args = list(sys.argv)
 
     executable = args[0]
     if not os.path.isabs(executable):
@@ -32,7 +31,7 @@ def get_reexec_argv() -> list[str]:
     return args
 
 
-def _find_escalation_tool(use_sudo: bool = False) -> list[str] | None:
+def _find_escalation_tool() -> list[str] | None:
     """Find the best escalation tool depending on the environment."""
     # Try sudo -> doas -> pkexec -> su in order of preference.
     if shutil.which("sudo"):
@@ -47,7 +46,7 @@ def _find_escalation_tool(use_sudo: bool = False) -> list[str] | None:
     return None
 
 
-def elevate_or_die(use_sudo: bool = False) -> None:
+def elevate_or_die() -> None:
     """Attempt to re-execute the current script with root privileges.
 
     If already elevating (to prevent infinite loops) or if no escalation tool is found,
@@ -60,7 +59,7 @@ def elevate_or_die(use_sudo: bool = False) -> None:
     if os.environ.get("_CHROOT_DISTRO_ELEVATING") == "1":
         raise RootRequiredError("Privilege elevation loop detected. The tool is still not running as root.")
 
-    tool_cmd = _find_escalation_tool(use_sudo=use_sudo)
+    tool_cmd = _find_escalation_tool()
     if not tool_cmd:
         raise RootRequiredError(
             "chroot-distro requires root privileges, but no privilege elevation tool "

@@ -22,7 +22,7 @@ def test_is_root():
 
 def test_get_reexec_argv_absolute():
     # If sys.argv[0] is absolute and not .py, return as is
-    with patch("sys.argv", ["/usr/bin/chroot-distro", "login", "alpine", "--no-elevate"]):
+    with patch("sys.argv", ["/usr/bin/chroot-distro", "login", "alpine"]):
         argv = get_reexec_argv()
         assert argv == ["/usr/bin/chroot-distro", "login", "alpine"]
 

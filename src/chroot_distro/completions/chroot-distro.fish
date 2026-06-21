@@ -188,8 +188,6 @@ complete -c chroot-distro -f -n __chroot_distro_no_subcommand -a hel   -d 'Alias
 
 # Global flags (before subcommand)
 complete -c chroot-distro -f -n __chroot_distro_no_subcommand -s h -l help        -d 'Show help'
-complete -c chroot-distro -f -n __chroot_distro_no_subcommand -l no-elevate     -d 'Do not auto-elevate to root'
-complete -c chroot-distro -f -n __chroot_distro_no_subcommand -l use-sudo       -d 'On Termux, prefer sudo over su'
 
 # ---------------------------------------------------------------------------
 # install (+ aliases add, i, in, ins)

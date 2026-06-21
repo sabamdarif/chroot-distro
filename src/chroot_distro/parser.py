@@ -141,8 +141,6 @@ def build_parser() -> _CdArgumentParser:
     )
     parser.add_argument("-h", "--help", action="store_true")
     parser.add_argument("-V", "--version", action="version", version=f"%(prog)s {PROGRAM_VERSION}")
-    parser.add_argument("--no-elevate", action="store_true")
-    parser.add_argument("--use-sudo", action="store_true")
     sub = parser.add_subparsers(dest="command")
 
     sub.add_parser("help", aliases=["hel", "he", "h"], add_help=False)

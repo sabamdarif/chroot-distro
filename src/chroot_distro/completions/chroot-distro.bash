@@ -48,7 +48,7 @@ _chroot_distro() {
 	# Complete the subcommand itself
 	if [[ ${cword} -eq 1 ]]; then
 		if [[ "${cur}" == -* ]]; then
-			_chroot_distro_compgen_words "-h --help --no-elevate --use-sudo" "${cur}"
+			_chroot_distro_compgen_words "-h --help" "${cur}"
 		else
 			_chroot_distro_compgen_words "${_all_commands}" "${cur}"
 		fi
