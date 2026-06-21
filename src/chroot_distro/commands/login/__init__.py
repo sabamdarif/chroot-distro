@@ -782,6 +782,7 @@ def _command_login_inner(container_name: str, args) -> None:
         rootfs=rootfs,
         minimal=minimal,
         isolated=skip_extra_mounts,
+        use_namespaces=use_ns_requested and not minimal,
         shared_home=use_shared_home,
         shared_tmp=shared_tmp,
         shared_display=shared_display,
