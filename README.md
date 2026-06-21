@@ -533,23 +533,38 @@ Termux.)
 - Guest `ldconfig` is run inside the chroot to refresh the shared library
   cache after the new libraries are bind-mounted.
 
-#### Namespace isolation (`--isolated`)
+#### Namespace isolation (`--isolated` and `CD_USE_NS`)
 
 With `--isolated`, chroot-distro creates a per-container namespace holder
 (`unshare`) and runs bind mounts, special mounts, and `chroot` inside that
 environment (`nsenter`). Supported namespaces: **mount**, **PID**, **UTS**,
-and **IPC**. Isolation is **all-or-nothing**: chroot-distro probes the full
-requested namespace set first, and if any one of them is unsupported on the
-kernel it acquires none of them and falls back fully to a non-isolated
-login (with a warning naming the missing namespace), so a session is never
-left half-isolated. This is inspired by
+**IPC**, and **cgroup**. The cgroup namespace is acquired best-effort (used
+when the kernel supports it, skipped otherwise); the **mount/PID/UTS/IPC**
+set is **all-or-nothing**: chroot-distro probes that set first, and if any
+one of them is unsupported on the kernel it acquires none of them and falls
+back fully to a non-isolated login (with a warning naming the missing
+namespace), so a session is never left half-isolated. This is inspired by
 [Ubuntu-Chroot](Ubuntu-Chroot/tools/chroot.sh) and is **not** a full
 container runtime: there is no network namespace, no user namespace
 mapping, and no image layering.
 
-Do not mix `--isolated` and non-isolated logins on the same container
-without running `chroot-distro unmount <name>` first. Concurrent
-`--isolated` sessions share the same holder and mounts.
+`--isolated` couples two things: namespace isolation **and** a reduced set
+of host bind mounts (it skips the Android system/storage/`$PREFIX` binds on
+Termux, and `/tmp`/display sharing on Linux, unless re-enabled with
+`--shared-*` / `--bind`). If you want **only** the namespace isolation
+while keeping every default mount, set the `CD_USE_NS=1` environment
+variable instead: every `login`/`run` then runs in the same
+mount/PID/UTS/IPC/cgroup namespaces but with the full default mount set
+intact. `CD_USE_NS` accepts `1`/`true`/`yes`/`on`.
+
+> `CD_USE_NS` is set by the invoking user but the tool re-executes itself
+> as root; chroot-distro forwards the variable across `sudo`/`doas`/`pkexec`
+> /`su` automatically, so it keeps working even when the `sudo` line prints
+> `'-E' is ignored`.
+
+Do not mix isolated (via `--isolated` or `CD_USE_NS`) and non-isolated
+logins on the same container without running `chroot-distro unmount <name>`
+first. Concurrent isolated sessions share the same holder and mounts.
 
 #### Host bindings (Termux, default mode)
 
@@ -606,9 +621,10 @@ entries win):
    `LIBGL_ALWAYS_SOFTWARE`. Your `--env` entries override these.
 
 `HOSTNAME` is always set to the host system hostname name. The
-`hostname`/`uname` commands report it only under `--isolated`, where the
-UTS namespace is given a real hostname; without `--isolated` they still
-report the host's name (no UTS namespace to change).
+`hostname`/`uname` commands report it only when namespace isolation is
+active (via `--isolated` or `CD_USE_NS`), where the UTS namespace is given
+a real hostname; otherwise they still report the host's name (no UTS
+namespace to change).
 
 On Termux (unless isolated or minimal), `$PREFIX/bin` is appended to
 `PATH`. A snippet at `/etc/profile.d/termux-profile.sh` re-applies
@@ -1139,6 +1155,7 @@ paths on Linux are typically under `/root/.local/share/` and
 | `CD_DOWNLOAD_WORKERS` | Parallel registry layer downloads during `install` (default `4`, maximum `10`). Invalid values use the default; out-of-range values are clamped. |
 | `CD_DOWNLOAD_RATE_LIMIT` | Bandwidth limit for downloads (e.g., `5M` for 5 MiB/s, default `0` = unlimited). Supports suffixes `K`, `M`, `G` (case-insensitive). |
 | `CD_DOWNLOAD_MAX_RETRIES` | Maximum retry attempts per connection failure (default `3`, clamped between `0` and `20`). |
+| `CD_USE_NS` | When truthy (`1`/`true`/`yes`/`on`), every `login`/`run` uses full Linux namespace isolation (mount, PID, UTS, IPC, and cgroup when supported) **without** skipping any default bind mounts. Differs from `--isolated`, which also reduces the mount set. Forwarded across privilege elevation automatically. |
 | `CD_FORCE_NO_COLORS` | When set, disables ANSI colours in Chroot-Distro output. |
 | `COLUMNS` | Fallback terminal width for `--help` rendering. |
 | `TERM`, `COLORTERM` | Inherited into the guest (always; even in `--minimal`). `TERM` defaults to `xterm-256color` when unset on the host. |
@@ -1231,9 +1248,10 @@ cp src/chroot_distro/completions/chroot-distro.fish \
 - **Kernel features**: FUSE modules, real `iptables`, custom cgroup
   hierarchies, and similar kernel-module features may not work inside the
   guest.
-- **Namespaces**: `--isolated` provides mount/PID/UTS/IPC isolation via
-  `unshare`/`nsenter`, but there is no network namespace and no parity with
-  Docker or Podman.
+- **Namespaces**: `--isolated` (or `CD_USE_NS=1`) provides
+  mount/PID/UTS/IPC isolation, plus the cgroup namespace when the kernel
+  supports it, via `unshare`/`nsenter` — but there is no network namespace,
+  no user-namespace mapping, and no parity with Docker or Podman.
 - **Bind mount hygiene**: crashed sessions or orphan processes can leave
   mounts busy; `unmount` and lazy unmount mitigate this but orphaned
   processes should be cleaned up.
