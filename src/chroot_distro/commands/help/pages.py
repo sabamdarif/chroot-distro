@@ -403,6 +403,19 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
                 else []
             ),
             {
+                "title": "ENVIRONMENT",
+                "intro": (
+                    "CD_USE_NS=1 enables full Linux namespace isolation "
+                    "(mount, PID, UTS, IPC via unshare/nsenter) by default for "
+                    "every login, while still keeping all the default bind "
+                    "mounts. Unlike --isolated, it does NOT skip the extra "
+                    "Android system/storage/$PREFIX (or Linux /tmp and display) "
+                    "mounts: the goal is only namespace isolation, not a "
+                    "reduced mount set. Accepts 1/true/yes/on. Use --isolated "
+                    "when you also want the reduced mount set."
+                ),
+            },
+            {
                 "title": "NOTES",
                 "intro": (
                     (
@@ -562,6 +575,19 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
         "examples": [
             f"{PROGRAM_NAME} run nextcloud",
             f"{PROGRAM_NAME} run ubuntu --isolated -- /bin/echo hi",
+        ],
+        "footer": [
+            {
+                "title": "ENVIRONMENT",
+                "intro": (
+                    "CD_USE_NS=1 enables full Linux namespace isolation "
+                    "(mount, PID, UTS, IPC via unshare/nsenter) by default for "
+                    "every run, while still keeping all the default bind "
+                    "mounts. Unlike --isolated, it does NOT skip the extra "
+                    "Android system/storage/$PREFIX (or Linux /tmp and display) "
+                    "mounts. Accepts 1/true/yes/on."
+                ),
+            },
         ],
     },
     "kill": {
