@@ -27,6 +27,29 @@ _LONG_TO_SHORT = {
 ISOLATION_MODE_NAMESPACE = "namespace"
 ISOLATION_MODE_HOST = "host"
 
+# Truthy spellings accepted for the CD_USE_NS environment variable.
+_TRUTHY_ENV_VALUES = frozenset({"1", "true", "yes", "on"})
+
+
+def use_ns_env_enabled() -> bool:
+    """Return True when CD_USE_NS requests full namespace isolation.
+
+    CD_USE_NS turns on the same PID/UTS/IPC/mount namespace isolation that
+    ``--isolated`` uses, but *without* skipping any of the default bind
+    mounts. Accepts ``1``/``true``/``yes``/``on`` (case-insensitive).
+    """
+    return os.environ.get("CD_USE_NS", "").strip().lower() in _TRUTHY_ENV_VALUES
+
+
+def should_use_namespaces(isolated: bool) -> bool:
+    """Decide whether to set up Linux namespace isolation.
+
+    Namespaces are used when the user passes ``--isolated`` (which also
+    skips the extra host mounts) or when ``CD_USE_NS`` is set (which keeps
+    every default mount and only adds namespace isolation).
+    """
+    return bool(isolated) or use_ns_env_enabled()
+
 # Android's toybox/toolbox `sleep` rejects the GNU coreutils `infinity`
 # keyword ("sleep: Not a number 'infinity'") and aborts immediately, which
 # tears down the namespace holder the moment it is created. Use a large
