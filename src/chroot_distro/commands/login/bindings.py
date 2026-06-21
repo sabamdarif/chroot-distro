@@ -424,6 +424,7 @@ def get_bindings(
     *,
     minimal: bool = False,
     isolated: bool = False,
+    use_namespaces: bool | None = None,
     shared_home: bool = False,
     shared_tmp: bool = False,
     shared_display: bool = False,
@@ -444,11 +445,19 @@ def get_bindings(
     binds = []
     rslave_targets: list[str] = []
 
+    # When namespaces are active, a fresh procfs is mounted in the PID
+    # namespace by get_special_mounts(). CD_USE_NS keeps every other mount
+    # (isolated=False) but still namespaces PIDs, so the /proc decision must
+    # follow namespace use, not the mount-skipping flag. Default to *isolated*
+    # for backward compatibility when the caller does not pass it explicitly.
+    if use_namespaces is None:
+        use_namespaces = isolated
+
     # 1. Base Linux mounts (always needed for chroot to function correctly)
     # Target paths are absolute guest paths (e.g. /dev) which we will mount nested under rootfs.
     binds.append(("/dev", "/dev"))
     # Host /proc bind breaks PID namespace isolation; mount procfs in get_special_mounts().
-    if not isolated:
+    if not use_namespaces:
         binds.append(("/proc", "/proc"))
     binds.append(("/sys", "/sys"))
 
