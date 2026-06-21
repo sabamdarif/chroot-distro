@@ -445,6 +445,12 @@ def _command_login_inner(container_name: str, args) -> None:
     login_wd = getattr(args, "work_dir", "") or ""
     isolated = getattr(args, "isolated", False)
     minimal = getattr(args, "minimal", False)
+    # `--isolated` skips the extra Android/host mounts AND uses namespaces.
+    # `CD_USE_NS` only turns on namespace isolation, keeping every mount.
+    # `skip_extra_mounts` therefore tracks only the real `--isolated` flag,
+    # while namespace setup is decided separately by should_use_namespaces().
+    skip_extra_mounts = isolated
+    use_ns_requested = namespace.should_use_namespaces(isolated)
     use_shared_home = getattr(args, "shared_home", False)
     shared_tmp = getattr(args, "shared_tmp", False)
     shared_display = getattr(args, "shared_display", False)
@@ -504,13 +510,13 @@ def _command_login_inner(container_name: str, args) -> None:
             container_path,
             extra_env,
             minimal,
-            isolated,
+            skip_extra_mounts,
             container_name=hostname_arg,
         )
 
         # A termux-type guest still needs its own cache dir to exist; create
         # it inside the rootfs (never bound from the host).
-        if IS_TERMUX and not isolated:
+        if IS_TERMUX and not skip_extra_mounts:
             os.makedirs(
                 os.path.join(rootfs, "data", "data", TERMUX_APP_PACKAGE, "cache"),
                 exist_ok=True,
@@ -656,7 +662,7 @@ def _command_login_inner(container_name: str, args) -> None:
             login_home,
             extra_env,
             minimal,
-            isolated,
+            skip_extra_mounts,
             container_name=hostname_arg,
         )
 
@@ -671,18 +677,18 @@ def _command_login_inner(container_name: str, args) -> None:
     # guest's supplementary groups, DNS and all networking fail inside the
     # chroot ("Temporary failure resolving"). Grant them on Termux unless the
     # session is isolated or minimal.
-    if IS_TERMUX and not isolated and not minimal:
+    if IS_TERMUX and not skip_extra_mounts and not minimal:
         groups = list(groups)
         for net_gid in ("3003", "3004"):
             if net_gid not in groups:
                 groups.append(net_gid)
 
-    if IS_TERMUX and not isolated and not minimal:
+    if IS_TERMUX and not skip_extra_mounts and not minimal:
         termux_bin = f"{TERMUX_PREFIX}/bin"
         components = [c for c in child_env.get("PATH", "").split(":") if c and c != termux_bin]
         child_env["PATH"] = ":".join(components)
 
-    if dist_type == "normal" and IS_TERMUX and not isolated and not minimal:
+    if dist_type == "normal" and IS_TERMUX and not skip_extra_mounts and not minimal:
         profile_uid = int(login_uid) if login_uid is not None else 0
         profile_gid = int(login_gid) if login_gid is not None else profile_uid
         inject_termux_profile(
@@ -775,7 +781,7 @@ def _command_login_inner(container_name: str, args) -> None:
     resolved_binds, rslave_targets = bindings.get_bindings(
         rootfs=rootfs,
         minimal=minimal,
-        isolated=isolated,
+        isolated=skip_extra_mounts,
         shared_home=use_shared_home,
         shared_tmp=shared_tmp,
         shared_display=shared_display,
@@ -795,7 +801,7 @@ def _command_login_inner(container_name: str, args) -> None:
             if key not in user_env_keys_all:
                 child_env[key] = val
 
-    use_namespaces = isolated and not minimal
+    use_namespaces = use_ns_requested and not minimal
     holder = None
     pipe_w = None
     chroot_args = None
@@ -812,7 +818,6 @@ def _command_login_inner(container_name: str, args) -> None:
                 f"(missing: {' '.join(missing)}). Falling back to non-isolated login."
             )
             use_namespaces = False
-            isolated = False
 
     try:
         host_mounts_exist = bool(mount_manager.get_active_mounts(rootfs))
@@ -874,7 +879,7 @@ def _command_login_inner(container_name: str, args) -> None:
             else:
                 namespace.write_isolation_mode(container_name, namespace.ISOLATION_MODE_HOST)
 
-            if IS_TERMUX and not isolated and not minimal:
+            if IS_TERMUX and not skip_extra_mounts and not minimal:
                 ensure_data_suid()
             # Pre-clean stale mounts if any
             with contextlib.suppress(Exception):
