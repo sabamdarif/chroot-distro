@@ -133,7 +133,100 @@ def test_probe_namespace_support_reports_missing(mock_run, _unshare):
 
 @patch("chroot_distro.helpers.namespace._resolve_unshare", side_effect=ns.NamespaceError("no unshare"))
 def test_probe_namespace_support_no_unshare_reports_all(_unshare):
-    assert ns.probe_namespace_support() == list(ns._PROBE_FLAGS)
+    # The strict pre-check covers only the required namespaces, so when
+    # unshare is missing it reports the whole required set as unavailable.
+    assert ns.probe_namespace_support() == list(ns._REQUIRED_PROBE_FLAGS)
+
+
+# ---------------------------------------------------------------------------
+# CD_USE_NS environment detection
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("value", ["1", "true", "TRUE", "Yes", "on", "  on  "])
+def test_use_ns_env_enabled_truthy(value):
+    with patch.dict("os.environ", {"CD_USE_NS": value}, clear=True):
+        assert ns.use_ns_env_enabled() is True
+
+
+@pytest.mark.parametrize("value", ["", "0", "false", "no", "off", "random"])
+def test_use_ns_env_enabled_falsy(value):
+    with patch.dict("os.environ", {"CD_USE_NS": value}, clear=True):
+        assert ns.use_ns_env_enabled() is False
+
+
+def test_use_ns_env_enabled_unset():
+    with patch.dict("os.environ", {}, clear=True):
+        assert ns.use_ns_env_enabled() is False
+
+
+def test_should_use_namespaces_isolated_flag_without_env():
+    with patch.dict("os.environ", {}, clear=True):
+        assert ns.should_use_namespaces(True) is True
+        assert ns.should_use_namespaces(False) is False
+
+
+def test_should_use_namespaces_env_enables_without_flag():
+    with patch.dict("os.environ", {"CD_USE_NS": "1"}, clear=True):
+        # CD_USE_NS turns on namespaces even when --isolated was not passed.
+        assert ns.should_use_namespaces(False) is True
+
+
+# ---------------------------------------------------------------------------
+# Opportunistic cgroup namespace probing
+# ---------------------------------------------------------------------------
+
+
+def test_cgroup_in_probe_flags_but_not_required_set():
+    assert "--cgroup" in ns._PROBE_FLAGS
+    assert "--cgroup" not in ns._REQUIRED_PROBE_FLAGS
+    # nsenter short-flag translation must know about cgroup.
+    assert ns._LONG_TO_SHORT["--cgroup"] == "-C"
+
+
+@patch("chroot_distro.helpers.namespace._resolve_unshare", return_value="unshare")
+@patch("chroot_distro.helpers.namespace.subprocess.run")
+def test_probe_unshare_flags_includes_cgroup_when_supported(mock_run, _unshare):
+    mock_run.return_value = MagicMock(returncode=0)
+    flags = ns.probe_unshare_flags()
+    assert "--cgroup" in flags
+    for required in ns._REQUIRED_PROBE_FLAGS:
+        assert required in flags
+
+
+@patch("chroot_distro.helpers.namespace._resolve_unshare", return_value="unshare")
+@patch("chroot_distro.helpers.namespace.subprocess.run")
+def test_probe_unshare_flags_drops_cgroup_when_unsupported(mock_run, _unshare):
+    # cgroup unshare fails (e.g. Android kernel without cgroupns); the rest
+    # succeed. cgroup must be dropped while the required set is kept.
+    def side_effect(cmd, **kwargs):
+        flag = cmd[1]
+        return MagicMock(returncode=1 if flag == "--cgroup" else 0)
+
+    mock_run.side_effect = side_effect
+    flags = ns.probe_unshare_flags()
+    assert "--cgroup" not in flags
+    for required in ns._REQUIRED_PROBE_FLAGS:
+        assert required in flags
+
+
+@patch("chroot_distro.helpers.namespace._resolve_unshare", return_value="unshare")
+@patch("chroot_distro.helpers.namespace.subprocess.run")
+def test_probe_namespace_support_ignores_missing_cgroup(mock_run, _unshare):
+    # Strict pre-check only covers the required set, so a kernel missing only
+    # cgroupns reports no missing required namespaces (no host fallback).
+    def side_effect(cmd, **kwargs):
+        flag = cmd[1]
+        return MagicMock(returncode=1 if flag == "--cgroup" else 0)
+
+    mock_run.side_effect = side_effect
+    assert ns.probe_namespace_support() == []
+
+
+def test_long_flags_to_nsenter_translates_cgroup():
+    flags = ["--mount", "--pid", "--cgroup"]
+    assert ns.long_flags_to_nsenter(flags, use_long=False) == ["-m", "-p", "-C"]
+    assert ns.long_flags_to_nsenter(flags, use_long=True) == flags
 
 
 def test_set_namespace_hostname_skips_without_uts():
