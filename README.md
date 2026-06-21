@@ -445,7 +445,6 @@ chroot-distro login ubuntu --get-chroot-cmd
 | `--shared-tmp` | Bind host tmp (`/tmp` on Linux, `$PREFIX/tmp` on Termux) to `/tmp` in the guest. Opt-in only: by default the container gets its own fresh `/tmp`, not the host's. |
 | `--shared-display` | Share the host display server (X11 and Wayland), audio (PulseAudio/PipeWire), and D-Bus session bus with the container. Binds only the specific session sockets, not the host's whole `/run`. Opt-in only. `--shared-x11` is accepted as a backward-compatible alias. |
 | `-b`, `--bind SRC[:DST]` | Bind-mount a custom host path (repeatable). `DST` must be an absolute guest path. |
-| `--hostname STRING` | Hostname inside the container (default: the container name). |
 | `-w`, `--work-dir PATH` | Initial working directory (default: user's home). |
 | `-e`, `--env VAR=VALUE` | Set a guest environment variable (repeatable). |
 | `--get-chroot-cmd` | Print the fully assembled `env` + `chroot` command line and exit. |
@@ -594,8 +593,7 @@ entries win):
    when not `--isolated` and not `--minimal`.
 4. Your `--env VAR=VALUE` entries.
 5. `HOME`, `USER`, `TERM` (default `xterm-256color`), `COLORTERM`
-   (when set on the host), and `HOSTNAME` (the `--hostname` value, else the
-   container name).
+   (when set on the host), and `HOSTNAME` (the container name).
 6. When display sharing is active (via `--shared-display`):
    `DISPLAY`, `XAUTHORITY`, `XDG_RUNTIME_DIR`, `WAYLAND_DISPLAY`,
    `XDG_SESSION_TYPE`, `XDG_CURRENT_DESKTOP`, `DESKTOP_SESSION`,
@@ -607,7 +605,7 @@ entries win):
    WSL2 — `GALLIUM_DRIVER`, `MESA_D3D12_DEFAULT_DEVICE_TYPE`,
    `LIBGL_ALWAYS_SOFTWARE`. Your `--env` entries override these.
 
-`HOSTNAME` is always set to the container name (or `--hostname`). The
+`HOSTNAME` is always set to the host system hostname name. The
 `hostname`/`uname` commands report it only under `--isolated`, where the
 UTS namespace is given a real hostname; without `--isolated` they still
 report the host's name (no UTS namespace to change).
@@ -1169,7 +1167,7 @@ overridden from `manifest.json` image `Env`, but can be overridden with
 
 | Variable | Source / Fallback |
 |---|---|
-| `HOSTNAME` | `--hostname` value; fallback the container name. Under `--isolated` the UTS namespace hostname is also set so `hostname`/`uname -n` report it. |
+| `HOSTNAME` | The container name. Under `--isolated` the UTS namespace hostname is also set so `hostname`/`uname -n` report it. |
 
 **GPU — NVIDIA native Linux (auto-detected, non-minimal):**
 

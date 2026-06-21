@@ -371,7 +371,6 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
                 "chroot. Can be specified multiple times."
                 + (" Takes priority over Isolated Mode." if IS_TERMUX else " Honored in all modes."),
             ),
-            ("--hostname [TEXT]", "Customize the system hostname."),
             ("-w, --work-dir [PATH]", "Set the initial working directory."),
             ("-e, --env VAR=VALUE", "Set an environment variable. Can be specified multiple times."),
             ("--get-chroot-cmd", "Print the fully assembled chroot command line and exit without running it."),
@@ -556,7 +555,6 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
                 "chroot. Can be specified multiple times."
                 + (" Takes priority over Isolated Mode." if IS_TERMUX else " Honored in all modes."),
             ),
-            ("--hostname [TEXT]", "Customize the system hostname."),
             ("-w, --work-dir [PATH]", "Set the initial working directory."),
             ("-e, --env VAR=VALUE", "Set an environment variable. Can be specified multiple times."),
             ("--get-chroot-cmd", "Print the fully assembled chroot command line and exit without running it."),

@@ -448,9 +448,9 @@ def _command_login_inner(container_name: str, args) -> None:
     use_shared_home = getattr(args, "shared_home", False)
     shared_tmp = getattr(args, "shared_tmp", False)
     shared_display = getattr(args, "shared_display", False)
-    # Effective hostname: explicit --hostname wins, else the container name.
+    # Effective hostname is the container name.
     # Sanitised to a valid hostname token by the env builders / UTS setter.
-    hostname_arg = getattr(args, "hostname", None) or container_name
+    hostname_arg = container_name
 
     # sudo and friends reverse-resolve the running hostname; ensure guest
     # /etc/hosts maps both the effective container hostname (seen under

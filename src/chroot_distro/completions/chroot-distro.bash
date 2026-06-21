@@ -133,7 +133,6 @@ _chroot_distro() {
 			_filedir
 			return
 			;;
-		--hostname) return ;;
 		-w | --work-dir)
 			_filedir -d
 			return
@@ -142,7 +141,7 @@ _chroot_distro() {
 		esac
 		if [[ "${cur}" == -* ]]; then
 			local opts="-u --user --isolated --minimal --shared-home --shared-tmp --shared-display --shared-x11
-                    -b --bind --hostname -w --work-dir -e --env --get-chroot-cmd -h --help"
+                    -b --bind -w --work-dir -e --env --get-chroot-cmd -h --help"
 			_chroot_distro_compgen_words "${opts}" "${cur}"
 		else
 			_chroot_distro_compgen_words "$(_chroot_distro_get_containers)" "${cur}"
@@ -242,7 +241,6 @@ _chroot_distro() {
 			_filedir
 			return
 			;;
-		--hostname) return ;;
 		-w | --work-dir)
 			_filedir -d
 			return
@@ -251,7 +249,7 @@ _chroot_distro() {
 		esac
 		if [[ "${cur}" == -* ]]; then
 			local opts="-u --user --isolated --minimal --shared-home --shared-tmp --shared-display --shared-x11
-                    -b --bind --hostname -w --work-dir -e --env --get-chroot-cmd -h --help"
+                    -b --bind -w --work-dir -e --env --get-chroot-cmd -h --help"
 			_chroot_distro_compgen_words "${opts}" "${cur}"
 		else
 			_chroot_distro_compgen_words "$(_chroot_distro_get_containers)" "${cur}"
