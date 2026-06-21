@@ -97,7 +97,9 @@ def elevate_or_die() -> None:
     # Runtime CD_* vars set by the invoking user must cross the elevation
     # boundary explicitly: `sudo -E` is frequently ignored by sudoers policy,
     # which would silently drop e.g. CD_USE_NS and skip namespace isolation.
-    env_assignments = _forwarded_env_assignments()
+    # The loop sentinel is forwarded the same way so it survives a stripped
+    # environment and still prevents an elevation loop.
+    env_assignments = ["_CHROOT_DISTRO_ELEVATING=1", *_forwarded_env_assignments()]
 
     tool_name = tool_cmd[0]
 
