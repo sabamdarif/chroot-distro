@@ -902,7 +902,14 @@ def _command_login_inner(container_name: str, args) -> None:
                         finally:
                             os.close(pipe_r)
                     else:
-                        holder = namespace.acquire_holder(container_name)
+                        # Under maximum isolation the holder chroots into the
+                        # rootfs before sleeping, so PID 1 (and therefore every
+                        # namespace PID reachable via /proc/<pid>/root) has its
+                        # root inside the container and cannot reach the host.
+                        holder = namespace.acquire_holder(
+                            container_name,
+                            rootfs=rootfs if (max_isolation and use_namespaces) else None,
+                        )
                     namespace.write_isolation_mode(container_name, namespace.ISOLATION_MODE_NAMESPACE)
                     if not namespace.make_mount_private(holder):
                         # Many Android kernels already provide an isolated
