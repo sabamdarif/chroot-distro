@@ -439,35 +439,53 @@ def apply_special_mount(rootfs: str, sm, holder: NamespaceHolder | None = None) 
     if is_mounted(target, holder=holder):
         return True
 
-    cmd = [_resolve_mount(), "-t", sm.fstype]
+    # Build the list of option strings to try, simplest-last. Android's toybox
+    # `mount` and SELinux frequently reject tmpfs option strings (e.g. size=)
+    # with a non-zero exit and no stderr, so progressively strip options and,
+    # for tmpfs, finally try with none at all.
+    option_attempts: list[str] = []
     if sm.options:
-        cmd += ["-o", sm.options]
-    cmd += [sm.source, target]
+        option_attempts.append(sm.options)
+        # Drop size= (a common toybox/SELinux reject) but keep mode=.
+        reduced = ",".join(o for o in sm.options.split(",") if not o.strip().startswith("size="))
+        if reduced and reduced != sm.options:
+            option_attempts.append(reduced)
+    if sm.fstype == "tmpfs":
+        option_attempts.append("")  # last resort: a bare tmpfs
+    if not option_attempts:
+        option_attempts.append("")
 
-    try:
-        if holder is not None:
-            result = holder.run(cmd, capture_output=True, text=True, timeout=15)
-        else:
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=15,
-                check=False,
-            )
-    except subprocess.TimeoutExpired as exc:
-        msg = f"mount timeout for {sm.fstype} at {target}"
-        if sm.optional:
-            log.debug(msg)
-            return False
-        raise RuntimeError(msg) from exc
+    last_err = ""
+    last_code = 0
+    last_cmd: list[str] = []
+    for opts in option_attempts:
+        cmd = [_resolve_mount(), "-t", sm.fstype]
+        if opts:
+            cmd += ["-o", opts]
+        cmd += [sm.source, target]
+        last_cmd = cmd
+        try:
+            if holder is not None:
+                result = holder.run(cmd, capture_output=True, text=True, timeout=15)
+            else:
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=15, check=False)
+        except subprocess.TimeoutExpired as exc:
+            msg = f"mount timeout for {sm.fstype} at {target}"
+            if sm.optional:
+                log.debug(msg)
+                return False
+            raise RuntimeError(msg) from exc
 
-    if result.returncode != 0:
-        msg = f"mount -t {sm.fstype} failed: {result.stderr.strip()}"
-        if sm.optional:
-            log.debug(msg)
-            return False
-        raise RuntimeError(msg)
+        if result.returncode == 0:
+            log.debug("Mounted %s at %s (options=%r)", sm.fstype, sm.target, opts)
+            return True
+        last_code = result.returncode
+        last_err = ((result.stderr or "").strip() or (result.stdout or "").strip())
+        log.debug("mount -t %s opts=%r failed (rc=%s): %s", sm.fstype, opts, last_code, last_err)
 
-    log.debug(f"Mounted {sm.fstype} at {sm.target}")
-    return True
+    detail = last_err or "(no error output)"
+    msg = f"mount -t {sm.fstype} at {target} failed (exit {last_code}): {detail}; cmd: {' '.join(last_cmd)}"
+    if sm.optional:
+        log.debug(msg)
+        return False
+    raise RuntimeError(msg)
