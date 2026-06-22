@@ -490,6 +490,9 @@ def get_live_holder(container_name: str) -> NamespaceHolder | None:
     if pid is None:
         return None
     flags = _read_holder_flags(container_name)
+    # Drop any flag whose ns file the live holder does not expose, so nsenter
+    # never tries to open a missing /proc/<pid>/ns/<name> (Android cgroupns).
+    flags = filter_flags_by_ns_files(pid, flags)
     nsenter = _resolve_nsenter()
     use_long = _nsenter_supports_long_flags(nsenter)
     return NamespaceHolder(
