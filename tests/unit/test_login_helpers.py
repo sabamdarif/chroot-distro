@@ -849,6 +849,69 @@ def test_resolve_rootfs_path_symlinks(tmp_path):
     assert res4 == expected4
 
 
+def test_get_bindings_max_isolation_binds_nothing():
+    """--isolated (max_isolation) must produce zero host bind mounts so the
+    container has no host path to traverse (e.g. via chroot /proc/1/root)."""
+    from chroot_distro.commands.login.bindings import get_bindings
+
+    with (
+        patch("os.path.exists", return_value=True),
+        patch("chroot_distro.commands.login.bindings.IS_TERMUX", False),
+    ):
+        binds, rslave = get_bindings(
+            rootfs="/fake/rootfs",
+            minimal=False,
+            isolated=True,
+            max_isolation=True,
+            use_namespaces=True,
+            shared_home=True,
+            shared_tmp=True,
+            shared_display=True,
+            custom_binds=["/host/x:/mnt/x"],
+        )
+        assert binds == []
+        assert rslave == []
+
+
+def test_special_mounts_max_isolation_fresh_pseudo_fs():
+    """Under max isolation, get_special_mounts must synthesise a fresh /dev
+    tmpfs, a read-only sysfs, a fresh procfs and a fresh /dev/shm."""
+    from chroot_distro.commands.login.bindings import get_special_mounts
+
+    with (
+        patch("os.path.exists", return_value=True),
+        patch("chroot_distro.commands.login.bindings.IS_TERMUX", False),
+        patch("chroot_distro.commands.login.bindings._fs_supported", return_value=True),
+    ):
+        specials = get_special_mounts("/fake/rootfs", isolated=True, max_isolation=True)
+
+    dev = [s for s in specials if s.fstype == "tmpfs" and s.target == "/dev"]
+    assert len(dev) == 1
+    assert dev[0].optional is False
+
+    sysfs = [s for s in specials if s.fstype == "sysfs" and s.target == "/sys"]
+    assert len(sysfs) == 1
+    assert "ro" in sysfs[0].options
+
+    proc = [s for s in specials if s.fstype == "proc" and s.target == "/proc"]
+    assert len(proc) == 1
+    assert proc[0].optional is False
+
+    shm = [s for s in specials if s.fstype == "tmpfs" and s.target == "/dev/shm"]
+    assert len(shm) == 1
+
+
+def test_max_isolation_dev_nodes_table():
+    """The minimal device-node table must include the core character devices."""
+    from chroot_distro.commands.login.bindings import MAX_ISOLATION_DEV_NODES
+
+    names = {name for name, _maj, _min, _mode in MAX_ISOLATION_DEV_NODES}
+    assert {"null", "zero", "tty", "random", "urandom", "full"} <= names
+    # null is major 1, minor 3 by Linux convention.
+    null = [n for n in MAX_ISOLATION_DEV_NODES if n[0] == "null"][0]
+    assert null[1] == 1 and null[2] == 3
+
+
 def test_resolve_rootfs_path_loop(tmp_path):
     import errno
 
