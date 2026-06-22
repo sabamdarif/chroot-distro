@@ -455,7 +455,16 @@ def _command_login_inner(container_name: str, args) -> None:
     # host (not even /dev or /sys), so the container cannot reach the host
     # filesystem (e.g. via `chroot /proc/1/root`). Any flag that only works by
     # exposing a host path is therefore inert and must be reported + disabled.
-    max_isolation = isolated
+    #
+    # `_disable_max_isolation` is an internal opt-out set when max isolation
+    # fails mid-setup on Android (SELinux denies the fresh tmpfs /dev and then
+    # kills the chrooted holder, so nsenter can no longer open its ns/mnt).
+    # In that case we re-enter with max isolation off, which keeps the old
+    # `--isolated` behaviour: fewer host mounts plus namespaces where the
+    # kernel supports them, but the host /dev, /sys and /proc are bound again
+    # so the session can actually come up. `--isolated` therefore degrades to
+    # the old isolated mode on Android instead of aborting.
+    max_isolation = isolated and not getattr(args, "_disable_max_isolation", False)
     use_shared_home = getattr(args, "shared_home", False)
     shared_tmp = getattr(args, "shared_tmp", False)
     shared_display = getattr(args, "shared_display", False)
