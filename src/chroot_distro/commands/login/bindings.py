@@ -481,6 +481,7 @@ def get_bindings(
     *,
     minimal: bool = False,
     isolated: bool = False,
+    max_isolation: bool = False,
     use_namespaces: bool | None = None,
     shared_home: bool = False,
     shared_tmp: bool = False,
@@ -509,6 +510,16 @@ def get_bindings(
     # for backward compatibility when the caller does not pass it explicitly.
     if use_namespaces is None:
         use_namespaces = isolated
+
+    # Maximum isolation: --isolated binds NOTHING from the host. Even /dev and
+    # /sys are escape vectors (host block devices, /sys kernel objects), and a
+    # bind-mounted host /dev/pts/ptmx can be used to reach host ptys. In this
+    # mode the container relies entirely on fresh pseudo-filesystems mounted by
+    # get_special_mounts() (proc, sysfs ro, a fresh tmpfs /dev with minimal
+    # device nodes, devpts and tmpfs /dev/shm), so there is no host path the
+    # guest can traverse to reach the real root filesystem.
+    if max_isolation:
+        return ([], [])
 
     # 1. Base Linux mounts (always needed for chroot to function correctly)
     # Target paths are absolute guest paths (e.g. /dev) which we will mount nested under rootfs.
