@@ -506,16 +506,18 @@ def _command_login_inner(container_name: str, args) -> None:
     login_cmd = getattr(args, "login_cmd", []) or []
     run_inner = getattr(args, "_run_inner", None)
 
-    # Auto-detect NVIDIA GPU on the host (not relevant for Termux)
+    # Auto-detect NVIDIA GPU on the host (not relevant for Termux). Skipped
+    # under --isolated: GPU integration binds host device nodes and libraries,
+    # which would defeat maximum isolation.
     has_nvidia = False
-    if not IS_TERMUX and not minimal:
+    if not IS_TERMUX and not minimal and not max_isolation:
         has_nvidia = detect_nvidia_gpu()
 
     # AMD/Intel/Mesa GPUs work via the /dev bind, but the container needs the
     # host's Vulkan/EGL/OpenCL ICD descriptors to enumerate the GPU. Bind
     # those config dirs read-only, unless the user already bound the same
     # guest path explicitly.
-    if not IS_TERMUX and not minimal:
+    if not IS_TERMUX and not minimal and not max_isolation:
         existing_guest = {"/" + dst.strip("/") for dst in bind_options_map} | {
             "/" + bindings._split_bind_spec(spec)[1].strip("/") for spec in raw_custom_binds
         }
