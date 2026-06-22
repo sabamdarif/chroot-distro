@@ -389,12 +389,17 @@ def _fs_supported(fstype: str) -> bool:
         return False
 
 
-def apply_special_mount(rootfs: str, sm, holder: NamespaceHolder | None = None) -> bool:
+def apply_special_mount(
+    rootfs: str, sm, holder: NamespaceHolder | None = None, force_optional: bool = False
+) -> bool:
     """Execute a single SpecialMount inside rootfs.
 
-    Returns True on success, False on failure (when optional=True).
-    Raises RuntimeError on failure when optional=False.
+    Returns True on success, False on failure (when optional). Raises
+    RuntimeError on failure when not optional. *force_optional* lets the
+    caller treat an otherwise-required mount as best-effort (used for the
+    max-isolation /dev tmpfs, which falls back to the on-disk /dev).
     """
+    optional = sm.optional or force_optional
     if sm.check and not _fs_supported(sm.check):
         log.debug(f"Skipping {sm.fstype} mount: '{sm.check}' not in /proc/filesystems")
         return False
@@ -412,7 +417,7 @@ def apply_special_mount(rootfs: str, sm, holder: NamespaceHolder | None = None) 
             mk = holder.run(["mkdir", "-p", target], capture_output=True, text=True)
             if mk.returncode != 0:
                 msg = f"Failed to create mount target directory {target}: {(mk.stderr or '').strip()}"
-                if sm.optional:
+                if optional:
                     log.debug(msg)
                     return False
                 raise RuntimeError(msg)
@@ -421,7 +426,7 @@ def apply_special_mount(rootfs: str, sm, holder: NamespaceHolder | None = None) 
                 os.makedirs(target, exist_ok=True)
             except OSError as e:
                 msg = f"Failed to create mount target directory {target}: {e}"
-                if sm.optional:
+                if optional:
                     log.debug(msg)
                     return False
                 raise RuntimeError(msg) from e
@@ -471,7 +476,7 @@ def apply_special_mount(rootfs: str, sm, holder: NamespaceHolder | None = None) 
                 result = subprocess.run(cmd, capture_output=True, text=True, timeout=15, check=False)
         except subprocess.TimeoutExpired as exc:
             msg = f"mount timeout for {sm.fstype} at {target}"
-            if sm.optional:
+            if optional:
                 log.debug(msg)
                 return False
             raise RuntimeError(msg) from exc
@@ -485,7 +490,7 @@ def apply_special_mount(rootfs: str, sm, holder: NamespaceHolder | None = None) 
 
     detail = last_err or "(no error output)"
     msg = f"mount -t {sm.fstype} at {target} failed (exit {last_code}): {detail}; cmd: {' '.join(last_cmd)}"
-    if sm.optional:
+    if optional:
         log.debug(msg)
         return False
     raise RuntimeError(msg)
