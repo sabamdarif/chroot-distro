@@ -806,13 +806,39 @@ def _command_login_inner(container_name: str, args) -> None:
                     f"'xhost +SI:localuser:{login_user}', or a UID-matched user."
                 )
 
+    # Decide the effective namespace state up front so it can gate both the
+    # bind set and the special mounts below. Namespace isolation is
+    # all-or-nothing: probe the full requested set before touching the session
+    # counter or any mount.
+    use_namespaces = use_ns_requested and not minimal
+    if use_namespaces:
+        missing = namespace.probe_namespace_support()
+        if missing:
+            if max_isolation:
+                # --isolated mounts fresh proc/dev/sys with NO host binds; that
+                # is only safe and functional inside namespaces. Without them
+                # the session would be both broken and insecure, so refuse.
+                crit_error(
+                    "--isolated requires Linux namespace isolation, but this "
+                    f"kernel is missing: {' '.join(missing)}. Isolation needs "
+                    "root with CAP_SYS_ADMIN and kernel support for the "
+                    "mount/PID/UTS/IPC namespaces. Run without --isolated, or "
+                    "use CD_USE_NS=1 on a kernel that supports it."
+                )
+                sys.exit(1)
+            warn(
+                "Namespace isolation unavailable on this kernel "
+                f"(missing: {' '.join(missing)}). Falling back to non-isolated login."
+            )
+            use_namespaces = False
+
     # 1. Resolve all bind mounts
     resolved_binds, rslave_targets = bindings.get_bindings(
         rootfs=rootfs,
         minimal=minimal,
         isolated=skip_extra_mounts,
-        max_isolation=max_isolation and not minimal,
-        use_namespaces=use_ns_requested and not minimal,
+        max_isolation=max_isolation and use_namespaces,
+        use_namespaces=use_namespaces,
         shared_home=use_shared_home,
         shared_tmp=shared_tmp,
         shared_display=shared_display,
@@ -832,23 +858,9 @@ def _command_login_inner(container_name: str, args) -> None:
             if key not in user_env_keys_all:
                 child_env[key] = val
 
-    use_namespaces = use_ns_requested and not minimal
     holder = None
     pipe_w = None
     chroot_args = None
-
-    # Namespace isolation is all-or-nothing: probe the full requested set
-    # before touching the session counter or any mount. If any namespace is
-    # unsupported on this kernel, acquire none of them and fall back fully to
-    # host mode, rather than leaving a half-isolated session behind.
-    if use_namespaces:
-        missing = namespace.probe_namespace_support()
-        if missing:
-            warn(
-                "Namespace isolation unavailable on this kernel "
-                f"(missing: {' '.join(missing)}). Falling back to non-isolated login."
-            )
-            use_namespaces = False
 
     try:
         host_mounts_exist = bool(mount_manager.get_active_mounts(rootfs))
@@ -974,7 +986,7 @@ def _command_login_inner(container_name: str, args) -> None:
                 specials = bindings.get_special_mounts(
                     rootfs,
                     isolated=use_namespaces,
-                    max_isolation=max_isolation and not minimal,
+                    max_isolation=max_isolation and use_namespaces,
                     enable_usb=not minimal,
                     enable_binfmt=not minimal,
                     enable_docker_cgroup=not minimal,
@@ -986,7 +998,7 @@ def _command_login_inner(container_name: str, args) -> None:
                     # isolation, populate it with the minimal device nodes a
                     # normal login needs (null, zero, tty, ...). The host /dev
                     # is intentionally not bound, so these must be created.
-                    if max_isolation and not minimal and sm.fstype == "tmpfs" and sm.target == "/dev":
+                    if max_isolation and use_namespaces and sm.fstype == "tmpfs" and sm.target == "/dev":
                         mount_manager.create_dev_nodes(
                             rootfs,
                             bindings.MAX_ISOLATION_DEV_NODES,
