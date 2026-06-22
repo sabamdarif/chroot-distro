@@ -9,11 +9,17 @@ from chroot_distro.constants import (
 
 _ISOLATED_OPT = (
     "--isolated",
-    "Enable Isolated Mode: fewer host bind mounts plus Linux namespace isolation "
-    "(mount, PID, UTS, IPC via unshare/nsenter). On Termux, skip Android system, "
-    "storage, and $PREFIX bindings unless requested with --shared-* or --bind. "
-    "On Linux, skip default /tmp and display sharing unless --shared-tmp or "
-    "--shared-display. Not a full container runtime (no network namespace).",
+    "Maximum isolation: bind NOTHING from the host plus Linux namespace "
+    "isolation (mount, PID, UTS, IPC via unshare/nsenter). The host /dev, "
+    "/sys and /proc are NOT bound; the container gets a fresh procfs, a "
+    "read-only sysfs and a fresh tmpfs /dev (null, zero, tty, random, "
+    "urandom, full) instead, so there is no host path to escape through "
+    "(e.g. 'chroot /proc/1/root' no longer reaches the host). Requires kernel "
+    "namespace support; aborts if unavailable. Sharing flags (--shared-home, "
+    "--shared-tmp, --shared-display, --bind) are ignored and a warning is "
+    "printed, since they would expose a host path. Use CD_USE_NS=1 instead if "
+    "you want namespace isolation but keep the default mounts. Not a full "
+    "container runtime (no network namespace).",
 )
 _MINIMAL_OPT = (
     "--minimal",
