@@ -147,6 +147,42 @@ def long_flags_to_nsenter(flags: list[str], *, use_long: bool) -> list[str]:
     return [_LONG_TO_SHORT[f] for f in flags if f in _LONG_TO_SHORT]
 
 
+# Maps each unshare long flag to the /proc/<pid>/ns/<name> entry nsenter must
+# open to join that namespace. Some Android kernels accept `unshare --cgroup`
+# yet never expose /proc/<pid>/ns/cgroup, so nsenter fails when it tries to
+# join it. Flags without a matching ns file are dropped before use.
+_FLAG_TO_NS_FILE = {
+    "--mount": "mnt",
+    "--uts": "uts",
+    "--ipc": "ipc",
+    "--pid": "pid",
+    "--cgroup": "cgroup",
+    "--net": "net",
+    "--user": "user",
+}
+
+
+def filter_flags_by_ns_files(pid: int, flags: list[str]) -> list[str]:
+    """Return *flags* keeping only those whose /proc/<pid>/ns/<name> exists.
+
+    Guards against kernels (notably some Android ones) where `unshare`
+    accepts a namespace flag but the process exposes no matching ns file,
+    which would make a later `nsenter` abort with "cannot open
+    /proc/<pid>/ns/<name>". Flags not in the map are kept unchanged.
+    """
+    kept: list[str] = []
+    for flag in flags:
+        ns_name = _FLAG_TO_NS_FILE.get(flag)
+        if ns_name is None:
+            kept.append(flag)
+            continue
+        if os.path.exists(f"/proc/{pid}/ns/{ns_name}"):
+            kept.append(flag)
+        else:
+            log.debug("Dropping namespace flag %s: /proc/%s/ns/%s missing", flag, pid, ns_name)
+    return kept
+
+
 def probe_unshare_flags() -> list[str]:
     """Return supported unshare flags; mount namespace is required."""
     unshare = _resolve_unshare()
