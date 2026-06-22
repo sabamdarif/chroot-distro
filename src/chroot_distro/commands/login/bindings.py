@@ -282,12 +282,16 @@ def get_special_mounts(
 
     # PID-namespace-aware procfs (must not bind-mount host /proc when isolated).
     if isolated:
+        # Under maximum isolation, harden the procfs: hidepid=2 hides other
+        # processes' /proc/<pid> entries (and their `root`/`cwd` links) from
+        # non-owner processes, and nosuid/nodev/noexec are standard hardening.
+        proc_options = "hidepid=2,nosuid,nodev,noexec" if max_isolation else ""
         specials.append(
             SpecialMount(
                 fstype="proc",
                 source="proc",
                 target="/proc",
-                options="",
+                options=proc_options,
                 mkdir=True,
                 check="proc",
                 optional=False,
