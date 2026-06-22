@@ -816,10 +816,26 @@ def _command_login_inner(container_name: str, args) -> None:
     if use_namespaces:
         missing = namespace.probe_namespace_support()
         if missing:
-            if max_isolation:
-                # --isolated mounts fresh proc/dev/sys with NO host binds; that
-                # is only safe and functional inside namespaces. Without them
-                # the session would be both broken and insecure, so refuse.
+            if max_isolation and IS_TERMUX:
+                # Android kernels frequently cannot sustain the namespace
+                # holder (SELinux blocks the fresh tmpfs /dev; the chrooted
+                # holder dies and nsenter then fails to open even ns/mnt).
+                # Degrade to chroot-only maximum isolation: still ZERO host
+                # bind mounts, fresh pseudo-filesystems mounted directly under
+                # the rootfs, but no namespaces. Warn that without a PID
+                # namespace the /proc/<pid>/root escape cannot be closed here.
+                warn(
+                    "Namespace isolation is unavailable on this Android kernel "
+                    f"(missing: {' '.join(missing)}). Using chroot-only maximum "
+                    "isolation: no host paths are bound, but without a PID "
+                    "namespace the container is NOT fully escape-proof on "
+                    "Android (e.g. via /proc/<pid>/root). For full isolation "
+                    "use a Linux host whose kernel supports namespaces."
+                )
+                use_namespaces = False
+            elif max_isolation:
+                # On non-Android hosts, refuse rather than silently downgrade:
+                # the user explicitly asked for the strong, escape-proof mode.
                 crit_error(
                     "--isolated requires Linux namespace isolation, but this "
                     f"kernel is missing: {' '.join(missing)}. Isolation needs "
@@ -828,11 +844,12 @@ def _command_login_inner(container_name: str, args) -> None:
                     "use CD_USE_NS=1 on a kernel that supports it."
                 )
                 sys.exit(1)
-            warn(
-                "Namespace isolation unavailable on this kernel "
-                f"(missing: {' '.join(missing)}). Falling back to non-isolated login."
-            )
-            use_namespaces = False
+            else:
+                warn(
+                    "Namespace isolation unavailable on this kernel "
+                    f"(missing: {' '.join(missing)}). Falling back to non-isolated login."
+                )
+                use_namespaces = False
 
     # 1. Resolve all bind mounts
     resolved_binds, rslave_targets = bindings.get_bindings(
