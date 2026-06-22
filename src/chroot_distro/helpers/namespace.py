@@ -649,6 +649,16 @@ def _create_holder(
         if not track_as_child and _proc_comm(host_pid) != "sleep":
             raise NamespaceError(f"Namespace holder PID {host_pid} is not a sleep process.")
 
+        # Keep only namespaces the holder actually exposes under /proc/<pid>/ns.
+        # Some Android kernels accept `unshare --cgroup` but never create the
+        # cgroup ns file, which would make every later nsenter abort.
+        flags = filter_flags_by_ns_files(host_pid, flags)
+        if "--mount" not in flags:
+            raise NamespaceError(
+                f"Namespace holder PID {host_pid} exposes no mount namespace "
+                "(/proc/<pid>/ns/mnt missing); isolation cannot proceed."
+            )
+
         start_time = _get_process_start_time(host_pid)
         with open(pid_file, "w") as fh:
             if start_time is not None:
