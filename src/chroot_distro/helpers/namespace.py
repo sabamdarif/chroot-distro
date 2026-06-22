@@ -94,6 +94,15 @@ def _isolation_mode_file(container_name: str) -> str:
     return os.path.join(_container_data_dir(container_name), "isolation.mode")
 
 
+def _holder_maxiso_file(container_name: str) -> str:
+    return os.path.join(_container_data_dir(container_name), "holder.maxiso")
+
+
+def holder_is_max_isolation(container_name: str) -> bool:
+    """Return True if the live holder was created chrooted (max isolation)."""
+    return os.path.isfile(_holder_maxiso_file(container_name))
+
+
 def _resolve_unshare() -> str:
     if IS_TERMUX:
         termux_unshare = os.path.join(TERMUX_PREFIX, "bin", "unshare")
@@ -282,7 +291,11 @@ def _read_holder_flags(container_name: str) -> list[str]:
 
 
 def _remove_holder_state(container_name: str) -> None:
-    for path in (_holder_pid_file(container_name), _holder_flags_file(container_name)):
+    for path in (
+        _holder_pid_file(container_name),
+        _holder_flags_file(container_name),
+        _holder_maxiso_file(container_name),
+    ):
         with contextlib.suppress(OSError):
             os.remove(path)
 
@@ -612,6 +625,11 @@ def _create_holder(
                 fh.write("custom\n")
         with open(flags_file, "w") as fh:
             fh.write(" ".join(flags))
+        # Record that this holder is a chrooted max-isolation holder so the
+        # login flow never reuses a stale host-rooted holder under --isolated.
+        if self_chroot_holder:
+            with open(_holder_maxiso_file(container_name), "w") as fh:
+                fh.write("1")
 
         success = True
 
