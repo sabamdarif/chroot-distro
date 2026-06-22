@@ -451,9 +451,38 @@ def _command_login_inner(container_name: str, args) -> None:
     # while namespace setup is decided separately by should_use_namespaces().
     skip_extra_mounts = isolated
     use_ns_requested = namespace.should_use_namespaces(isolated)
+    # `--isolated` is the maximum-isolation tier: it binds NOTHING from the
+    # host (not even /dev or /sys), so the container cannot reach the host
+    # filesystem (e.g. via `chroot /proc/1/root`). Any flag that only works by
+    # exposing a host path is therefore inert and must be reported + disabled.
+    max_isolation = isolated
     use_shared_home = getattr(args, "shared_home", False)
     shared_tmp = getattr(args, "shared_tmp", False)
     shared_display = getattr(args, "shared_display", False)
+
+    if max_isolation:
+        disabled = []
+        if use_shared_home:
+            disabled.append("--shared-home")
+        if shared_tmp:
+            disabled.append("--shared-tmp")
+        if shared_display:
+            disabled.append("--shared-display")
+        if getattr(args, "bind", None):
+            disabled.append("--bind")
+        if disabled:
+            warn(
+                "--isolated provides maximum isolation and does not bind any "
+                "host paths into the container; the following "
+                f"flag(s) are ignored: {', '.join(disabled)}. "
+                "Drop --isolated (or use CD_USE_NS=1 for namespace isolation "
+                "that keeps the default mounts) if you need them."
+            )
+        # Force every host-path-sharing option off so nothing is exposed.
+        use_shared_home = False
+        shared_tmp = False
+        shared_display = False
+        args.bind = []
     # Effective hostname is the container name.
     # Sanitised to a valid hostname token by the env builders / UTS setter.
     hostname_arg = container_name
