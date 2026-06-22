@@ -451,13 +451,32 @@ def get_live_holder(container_name: str) -> NamespaceHolder | None:
     )
 
 
-def _holder_unshare_argv(unshare: str, flags: list[str]) -> list[str]:
-    """Build unshare argv for a detached ``sleep infinity`` namespace holder."""
+def _holder_unshare_argv(unshare: str, flags: list[str], rootfs: str | None = None) -> list[str]:
+    """Build unshare argv for a detached namespace holder.
+
+    Without *rootfs* the holder is a plain ``sleep`` whose root is the host
+    ``/``. Under maximum isolation *rootfs* is given: the holder then runs a
+    tiny Python launcher that ``os.chroot(rootfs)`` before sleeping, so the
+    holder (PID 1 in the namespace) has its root *inside* the container. This
+    closes the ``chroot /proc/1/root`` escape, because every PID's
+    ``/proc/<pid>/root`` then points into the rootfs rather than the host.
+    """
     argv = [unshare]
     if "--pid" in flags and "--fork" not in flags and "-f" not in flags:
         argv.append("--fork")
     argv.extend(flags)
-    argv.extend(["sleep", HOLDER_SLEEP_SECONDS])
+    if rootfs:
+        # chroot into the rootfs, then sleep. The launcher keeps the holder's
+        # root inside the container so no namespace PID can reach the host root.
+        launcher = (
+            "import os, time\n"
+            f"os.chroot({rootfs!r})\n"
+            "os.chdir('/')\n"
+            f"time.sleep({int(HOLDER_SLEEP_SECONDS)})\n"
+        )
+        argv.extend(["python3", "-c", launcher])
+    else:
+        argv.extend(["sleep", HOLDER_SLEEP_SECONDS])
     return argv
 
 
@@ -467,6 +486,7 @@ def _create_holder(
     holder_cmd: list[str] | None = None,
     pipe_r: int | None = None,
     env: dict | None = None,
+    rootfs: str | None = None,
 ) -> NamespaceHolder:
     unshare = _resolve_unshare()
     pid_file = _holder_pid_file(container_name)
