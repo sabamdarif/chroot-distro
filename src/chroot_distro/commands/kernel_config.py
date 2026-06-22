@@ -157,17 +157,40 @@ def _proc_filesystems() -> set[str]:
     try:
         with open("/proc/filesystems", encoding="utf-8", errors="replace") as fh:
             for raw in fh:
+                # Format is two tab-separated columns: an optional 'nodev'
+                # marker and the filesystem type. The type is the last field.
                 parts = raw.split()
                 if parts:
                     types.add(parts[-1])
     except OSError:
-        pass
+        return None
     return types
 
 
+def _ns_dir_entries() -> set[str] | None:
+    """Return the namespace names listed under /proc/self/ns, or None.
+
+    Listing the directory is more reliable than stat-ing each entry: the ns
+    files are special nodes whose stat() target can be denied to unprivileged
+    callers (notably on Android), which would make os.path.exists() lie.
+    """
+    try:
+        return set(os.listdir("/proc/self/ns"))
+    except OSError:
+        return None
+
+
 def _ns_file_present(name: str) -> bool:
-    """Return True if this process exposes /proc/self/ns/<name>."""
-    return os.path.exists(f"/proc/self/ns/{name}")
+    """Return True if this process exposes /proc/self/ns/<name>.
+
+    Prefers a directory listing of /proc/self/ns; falls back to os.path.lexists
+    (which checks the link itself without stat-ing its target, so it works even
+    when the target is unreadable to an unprivileged caller).
+    """
+    entries = _ns_dir_entries()
+    if entries is not None:
+        return name in entries
+    return os.path.lexists(f"/proc/self/ns/{name}")
 
 
 def _userns_present() -> bool | None:
@@ -207,26 +230,37 @@ def probe_flag_runtime(name: str) -> str:
             return PROBE_UNKNOWN
         return PROBE_PRESENT if res else PROBE_ABSENT
 
-    # Pseudo-filesystems: look them up in /proc/filesystems.
+    # Pseudo-filesystems: look them up in /proc/filesystems. The mounted
+    # pseudo-fs at its canonical path is also accepted, since /proc/filesystems
+    # only lists types not yet exhausted and a mounted fs is proof enough.
     fs_map = {
-        "PROC_FS": "proc",
-        "SYSFS": "sysfs",
-        "TMPFS": "tmpfs",
-        "DEVTMPFS": "devtmpfs",
-        "UNIX98_PTYS": "devpts",
+        "PROC_FS": ("proc", "/proc"),
+        "SYSFS": ("sysfs", "/sys"),
+        "TMPFS": ("tmpfs", None),
+        "DEVTMPFS": ("devtmpfs", None),
+        "UNIX98_PTYS": ("devpts", "/dev/pts"),
     }
     if name in fs_map:
+        fstype, mount_hint = fs_map[name]
         fstypes = _proc_filesystems()
-        if not fstypes:
+        if fstypes is None:
+            # Could not read /proc/filesystems; fall back to the mount hint.
+            if mount_hint and os.path.isdir(mount_hint):
+                return PROBE_PRESENT
             return PROBE_UNKNOWN
-        return PROBE_PRESENT if fs_map[name] in fstypes else PROBE_ABSENT
+        if fstype in fstypes:
+            return PROBE_PRESENT
+        if mount_hint and os.path.isdir(mount_hint):
+            return PROBE_PRESENT
+        return PROBE_ABSENT
 
     # Cgroups: presence of the cgroup/cgroup2 filesystem and the mount point.
     if name == "CGROUPS":
         fstypes = _proc_filesystems()
-        if not fstypes:
-            return PROBE_UNKNOWN
-        has_cg = ("cgroup" in fstypes) or ("cgroup2" in fstypes) or os.path.isdir("/sys/fs/cgroup")
+        has_dir = os.path.isdir("/sys/fs/cgroup")
+        if fstypes is None:
+            return PROBE_PRESENT if has_dir else PROBE_UNKNOWN
+        has_cg = ("cgroup" in fstypes) or ("cgroup2" in fstypes) or has_dir
         return PROBE_PRESENT if has_cg else PROBE_ABSENT
     if name in ("CGROUP_DEVICE", "MEMCG", "CGROUP_PIDS"):
         # Specific cgroup controllers can't be reliably enumerated rootlessly
