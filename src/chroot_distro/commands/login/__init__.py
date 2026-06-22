@@ -422,7 +422,45 @@ def _check_shell_available(rootfs, container_path, login_shell, container_name):
     sys.exit(1)
 
 
+class _MaxIsolationFallback(Exception):
+    """Internal signal: max isolation failed mid-setup and the login should be
+    retried in the old isolated mode (host binds + host /proc, namespaces
+    where supported). Raised on Android where SELinux denies the fresh
+    pseudo-filesystems and kills the chrooted holder."""
+
+
+def _can_fall_back_to_old_isolated(max_isolation: bool, args) -> bool:
+    """Return True if a failed max-isolation setup may degrade to old isolated.
+
+    Only on Android/Termux and only once: the retry sets
+    ``args._disable_max_isolation`` so a second failure is reported normally
+    instead of looping. On a real Linux host we keep refusing, since the user
+    explicitly asked for the strong, escape-proof mode and it should work.
+    """
+    if not (max_isolation and IS_TERMUX):
+        return False
+    return not getattr(args, "_disable_max_isolation", False)
+
+
 def _command_login_inner(container_name: str, args) -> None:
+    """Run the login, degrading max isolation to the old isolated mode once if
+    it cannot be set up on this (Android) kernel."""
+    try:
+        _command_login_inner_once(container_name, args)
+    except _MaxIsolationFallback as exc:
+        warn(
+            "Maximum isolation could not be set up on this Android kernel "
+            f"({exc}). Falling back to the standard isolated mode (host /dev, "
+            "/sys and /proc are bound, with namespaces where the kernel "
+            "supports them). This is the pre-existing --isolated behaviour and "
+            "is NOT fully escape-proof on Android. Use a Linux host whose "
+            "kernel supports namespaces for maximum isolation."
+        )
+        args._disable_max_isolation = True
+        _command_login_inner_once(container_name, args)
+
+
+def _command_login_inner_once(container_name: str, args) -> None:
     rootfs = container_rootfs(container_name)
     if not os.path.isdir(rootfs):
         crit_error(f"container '{container_name}' is not installed.")
