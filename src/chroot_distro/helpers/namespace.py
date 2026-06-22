@@ -641,13 +641,21 @@ def acquire_holder(
     holder_cmd: list[str] | None = None,
     pipe_r: int | None = None,
     env: dict | None = None,
+    rootfs: str | None = None,
 ) -> NamespaceHolder:
-    """Reuse or create a namespace holder for the container."""
+    """Reuse or create a namespace holder for the container.
+
+    When *rootfs* is given (maximum isolation, interactive path), the holder
+    chroots into the rootfs before sleeping so PID 1's root is inside the
+    container, closing the ``chroot /proc/1/root`` escape.
+    """
     existing = get_live_holder(container_name)
     if existing is not None:
         return existing
     flags = probe_unshare_flags()
-    return _create_holder(container_name, flags, holder_cmd=holder_cmd, pipe_r=pipe_r, env=env)
+    return _create_holder(
+        container_name, flags, holder_cmd=holder_cmd, pipe_r=pipe_r, env=env, rootfs=rootfs
+    )
 
 
 def release_holder(container_name: str) -> None:
