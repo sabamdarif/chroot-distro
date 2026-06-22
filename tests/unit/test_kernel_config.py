@@ -1,0 +1,119 @@
+import gzip
+from unittest.mock import patch
+
+import chroot_distro.commands.info as info
+import chroot_distro.commands.kernel_config as kc
+
+_SAMPLE = "\n".join(
+    [
+        "# Auto-generated kernel config",
+        "CONFIG_NAMESPACES=y",
+        "CONFIG_PID_NS=y",
+        "CONFIG_UTS_NS=y",
+        "CONFIG_IPC_NS=y",
+        "# CONFIG_USER_NS is not set",
+        "CONFIG_PROC_FS=y",
+        "CONFIG_SYSFS=y",
+        "CONFIG_TMPFS=y",
+        "CONFIG_CGROUPS=y",
+        "CONFIG_CGROUP_DEVICE=m",
+    ]
+)
+
+
+def _capture(lines):
+    return lambda *a: lines.append(a[0] if a else "")
+
+
+def test_parse_kernel_config_recognizes_y_m_and_not_set():
+    parsed = kc.parse_kernel_config(_SAMPLE)
+    assert parsed["NAMESPACES"] == kc.CONFIG_BUILTIN
+    assert parsed["CGROUP_DEVICE"] == kc.CONFIG_MODULE
+    assert parsed["USER_NS"] == kc.CONFIG_MISSING
+    # An option absent from the text is simply not in the dict.
+    assert "MEMCG" not in parsed
+
+
+def test_lookup_flag_handles_unknown_and_absent():
+    parsed = kc.parse_kernel_config(_SAMPLE)
+    assert kc.lookup_flag(parsed, "PID_NS") == kc.CONFIG_BUILTIN
+    # Absent from a readable config -> treated as missing.
+    assert kc.lookup_flag(parsed, "MEMCG") == kc.CONFIG_MISSING
+    # No config at all -> unknown.
+    assert kc.lookup_flag(None, "PID_NS") == kc.CONFIG_UNKNOWN
+
+
+def test_find_kernel_config_reads_plain_file(tmp_path):
+    cfg = tmp_path / ".config"
+    cfg.write_text(_SAMPLE)
+    with patch.dict(kc.os.environ, {"CONFIG": str(cfg)}, clear=False):
+        path, text = kc.find_kernel_config()
+    assert path == str(cfg)
+    assert "CONFIG_NAMESPACES=y" in text
+
+
+def test_find_kernel_config_reads_gzip(tmp_path):
+    cfg = tmp_path / "config.gz"
+    with gzip.open(cfg, "wt", encoding="utf-8") as fh:
+        fh.write(_SAMPLE)
+    with patch.dict(kc.os.environ, {"CONFIG": str(cfg)}, clear=False):
+        path, text = kc.find_kernel_config()
+    assert path == str(cfg)
+    assert "CONFIG_PID_NS=y" in text
+
+
+def test_find_kernel_config_returns_none_when_absent(tmp_path):
+    missing = tmp_path / "does-not-exist"
+    with (
+        patch.dict(kc.os.environ, {"CONFIG": str(missing)}, clear=False),
+        patch.object(kc, "_candidate_config_paths", return_value=[]),
+    ):
+        path, text = kc.find_kernel_config()
+    assert path is None
+    assert text is None
+
+
+def test_render_kernel_config_reports_missing_required():
+    # PID_NS is required and missing in this partial config.
+    partial = "\n".join(
+        [
+            "CONFIG_NAMESPACES=y",
+            "CONFIG_PROC_FS=y",
+            "CONFIG_SYSFS=y",
+            "CONFIG_UNIX98_PTYS=y",
+        ]
+    )
+    lines: list[str] = []
+    with (
+        patch.object(info, "find_kernel_config", return_value=("/proc/config.gz", partial)),
+        patch.object(info, "msg", side_effect=_capture(lines)),
+    ):
+        info._render_kernel_config()
+    blob = "\n".join(lines)
+    assert "CONFIG_PID_NS" in blob
+    assert "cannot work fully without" in blob
+
+
+def test_render_kernel_config_handles_unreadable_config():
+    lines: list[str] = []
+    with (
+        patch.object(info, "find_kernel_config", return_value=(None, None)),
+        patch.object(info, "msg", side_effect=_capture(lines)),
+    ):
+        info._render_kernel_config()
+    assert "Kernel config not readable" in "\n".join(lines)
+
+
+def test_render_kernel_config_all_present_is_ok():
+    full = "\n".join(
+        "CONFIG_" + flag.name + "=y"
+        for group in kc.KERNEL_FLAG_GROUPS
+        for flag in group.flags
+    )
+    lines: list[str] = []
+    with (
+        patch.object(info, "find_kernel_config", return_value=("/boot/config-test", full)),
+        patch.object(info, "msg", side_effect=_capture(lines)),
+    ):
+        info._render_kernel_config()
+    assert "All kernel options required for namespace isolation are present" in "\n".join(lines)
