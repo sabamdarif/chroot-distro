@@ -514,7 +514,13 @@ def _create_holder(
         unshare_argv.extend(flags)
         unshare_argv.extend(["python3", "-c", python_script, *holder_cmd])
     else:
-        unshare_argv = _holder_unshare_argv(unshare, flags)
+        unshare_argv = _holder_unshare_argv(unshare, flags, rootfs=rootfs)
+
+    # The chrooted max-isolation holder runs as `python3`, not `sleep`, and is
+    # re-parented below the launched `unshare --fork` just like a custom
+    # holder, so it is detected by its child PID and validated by start-time.
+    self_chroot_holder = bool(rootfs) and not holder_cmd
+    track_as_child = bool(holder_cmd) or self_chroot_holder
 
     popen_kwargs: dict = {
         "start_new_session": True,
@@ -539,17 +545,23 @@ def _create_holder(
         # Up to ~5s: the forked grandchild/child process can take a moment to appear
         # under a busy /proc, especially on Android kernels.
         for _ in range(250):
-            if holder_cmd:
-                assert pipe_r is not None
+            if track_as_child:
                 children = _read_host_child_pids(proc.pid)
                 if children:
                     host_pid = children[0]
                     break
                 # Fallback to scanning all new PIDs (for Android kernels that hide children)
-                for pid in _snapshot_all_pids() - before_pids:
-                    if _is_custom_holder(pid, pipe_r):
-                        host_pid = pid
-                        break
+                if holder_cmd:
+                    assert pipe_r is not None
+                    for pid in _snapshot_all_pids() - before_pids:
+                        if _is_custom_holder(pid, pipe_r):
+                            host_pid = pid
+                            break
+                else:
+                    for pid in _snapshot_all_pids() - before_pids:
+                        if _proc_comm(pid) in ("python3", "python"):
+                            host_pid = pid
+                            break
                 if host_pid is not None:
                     break
             else:
@@ -585,7 +597,7 @@ def _create_holder(
                 )
             raise NamespaceError("Failed to locate namespace holder process on the host.")
 
-        if not holder_cmd and _proc_comm(host_pid) != "sleep":
+        if not track_as_child and _proc_comm(host_pid) != "sleep":
             raise NamespaceError(f"Namespace holder PID {host_pid} is not a sleep process.")
 
         start_time = _get_process_start_time(host_pid)
@@ -594,7 +606,9 @@ def _create_holder(
                 fh.write(f"{host_pid}\n{start_time}\n")
             else:
                 fh.write(f"{host_pid}\n")
-            if holder_cmd:
+            # Custom and self-chrooting holders are validated by start-time
+            # (their comm is python3, not sleep), so mark them as custom.
+            if track_as_child:
                 fh.write("custom\n")
         with open(flags_file, "w") as fh:
             fh.write(" ".join(flags))
