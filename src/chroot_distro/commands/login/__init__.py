@@ -951,7 +951,18 @@ def _command_login_inner(container_name: str, args) -> None:
                     if pipe_w is not None:
                         with contextlib.suppress(OSError):
                             os.close(pipe_w)
+                    with contextlib.suppress(Exception):
+                        mount_manager.unmount_all(rootfs, holder=holder)
+                    if holder is not None:
+                        with contextlib.suppress(Exception):
+                            namespace.release_holder(container_name)
+                        namespace.clear_isolation_mode(container_name)
                     session.decrement(container_name, lock_fh=lock_fh)
+                    # The chrooted max-isolation holder can die immediately on
+                    # Android (SELinux). Fall back to the old isolated mode
+                    # instead of failing outright.
+                    if _maybe_retry_without_max_isolation(container_name, args, lock_fh):
+                        return
                     crit_error(str(exc))
                     sys.exit(1)
             else:
@@ -1066,6 +1077,14 @@ def _command_login_inner(container_name: str, args) -> None:
                     namespace.release_holder(container_name)
                     namespace.clear_isolation_mode(container_name)
                 session.decrement(container_name, lock_fh=lock_fh)
+                # On Android the fresh pseudo-filesystems (tmpfs /dev, proc,
+                # sysfs) are frequently denied by SELinux, which also kills the
+                # chrooted holder so nsenter can no longer open its ns/mnt.
+                # Rather than abort the whole login, degrade once to the old
+                # `--isolated` mode (host binds + host /proc, namespaces where
+                # supported) by re-entering with max isolation disabled.
+                if _maybe_retry_without_max_isolation(container_name, args, lock_fh):
+                    return
                 crit_error(f"Failed to apply special mounts: {e}")
                 sys.exit(1)
 
