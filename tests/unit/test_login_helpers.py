@@ -901,6 +901,38 @@ def test_special_mounts_max_isolation_fresh_pseudo_fs():
     assert len(shm) == 1
 
 
+def test_holder_unshare_argv_max_isolation_chroots():
+    """The max-isolation holder must chroot into the rootfs before sleeping so
+    PID 1's root is inside the container (closes chroot /proc/1/root escape)."""
+    from chroot_distro.helpers.namespace import _holder_unshare_argv
+
+    plain = _holder_unshare_argv("/usr/bin/unshare", ["--pid", "--mount"])
+    assert plain[-2:] == ["sleep", "2147483647"]
+    assert "--fork" in plain
+
+    chrooted = _holder_unshare_argv("/usr/bin/unshare", ["--pid", "--mount"], rootfs="/fake/rootfs")
+    assert chrooted[-3] == "python3"
+    assert chrooted[-2] == "-c"
+    launcher = chrooted[-1]
+    assert "os.chroot('/fake/rootfs')" in launcher
+    assert "time.sleep(" in launcher
+    assert "--fork" in chrooted
+
+
+def test_special_mounts_max_isolation_proc_hidepid():
+    """The fresh procfs under max isolation must be hardened with hidepid=2."""
+    from chroot_distro.commands.login.bindings import get_special_mounts
+
+    with (
+        patch("os.path.exists", return_value=True),
+        patch("chroot_distro.commands.login.bindings.IS_TERMUX", False),
+        patch("chroot_distro.commands.login.bindings._fs_supported", return_value=True),
+    ):
+        specials = get_special_mounts("/fake/rootfs", isolated=True, max_isolation=True)
+    proc = [s for s in specials if s.fstype == "proc"][0]
+    assert "hidepid=2" in proc.options
+
+
 def test_max_isolation_dev_nodes_table():
     """The minimal device-node table must include the core character devices."""
     from chroot_distro.commands.login.bindings import MAX_ISOLATION_DEV_NODES
