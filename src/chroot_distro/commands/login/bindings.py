@@ -280,23 +280,24 @@ def get_special_mounts(
     if max_isolation:
         specials.extend(_max_isolation_dev_specials())
 
-    # PID-namespace-aware procfs (must not bind-mount host /proc when isolated).
-    if isolated:
-        # Under maximum isolation, harden the procfs: hidepid=2 hides other
-        # processes' /proc/<pid> entries (and their `root`/`cwd` links) from
-        # non-owner processes, and nosuid/nodev/noexec are standard hardening.
-        proc_options = "hidepid=2,nosuid,nodev,noexec" if max_isolation else ""
-        specials.append(
-            SpecialMount(
-                fstype="proc",
-                source="proc",
-                target="/proc",
-                options=proc_options,
-                mkdir=True,
-                check="proc",
-                optional=False,
-            )
+    # Fresh procfs. The host /proc is no longer bind-mounted in any mode (see
+    # get_bindings), so a fresh procfs is always mounted here. Under maximum
+    # isolation it is hardened with hidepid=2 (hides other processes'
+    # /proc/<pid> entries and their root/cwd links) plus nosuid/nodev/noexec.
+    # In the default and CD_USE_NS modes it is a plain procfs; note that
+    # without a PID namespace it still reflects the host's global PIDs.
+    proc_options = "hidepid=2,nosuid,nodev,noexec" if max_isolation else ""
+    specials.append(
+        SpecialMount(
+            fstype="proc",
+            source="proc",
+            target="/proc",
+            options=proc_options,
+            mkdir=True,
+            check="proc",
+            optional=False,
         )
+    )
 
     # Maximum isolation: a fresh read-only sysfs replaces the host /sys bind
     # so the guest cannot reach host kernel objects under /sys.
@@ -529,9 +530,14 @@ def get_bindings(
     # 1. Base Linux mounts (always needed for chroot to function correctly)
     # Target paths are absolute guest paths (e.g. /dev) which we will mount nested under rootfs.
     binds.append(("/dev", "/dev"))
-    # Host /proc bind breaks PID namespace isolation; mount procfs in get_special_mounts().
-    if not use_namespaces:
-        binds.append(("/proc", "/proc"))
+    # The host /proc is never bind-mounted any more: even in the default
+    # (no-flag) mode a fresh procfs is mounted by get_special_mounts() so the
+    # container gets its own /proc instance instead of sharing the host mount.
+    # NOTE: without a PID namespace this is NOT a security boundary (the fresh
+    # procfs still shows the same global PIDs, so e.g. `chroot /proc/1/root`
+    # can still reach the host); it only avoids leaking the host /proc mount
+    # into the container's mount table and gives a correct per-chroot
+    # /proc/self. Real process isolation requires CD_USE_NS=1 or --isolated.
     binds.append(("/sys", "/sys"))
 
     # Check if host /dev/pts and /dev/shm exist and mount them. We bind the
