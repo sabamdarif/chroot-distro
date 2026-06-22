@@ -137,14 +137,16 @@ def _usb_specials() -> list[SpecialMount]:
     ]
 
 
-def _binfmt_misc_special(*, fresh_proc: bool = False) -> SpecialMount | None:
+def _binfmt_misc_special(*, fresh_proc: bool = True) -> SpecialMount | None:
     """Mount binfmt_misc inside the chroot if the host hasn't already done it.
 
-    On regular Linux with systemd: already mounted → comes in via /proc bind → return None.
-    On Android: the kernel supports it but nothing mounts it → mount it ourselves.
+    The chroot's /proc is now always a fresh procfs (the host /proc is never
+    bind-mounted), so the host's binfmt_misc registrations are never inherited
+    and binfmt_misc must be mounted explicitly when the kernel supports it.
 
-    When *fresh_proc* is True (--isolated), /proc is a new procfs mount in the PID
-    namespace, so binfmt_misc must be mounted explicitly when supported.
+    *fresh_proc* is kept for backward compatibility; when False the old
+    behaviour of skipping the mount if the host already has binfmt_misc is
+    preserved, but callers now pass True since /proc is always fresh.
     """
     # Already mounted? The 'register' file only appears when binfmt_misc is mounted.
     if not fresh_proc and os.path.exists("/proc/sys/fs/binfmt_misc/register"):
@@ -159,7 +161,7 @@ def _binfmt_misc_special(*, fresh_proc: bool = False) -> SpecialMount | None:
         source="binfmt_misc",
         target="/proc/sys/fs/binfmt_misc",
         options="",
-        mkdir=False,  # /proc is already bind-mounted; the dir exists inside
+        mkdir=False,  # the fresh procfs provides the binfmt_misc mountpoint stub
         check="binfmt_misc",
         optional=True,
     )
@@ -343,7 +345,9 @@ def get_special_mounts(
         specials.extend(_usb_specials())
 
     if enable_binfmt:
-        sm = _binfmt_misc_special(fresh_proc=isolated)
+        # /proc is always a fresh procfs now, so binfmt_misc is never inherited
+        # from the host and must be mounted explicitly when supported.
+        sm = _binfmt_misc_special(fresh_proc=True)
         if sm:
             specials.append(sm)
 
