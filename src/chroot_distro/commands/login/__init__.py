@@ -1080,6 +1080,19 @@ def _command_login_inner(container_name: str, args) -> None:
                         f"Run '{PROGRAM_NAME} unmount {container_name}' and try again."
                     )
                     sys.exit(1)
+                # Under maximum isolation, never reuse a holder that was not
+                # created chrooted (e.g. a stale host-rooted holder left by an
+                # older version or a non-isolated session). Entering it would
+                # re-open the `chroot /proc/1/root` escape.
+                if max_isolation and not namespace.holder_is_max_isolation(container_name):
+                    session.decrement(container_name, lock_fh=lock_fh)
+                    crit_error(
+                        f"Container '{container_name}' already has an active, "
+                        f"non-isolated session/holder. Run "
+                        f"'{PROGRAM_NAME} unmount {container_name}' first, then "
+                        f"log in again with --isolated."
+                    )
+                    sys.exit(1)
 
     # On Termux, Android's /dev/pts nodes use device major 88 while live ptys
     # use major 136, so the inherited login pty has no matching /dev/pts entry
