@@ -18,9 +18,13 @@ from chroot_distro.commands.kernel_config import (
     CONFIG_MODULE,
     CONFIG_UNKNOWN,
     KERNEL_FLAG_GROUPS,
+    PROBE_ABSENT,
+    PROBE_PRESENT,
+    PROBE_UNKNOWN,
     find_kernel_config,
     lookup_flag,
     parse_kernel_config,
+    probe_flag_runtime,
 )
 from chroot_distro.constants import (
     BASE_CACHE_DIR,
@@ -535,54 +539,69 @@ def _render_capabilities(caps: list[_Capability]) -> None:
         )
 
 
+def _flag_status(flag, parsed: dict | None) -> tuple[str, str, str, bool]:
+    """Resolve one kernel flag to (glyph, color, state_text, counts_as_missing).
+
+    Uses the static kernel config when available; otherwise falls back to a
+    live runtime probe (so Android, where /proc/config.gz is root-only and
+    `info` runs rootless, still gets a meaningful answer). *counts_as_missing*
+    is True only when the option is both required and confirmed absent, so the
+    summary line never flags a merely-unknown option as blocking.
+    """
+    if parsed is not None:
+        status = lookup_flag(parsed, flag.name)
+        if status in (CONFIG_BUILTIN, CONFIG_MODULE):
+            state = "enabled" if status == CONFIG_BUILTIN else "enabled (module)"
+            return _OK, "GREEN", state, False
+        if status == CONFIG_UNKNOWN:
+            return "\u2022", "CYAN", "unknown", False
+        # Confirmed missing in a readable config.
+        if flag.required:
+            return _BAD, "RED", "missing (required)", True
+        return _WARN, "YELLOW", "missing (optional)", False
+
+    # No static config: probe the live kernel.
+    probe = probe_flag_runtime(flag.name)
+    if probe == PROBE_PRESENT:
+        return _OK, "GREEN", "available (runtime)", False
+    if probe == PROBE_ABSENT:
+        if flag.required:
+            return _BAD, "RED", "unavailable (required)", True
+        return _WARN, "YELLOW", "unavailable (optional)", False
+    return "\u2022", "CYAN", "unknown", False
+
+
 def _render_kernel_config() -> None:
     """Show which CONFIG_* options chroot-distro relies on are enabled.
 
-    Reads the kernel build config (``/proc/config.gz`` and friends) and lists
-    each option grouped by the feature it powers. When the config can't be
-    read (common on locked-down Android kernels) this is reported as a single
-    informational line rather than a wall of 'unknown' rows.
+    Prefers the static kernel build config (``/proc/config.gz`` and friends).
+    When that cannot be read (commonly on Android, where /proc/config.gz is
+    root-only and `info` runs rootless), it falls back to probing the running
+    kernel directly (namespace files, /proc/filesystems, /sys/fs/cgroup) so
+    the report stays useful instead of giving up.
     """
     _render_section("KERNEL CONFIG")
     path, text = find_kernel_config()
     parsed = parse_kernel_config(text) if text is not None else None
 
-    if parsed is None:
+    if parsed is not None:
+        msg(f"  {C['CYAN']}Read from {path}{C['RST']}")
+    else:
         msg(
-            f"  {C['YELLOW']}{_WARN}{C['RST']} "
-            f"{C['WHITE']}Kernel config not readable "
-            f"(no /proc/config.gz or /boot/config-*).{C['RST']}"
+            f"  {C['CYAN']}Kernel config not readable; probing the running "
+            f"kernel instead. For a definitive report run "
+            f"'CONFIG=/path/to/.config {PROGRAM_NAME} info' or as root.{C['RST']}"
         )
-        msg(
-            f"    {C['CYAN']}Set CONFIG=/path/to/.config and re-run "
-            f"'{PROGRAM_NAME} info' to check feature support.{C['RST']}"
-        )
-        return
 
-    msg(f"  {C['CYAN']}Read from {path}{C['RST']}")
     missing_required: list[str] = []
-
     for group in KERNEL_FLAG_GROUPS:
         msg()
         msg(f"  {C['WHITE']}{group.title}{C['RST']}")
-        # Width of the widest "CONFIG_NAME" label in this group for alignment.
         label_w = max(len("CONFIG_" + flag.name) for flag in group.flags) + 1
         for flag in group.flags:
-            status = lookup_flag(parsed, flag.name)
-            if status == CONFIG_BUILTIN:
-                glyph, color, state = _OK, "GREEN", "enabled"
-            elif status == CONFIG_MODULE:
-                glyph, color, state = _OK, "GREEN", "enabled (module)"
-            elif status == CONFIG_UNKNOWN:
-                glyph, color, state = "\u2022", "CYAN", "unknown"
-            else:
-                # Missing: red when the option is required for isolation,
-                # yellow when it only affects an optional extra.
-                if flag.required:
-                    glyph, color, state = _BAD, "RED", "missing (required)"
-                    missing_required.append("CONFIG_" + flag.name)
-                else:
-                    glyph, color, state = _WARN, "YELLOW", "missing (optional)"
+            glyph, color, state, counts_missing = _flag_status(flag, parsed)
+            if counts_missing:
+                missing_required.append("CONFIG_" + flag.name)
             label = "CONFIG_" + flag.name
             msg(
                 f"    {C[color]}{glyph}{C['RST']} "
