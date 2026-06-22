@@ -276,9 +276,13 @@ __all__ = (
     "CONFIG_MODULE",
     "CONFIG_UNKNOWN",
     "KERNEL_FLAG_GROUPS",
+    "PROBE_ABSENT",
+    "PROBE_PRESENT",
+    "PROBE_UNKNOWN",
     "KernelFlag",
     "KernelFlagGroup",
     "find_kernel_config",
     "lookup_flag",
     "parse_kernel_config",
+    "probe_flag_runtime",
 )
