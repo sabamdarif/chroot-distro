@@ -217,10 +217,44 @@ def _docker_cgroup_specials() -> list[SpecialMount]:
     return specials
 
 
+def _max_isolation_dev_specials() -> list[SpecialMount]:
+    """Return mounts that synthesise a fresh /dev for maximum isolation.
+
+    Under --isolated the host /dev is never bind-mounted (that would expose
+    host block devices and an escape path). Instead a fresh tmpfs is mounted
+    at /dev and the handful of character devices a normal login needs
+    (null, zero, full, random, urandom, tty) are created inside it. The
+    devpts overmount and /dev/shm tmpfs are added separately below.
+    """
+    return [
+        SpecialMount(
+            fstype="tmpfs",
+            source="tmpfs",
+            target="/dev",
+            options="mode=0755,size=64M",
+            mkdir=True,
+            optional=False,
+        )
+    ]
+
+
+# Minimal character devices created inside the fresh /dev tmpfs under
+# --isolated, as (relative path, major, minor, mode) tuples.
+MAX_ISOLATION_DEV_NODES: tuple[tuple[str, int, int, int], ...] = (
+    ("null", 1, 3, 0o666),
+    ("zero", 1, 5, 0o666),
+    ("full", 1, 7, 0o666),
+    ("random", 1, 8, 0o666),
+    ("urandom", 1, 9, 0o666),
+    ("tty", 5, 0, 0o666),
+)
+
+
 def get_special_mounts(
     rootfs: str,
     *,
     isolated: bool = False,
+    max_isolation: bool = False,
     enable_usb: bool = True,
     enable_binfmt: bool = True,
     enable_docker_cgroup: bool = True,  # enabled by default per user request
@@ -235,8 +269,16 @@ def get_special_mounts(
     own empty, writable /tmp and /run directories. No tmpfs overmount is
     used here because it would mount on top of the display socket and
     /tmp/.X11-unix binds applied earlier, hiding them.
+
+    When *max_isolation* is set (--isolated), the host /dev and /sys are
+    never bind-mounted, so a fresh tmpfs /dev (plus minimal device nodes)
+    and a fresh read-only sysfs are mounted here instead.
     """
     specials: list[SpecialMount] = []
+
+    # Maximum isolation synthesises a fresh /dev (host /dev is not bound).
+    if max_isolation:
+        specials.extend(_max_isolation_dev_specials())
 
     # PID-namespace-aware procfs (must not bind-mount host /proc when isolated).
     if isolated:
@@ -249,6 +291,21 @@ def get_special_mounts(
                 mkdir=True,
                 check="proc",
                 optional=False,
+            )
+        )
+
+    # Maximum isolation: a fresh read-only sysfs replaces the host /sys bind
+    # so the guest cannot reach host kernel objects under /sys.
+    if max_isolation:
+        specials.append(
+            SpecialMount(
+                fstype="sysfs",
+                source="sysfs",
+                target="/sys",
+                options="ro,nosuid,nodev,noexec",
+                mkdir=True,
+                check="sysfs",
+                optional=True,
             )
         )
 
