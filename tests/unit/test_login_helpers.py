@@ -901,6 +901,31 @@ def test_special_mounts_max_isolation_fresh_pseudo_fs():
     assert len(shm) == 1
 
 
+def test_filter_flags_by_ns_files_drops_missing_cgroup():
+    """A flag whose /proc/<pid>/ns/<name> is missing must be dropped, mirroring
+    Android kernels that accept `unshare --cgroup` but expose no cgroup ns."""
+    from chroot_distro.helpers.namespace import filter_flags_by_ns_files
+
+    flags = ["--mount", "--uts", "--ipc", "--pid", "--cgroup"]
+
+    def fake_exists(path):
+        # Every ns file exists except cgroup.
+        return not path.endswith("/ns/cgroup")
+
+    with patch("chroot_distro.helpers.namespace.os.path.exists", side_effect=fake_exists):
+        kept = filter_flags_by_ns_files(1234, flags)
+    assert "--cgroup" not in kept
+    assert kept == ["--mount", "--uts", "--ipc", "--pid"]
+
+
+def test_filter_flags_by_ns_files_keeps_all_when_present():
+    from chroot_distro.helpers.namespace import filter_flags_by_ns_files
+
+    flags = ["--mount", "--pid", "--cgroup"]
+    with patch("chroot_distro.helpers.namespace.os.path.exists", return_value=True):
+        assert filter_flags_by_ns_files(1, flags) == flags
+
+
 def test_holder_unshare_argv_max_isolation_chroots():
     """The max-isolation holder must chroot into the rootfs before sleeping so
     PID 1's root is inside the container (closes chroot /proc/1/root escape)."""
