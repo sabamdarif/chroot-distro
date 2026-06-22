@@ -345,9 +345,10 @@ def get_special_mounts(
     if enable_docker_cgroup and IS_TERMUX:
         specials.extend(_docker_cgroup_specials())
 
-    if enable_shm and not os.path.exists("/dev/shm"):
-        # host already has /dev/shm → comes in via /dev bind
-        # only add a fresh tmpfs when host doesn't have one (some Android kernels)
+    # Under max isolation the host /dev is not bound, so the fresh tmpfs /dev
+    # has no /dev/shm: always mount one. Otherwise only add it when the host
+    # has no /dev/shm to come in via the /dev bind (some Android kernels).
+    if enable_shm and (max_isolation or not os.path.exists("/dev/shm")):
         specials.append(
             SpecialMount(
                 fstype="tmpfs",
