@@ -467,6 +467,26 @@ def _pick_new_holder_pid(before: set[int], launcher_pid: int | None = None) -> i
     return min(candidates, key=lambda pid: os.stat(f"/proc/{pid}").st_mtime)
 
 
+# Maps an nsenter argv token (long or short) back to the unshare long flag,
+# so the live-ns filter can be applied to whatever form is in nsenter_flags.
+_NSENTER_TOKEN_TO_LONG = {
+    "--mount": "--mount",
+    "--uts": "--uts",
+    "--ipc": "--ipc",
+    "--pid": "--pid",
+    "--cgroup": "--cgroup",
+    "--net": "--net",
+    "--user": "--user",
+    "-m": "--mount",
+    "-u": "--uts",
+    "-i": "--ipc",
+    "-p": "--pid",
+    "-C": "--cgroup",
+    "-n": "--net",
+    "-U": "--user",
+}
+
+
 @dataclass
 class NamespaceHolder:
     """A long-lived process holding mount/PID/UTS/IPC namespaces."""
@@ -477,8 +497,43 @@ class NamespaceHolder:
     container_name: str
     proc: subprocess.Popen | None = None
 
+    def _live_nsenter_flags(self) -> list[str]:
+        """Return nsenter_flags minus any namespace not openable right now.
+
+        On some Android kernels a /proc/<pid>/ns/<name> entry that was
+        openable when the holder was created later cannot be opened, and
+        nsenter aborts with "cannot open .../ns/<name>". Re-check at call time
+        so nsenter only ever joins namespaces that are currently openable.
+        The mount namespace is essential and is kept even if the probe is
+        inconclusive.
+        """
+        live: list[str] = []
+        for token in self.nsenter_flags:
+            long = _NSENTER_TOKEN_TO_LONG.get(token)
+            if long is None:
+                live.append(token)
+                continue
+            ns_name = _FLAG_TO_NS_FILE.get(long)
+            if ns_name is None:
+                live.append(token)
+                continue
+            ns_path = f"/proc/{self.pid}/ns/{ns_name}"
+            try:
+                fd = os.open(ns_path, os.O_RDONLY)
+            except OSError:
+                if long == "--mount":
+                    # Mount NS is essential; keep it and let nsenter surface
+                    # any real error rather than silently dropping it.
+                    live.append(token)
+                else:
+                    log.debug("nsenter: dropping %s, cannot open %s", token, ns_path)
+                continue
+            os.close(fd)
+            live.append(token)
+        return live
+
     def run_argv(self, cmd: list[str]) -> list[str]:
-        return [self.nsenter_exe, "--target", str(self.pid), *self.nsenter_flags, "--", *cmd]
+        return [self.nsenter_exe, "--target", str(self.pid), *self._live_nsenter_flags(), "--", *cmd]
 
     def run(self, cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
         check = kwargs.pop("check", False)
