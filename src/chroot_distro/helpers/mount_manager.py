@@ -226,6 +226,44 @@ def safe_mount(
         raise MountError(f"Failed to apply mount options '{kernel_options}' to {target}: {stderr}") from e
 
 
+def create_dev_nodes(
+    rootfs: str,
+    nodes,
+    holder: NamespaceHolder | None = None,
+) -> None:
+    """Create minimal character device nodes inside the rootfs ``/dev``.
+
+    *nodes* is an iterable of ``(name, major, minor, mode)`` tuples. Used for
+    the fresh tmpfs ``/dev`` mounted under maximum isolation, where the host
+    ``/dev`` is intentionally not bind-mounted. mknod is run inside the
+    holder's mount namespace (when given) so the nodes land on the new tmpfs;
+    failures are non-fatal and logged at debug level. ``/dev/ptmx``,
+    ``/dev/console`` and the ``std*`` symlinks are provided by the devpts
+    overmount and the login pty wrapper, so they are not created here.
+    """
+    dev_dir = os.path.join(rootfs, "dev")
+    for name, major, minor, mode in nodes:
+        guest_path = f"/dev/{name}"
+        host_path = os.path.join(dev_dir, name)
+        if holder is not None:
+            cmd = ["mknod", "-m", format(mode, "o"), guest_path, "c", str(major), str(minor)]
+            try:
+                result = holder.run(cmd, capture_output=True, text=True)
+                if result.returncode != 0:
+                    log.debug("mknod %s failed: %s", guest_path, (result.stderr or "").strip())
+            except OSError as exc:
+                log.debug("mknod %s raised: %s", guest_path, exc)
+            continue
+        # No holder (no mount namespace): create directly on the host path.
+        try:
+            if os.path.exists(host_path):
+                continue
+            os.mknod(host_path, mode | 0o020000, os.makedev(major, minor))  # S_IFCHR
+            os.chmod(host_path, mode)
+        except OSError as exc:
+            log.debug("os.mknod %s failed: %s", host_path, exc)
+
+
 def make_rslave(target: str, holder: NamespaceHolder | None = None) -> bool:
     """Set recursive slave mount propagation on *target*.
 
