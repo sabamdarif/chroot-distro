@@ -26,6 +26,7 @@ quoting/escaping pitfalls.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import ctypes
 import ctypes.util
 import json
@@ -58,7 +59,7 @@ def _mount(libc, source, target, fstype, flags, data) -> None:
     d = data.encode() if data else None
     if libc.mount(s, t, f, ctypes.c_ulong(flags), d) != 0:
         err = ctypes.get_errno()
-        raise OSError(err, "mount %s -> %s (%s): %s" % (source, target, fstype, os.strerror(err)))
+        raise OSError(err, f"mount {source} -> {target} ({fstype}): {os.strerror(err)}")
 
 
 def _make_node(path: str, major: int, minor: int, mode: int) -> None:
@@ -78,10 +79,8 @@ def setup(config: dict) -> None:
     libc = _libc()
 
     # Detach our mount tree from the host so nothing we do propagates back.
-    try:
+    with contextlib.suppress(OSError):
         _mount(libc, "none", "/", "", MS_REC | MS_PRIVATE, None)
-    except OSError:
-        pass
 
     os.chroot(rootfs)
     os.chdir("/")
@@ -143,14 +142,14 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         setup(config)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         if ready_fd >= 0:
             try:
                 os.write(ready_fd, ("E" + str(exc))[:240].encode())
                 os.close(ready_fd)
             except OSError:
                 pass
-        sys.stderr.write("max-isolation holder setup failed: %s\n" % exc)
+        sys.stderr.write(f"max-isolation holder setup failed: {exc}\n")
         return 1
 
     if ready_fd >= 0:

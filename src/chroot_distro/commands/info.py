@@ -6,25 +6,23 @@ import subprocess
 from dataclasses import dataclass, field
 
 from chroot_distro.arch import detect_installed_arch, get_device_cpu_arch, supports_32bit
-from chroot_distro.commands.list_cmd import (
-    _ensure_manifest_readable,
-    _iter_container_names,
-    _read_image_source,
-    _rootfs_size_bytes,
-)
 from chroot_distro.commands.kernel_config import (
     CONFIG_BUILTIN,
-    CONFIG_MISSING,
     CONFIG_MODULE,
     CONFIG_UNKNOWN,
     KERNEL_FLAG_GROUPS,
     PROBE_ABSENT,
     PROBE_PRESENT,
-    PROBE_UNKNOWN,
     find_kernel_config,
     lookup_flag,
     parse_kernel_config,
     probe_flag_runtime,
+)
+from chroot_distro.commands.list_cmd import (
+    _ensure_manifest_readable,
+    _iter_container_names,
+    _read_image_source,
+    _rootfs_size_bytes,
 )
 from chroot_distro.constants import (
     BASE_CACHE_DIR,

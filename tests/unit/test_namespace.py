@@ -423,7 +423,11 @@ def test_create_holder_with_custom_cmd(mock_nsenter, mock_read_child, mock_start
     mock_popen.return_value = mock_proc
 
     m_open = mock_open()
-    with patch("builtins.open", m_open):
+    with (
+        patch("builtins.open", m_open),
+        patch("chroot_distro.helpers.namespace.os.open", return_value=7),
+        patch("chroot_distro.helpers.namespace.os.close"),
+    ):
         holder = ns._create_holder("alpine", ["--mount", "--pid"], holder_cmd=["chroot", "rootfs", "/init"], pipe_r=3)
 
     assert holder.pid == 555

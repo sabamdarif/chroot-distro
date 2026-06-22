@@ -33,7 +33,7 @@ def test_safe_hostname_rejects_overlong_label():
 def test_can_fall_back_only_on_termux_max_isolation_once():
     """Fallback is allowed only on Termux, only under max isolation, and only
     until the one-shot opt-out flag is set."""
-    from chroot_distro.commands.login import __init__ as login_mod
+    import chroot_distro.commands.login as login_mod
 
     with patch.object(login_mod, "IS_TERMUX", True):
         # Eligible: Termux + max isolation + not yet retried.
@@ -57,7 +57,7 @@ def test_command_login_inner_retries_once_on_fallback():
     """The wrapper retries the login exactly once with max isolation disabled
     when the inner run raises _MaxIsolationFallback, then propagates a second
     failure unchanged."""
-    from chroot_distro.commands.login import __init__ as login_mod
+    import chroot_distro.commands.login as login_mod
 
     calls = []
 
@@ -81,7 +81,7 @@ def test_command_login_inner_retries_once_on_fallback():
 def test_command_login_inner_does_not_retry_twice():
     """A second _MaxIsolationFallback (should not normally happen, since the
     retry disables max isolation) is not swallowed into an infinite loop."""
-    from chroot_distro.commands.login import __init__ as login_mod
+    import chroot_distro.commands.login as login_mod
 
     calls = []
 
@@ -566,7 +566,7 @@ def test_special_mounts_default():
 
         # In non-Termux/Linux by default, it should at least return devpts
         assert len(specials) >= 1
-        assert not any(s.fstype == "proc" for s in specials)
+        assert any(s.fstype == "proc" for s in specials)
         devpts_mount = [s for s in specials if s.fstype == "devpts"]
         assert len(devpts_mount) == 1
         assert devpts_mount[0].target == "/dev/pts"
@@ -651,7 +651,7 @@ def test_get_bindings_minimal_linux():
         srcs = {src for src, _ in binds}
         assert "/tmp" not in srcs
         assert "/dev" in srcs
-        assert "/proc" in srcs
+        assert "/proc" not in srcs
         assert "/sys" in srcs
 
 

@@ -422,7 +422,7 @@ def _check_shell_available(rootfs, container_path, login_shell, container_name):
     sys.exit(1)
 
 
-class _MaxIsolationFallback(Exception):
+class _MaxIsolationFallback(Exception):  # noqa: N818
     """Internal signal: max isolation failed mid-setup and the login should be
     retried in the old isolated mode (host binds + host /proc, namespaces
     where supported). Raised on Android where SELinux denies the fresh
