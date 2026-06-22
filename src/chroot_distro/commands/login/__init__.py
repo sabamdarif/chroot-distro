@@ -67,7 +67,7 @@ from chroot_distro.helpers.x11 import (
 from chroot_distro.locking import ContainerLock
 from chroot_distro.message import crit_error, warn
 from chroot_distro.names import require_valid_name
-from chroot_distro.paths import container_dir, container_rootfs
+from chroot_distro.paths import container_dir, container_log_path, container_rootfs
 
 log = logging.getLogger(__name__)
 
@@ -945,7 +945,11 @@ def _command_login_inner_once(container_name: str, args) -> None:
         if sess_count == 1:
             if use_namespaces:
                 try:
-                    if run_inner is not None:
+                    # A detached run must use a plain holder and reach the
+                    # command via nsenter; the synchronized foreground holder
+                    # (which execs the command itself) cannot be backgrounded.
+                    _detach_run = getattr(args, "detach", False) and run_inner is not None
+                    if run_inner is not None and not _detach_run:
                         chroot_args = build_chroot_args(
                             rootfs=rootfs,
                             login_uid=login_uid,
@@ -1246,6 +1250,15 @@ def _command_login_inner_once(container_name: str, args) -> None:
                     namespace.clear_isolation_mode(container_name)
         sys.exit(0)
 
+    if getattr(args, "detach", False) and run_inner is not None:
+        _run_detached(
+            container_name,
+            exec_argv=exec_argv,
+            child_env=child_env,
+            holder=holder,
+        )
+        return
+
     if holder is not None and holder.proc is not None:
         try:
             holder.proc.wait()
@@ -1278,6 +1291,76 @@ def _command_login_inner_once(container_name: str, args) -> None:
                     if holder is not None:
                         namespace.release_holder(container_name)
                         namespace.clear_isolation_mode(container_name)
+
+
+def _run_detached(
+    container_name: str,
+    *,
+    exec_argv: list,
+    child_env: dict,
+    holder,
+) -> None:
+    """Launch the resolved command in the background and return immediately.
+
+    The command is started in a new session (detached from the controlling
+    terminal) with stdin from /dev/null and stdout/stderr appended to the
+    container's run log. The session counter is intentionally NOT decremented:
+    the container stays mounted while the detached process runs, and the
+    process is discoverable via /proc/<pid>/root so 'kill' and 'unmount' tear
+    it down like any other session.
+    """
+    log_path = container_log_path(container_name)
+    try:
+        log_fh = open(log_path, "ab")  # noqa: SIM115 — handed to the child.
+    except OSError as exc:
+        with session.lock(container_name) as lock_fh:
+            sess_count = session.decrement(container_name, lock_fh=lock_fh)
+            if sess_count == 0:
+                mount_manager.unmount_all(container_rootfs(container_name), holder=holder)
+                if holder is not None:
+                    namespace.release_holder(container_name)
+                    namespace.clear_isolation_mode(container_name)
+        crit_error(f"cannot open run log '{log_path}': {exc}")
+        sys.exit(1)
+
+    try:
+        devnull = open(os.devnull, "rb")  # noqa: SIM115 — handed to the child.
+    except OSError as exc:
+        log_fh.close()
+        crit_error(f"cannot open {os.devnull}: {exc}")
+        sys.exit(1)
+
+    try:
+        proc = subprocess.Popen(
+            exec_argv,
+            env=child_env,
+            stdin=devnull,
+            stdout=log_fh,
+            stderr=log_fh,
+            start_new_session=True,
+        )
+    except OSError as exc:
+        log_fh.close()
+        devnull.close()
+        with session.lock(container_name) as lock_fh:
+            sess_count = session.decrement(container_name, lock_fh=lock_fh)
+            if sess_count == 0:
+                mount_manager.unmount_all(container_rootfs(container_name), holder=holder)
+                if holder is not None:
+                    namespace.release_holder(container_name)
+                    namespace.clear_isolation_mode(container_name)
+        crit_error(f"failed to start detached command for '{container_name}': {exc}")
+        sys.exit(1)
+    finally:
+        # The child holds its own copies of these descriptors.
+        log_fh.close()
+        devnull.close()
+
+    from chroot_distro.message import log_info
+
+    log_info(f"Container '{container_name}' started in background (PID {proc.pid}).")
+    log_info(f"Output is being written to: {log_path}")
+    log_info(f"Stop it with: {PROGRAM_NAME} kill {container_name}")
 
 
 __all__ = ("command_login",)

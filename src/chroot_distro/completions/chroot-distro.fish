@@ -369,6 +369,8 @@ complete -c chroot-distro -n '__fish_seen_subcommand_from run' \
 complete -c chroot-distro -f -n '__fish_seen_subcommand_from run' \
     -s e -l env        -r -d 'Set environment variable VAR=VALUE (repeatable)'
 complete -c chroot-distro -f -n '__fish_seen_subcommand_from run' \
+    -s d -l detach        -d 'Run the command in the background and return immediately'
+complete -c chroot-distro -f -n '__fish_seen_subcommand_from run' \
     -l get-chroot-cmd      -d 'Print the chroot command line and exit'
 complete -c chroot-distro -f -n '__fish_seen_subcommand_from run' \
     -s h -l help          -d 'Show help'

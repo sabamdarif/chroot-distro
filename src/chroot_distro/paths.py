@@ -1,6 +1,6 @@
 import os
 
-from chroot_distro.constants import CONTAINERS_DIR
+from chroot_distro.constants import CONTAINERS_DIR, RUNTIME_DIR
 from chroot_distro.exceptions import (
     ChrootDistroError,
     ContainerNotFoundError,
@@ -13,6 +13,18 @@ from chroot_distro.names import is_valid_name
 def container_dir(name: str) -> str:
     """Return the absolute path to a container's top-level directory."""
     return os.path.join(CONTAINERS_DIR, name)
+
+
+def container_log_path(name: str) -> str:
+    """Return the log-file path used by detached `run` sessions.
+
+    Lives alongside the session/holder state under the runtime data dir so it
+    persists for the lifetime of the container's mounts and is not part of the
+    rootfs itself.
+    """
+    data_dir = os.path.join(RUNTIME_DIR, "data", name)
+    os.makedirs(data_dir, exist_ok=True)
+    return os.path.join(data_dir, "run.log")
 
 
 def container_rootfs(name: str) -> str:

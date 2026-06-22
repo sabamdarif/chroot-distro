@@ -366,6 +366,13 @@ def _run(sub):
     p._cd_command = "run"
     p.add_argument("container_name", nargs="?", default=None)
     _add_login_or_run_common(p)
+    p.add_argument(
+        "-d",
+        "--detach",
+        dest="detach",
+        action="store_true",
+        help="Run the command in the background and return immediately.",
+    )
     p.add_argument("--get-chroot-cmd", dest="get_chroot_cmd", action="store_true")
     p.add_argument("-h", "--help", action="store_true")
 

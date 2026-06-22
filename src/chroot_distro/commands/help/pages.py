@@ -578,10 +578,18 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
             ),
             ("-w, --work-dir [PATH]", "Set the initial working directory."),
             ("-e, --env VAR=VALUE", "Set an environment variable. Can be specified multiple times."),
+            (
+                "-d, --detach",
+                "Run the command in the background and return immediately. "
+                "Output is written to a per-container log file (its path is "
+                "printed) and the container stays mounted. Stop the detached "
+                f"command with '{PROGRAM_NAME} kill CONTAINER'.",
+            ),
             ("--get-chroot-cmd", "Print the fully assembled chroot command line and exit without running it."),
         ],
         "examples": [
             f"{PROGRAM_NAME} run nextcloud",
+            f"{PROGRAM_NAME} run --detach nextcloud",
             f"{PROGRAM_NAME} run ubuntu --isolated -- /bin/echo hi",
         ],
         "footer": [

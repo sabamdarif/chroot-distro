@@ -11,6 +11,7 @@ from chroot_distro.paths import (
     container_dir,
     container_from_spec,
     container_locks_for_spec_pair,
+    container_log_path,
     container_manifest,
     container_rootfs,
     resolve_container_path,
@@ -21,6 +22,14 @@ def test_paths():
     assert container_dir("debian").endswith("containers/debian")
     assert container_rootfs("debian").endswith("containers/debian/rootfs")
     assert container_manifest("debian").endswith("containers/debian/manifest.json")
+
+
+def test_container_log_path(tmp_path):
+    with patch("chroot_distro.paths.RUNTIME_DIR", str(tmp_path)):
+        log_path = container_log_path("debian")
+    assert log_path.endswith("data/debian/run.log")
+    # The parent data dir is created on demand.
+    assert (tmp_path / "data" / "debian").is_dir()
 
 
 def test_container_from_spec():

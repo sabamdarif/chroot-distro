@@ -260,6 +260,7 @@ _chroot_distro() {
 				'*'{-b,--bind}'[bind-mount PATH\[:DEST\] into the container]:path:_files'
 				'(-w --work-dir)'{-w,--work-dir}'[initial working directory]:path:_directories'
 				'*'{-e,--env}'[set environment variable]:VAR=VALUE'
+				'(-d --detach)'{-d,--detach}'[run the command in the background and return immediately]'
 				'--get-chroot-cmd[print the chroot command line and exit]'
 				'(isolated minimal)--isolated[fewer host binds + mount/PID/UTS/IPC namespaces]'
 				'(isolated minimal)--minimal[bare /dev, /proc, /sys only]'

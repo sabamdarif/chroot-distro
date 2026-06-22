@@ -78,3 +78,28 @@ def test_parser_run_captures_multiple_run_args():
     args, _ = parse_cli_args(parser, ["run", "alpine", "--isolate", "--", "tunnel", "run"])
     assert args.isolated is True
     assert args.run_args == ["tunnel", "run"]
+
+
+def test_parser_run_detach_default_false():
+    parser = build_parser()
+    args = parser.parse_args(["run", "alpine"])
+    assert args.detach is False
+
+
+def test_parser_run_detach_long_flag():
+    parser = build_parser()
+    args = parser.parse_args(["run", "alpine", "--detach"])
+    assert args.detach is True
+
+
+def test_parser_run_detach_short_flag():
+    parser = build_parser()
+    args = parser.parse_args(["run", "-d", "alpine"])
+    assert args.detach is True
+
+
+def test_parser_run_detach_with_run_args():
+    parser = build_parser()
+    args, _ = parse_cli_args(parser, ["run", "alpine", "--detach", "--", "sleep", "100"])
+    assert args.detach is True
+    assert args.run_args == ["sleep", "100"]
