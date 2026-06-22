@@ -25,7 +25,13 @@ _REQUIRED_PROBE_FLAGS = ("--pid", "--mount", "--uts", "--ipc")
 # holder when the kernel supports it (probe_unshare_flags drops unsupported
 # flags), but it is NOT part of the strict pre-check because several Android
 # kernels lack cgroupns and we still want pid/mount/uts/ipc isolation there.
-_OPTIONAL_PROBE_FLAGS = ("--cgroup",)
+#
+# On Termux/Android the cgroup namespace is excluded entirely: several Android
+# kernels accept `unshare --cgroup` and even expose /proc/<pid>/ns/cgroup, yet
+# nsenter still cannot open it (it returns ENOENT for the unopenable ns file),
+# which would abort every isolated session. cgroupns brings little benefit on
+# Android, so we simply never request it there.
+_OPTIONAL_PROBE_FLAGS: tuple[str, ...] = () if IS_TERMUX else ("--cgroup",)
 _PROBE_FLAGS = _REQUIRED_PROBE_FLAGS + _OPTIONAL_PROBE_FLAGS
 _LONG_TO_SHORT = {
     "--mount": "-m",
@@ -176,10 +182,18 @@ def filter_flags_by_ns_files(pid: int, flags: list[str]) -> list[str]:
         if ns_name is None:
             kept.append(flag)
             continue
-        if os.path.exists(f"/proc/{pid}/ns/{ns_name}"):
-            kept.append(flag)
-        else:
-            log.debug("Dropping namespace flag %s: /proc/%s/ns/%s missing", flag, pid, ns_name)
+        ns_path = f"/proc/{pid}/ns/{ns_name}"
+        # Use an actual open() rather than os.path.exists(): on Android a ns
+        # file can report as existing yet still be unopenable, and nsenter
+        # would then abort with "cannot open .../ns/<name>". Only keep flags
+        # whose ns file can really be opened (matching what nsenter does).
+        try:
+            fd = os.open(ns_path, os.O_RDONLY)
+        except OSError as exc:
+            log.debug("Dropping namespace flag %s: cannot open %s (%s)", flag, ns_path, exc)
+            continue
+        os.close(fd)
+        kept.append(flag)
     return kept
 
 
