@@ -402,17 +402,39 @@ def apply_special_mount(rootfs: str, sm, holder: NamespaceHolder | None = None) 
     target = os.path.join(rootfs, sm.target.lstrip("/"))
 
     if sm.mkdir:
-        try:
-            os.makedirs(target, exist_ok=True)
-        except OSError as e:
-            msg = f"Failed to create mount target directory {target}: {e}"
-            if sm.optional:
-                log.debug(msg)
-                return False
-            raise RuntimeError(msg) from e
+        # When a holder is present the target may live on a tmpfs that only
+        # exists inside the holder's mount namespace (e.g. the fresh /dev
+        # under maximum isolation). Creating it from the parent process would
+        # write to the underlying directory the namespace cannot see, so the
+        # subsequent mount fails with "mount point does not exist". Create the
+        # directory inside the holder's mount namespace instead.
+        if holder is not None:
+            mk = holder.run(["mkdir", "-p", target], capture_output=True, text=True)
+            if mk.returncode != 0:
+                msg = f"Failed to create mount target directory {target}: {(mk.stderr or '').strip()}"
+                if sm.optional:
+                    log.debug(msg)
+                    return False
+                raise RuntimeError(msg)
+        else:
+            try:
+                os.makedirs(target, exist_ok=True)
+            except OSError as e:
+                msg = f"Failed to create mount target directory {target}: {e}"
+                if sm.optional:
+                    log.debug(msg)
+                    return False
+                raise RuntimeError(msg) from e
     elif not os.path.exists(target):
-        log.debug(f"Mount target {target} does not exist and mkdir=False, skipping")
-        return False
+        # With a holder, existence must also be checked inside its namespace.
+        if holder is not None:
+            chk = holder.run(["test", "-e", target], capture_output=True, text=True)
+            if chk.returncode != 0:
+                log.debug(f"Mount target {target} does not exist in holder NS and mkdir=False, skipping")
+                return False
+        else:
+            log.debug(f"Mount target {target} does not exist and mkdir=False, skipping")
+            return False
 
     if is_mounted(target, holder=holder):
         return True
