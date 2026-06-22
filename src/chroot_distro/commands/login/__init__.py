@@ -961,8 +961,8 @@ def _command_login_inner(container_name: str, args) -> None:
                     # The chrooted max-isolation holder can die immediately on
                     # Android (SELinux). Fall back to the old isolated mode
                     # instead of failing outright.
-                    if _maybe_retry_without_max_isolation(container_name, args, lock_fh):
-                        return
+                    if _can_fall_back_to_old_isolated(max_isolation, args):
+                        raise _MaxIsolationFallback(str(exc)) from exc
                     crit_error(str(exc))
                     sys.exit(1)
             else:
@@ -1083,8 +1083,8 @@ def _command_login_inner(container_name: str, args) -> None:
                 # Rather than abort the whole login, degrade once to the old
                 # `--isolated` mode (host binds + host /proc, namespaces where
                 # supported) by re-entering with max isolation disabled.
-                if _maybe_retry_without_max_isolation(container_name, args, lock_fh):
-                    return
+                if _can_fall_back_to_old_isolated(max_isolation, args):
+                    raise _MaxIsolationFallback(str(e)) from e
                 crit_error(f"Failed to apply special mounts: {e}")
                 sys.exit(1)
 
