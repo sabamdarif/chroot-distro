@@ -1002,17 +1002,35 @@ def _command_login_inner(container_name: str, args) -> None:
                     enable_shm=not minimal,
                 )
                 for sm in specials:
-                    mount_manager.apply_special_mount(rootfs, sm, holder=holder)
-                    # Right after the fresh tmpfs /dev is mounted under max
-                    # isolation, populate it with the minimal device nodes a
-                    # normal login needs (null, zero, tty, ...). The host /dev
-                    # is intentionally not bound, so these must be created.
-                    if max_isolation and use_namespaces and sm.fstype == "tmpfs" and sm.target == "/dev":
+                    is_maxiso_dev = (
+                        max_isolation and use_namespaces and sm.fstype == "tmpfs" and sm.target == "/dev"
+                    )
+                    if is_maxiso_dev:
+                        # The fresh /dev tmpfs is best-effort under max
+                        # isolation: if the kernel denies it (SELinux on some
+                        # Android kernels rejects mounting tmpfs and emits no
+                        # error), fall back to the container's own empty
+                        # on-disk /dev. That is still not a host bind, so the
+                        # session stays isolated; we just populate the device
+                        # nodes directly on the rootfs /dev directory.
+                        mounted = mount_manager.apply_special_mount(
+                            rootfs, sm, holder=holder, force_optional=True
+                        )
+                        if not mounted:
+                            warn(
+                                "Could not mount a fresh tmpfs /dev; using the "
+                                "container's own /dev directory (still isolated, "
+                                "no host bind)."
+                            )
+                        # Populate the minimal device nodes whether on tmpfs or
+                        # the on-disk dir (the host /dev is never bound).
                         mount_manager.create_dev_nodes(
                             rootfs,
                             bindings.MAX_ISOLATION_DEV_NODES,
                             holder=holder,
                         )
+                    else:
+                        mount_manager.apply_special_mount(rootfs, sm, holder=holder)
             except Exception as e:
                 if pipe_w is not None:
                     with contextlib.suppress(OSError):
