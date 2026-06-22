@@ -94,24 +94,44 @@ def test_render_kernel_config_reports_missing_required():
     assert "cannot work fully without" in blob
 
 
-def test_probe_flag_runtime_namespaces_and_filesystems():
-    # Namespace present when its /proc/self/ns file exists.
-    with patch.object(kc.os.path, "exists", side_effect=lambda p: p.endswith("/ns/pid")):
+def test_probe_flag_runtime_namespaces_from_dir_listing():
+    # Namespace present when listed under /proc/self/ns (the reliable path).
+    with patch.object(kc, "_ns_dir_entries", return_value={"mnt", "pid", "uts", "ipc"}):
         assert kc.probe_flag_runtime("PID_NS") == kc.PROBE_PRESENT
+        assert kc.probe_flag_runtime("NAMESPACES") == kc.PROBE_PRESENT
         assert kc.probe_flag_runtime("NET_NS") == kc.PROBE_ABSENT
 
-    # Pseudo-filesystem present when listed in /proc/filesystems.
+
+def test_probe_flag_runtime_namespaces_lexists_fallback():
+    # When the dir cannot be listed, fall back to lexists on the link itself.
+    with (
+        patch.object(kc, "_ns_dir_entries", return_value=None),
+        patch.object(kc.os.path, "lexists", side_effect=lambda p: p.endswith("/ns/pid")),
+    ):
+        assert kc.probe_flag_runtime("PID_NS") == kc.PROBE_PRESENT
+        assert kc.probe_flag_runtime("UTS_NS") == kc.PROBE_ABSENT
+
+
+def test_probe_flag_runtime_filesystems():
+    # Present when listed in /proc/filesystems.
     with patch.object(kc, "_proc_filesystems", return_value={"proc", "sysfs", "tmpfs"}):
         assert kc.probe_flag_runtime("PROC_FS") == kc.PROBE_PRESENT
-        assert kc.probe_flag_runtime("DEVTMPFS") == kc.PROBE_ABSENT
+        # devtmpfs not listed and no mount hint -> absent.
+        with patch.object(kc.os.path, "isdir", return_value=False):
+            assert kc.probe_flag_runtime("DEVTMPFS") == kc.PROBE_ABSENT
 
-    # Unmappable / unenumerable controllers stay unknown.
+    # Unenumerable cgroup controllers stay unknown.
     assert kc.probe_flag_runtime("CGROUP_DEVICE") == kc.PROBE_UNKNOWN
 
 
-def test_probe_flag_runtime_filesystems_unknown_when_unreadable():
-    with patch.object(kc, "_proc_filesystems", return_value=set()):
-        assert kc.probe_flag_runtime("SYSFS") == kc.PROBE_UNKNOWN
+def test_probe_flag_runtime_filesystem_uses_mount_hint_when_unreadable():
+    # /proc/filesystems unreadable (None) but the canonical mount exists.
+    with (
+        patch.object(kc, "_proc_filesystems", return_value=None),
+        patch.object(kc.os.path, "isdir", side_effect=lambda p: p == "/proc"),
+    ):
+        assert kc.probe_flag_runtime("PROC_FS") == kc.PROBE_PRESENT
+        assert kc.probe_flag_runtime("TMPFS") == kc.PROBE_UNKNOWN
 
 
 def test_render_kernel_config_falls_back_to_runtime_probe():
