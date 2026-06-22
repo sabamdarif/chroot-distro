@@ -94,14 +94,61 @@ def test_render_kernel_config_reports_missing_required():
     assert "cannot work fully without" in blob
 
 
-def test_render_kernel_config_handles_unreadable_config():
+def test_probe_flag_runtime_namespaces_and_filesystems():
+    # Namespace present when its /proc/self/ns file exists.
+    with patch.object(kc.os.path, "exists", side_effect=lambda p: p.endswith("/ns/pid")):
+        assert kc.probe_flag_runtime("PID_NS") == kc.PROBE_PRESENT
+        assert kc.probe_flag_runtime("NET_NS") == kc.PROBE_ABSENT
+
+    # Pseudo-filesystem present when listed in /proc/filesystems.
+    with patch.object(kc, "_proc_filesystems", return_value={"proc", "sysfs", "tmpfs"}):
+        assert kc.probe_flag_runtime("PROC_FS") == kc.PROBE_PRESENT
+        assert kc.probe_flag_runtime("DEVTMPFS") == kc.PROBE_ABSENT
+
+    # Unmappable / unenumerable controllers stay unknown.
+    assert kc.probe_flag_runtime("CGROUP_DEVICE") == kc.PROBE_UNKNOWN
+
+
+def test_probe_flag_runtime_filesystems_unknown_when_unreadable():
+    with patch.object(kc, "_proc_filesystems", return_value=set()):
+        assert kc.probe_flag_runtime("SYSFS") == kc.PROBE_UNKNOWN
+
+
+def test_render_kernel_config_falls_back_to_runtime_probe():
+    """With no static config, the section must probe the live kernel rather
+    than giving up, and a confirmed-absent required flag still blocks."""
     lines: list[str] = []
+
+    def fake_probe(name):
+        # PID_NS confirmed absent (required) -> must be flagged; others present.
+        return kc.PROBE_ABSENT if name == "PID_NS" else kc.PROBE_PRESENT
+
     with (
         patch.object(info, "find_kernel_config", return_value=(None, None)),
+        patch.object(info, "probe_flag_runtime", side_effect=fake_probe),
         patch.object(info, "msg", side_effect=_capture(lines)),
     ):
         info._render_kernel_config()
-    assert "Kernel config not readable" in "\n".join(lines)
+    blob = "\n".join(lines)
+    assert "probing the running kernel" in blob
+    assert "available (runtime)" in blob
+    assert "cannot work fully without" in blob
+    assert "CONFIG_PID_NS" in blob
+
+
+def test_render_kernel_config_runtime_unknown_does_not_block():
+    """A merely-unknown required flag (probe inconclusive) must NOT be reported
+    as blocking isolation."""
+    lines: list[str] = []
+    with (
+        patch.object(info, "find_kernel_config", return_value=(None, None)),
+        patch.object(info, "probe_flag_runtime", return_value=kc.PROBE_UNKNOWN),
+        patch.object(info, "msg", side_effect=_capture(lines)),
+    ):
+        info._render_kernel_config()
+    blob = "\n".join(lines)
+    assert "cannot work fully without" not in blob
+    assert "All kernel options required for namespace isolation are present" in blob
 
 
 def test_render_kernel_config_all_present_is_ok():
