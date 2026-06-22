@@ -953,6 +953,46 @@ def test_get_bindings_max_isolation_binds_nothing():
         assert rslave == []
 
 
+def test_get_bindings_default_does_not_bind_host_proc():
+    """Default (no-flag) mode must no longer bind-mount the host /proc; a fresh
+    procfs is mounted by get_special_mounts() instead."""
+    from chroot_distro.commands.login.bindings import get_bindings
+
+    with (
+        patch("os.path.exists", return_value=True),
+        patch("chroot_distro.commands.login.bindings.IS_TERMUX", False),
+    ):
+        binds, _rslave = get_bindings(
+            rootfs="/fake/rootfs",
+            minimal=False,
+            isolated=False,
+            use_namespaces=False,
+        )
+    sources = {src for src, _dst in binds}
+    assert "/proc" not in sources
+    # /dev and /sys are still bound in the default mode.
+    assert "/dev" in sources
+    assert "/sys" in sources
+
+
+def test_special_mounts_default_mode_mounts_fresh_procfs():
+    """Even in the default (non-isolated, no-namespace) mode a fresh procfs is
+    now mounted, with no hidepid hardening (that is max-isolation only)."""
+    from chroot_distro.commands.login.bindings import get_special_mounts
+
+    with (
+        patch("os.path.exists", return_value=True),
+        patch("chroot_distro.commands.login.bindings.IS_TERMUX", False),
+        patch("chroot_distro.commands.login.bindings._fs_supported", return_value=True),
+    ):
+        specials = get_special_mounts("/fake/rootfs", isolated=False, max_isolation=False)
+
+    proc = [s for s in specials if s.fstype == "proc" and s.target == "/proc"]
+    assert len(proc) == 1
+    assert proc[0].optional is False
+    assert "hidepid" not in proc[0].options
+
+
 def test_special_mounts_max_isolation_fresh_pseudo_fs():
     """Under max isolation, get_special_mounts must synthesise a fresh /dev
     tmpfs, a read-only sysfs, a fresh procfs and a fresh /dev/shm."""
