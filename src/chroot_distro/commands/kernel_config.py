@@ -26,6 +26,14 @@ import platform
 import re
 from dataclasses import dataclass
 
+# Runtime-probe outcome, distinct from the static-config states above.
+#   "present" -> the feature is available right now on this running kernel
+#   "absent"  -> the feature is not available
+#   "unknown" -> could not be determined by probing
+PROBE_PRESENT = "present"
+PROBE_ABSENT = "absent"
+PROBE_UNKNOWN = "unknown"
+
 # Outcome of a single CONFIG_* lookup.
 #   "y"       -> built in (``=y``)
 #   "m"       -> built as a loadable module (``=m``)
@@ -137,6 +145,96 @@ def find_kernel_config() -> tuple[str | None, str | None]:
         if text is not None:
             return path, text
     return None, None
+
+
+def _proc_filesystems() -> set[str]:
+    """Return the filesystem types the running kernel supports.
+
+    Parsed from /proc/filesystems (second column; the first is 'nodev' for
+    pseudo-filesystems). Empty set if it cannot be read.
+    """
+    types: set[str] = set()
+    try:
+        with open("/proc/filesystems", encoding="utf-8", errors="replace") as fh:
+            for raw in fh:
+                parts = raw.split()
+                if parts:
+                    types.add(parts[-1])
+    except OSError:
+        pass
+    return types
+
+
+def _ns_file_present(name: str) -> bool:
+    """Return True if this process exposes /proc/self/ns/<name>."""
+    return os.path.exists(f"/proc/self/ns/{name}")
+
+
+def _userns_present() -> bool | None:
+    """Return True/False if user-namespace support is known, else None."""
+    try:
+        with open("/proc/sys/user/max_user_namespaces", encoding="utf-8") as fh:
+            return int(fh.read().strip()) > 0
+    except (OSError, ValueError):
+        return _ns_file_present("user") or None
+
+
+def probe_flag_runtime(name: str) -> str:
+    """Best-effort live check that CONFIG_*name* is effective right now.
+
+    Used as a fallback when the static kernel config cannot be read (e.g. the
+    root-only /proc/config.gz on Android, with `info` running rootless).
+    Returns PROBE_PRESENT / PROBE_ABSENT / PROBE_UNKNOWN. Only the options
+    chroot-distro cares about are mapped; anything else returns PROBE_UNKNOWN
+    so the caller renders it as 'unknown' rather than guessing.
+    """
+    # Namespaces: the umbrella is present if any ns file exists; each specific
+    # namespace maps to its /proc/self/ns/<name> entry.
+    ns_map = {
+        "NAMESPACES": ("mnt", "pid", "uts", "ipc"),
+        "PID_NS": ("pid",),
+        "UTS_NS": ("uts",),
+        "IPC_NS": ("ipc",),
+        "NET_NS": ("net",),
+    }
+    if name in ns_map:
+        files = ns_map[name]
+        present = any(_ns_file_present(f) for f in files)
+        return PROBE_PRESENT if present else PROBE_ABSENT
+    if name == "USER_NS":
+        res = _userns_present()
+        if res is None:
+            return PROBE_UNKNOWN
+        return PROBE_PRESENT if res else PROBE_ABSENT
+
+    # Pseudo-filesystems: look them up in /proc/filesystems.
+    fs_map = {
+        "PROC_FS": "proc",
+        "SYSFS": "sysfs",
+        "TMPFS": "tmpfs",
+        "DEVTMPFS": "devtmpfs",
+        "UNIX98_PTYS": "devpts",
+    }
+    if name in fs_map:
+        fstypes = _proc_filesystems()
+        if not fstypes:
+            return PROBE_UNKNOWN
+        return PROBE_PRESENT if fs_map[name] in fstypes else PROBE_ABSENT
+
+    # Cgroups: presence of the cgroup/cgroup2 filesystem and the mount point.
+    if name == "CGROUPS":
+        fstypes = _proc_filesystems()
+        if not fstypes:
+            return PROBE_UNKNOWN
+        has_cg = ("cgroup" in fstypes) or ("cgroup2" in fstypes) or os.path.isdir("/sys/fs/cgroup")
+        return PROBE_PRESENT if has_cg else PROBE_ABSENT
+    if name in ("CGROUP_DEVICE", "MEMCG", "CGROUP_PIDS"):
+        # Specific cgroup controllers can't be reliably enumerated rootlessly
+        # across cgroup v1/v2 layouts on Android, so leave them as unknown
+        # rather than risk a misleading 'missing'.
+        return PROBE_UNKNOWN
+
+    return PROBE_UNKNOWN
 
 
 def parse_kernel_config(text: str) -> dict[str, str]:
