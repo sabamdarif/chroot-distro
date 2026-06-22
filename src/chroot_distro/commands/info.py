@@ -12,6 +12,16 @@ from chroot_distro.commands.list_cmd import (
     _read_image_source,
     _rootfs_size_bytes,
 )
+from chroot_distro.commands.kernel_config import (
+    CONFIG_BUILTIN,
+    CONFIG_MISSING,
+    CONFIG_MODULE,
+    CONFIG_UNKNOWN,
+    KERNEL_FLAG_GROUPS,
+    find_kernel_config,
+    lookup_flag,
+    parse_kernel_config,
+)
 from chroot_distro.constants import (
     BASE_CACHE_DIR,
     CANONICAL_PROGRAM_NAME,
@@ -525,6 +535,77 @@ def _render_capabilities(caps: list[_Capability]) -> None:
         )
 
 
+def _render_kernel_config() -> None:
+    """Show which CONFIG_* options chroot-distro relies on are enabled.
+
+    Reads the kernel build config (``/proc/config.gz`` and friends) and lists
+    each option grouped by the feature it powers. When the config can't be
+    read (common on locked-down Android kernels) this is reported as a single
+    informational line rather than a wall of 'unknown' rows.
+    """
+    _render_section("KERNEL CONFIG")
+    path, text = find_kernel_config()
+    parsed = parse_kernel_config(text) if text is not None else None
+
+    if parsed is None:
+        msg(
+            f"  {C['YELLOW']}{_WARN}{C['RST']} "
+            f"{C['WHITE']}Kernel config not readable "
+            f"(no /proc/config.gz or /boot/config-*).{C['RST']}"
+        )
+        msg(
+            f"    {C['CYAN']}Set CONFIG=/path/to/.config and re-run "
+            f"'{PROGRAM_NAME} info' to check feature support.{C['RST']}"
+        )
+        return
+
+    msg(f"  {C['CYAN']}Read from {path}{C['RST']}")
+    missing_required: list[str] = []
+
+    for group in KERNEL_FLAG_GROUPS:
+        msg()
+        msg(f"  {C['WHITE']}{group.title}{C['RST']}")
+        # Width of the widest "CONFIG_NAME" label in this group for alignment.
+        label_w = max(len("CONFIG_" + flag.name) for flag in group.flags) + 1
+        for flag in group.flags:
+            status = lookup_flag(parsed, flag.name)
+            if status == CONFIG_BUILTIN:
+                glyph, color, state = _OK, "GREEN", "enabled"
+            elif status == CONFIG_MODULE:
+                glyph, color, state = _OK, "GREEN", "enabled (module)"
+            elif status == CONFIG_UNKNOWN:
+                glyph, color, state = "\u2022", "CYAN", "unknown"
+            else:
+                # Missing: red when the option is required for isolation,
+                # yellow when it only affects an optional extra.
+                if flag.required:
+                    glyph, color, state = _BAD, "RED", "missing (required)"
+                    missing_required.append("CONFIG_" + flag.name)
+                else:
+                    glyph, color, state = _WARN, "YELLOW", "missing (optional)"
+            label = "CONFIG_" + flag.name
+            msg(
+                f"    {C[color]}{glyph}{C['RST']} "
+                f"{C['CYAN']}{label + ':':<{label_w}}{C['RST']} "
+                f"{C['WHITE']}{state}{C['RST']} "
+                f"{C['CYAN']}({flag.purpose}){C['RST']}"
+            )
+
+    msg()
+    if missing_required:
+        msg(
+            f"  {C['RED']}{_BAD}{C['RST']} "
+            f"{C['WHITE']}Namespace isolation (--isolated, CD_USE_NS=1) cannot "
+            f"work fully without: {', '.join(missing_required)}.{C['RST']}"
+        )
+    else:
+        msg(
+            f"  {C['GREEN']}{_OK}{C['RST']} "
+            f"{C['WHITE']}All kernel options required for namespace isolation "
+            f"are present.{C['RST']}"
+        )
+
+
 def _running_summary(images: list[_ImageInfo]) -> int:
     """Return the number of containers with live processes or a namespace holder."""
     if not images:
@@ -575,6 +656,7 @@ def command_info(args) -> None:
     _render_basic()
     _render_host(host, host_arch)
     _render_capabilities(capabilities)
+    _render_kernel_config()
     _render_images(images)
     if images:
         msg()
