@@ -147,11 +147,12 @@ def find_kernel_config() -> tuple[str | None, str | None]:
     return None, None
 
 
-def _proc_filesystems() -> set[str]:
-    """Return the filesystem types the running kernel supports.
+def _proc_filesystems() -> set[str] | None:
+    """Return the filesystem types the running kernel supports, or None.
 
-    Parsed from /proc/filesystems (second column; the first is 'nodev' for
-    pseudo-filesystems). Empty set if it cannot be read.
+    Parsed from /proc/filesystems (last column; the first is 'nodev' for
+    pseudo-filesystems). Returns None when the file cannot be read, so callers
+    can distinguish 'unreadable' (unknown) from 'readable but type absent'.
     """
     types: set[str] = set()
     try:
