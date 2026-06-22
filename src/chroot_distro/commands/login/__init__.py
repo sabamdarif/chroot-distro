@@ -811,6 +811,7 @@ def _command_login_inner(container_name: str, args) -> None:
         rootfs=rootfs,
         minimal=minimal,
         isolated=skip_extra_mounts,
+        max_isolation=max_isolation and not minimal,
         use_namespaces=use_ns_requested and not minimal,
         shared_home=use_shared_home,
         shared_tmp=shared_tmp,
@@ -973,6 +974,7 @@ def _command_login_inner(container_name: str, args) -> None:
                 specials = bindings.get_special_mounts(
                     rootfs,
                     isolated=use_namespaces,
+                    max_isolation=max_isolation and not minimal,
                     enable_usb=not minimal,
                     enable_binfmt=not minimal,
                     enable_docker_cgroup=not minimal,
@@ -980,6 +982,16 @@ def _command_login_inner(container_name: str, args) -> None:
                 )
                 for sm in specials:
                     mount_manager.apply_special_mount(rootfs, sm, holder=holder)
+                    # Right after the fresh tmpfs /dev is mounted under max
+                    # isolation, populate it with the minimal device nodes a
+                    # normal login needs (null, zero, tty, ...). The host /dev
+                    # is intentionally not bound, so these must be created.
+                    if max_isolation and not minimal and sm.fstype == "tmpfs" and sm.target == "/dev":
+                        mount_manager.create_dev_nodes(
+                            rootfs,
+                            bindings.MAX_ISOLATION_DEV_NODES,
+                            holder=holder,
+                        )
             except Exception as e:
                 if pipe_w is not None:
                     with contextlib.suppress(OSError):
