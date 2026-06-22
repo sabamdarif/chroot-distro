@@ -1,6 +1,12 @@
 import os
+from types import SimpleNamespace
 from unittest.mock import patch
 
+from chroot_distro.commands.login import (
+    _MaxIsolationFallback,
+    _can_fall_back_to_old_isolated,
+    _command_login_inner,
+)
 from chroot_distro.commands.login import _safe_hostname
 from chroot_distro.commands.login.chroot_cmd import build_chroot_args
 from chroot_distro.commands.login.env import resolve_term
@@ -22,6 +28,80 @@ def test_safe_hostname_rejects_overlong_label():
     assert _safe_hostname("a" * 64) == "localhost"
     # each label must be <= 63 even if the whole string is longer
     assert _safe_hostname("ok." + "b" * 64) == "localhost"
+
+
+def test_can_fall_back_only_on_termux_max_isolation_once():
+    """Fallback is allowed only on Termux, only under max isolation, and only
+    until the one-shot opt-out flag is set."""
+    from chroot_distro.commands.login import __init__ as login_mod
+
+    with patch.object(login_mod, "IS_TERMUX", True):
+        # Eligible: Termux + max isolation + not yet retried.
+        assert _can_fall_back_to_old_isolated(True, SimpleNamespace()) is True
+        # Not eligible once the opt-out has been set (prevents a retry loop).
+        assert (
+            _can_fall_back_to_old_isolated(
+                True, SimpleNamespace(_disable_max_isolation=True)
+            )
+            is False
+        )
+        # Not eligible when max isolation is already off.
+        assert _can_fall_back_to_old_isolated(False, SimpleNamespace()) is False
+
+    # Never eligible on a non-Termux (real Linux) host: keep refusing there.
+    with patch.object(login_mod, "IS_TERMUX", False):
+        assert _can_fall_back_to_old_isolated(True, SimpleNamespace()) is False
+
+
+def test_command_login_inner_retries_once_on_fallback():
+    """The wrapper retries the login exactly once with max isolation disabled
+    when the inner run raises _MaxIsolationFallback, then propagates a second
+    failure unchanged."""
+    from chroot_distro.commands.login import __init__ as login_mod
+
+    calls = []
+
+    def fake_once(container_name, args):
+        calls.append(getattr(args, "_disable_max_isolation", False))
+        if len(calls) == 1:
+            raise _MaxIsolationFallback("selinux denied tmpfs /dev")
+        # Second call (fallback) succeeds.
+
+    args = SimpleNamespace()
+    with (
+        patch.object(login_mod, "_command_login_inner_once", side_effect=fake_once),
+        patch.object(login_mod, "warn"),
+    ):
+        _command_login_inner("debian", args)
+
+    assert calls == [False, True]
+    assert args._disable_max_isolation is True
+
+
+def test_command_login_inner_does_not_retry_twice():
+    """A second _MaxIsolationFallback (should not normally happen, since the
+    retry disables max isolation) is not swallowed into an infinite loop."""
+    from chroot_distro.commands.login import __init__ as login_mod
+
+    calls = []
+
+    def always_fallback(container_name, args):
+        calls.append(True)
+        raise _MaxIsolationFallback("still failing")
+
+    with (
+        patch.object(login_mod, "_command_login_inner_once", side_effect=always_fallback),
+        patch.object(login_mod, "warn"),
+    ):
+        try:
+            _command_login_inner("debian", SimpleNamespace())
+            raised = False
+        except _MaxIsolationFallback:
+            raised = True
+
+    # Wrapper only catches the first; the second propagates (no infinite loop).
+    assert raised is True
+    assert len(calls) == 2
 
 
 def test_resolve_term_empty():
