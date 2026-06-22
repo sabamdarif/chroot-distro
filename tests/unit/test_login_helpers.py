@@ -927,6 +927,46 @@ def test_filter_flags_by_ns_files_keeps_all_when_openable():
         assert ns.filter_flags_by_ns_files(1, flags) == flags
 
 
+def test_holder_run_argv_drops_unopenable_ipc_at_call_time():
+    """run_argv must drop a namespace whose ns file is unopenable right now,
+    but always keep the essential mount namespace."""
+    from chroot_distro.helpers import namespace as ns
+
+    holder = ns.NamespaceHolder(
+        pid=4321,
+        nsenter_flags=["--mount", "--uts", "--ipc", "--pid"],
+        nsenter_exe="/usr/bin/nsenter",
+        container_name="debian",
+    )
+
+    def fake_open(path, *a, **k):
+        if path.endswith("/ns/ipc"):
+            raise OSError(2, "No such file or directory")
+        return 5
+
+    with patch.object(ns.os, "open", side_effect=fake_open), patch.object(ns.os, "close"):
+        argv = holder.run_argv(["true"])
+
+    assert "--ipc" not in argv
+    assert "--mount" in argv
+    assert "--pid" in argv and "--uts" in argv
+    assert argv[:3] == ["/usr/bin/nsenter", "--target", "4321"]
+
+
+def test_holder_run_argv_keeps_mount_even_if_unopenable():
+    from chroot_distro.helpers import namespace as ns
+
+    holder = ns.NamespaceHolder(
+        pid=1,
+        nsenter_flags=["--mount"],
+        nsenter_exe="/usr/bin/nsenter",
+        container_name="x",
+    )
+    with patch.object(ns.os, "open", side_effect=OSError(2, "nope")):
+        argv = holder.run_argv(["true"])
+    assert "--mount" in argv
+
+
 def test_holder_unshare_argv_max_isolation_chroots():
     """The max-isolation holder must chroot into the rootfs before sleeping so
     PID 1's root is inside the container (closes chroot /proc/1/root escape)."""
