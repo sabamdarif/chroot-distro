@@ -607,20 +607,23 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
         ],
     },
     "kill": {
-        "usage": "kill CONTAINER",
+        "usage": "kill (CONTAINER | PID)",
         "aliases": ("k", "stop"),
         "summary": (
-            "Forcibly stop a running container. All processes inside the "
-            "container's chroot are sent SIGTERM and then SIGKILL after a "
-            "short grace period, the filesystem bindings are unmounted, and "
-            "the namespace holder (if any) is released. This is the abrupt "
-            "counterpart to 'unmount'."
+            "Forcibly stop a running container. The argument may be a container "
+            "name or a session PID shown by 'ps'. When a PID is given, the "
+            "owning container is resolved from the session registry; arbitrary "
+            "host PIDs are rejected. All processes inside the container's chroot "
+            "are sent SIGTERM and then SIGKILL after a short grace period, the "
+            "filesystem bindings are unmounted, and the namespace holder (if any) "
+            "is released. This is the abrupt counterpart to 'unmount'."
         ),
         "options": [
             ("-h, --help", "Show this help."),
         ],
         "examples": [
             f"{PROGRAM_NAME} kill ubuntu",
+            f"{PROGRAM_NAME} kill 111579",
         ],
     },
     "ps": {

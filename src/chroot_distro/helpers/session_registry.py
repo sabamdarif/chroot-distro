@@ -195,4 +195,18 @@ def _safe_unlink(path: str) -> None:
         os.unlink(path)
 
 
-__all__ = ("active_sessions", "register_session")
+def resolve_container_by_pid(pid: int) -> str | None:
+    """Return the container name for a live session with the given PID, or ``None``.
+
+    Iterates the active session registry (the same data ``ps`` displays)
+    and returns the ``container`` field of the matching entry.  Only PIDs
+    that appear in the registry are accepted, so arbitrary host PIDs can
+    never be resolved to a container.
+    """
+    for sess in active_sessions():
+        if sess.get("pid") == pid:
+            return sess.get("container")
+    return None
+
+
+__all__ = ("active_sessions", "register_session", "resolve_container_by_pid")

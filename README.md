@@ -178,8 +178,9 @@ chroot-distro diff ubuntu
 # Unmount bindings and end active sessions
 chroot-distro unmount ubuntu
 
-# Forcibly stop a running container (SIGKILL + unmount)
+# Forcibly stop a running container (SIGKILL + unmount), by name or session PID
 chroot-distro kill ubuntu
+chroot-distro kill 12345
 
 # Permanently remove a container (unmounts active sessions first)
 chroot-distro remove ubuntu
@@ -831,14 +832,12 @@ fallback.
 ### `kill` — Forcibly stop a running container
 
 ```
-chroot-distro kill CONTAINER
-Aliases: k, stop
+chroot-distro kill (CONTAINER | PID)
 ```
 
-Forcibly stop a running container: all processes inside its chroot are
-sent `SIGTERM` and then `SIGKILL` after a short grace period, the bind
-mounts are unmounted, and the namespace holder (if any) is released. This
-is the abrupt counterpart to `unmount` (equivalent to `docker kill`).
+Forcibly stop a running container. The argument may be a container name or a session PID shown in `chroot-distro ps`. When a session PID is provided, the entire container that the session belongs to is stopped. Only PIDs from active chroot-distro sessions are accepted; random host PIDs are rejected.
+
+All processes inside the container's chroot are sent `SIGTERM` and then `SIGKILL` after a short grace period, the bind mounts are unmounted, and the namespace holder (if any) is released. This is the abrupt counterpart to `unmount` (equivalent to `docker kill`).
 
 ---
 

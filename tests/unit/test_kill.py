@@ -13,7 +13,7 @@ def test_parser_kill():
     parser = build_parser()
     args = parser.parse_args(["kill", "ubuntu"])
     assert args.command == "kill"
-    assert args.container_name == "ubuntu"
+    assert args.container_or_pid == "ubuntu"
 
 
 @patch("chroot_distro.commands.kill.container_rootfs", return_value="/mock/containers/ubuntu/rootfs")
@@ -21,7 +21,7 @@ def test_parser_kill():
 @patch("chroot_distro.commands.kill.crit_error")
 def test_kill_container_not_installed(mock_crit_error, mock_isdir, mock_rootfs):
     args = MagicMock()
-    args.container_name = "ubuntu"
+    args.container_or_pid = "ubuntu"
 
     with pytest.raises(SystemExit) as exc_info:
         command_kill(args)
@@ -38,7 +38,7 @@ def test_kill_container_not_installed(mock_crit_error, mock_isdir, mock_rootfs):
 @patch("chroot_distro.commands.kill.log_info")
 def test_kill_not_running(mock_log, mock_mount, mock_session, mock_isdir, mock_rootfs, *_mocks):
     args = MagicMock()
-    args.container_name = "ubuntu"
+    args.container_or_pid = "ubuntu"
 
     mock_session.get_active_chroot_pids.return_value = []
     mock_mount.get_active_mounts.return_value = []
@@ -61,7 +61,7 @@ def test_kill_standard_unmount_success(
 ):
     """If standard unmount succeeds, we don't need lazy/kill/forceful."""
     args = MagicMock()
-    args.container_name = "ubuntu"
+    args.container_or_pid = "ubuntu"
 
     mock_session.get_active_chroot_pids.return_value = []
     # get_active_mounts returns active mounts for first check, then empty for subsequent checks
@@ -106,7 +106,7 @@ def test_kill_lazy_unmount_success(
 ):
     """If standard unmount fails, lazy unmount succeeds."""
     args = MagicMock()
-    args.container_name = "ubuntu"
+    args.container_or_pid = "ubuntu"
 
     mock_session.get_active_chroot_pids.return_value = []
     # get_active_mounts sequences:
@@ -171,7 +171,7 @@ def test_kill_process_then_unmount(
 ):
     """Processes are active, we terminate them and successfully retry unmounting."""
     args = MagicMock()
-    args.container_name = "ubuntu"
+    args.container_or_pid = "ubuntu"
 
     # PIDs sequence:
     # 1. Initial check (PIDs active) -> [1000]
@@ -234,7 +234,7 @@ def test_kill_forceful_failure_diagnostic(
 ):
     """If forceful unmount also fails, we output detailed diagnostics."""
     args = MagicMock()
-    args.container_name = "ubuntu"
+    args.container_or_pid = "ubuntu"
 
     mock_session.get_active_chroot_pids.return_value = []
     # get_active_mounts always returns a mount
@@ -286,7 +286,7 @@ def test_kill_lock_conflict_bypass(
 ):
     """When container lock is busy initially, we bypass it, kill processes, and acquire it afterward."""
     args = MagicMock()
-    args.container_name = "ubuntu"
+    args.container_or_pid = "ubuntu"
 
     mock_session.get_active_chroot_pids.side_effect = [[1000], [1000], []]
     mock_mount.get_active_mounts.side_effect = [
@@ -315,3 +315,82 @@ def test_kill_lock_conflict_bypass(
     assert mock_lock_instance.acquire.call_count == 2
     # Lock released at the end
     mock_lock_instance.release.assert_called_once()
+
+
+# ---------- PID-based kill tests ----------
+
+
+def test_parser_kill_with_pid():
+    parser = build_parser()
+    args = parser.parse_args(["kill", "111579"])
+    assert args.command == "kill"
+    assert args.container_or_pid == "111579"
+
+
+@patch("chroot_distro.commands.kill.namespace.get_live_holder", return_value=None)
+@patch("chroot_distro.commands.kill.namespace.release_holder")
+@patch("chroot_distro.commands.kill.namespace.clear_isolation_mode")
+@patch("chroot_distro.commands.kill.container_rootfs", return_value="/mock/containers/httpd/rootfs")
+@patch("os.path.isdir", return_value=True)
+@patch("chroot_distro.commands.kill.ContainerLock")
+@patch("chroot_distro.commands.kill.session")
+@patch("chroot_distro.commands.kill.mount_manager")
+@patch("chroot_distro.commands.kill.log_info")
+@patch(
+    "chroot_distro.helpers.session_registry.active_sessions",
+    return_value=[{"pid": 111579, "container": "httpd"}],
+)
+def test_kill_by_pid_resolves_container(
+    mock_active, mock_log, mock_mount, mock_session, mock_lock, mock_isdir, mock_rootfs, *_mocks
+):
+    """Numeric PID that exists in the session registry kills the owning container."""
+    args = MagicMock()
+    args.container_or_pid = "111579"
+
+    mock_session.get_active_chroot_pids.return_value = []
+    mock_mount.get_active_mounts.return_value = []
+
+    mock_lock_instance = MagicMock()
+    mock_lock_instance.acquire.return_value = True
+    mock_lock.return_value = mock_lock_instance
+
+    command_kill(args)
+
+    mock_log.assert_any_call("Container 'httpd' is not running.")
+
+
+@patch(
+    "chroot_distro.helpers.session_registry.active_sessions",
+    return_value=[],
+)
+@patch("chroot_distro.commands.kill.crit_error")
+def test_kill_by_pid_not_found(mock_crit_error, mock_active):
+    """Numeric PID not in the session registry prints error and exits."""
+    args = MagicMock()
+    args.container_or_pid = "99999"
+
+    with pytest.raises(SystemExit) as exc_info:
+        command_kill(args)
+
+    assert exc_info.value.code == 1
+    mock_crit_error.assert_called_once_with("No running container found with PID 99999.")
+
+
+@patch("chroot_distro.commands.kill.namespace.get_live_holder", return_value=None)
+@patch("chroot_distro.commands.kill.container_rootfs", return_value="/mock/containers/ubuntu/rootfs")
+@patch("os.path.isdir", return_value=True)
+@patch("chroot_distro.commands.kill.session")
+@patch("chroot_distro.commands.kill.mount_manager")
+@patch("chroot_distro.commands.kill.log_info")
+def test_kill_by_name_still_works(mock_log, mock_mount, mock_session, mock_isdir, mock_rootfs, *_mocks):
+    """Name-based kill still works with the renamed arg."""
+    args = MagicMock()
+    args.container_or_pid = "ubuntu"
+
+    mock_session.get_active_chroot_pids.return_value = []
+    mock_mount.get_active_mounts.return_value = []
+
+    command_kill(args)
+
+    mock_log.assert_called_once_with("Container 'ubuntu' is not running.")
+

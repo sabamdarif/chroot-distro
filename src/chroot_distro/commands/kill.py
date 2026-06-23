@@ -52,8 +52,25 @@ def command_kill(args) -> None:
     First try standard unmount, then lazy unmount. If mounts remain or processes
     are active, kill all processes and retry unmounting. If still failing,
     try forceful unmount and print a detailed error if mounts remain.
+
+    The positional argument may be a container name **or** a numeric PID from
+    ``chroot-distro ps``.  When a PID is given it is resolved to the owning
+    container via the session registry; arbitrary host PIDs are rejected.
     """
-    container_name = args.container_name
+    container_or_pid = args.container_or_pid
+
+    # Resolve numeric PID to the owning container name.
+    if container_or_pid.isdigit():
+        from chroot_distro.helpers.session_registry import resolve_container_by_pid
+
+        pid_value = int(container_or_pid)
+        container_name = resolve_container_by_pid(pid_value)
+        if container_name is None:
+            crit_error(f"No running container found with PID {pid_value}.")
+            sys.exit(1)
+    else:
+        container_name = container_or_pid
+
     require_valid_name(container_name)
 
     rootfs_dir = container_rootfs(container_name)

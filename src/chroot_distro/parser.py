@@ -40,7 +40,7 @@ REQUIRED_ARGS = {
     "run": [("container_name", "container name is not specified.")],
     "push": [("image_ref", "image reference is not specified.")],
     "unmount": [("container_name", "container name is not specified.")],
-    "kill": [("container_name", "container name is not specified.")],
+    "kill": [("container_or_pid", "container name or PID is not specified.")],
     "diff": [("container_name", "container name is not specified.")],
     "search": [("term", "search term is not specified.")],
 }
@@ -387,7 +387,7 @@ def _unmount(sub):
 def _kill(sub):
     p = sub.add_parser("kill", aliases=["k", "stop"], add_help=False)
     p._cd_command = "kill"
-    p.add_argument("container_name", nargs="?", default=None)
+    p.add_argument("container_or_pid", nargs="?", default=None)
     p.add_argument("-h", "--help", action="store_true")
 
 
