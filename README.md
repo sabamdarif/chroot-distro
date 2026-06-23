@@ -5,24 +5,13 @@
 [![License](https://img.shields.io/github/license/sabamdarif/chroot-distro?style=flat)](LICENSE)
 
 
-Chroot-Distro is a utility for managing rootful Linux containers in
-[Termux](https://termux.dev) and on regular Linux hosts. It uses the
-host kernel's native `chroot` and bind mounts (`mount --bind`) to provide a
-high-performance, near-native Linux environment.
+Chroot-Distro is a utility for managing rootful Linux containers in Termux and on standard Linux hosts. It uses the host kernel's native `chroot` and bind mounts (`mount --bind`) to provide a high-performance, near-native Linux environment.
 
-Containers are created by pulling Docker/OCI images directly from
-Docker Hub or any compatible registry — or by extracting a local
-tarball / OCI image archive. The container filesystem is assembled from
-the image layers and stored locally, ready to be entered at any time.
+Containers are created by pulling Docker/OCI images directly from Docker Hub (or any compatible registry), or by extracting a local tarball / OCI image archive. The container filesystem is assembled from the image layers and stored locally, ready to be entered at any time.
 
-Chroot-Distro can also **build** OCI images from a Dockerfile (no Docker
-daemon required), storing the result in the local manifest cache or
-exporting it as a standalone OCI tarball.
+Chroot-Distro can also **build** OCI images from a Dockerfile (no Docker daemon required), storing the result in the local manifest cache or exporting it as a standalone OCI tarball.
 
-Unlike [proot-distro](https://github.com/termux/proot-distro) (which is
-rootless via `proot`), Chroot-Distro **requires root privileges** on the host. Mutating commands
-automatically re-launch themselves via `sudo`, `doas`, `pkexec`, or `su`
-when needed (see [First-run check](#first-run-check)).
+Chroot-Distro requires **root privileges** on the host. Mutating commands automatically re-execute themselves via `sudo`, `doas`, `pkexec`, or `su` when needed (see [First-run check](#first-run-check)).
 
 ---
 
@@ -62,26 +51,7 @@ when needed (see [First-run check](#first-run-check)).
 
 ## Introduction
 
-Chroot-Distro lets you run a full Linux userland — Ubuntu, Debian,
-Alpine, Arch, openSUSE, distroless server images, anything available as
-a Docker/OCI image — on top of Termux on a rooted Android device, or on
-top of a regular Linux distribution, **with** native kernel performance,
-**without** the overhead of `proot`'s `ptrace` interception, and
-**without** a Docker daemon.
-
-Typical use cases:
-
-- Running a desktop-class Linux distribution on a phone or tablet at
-  near-native speed (rooted device required on Termux).
-- Disk-intensive and compile workloads (GCC/Clang, Rust, Go) without
-  `proot` slowdowns.
-- Spinning up server software (Nginx, Nextcloud, PostgreSQL, etc.) on
-  Android by reusing the same OCI images you'd run on a server.
-- Building custom OCI images from a Dockerfile on-device, without a
-  Docker daemon — and pushing them to Docker Hub, GHCR, or any
-  OCI-compatible registry.
-- Trying a distribution non-destructively: install, experiment,
-  `chroot-distro remove` when done.
+Chroot-Distro lets you run a full Linux userland — Ubuntu, Debian, Alpine, Arch, openSUSE, distroless server images, or anything available as a Docker/OCI image — on top of Termux on a rooted Android device, or on top of a regular Linux distribution, with native kernel performance and without needing a Docker daemon.
 
 ### Installation
 
@@ -127,13 +97,9 @@ pip install .
 
 ### First-run check
 
-On startup, commands that modify containers or mounts verify that the
-effective UID is `0`. If not, Chroot-Distro auto-elevates when not root by
-re-executing itself using, in order: `sudo`, `doas`, `pkexec`, or `su`.
+On startup, commands that modify containers or mounts verify that the effective UID is `0`. If not, Chroot-Distro auto-elevates when not root by re-executing itself using, in order: `sudo`, `doas`, `pkexec`, or `su`.
 
-`list`, `ps`, `search`, `info`, and `help` do not require root on Termux and
-are never re-executed. On regular Linux, `list`, `ps`, and `info` still
-elevate to inspect root-owned data.
+`list`, `ps`, `search`, `info`, and `help` do not require root on Termux and are run immediately. On regular Linux, `list`, `ps`, and `info` still elevate to inspect root-owned data.
 
 ### Quick start
 
@@ -256,12 +222,6 @@ cached, installation runs fully offline.
 Missing layers are downloaded in parallel (default **4** workers). Set
 `CD_DOWNLOAD_WORKERS` to tune concurrency (integer **1–10**; values above
 10 are capped).
-
-On Termux, `list` does not elevate privileges. If containers were
-installed as root, run once as root to fix legacy manifest permissions:
-`su -c 'chmod -R a+r $PREFIX/var/lib/chroot-distro/containers/*/manifest.json'`
-(or reinstall). New installs write `manifest.json` as world-readable
-(`0644`).
 
 **Examples:**
 
@@ -438,99 +398,33 @@ chroot-distro login ubuntu --get-chroot-cmd
 | Option | Description |
 |---|---|
 | `-u`, `--user USER` | Log in as USER (default: `root`). Accepts `name`, numeric `uid`, `name:group`, or `uid:gid`. |
-| `--isolated` | Reduce host exposure and enable namespace isolation (mount, PID, UTS, IPC, and cgroup when supported, via `unshare`/`nsenter`). On Termux: also skip Android system, storage, and `$PREFIX` binds unless you opt in with `--shared-*` or `--bind`. (Fresh `/tmp` and `/run` are the default in every mode now, not just `--isolated`.) Mutually exclusive with `--minimal`. To get the same namespace isolation **without** reducing the mount set, set `CD_USE_NS=1` instead (see [Environment variables](#environment-variables)). |
+| `--isolated` | Reduce host exposure and enable namespace isolation (mount, PID, UTS, IPC, and cgroup when supported, via `unshare`/`nsenter`). Binds **no** host paths at all — `--shared-home`, `--shared-tmp`, `--shared-display`/`--shared-x11`, and `--bind` are all ignored (with a warning) when combined with `--isolated`, since there's nothing for them to bind into. Mutually exclusive with `--minimal`. To get the same namespace isolation **without** reducing the mount set (so `--shared-*`/`--bind` keep working), set `CD_USE_NS=1` instead (see [Environment variables](#environment-variables)). |
 | `--minimal` | Bare minimum chroot: core pseudo-filesystems only (`/dev`, `/proc`, `/sys`, plus `/run`, `/dev/pts`, `/dev/shm` when present). Stripped guest environment. Mutually exclusive with `--isolated`. |
-| `--shared-home` | Bind the invoking user's host home into the guest home (or `/root` for root). On Termux, binds `TERMUX_HOME`. |
-| `--shared-tmp` | Bind host tmp (`/tmp` on Linux, `$PREFIX/tmp` on Termux) to `/tmp` in the guest. Opt-in only: by default the container gets its own fresh `/tmp`, not the host's. |
-| `--shared-display` | Share the host display server (X11 and Wayland), audio (PulseAudio/PipeWire), and D-Bus session bus with the container. Binds only the specific session sockets, not the host's whole `/run`. Opt-in only. `--shared-x11` is accepted as a backward-compatible alias. |
-| `-b`, `--bind SRC[:DST]` | Bind-mount a custom host path (repeatable). `DST` must be an absolute guest path. |
+| `--shared-home` | Bind the invoking user's host home into the guest home (or `/root` for root). On Termux, binds `TERMUX_HOME`. Ignored under `--isolated`. |
+| `--shared-tmp` | Bind host tmp (`/tmp` on Linux, `$PREFIX/tmp` on Termux) to `/tmp` in the guest. Opt-in only: by default the container gets its own fresh `/tmp`, not the host's. Ignored under `--isolated`. |
+| `--shared-display` | Share the host display server (X11 and Wayland), audio (PulseAudio/PipeWire), and D-Bus session bus with the container. Binds only the specific session sockets, not the host's whole `/run`. Opt-in only. `--shared-x11` is accepted as a backward-compatible alias. Ignored under `--isolated`. |
+| `-b`, `--bind SRC[:DST]` | Bind-mount a custom host path (repeatable). `DST` must be an absolute guest path. Ignored under `--isolated`. |
 | `-w`, `--work-dir PATH` | Initial working directory (default: user's home). |
 | `-e`, `--env VAR=VALUE` | Set a guest environment variable (repeatable). |
 | `--get-chroot-cmd` | Print the fully assembled `env` + `chroot` command line and exit. |
 
 #### Display sharing
-Display sharing is active when using `--shared-display` (or `--shared-x11` as a backward-compatible alias).
-> It work best on regular Linux and in Termux it doesn't have all the options
 
-By default the container is isolated from the host's runtime state: its
-`/tmp` and `/run` are fresh and empty, so host temp files and host runtime
-sockets (D-Bus, PulseAudio, etc.) do not leak in. `/proc`, `/sys`, `/dev`,
-and `/dev/pts` are still bound from the host for hardware/USB access.
-`--shared-display` is the only way to expose the GUI/audio/D-Bus sockets;
-it binds **only** the specific sockets needed, never the whole `/run`.
-
-Display sharing forwards four subsystems from the invoking host session into
-the container:
-
-**X11**
-- `/tmp/.X11-unix` socket directory is bind-mounted into the guest.
-- `DISPLAY`, `XAUTHORITY`, and `XDG_RUNTIME_DIR` are forwarded.
-- The X authority file is bind-mounted when it lives outside `/run`.
-- Compositors such as niri with xwayland-satellite often authenticate X11
-  clients by Unix-socket UID. Chroot-distro aligns the guest user's UID to
-  the invoking host user when needed. If the guest cannot read the cookie
-  file, it is copied to `/var/tmp/.chroot-distro-xauthority` (requires
-  `xauth` on the host). If that fails, use `--shared-home`,
-  `xhost +SI:localuser:GUEST`, or a UID-matched user.
-
-**Wayland**
-- `WAYLAND_DISPLAY` is forwarded (fallback: `wayland-0` if socket exists).
-- `XDG_SESSION_TYPE`, `XDG_CURRENT_DESKTOP`, and `DESKTOP_SESSION` are
-  forwarded from the host session.
-- The host's `XDG_RUNTIME_DIR` (`/run/user/<uid>`) is bind-mounted whole
-  with **rslave** propagation, so every session socket (Wayland,
-  PulseAudio, PipeWire, D-Bus) is exposed and sockets created after mount
-  stay visible — while the host's broad `/run` stays hidden. The system
-  D-Bus socket (`/run/dbus/system_bus_socket`) is bound individually.
-
-> Note: logging in as **root** with `--shared-display` cannot use the
-> session D-Bus bus (it rejects uid 0 with "Connection reset by peer");
-> log in as a UID-matched normal user with `--user` for a working session
-> bus. The system bus works for root.
-
-**Sound (PulseAudio / PipeWire)**
-- `PULSE_SERVER` is forwarded (fallback: `unix:/run/user/<uid>/pulse/native`
-  if the PulseAudio socket exists).
-- PipeWire apps discover their socket automatically via `XDG_RUNTIME_DIR`;
-  no extra env var is needed.
-
-**D-Bus**
-- `DBUS_SESSION_BUS_ADDRESS` is forwarded (fallback:
-  `unix:path=/run/user/<uid>/bus` if the socket exists).
-
-Use `--isolated` to skip all display sharing, or `--minimal` for only core
-pseudo-filesystems. Home is never bind-mounted unless you pass `--shared-home`.
+Pass `--shared-display` (or `--shared-x11`) to use your host's screen,
+audio, and D-Bus session inside the container — handy for running GUI
+apps. It's opt-in: without this flag, none of that is shared, and `/tmp`
+and `/run` stay isolated from the host. It works best on regular Linux;
+on Termux only some of this is available. `--shared-display` (like every
+`--shared-*` flag) is ignored if you also pass `--isolated`, since
+`--isolated` binds no host paths at all — drop `--isolated`, or use
+`CD_USE_NS=1` instead, if you need display sharing alongside namespace
+isolation.
 
 #### GPU acceleration (auto-detected)
 
-Chroot-distro automatically enables hardware-accelerated GPU rendering at
-login — **no flag needed**, same tier as USB and general hardware access.
-GPU passthrough is independent of `--shared-display`. (It doesn't work on
-Termux.)
-
-**AMD and Intel** (open-source Mesa drivers)
-- Works out of the box. Host `/dev` (including `/dev/dri/` render nodes) is
-  bind-mounted into the container. The host's Vulkan/EGL/OpenCL ICD and
-  loader-config descriptors are bound read-only so the guest's own Mesa
-  stack can enumerate the hardware. Driver `.so` files are **not** bound:
-  shadowing the container's own Mesa libraries corrupts its loader.
-
-**NVIDIA — native Linux** (proprietary driver)
-- Detection: `/dev/nvidia0` exists, or `libcuda*.so*` / `libnvidia*.so*`
-  found under `/usr/lib*/`.
-- Bind-mounts: `/dev/nvidia*` device nodes, `/dev/dri/card*` and
-  `/dev/dri/renderD*` DRM nodes, host NVIDIA `.so` libraries mapped to the
-  correct guest library directory (multi-arch aware), NVIDIA config and ICD
-  files (`/etc/`, EGL/Vulkan JSON descriptors, OpenCL ICD), and NVIDIA CLI
-  tools (`nvidia-smi`, etc.). Vendor-neutral GLVND/GBM dispatch libraries
-  (`libGL`, `libEGL`, `libGLX`, `libgbm`, …) and zero-byte sources are never
-  bound, so the container's own loader is not shadowed.
-- Runs independent of `--shared-display`: the GPU works whether or not the
-  display is shared.
-- Environment variables set: `__NV_PRIME_RENDER_OFFLOAD=1`,
-  `__GLX_VENDOR_LIBRARY_NAME=nvidia`.
-- Guest `ldconfig` is run inside the chroot to refresh the shared library
-  cache after the new libraries are bind-mounted.
+If you have a GPU (AMD, Intel, or NVIDIA), Chroot-Distro automatically
+sets it up for hardware-accelerated rendering — no flag needed. This
+works independently of display sharing and isn't available on Termux.
 
 #### Namespace isolation (`--isolated` and `CD_USE_NS`)
 
@@ -542,16 +436,17 @@ when the kernel supports it, skipped otherwise); the **mount/PID/UTS/IPC**
 set is **all-or-nothing**: chroot-distro probes that set first, and if any
 one of them is unsupported on the kernel it acquires none of them and falls
 back fully to a non-isolated login (with a warning naming the missing
-namespace), so a session is never left half-isolated. This is inspired by
-[Ubuntu-Chroot](Ubuntu-Chroot/tools/chroot.sh) and is **not** a full
+namespace), so a session is never left half-isolated. This is **not** a full
 container runtime: there is no network namespace, no user namespace
 mapping, and no image layering.
 
-`--isolated` couples two things: namespace isolation **and** a reduced set
-of host bind mounts (it skips the Android system/storage/`$PREFIX` binds on
-Termux, and `/tmp`/display sharing on Linux, unless re-enabled with
-`--shared-*` / `--bind`). If you want **only** the namespace isolation
-while keeping every default mount, set the `CD_USE_NS=1` environment
+`--isolated` couples two things: namespace isolation **and** binding no
+host paths at all — no Android system/storage/`$PREFIX` binds on Termux,
+no `/tmp` sharing, no display sharing on Linux, and no `--shared-*` /
+`--bind` flags take effect (they're accepted but ignored, with a
+warning, since there's nothing to bind into). If you want **only** the
+namespace isolation while keeping every default mount — and keeping
+`--shared-*` / `--bind` working — set the `CD_USE_NS=1` environment
 variable instead: every `login`/`run` then runs in the same
 mount/PID/UTS/IPC/cgroup namespaces but with the full default mount set
 intact. `CD_USE_NS` accepts `1`/`true`/`yes`/`on`.
@@ -1099,8 +994,7 @@ in the [`install`](#install--install-a-container) section.
 
 ### 2. Native chroot and bind mounts
 
-Unlike `proot`, which rewrites paths via `ptrace`, Chroot-Distro uses
-real kernel features:
+Chroot-Distro uses real kernel features rather than path rewriting:
 
 - **Bind mounts** (`mount --bind`) for host directories inside the guest.
 - **Session tracking** under `$RUNTIME_DIR/data/<name>/sessions` (counter)
@@ -1146,6 +1040,24 @@ Because mutating commands run as root after auto-elevation, effective
 paths on Linux are typically under `/root/.local/share/` and
 `/root/.cache/` unless you set `XDG_DATA_HOME` / `XDG_CACHE_HOME`.
 
+### Directory Variables and Definitions
+
+The application dynamically computes paths based on the environment (Termux/Android vs. Regular Linux):
+
+| Variable | Description | Termux Path | Regular Linux Path |
+|---|---|---|---|
+| `RUNTIME_DIR` | Root directory for application state (containers, sessions, locks, logs). | `/data/data/com.termux/files/usr/var/lib/chroot-distro` | `~/.local/share/chroot-distro` |
+| `BASE_CACHE_DIR` | Base directory for caching downloaded OCI layers, manifests, and build cache index. | `$RUNTIME_DIR/cache` | `~/.cache/chroot-distro` |
+| `CONTAINERS_DIR` | Directory containing the root filesystems (`rootfs`) of installed distributions. | `$RUNTIME_DIR/containers` | `~/.local/share/chroot-distro/containers` |
+| `SESSIONS_DIR` | Directory for active session tracker files (`<pid>.json`) used by the `ps` command. | `$RUNTIME_DIR/sessions` | `~/.local/share/chroot-distro/sessions` |
+| `LOCKS_DIR` | Directory for POSIX flock files to prevent concurrent access conflicts. | `$RUNTIME_DIR/locks` | `~/.local/share/chroot-distro/locks` |
+| `LAYER_CACHE_DIR` | Directory where downloaded OCI layers are cached. | `$BASE_CACHE_DIR/oci_layers` | `~/.cache/chroot-distro/oci_layers` |
+| `MANIFEST_CACHE_DIR` | Directory where fetched OCI manifests are cached. | `$BASE_CACHE_DIR/oci_manifests` | `~/.cache/chroot-distro/oci_manifests` |
+
+> [!NOTE]
+> Since mutating commands on regular Linux run as `root` (via auto-elevation), the regular Linux paths above will default to being under the `/root` home directory (e.g., `/root/.local/share/chroot-distro` and `/root/.cache/chroot-distro`) unless `XDG_DATA_HOME` or `XDG_CACHE_HOME` are explicitly set and forwarded.
+
+
 | Path | Contents |
 |---|---|
 | `containers/<name>/rootfs/` | Container root filesystem |
@@ -1186,7 +1098,8 @@ These are set automatically by chroot-distro at login. They cannot be
 overridden from `manifest.json` image `Env`, but can be overridden with
 `--env`.
 
-**Display and audio (Linux, non-minimal, display sharing active):**
+**Display and audio (Linux, non-minimal, only when `--shared-display` /
+`--shared-x11` is passed — not set by default):**
 
 | Variable | Source / Fallback |
 |---|---|
@@ -1200,26 +1113,13 @@ overridden from `manifest.json` image `Env`, but can be overridden with
 | `PULSE_SERVER` | Host `$PULSE_SERVER`; fallback `unix:/run/user/<uid>/pulse/native` if socket exists |
 | `DBUS_SESSION_BUS_ADDRESS` | Host `$DBUS_SESSION_BUS_ADDRESS`; fallback `unix:path=/run/user/<uid>/bus` if socket exists |
 
-**Hostname (always set, non-minimal):**
-
-| Variable | Source / Fallback |
-|---|---|
-| `HOSTNAME` | The container name. Under `--isolated` the UTS namespace hostname is also set so `hostname`/`uname -n` report it. |
-
-**GPU — NVIDIA native Linux (auto-detected, non-minimal):**
+**Hostname and GPU (non-minimal, auto-detected/auto-set):**
 
 | Variable | Value |
 |---|---|
-| `__NV_PRIME_RENDER_OFFLOAD` | `1` |
-| `__GLX_VENDOR_LIBRARY_NAME` | `nvidia` |
-
-**GPU — WSL2 with NVIDIA (auto-detected, non-minimal):**
-
-| Variable | Value |
-|---|---|
-| `GALLIUM_DRIVER` | `d3d12` |
-| `MESA_D3D12_DEFAULT_DEVICE_TYPE` | `GPU` |
-| `LIBGL_ALWAYS_SOFTWARE` | `0` |
+| `HOSTNAME` | The container name (`hostname`/`uname -n` only reflect it under `--isolated`) |
+| `__NV_PRIME_RENDER_OFFLOAD`, `__GLX_VENDOR_LIBRARY_NAME` | `1`, `nvidia` — NVIDIA on native Linux |
+| `GALLIUM_DRIVER`, `MESA_D3D12_DEFAULT_DEVICE_TYPE`, `LIBGL_ALWAYS_SOFTWARE` | `d3d12`, `GPU`, `0` — NVIDIA on WSL2 |
 
 ---
 
@@ -1258,6 +1158,23 @@ cp src/chroot_distro/completions/chroot-distro.fish \
 
 ## Limitations
 
+### Design choices (not limitations)
+
+- **Shared network by default**: containers use the host's network stack
+  directly. There is no network namespace and no per-container network
+  isolation, even under `--isolated` / `CD_USE_NS=1`. This is intentional:
+  Chroot-Distro targets fast, near-native access to the host (Wi-Fi,
+  mobile data, VPNs already configured on the host, etc.) rather than
+  Docker-style network sandboxing, so there is no virtual NIC, no NAT, and
+  no per-container firewall to set up or work around.
+- **Shared GPU by default**: GPU passthrough (see
+  [GPU acceleration](#gpu-acceleration-auto-detected)) is automatic and
+  unconditional whenever supported hardware/drivers are detected — it is
+  not gated behind `--isolated`, `--shared-display`, or any opt-in flag.
+  The container talks to the same `/dev/dri`, NVIDIA device nodes, and
+  driver stack as the host, by design, so 3D/Vulkan/OpenCL workloads work
+  out of the box without per-container GPU allocation or arbitration.
+
 ### Kernel and chroot limitations
 
 - **Root required**: real `chroot` and bind mounts need appropriate
@@ -1270,16 +1187,19 @@ cp src/chroot_distro/completions/chroot-distro.fish \
   guest.
 - **Namespaces**: `--isolated` (or `CD_USE_NS=1`) provides
   mount/PID/UTS/IPC isolation, plus the cgroup namespace when the kernel
-  supports it, via `unshare`/`nsenter` — but there is no network namespace,
-  no user-namespace mapping, and no parity with Docker or Podman.
+  supports it, via `unshare`/`nsenter`. There is no user-namespace mapping
+  and no parity with Docker or Podman. (Networking is intentionally
+  excluded from this isolation set — see
+  [Design choices](#design-choices-not-limitations) above.)
 - **Bind mount hygiene**: crashed sessions or orphan processes can leave
   mounts busy; `unmount` and lazy unmount mitigate this but orphaned
   processes should be cleaned up.
 
 ### Chroot-Distro limitations
 
-- **Termux requires root**: unlike proot-distro, Chroot-Distro cannot run
-  containers on a non-rooted Android device.
+- **Root is required on Termux**: Chroot-Distro relies on real `chroot`
+  and bind mounts, so it cannot run containers on a non-rooted Android
+  device.
 - **Registry authentication**: private pulls and pushes need
   `CD_DOCKER_AUTH=user:password`. Docker
   `config.json` credential helpers are not read.
