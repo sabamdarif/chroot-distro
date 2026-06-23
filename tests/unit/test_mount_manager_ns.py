@@ -37,3 +37,17 @@ def test_safe_mount_via_holder(mock_run):
     assert mock_run.call_args[0][0][0].endswith("mount")
     assert mock_run.call_args[0][0][1:] == ["--bind", "/host/src", "/tmp/rootfs/mnt"]
     assert mock_run.call_args[0][1] is holder
+
+
+def test_create_dev_nodes_via_holder():
+    holder = MagicMock()
+    holder.run.return_value = MagicMock(returncode=0)
+    rootfs = "/tmp/rootfs"
+    nodes = [("null", 1, 3, 0o666)]
+    mm.create_dev_nodes(rootfs, nodes, holder=holder)
+    holder.run.assert_called_once_with(
+        ["mknod", "-m", "666", "/tmp/rootfs/dev/null", "c", "1", "3"],
+        capture_output=True,
+        text=True,
+    )
+

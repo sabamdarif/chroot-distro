@@ -243,16 +243,15 @@ def create_dev_nodes(
     """
     dev_dir = os.path.join(rootfs, "dev")
     for name, major, minor, mode in nodes:
-        guest_path = f"/dev/{name}"
         host_path = os.path.join(dev_dir, name)
         if holder is not None:
-            cmd = ["mknod", "-m", format(mode, "o"), guest_path, "c", str(major), str(minor)]
+            cmd = ["mknod", "-m", format(mode, "o"), host_path, "c", str(major), str(minor)]
             try:
                 result = holder.run(cmd, capture_output=True, text=True)
                 if result.returncode != 0:
-                    log.debug("mknod %s failed: %s", guest_path, (result.stderr or "").strip())
+                    log.debug("mknod %s failed: %s", host_path, (result.stderr or "").strip())
             except OSError as exc:
-                log.debug("mknod %s raised: %s", guest_path, exc)
+                log.debug("mknod %s raised: %s", host_path, exc)
             continue
         # No holder (no mount namespace): create directly on the host path.
         try:
