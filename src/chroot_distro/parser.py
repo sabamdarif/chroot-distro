@@ -394,7 +394,6 @@ def _kill(sub):
 def _ps(sub):
     p = sub.add_parser("ps", add_help=False)
     p._cd_command = "ps"
-    p.add_argument("-a", "--all", action="store_true")
     p.add_argument("-q", "--quiet", action="store_true")
     p.add_argument("-h", "--help", action="store_true")
 

@@ -626,18 +626,17 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
     "ps": {
         "usage": "ps [OPTIONS]",
         "summary": (
-            "List running containers: those with a live process inside their "
-            "chroot or an active namespace holder. Shows rootfs size, image "
-            "source, and status, like 'list'."
+            "List every active container session (one row per live "
+            "login or run). Shows PID, container name, session type "
+            "(login or run), user, uptime, and command."
         ),
         "options": [
             ("-h, --help", "Show this help."),
-            ("-a, --all", "Show all installed containers, not just running ones."),
-            ("-q, --quiet", "Print only container names, one per line."),
+            ("-q, --quiet", "Print only PIDs, one per line (for scripting)."),
         ],
         "examples": [
             f"{PROGRAM_NAME} ps",
-            f"{PROGRAM_NAME} ps --all",
+            f"{PROGRAM_NAME} ps -q",
         ],
     },
     "diff": {
@@ -769,7 +768,7 @@ TOP_COMMANDS = [
     ("sync", "Sync files from/to container."),
     ("build", "Build an OCI image from a Dockerfile."),
     ("push", "Push a locally built image to a registry."),
-    ("ps", "List running containers."),
+    ("ps", "List active container sessions."),
     ("kill", "Forcibly stop a running container."),
     ("diff", "Inspect filesystem changes in a container."),
     ("search", "Search Docker Hub for images."),

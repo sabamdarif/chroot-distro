@@ -625,20 +625,7 @@ def _render_kernel_config() -> None:
 
 def _running_summary(images: list[_ImageInfo]) -> int:
     """Return the number of containers with live processes or a namespace holder."""
-    if not images:
-        return 0
-    try:
-        from chroot_distro.commands.ps import _is_running
-    except ImportError:
-        return 0
-    count = 0
-    for img in images:
-        try:
-            if _is_running(img.name):
-                count += 1
-        except OSError:
-            continue
-    return count
+    return sum(1 for img in images if img.status != "idle")
 
 
 def _render_analysis(images: list[_ImageInfo]) -> None:

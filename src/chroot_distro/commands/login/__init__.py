@@ -58,6 +58,7 @@ from chroot_distro.helpers.nvidia import (
     run_ldconfig_in_chroot,
 )
 from chroot_distro.helpers.rootfs import ensure_hosts_entry
+from chroot_distro.helpers.session_registry import register_session
 from chroot_distro.helpers.x11 import (
     guest_can_read_auth,
     provision_guest_xauthority,
@@ -1250,12 +1251,26 @@ def _command_login_inner_once(container_name: str, args) -> None:
                     namespace.clear_isolation_mode(container_name)
         sys.exit(0)
 
+    # Record this session for `ps`. Best-effort; the returned handle holds
+    # an inheritable flock that tracks liveness. Keep the reference alive
+    # for the duration of the session so the lock is not released early.
+    _sess_handle = register_session(
+        container=container_name,
+        kind="run" if run_inner is not None else "login",
+        command_argv=inner,
+        user=login_user,
+        isolated=isolated,
+        minimal=minimal,
+        detached=bool(getattr(args, "detach", False) and run_inner is not None),
+    )
+
     if getattr(args, "detach", False) and run_inner is not None:
         _run_detached(
             container_name,
             exec_argv=exec_argv,
             child_env=child_env,
             holder=holder,
+            session_handle=_sess_handle,
         )
         return
 
@@ -1273,6 +1288,8 @@ def _command_login_inner_once(container_name: str, args) -> None:
                 with contextlib.suppress(OSError):
                     holder.proc.wait()
         finally:
+            if _sess_handle is not None:
+                _sess_handle.close()
             with session.lock(container_name) as lock_fh:
                 sess_count = session.decrement(container_name, lock_fh=lock_fh)
                 if sess_count == 0:
@@ -1284,6 +1301,8 @@ def _command_login_inner_once(container_name: str, args) -> None:
         try:
             subprocess.run(exec_argv, env=child_env, check=False)
         finally:
+            if _sess_handle is not None:
+                _sess_handle.close()
             with session.lock(container_name) as lock_fh:
                 sess_count = session.decrement(container_name, lock_fh=lock_fh)
                 if sess_count == 0:
@@ -1299,6 +1318,7 @@ def _run_detached(
     exec_argv: list,
     child_env: dict,
     holder,
+    session_handle=None,
 ) -> None:
     """Launch the resolved command in the background and return immediately.
 
@@ -1330,6 +1350,13 @@ def _run_detached(
         crit_error(f"cannot open {os.devnull}: {exc}")
         sys.exit(1)
 
+    # If a session handle exists, pass its fd to the child so the flock
+    # (and the session's liveness signal) is inherited by the detached
+    # process. The parent closes its copy after Popen returns.
+    extra_fds: tuple = ()
+    if session_handle is not None:
+        extra_fds = (session_handle.fileno(),)
+
     try:
         proc = subprocess.Popen(
             exec_argv,
@@ -1338,10 +1365,13 @@ def _run_detached(
             stdout=log_fh,
             stderr=log_fh,
             start_new_session=True,
+            pass_fds=extra_fds,
         )
     except OSError as exc:
         log_fh.close()
         devnull.close()
+        if session_handle is not None:
+            session_handle.close()
         with session.lock(container_name) as lock_fh:
             sess_count = session.decrement(container_name, lock_fh=lock_fh)
             if sess_count == 0:
@@ -1355,6 +1385,10 @@ def _run_detached(
         # The child holds its own copies of these descriptors.
         log_fh.close()
         devnull.close()
+        # The child inherited the session flock fd via pass_fds; close the
+        # parent's copy so only the child keeps the lock alive.
+        if session_handle is not None:
+            session_handle.close()
 
     from chroot_distro.message import log_info
 

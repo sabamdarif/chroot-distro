@@ -52,6 +52,7 @@ else:
     BASE_CACHE_DIR = os.path.join(_xdg_cache, PROGRAM_NAME)
 
 CONTAINERS_DIR = os.path.join(RUNTIME_DIR, "containers")
+SESSIONS_DIR = os.path.join(RUNTIME_DIR, "sessions")
 LOCKS_DIR = os.path.join(RUNTIME_DIR, "locks")
 LAYER_CACHE_DIR = os.path.join(BASE_CACHE_DIR, "oci_layers")
 MANIFEST_CACHE_DIR = os.path.join(BASE_CACHE_DIR, "oci_manifests")

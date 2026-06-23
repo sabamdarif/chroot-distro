@@ -36,7 +36,7 @@ when needed (see [First-run check](#first-run-check)).
    * [`login`](#login--start-a-shell-inside-a-container)
    * [`run`](#run--run-the-image-defined-entrypoint)
    * [`list`](#list--list-installed-containers)
-   * [`ps`](#ps--list-running-containers)
+   * [`ps`](#ps--list-active-sessions)
    * [`search`](#search--search-docker-hub)
    * [`diff`](#diff--inspect-filesystem-changes)
    * [`remove`](#remove--delete-a-container)
@@ -163,7 +163,7 @@ chroot-distro push myuser/myapp:1.0
 # Rebuild from scratch (loses all in-container data)
 chroot-distro reset ubuntu
 
-# List only the containers that are currently running
+# List active sessions (PID, container, type, user, uptime, command)
 chroot-distro ps
 
 # Search Docker Hub for an image
@@ -704,20 +704,41 @@ printed.
 
 ---
 
-### `ps` — List running containers
+### `ps` — List active sessions
 
 ```
 chroot-distro ps [OPTIONS]
 ```
 
-List only containers that are currently **running** — those with a live
-process inside their chroot or an active namespace holder. Columns match
-`list` (rootfs size, image source, status). Does not require root.
+List every active container session — one row per live `login` or `run`.
+Each session is tracked by a per-PID JSON file under
+`$RUNTIME_DIR/sessions/` with flock-based liveness detection (immune to
+PID recycling and crash-safe). Does not require root.
+
+Output columns:
+
+| Column | Description |
+|---|---|
+| `PID` | Host PID of the session's chroot process. |
+| `CONTAINER` | Container name. |
+| `TYPE` | `login` or `run` (recorded at session start). |
+| `USER` | User the session runs as. |
+| `UPTIME` | Elapsed time since session start (e.g. `3m12s`, `1h04m`). |
+| `COMMAND` | Inner command line (shell-quoted, truncated to terminal width). |
+
+Example output:
+
+```
+PID     CONTAINER  TYPE   USER  UPTIME  COMMAND
+12345   ubuntu     login  root  3m12s   /bin/bash -l
+12388   debian     run*    root  0m44s   nginx -g 'daemon off;'
+
+* detached session
+```
 
 | Option | Description |
 |---|---|
-| `-a`, `--all` | Show all installed containers, not just running ones. |
-| `-q`, `--quiet` | Print only container names, one per line. |
+| `-q`, `--quiet` | Print only PIDs, one per line (for scripting). |
 
 ---
 
@@ -1085,7 +1106,9 @@ Unlike `proot`, which rewrites paths via `ptrace`, Chroot-Distro uses
 real kernel features:
 
 - **Bind mounts** (`mount --bind`) for host directories inside the guest.
-- **Session tracking** under `$RUNTIME_DIR/data/<name>/sessions`.
+- **Session tracking** under `$RUNTIME_DIR/data/<name>/sessions` (counter)
+  and `$RUNTIME_DIR/sessions/<pid>.json` (per-session registry for `ps`,
+  with `flock`-based liveness detection).
 - **Automatic mount/unmount**: the first session mounts; the last session
   exiting unmounts everything.
 - **Lazy unmount fallback** (`umount -l`) when a target is busy.

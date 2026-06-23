@@ -109,7 +109,7 @@ _chroot_distro() {
 			'kill:forcibly stop a running container'
 			'k:alias for kill'
 			'stop:alias for kill'
-			'ps:list running containers'
+			'ps:list active container sessions'
 			'diff:inspect filesystem changes in a container'
 			'search:search Docker Hub for images'
 			'find:alias for search'
@@ -288,8 +288,7 @@ _chroot_distro() {
 		ps)
 			_arguments \
 				'(-h --help)'{-h,--help}'[show help]' \
-				'(-a --all)'{-a,--all}'[show all installed containers, not just running]' \
-				'(-q --quiet)'{-q,--quiet}'[print only container names]'
+				'(-q --quiet)'{-q,--quiet}'[print only PIDs]'
 			;;
 
 		# -----------------------------------------------------------

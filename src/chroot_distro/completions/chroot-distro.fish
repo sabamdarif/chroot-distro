@@ -154,7 +154,7 @@ complete -c chroot-distro -f -n __chroot_distro_no_subcommand -a build       -d 
 complete -c chroot-distro -f -n __chroot_distro_no_subcommand -a push        -d 'Push a locally built image to a registry'
 complete -c chroot-distro -f -n __chroot_distro_no_subcommand -a unmount     -d 'Unmount a container filesystem'
 complete -c chroot-distro -f -n __chroot_distro_no_subcommand -a kill        -d 'Forcibly stop a running container'
-complete -c chroot-distro -f -n __chroot_distro_no_subcommand -a ps          -d 'List running containers'
+complete -c chroot-distro -f -n __chroot_distro_no_subcommand -a ps          -d 'List active container sessions'
 complete -c chroot-distro -f -n __chroot_distro_no_subcommand -a diff        -d 'Inspect filesystem changes in a container'
 complete -c chroot-distro -f -n __chroot_distro_no_subcommand -a search      -d 'Search Docker Hub for images'
 complete -c chroot-distro -f -n __chroot_distro_no_subcommand -a info        -d 'Show host and container diagnostics'
@@ -434,9 +434,7 @@ complete -c chroot-distro -f -n __chroot_distro_seen_kill \
 # ps
 # ---------------------------------------------------------------------------
 complete -c chroot-distro -f -n __chroot_distro_seen_ps \
-    -s a -l all        -d 'Show all installed containers, not just running'
-complete -c chroot-distro -f -n __chroot_distro_seen_ps \
-    -s q -l quiet      -d 'Print only container names'
+    -s q -l quiet      -d 'Print only PIDs'
 complete -c chroot-distro -f -n __chroot_distro_seen_ps \
     -s h -l help       -d 'Show help'
 
