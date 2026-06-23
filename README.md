@@ -239,8 +239,7 @@ discovered from each registry's `/v2/` challenge.
 
 **Private images** require credentials. Set `CD_DOCKER_AUTH` to
 `username:password` (or `username:PAT`) before running `install`. The
-colon separator is mandatory. `PD_DOCKER_AUTH` is accepted as a fallback
-for compatibility with proot-distro:
+colon separator is mandatory:
 
 ```sh
 export CD_DOCKER_AUTH=myuser:mypassword
@@ -399,8 +398,7 @@ required.
 
 **Authentication:**
 
-Set `CD_DOCKER_AUTH=username:password` (colon required). `PD_DOCKER_AUTH`
-is accepted as a fallback:
+Set `CD_DOCKER_AUTH=username:password` (colon required):
 
 ```sh
 chroot-distro build -t myuser/myapp:1.0 ./mycontext
@@ -1173,7 +1171,7 @@ paths on Linux are typically under `/root/.local/share/` and
 | `TERMUX_APP__APP_VERSION_NAME`, `TERMUX_VERSION` | Either counts toward Termux detection when set. |
 | `XDG_DATA_HOME` | Base for `$XDG_DATA_HOME/chroot-distro/` on non-Termux hosts. Default: `~/.local/share`. |
 | `XDG_CACHE_HOME` | Base for `$XDG_CACHE_HOME/chroot-distro/` on non-Termux hosts. Default: `~/.cache`. |
-| `CD_DOCKER_AUTH` | Registry credentials as `username:password` or `username:PAT` (colon required). Used by `install`, `build` (`FROM` pulls), and `push`. `PD_DOCKER_AUTH` is accepted as a fallback. |
+| `CD_DOCKER_AUTH` | Registry credentials as `username:password` or `username:PAT` (colon required). Used by `install`, `build` (`FROM` pulls), and `push`. |
 | `CD_DOWNLOAD_WORKERS` | Parallel registry layer downloads during `install` (default `4`, maximum `10`). Invalid values use the default; out-of-range values are clamped. |
 | `CD_DOWNLOAD_RATE_LIMIT` | Bandwidth limit for downloads (e.g., `5M` for 5 MiB/s, default `0` = unlimited). Supports suffixes `K`, `M`, `G` (case-insensitive). |
 | `CD_DOWNLOAD_MAX_RETRIES` | Maximum retry attempts per connection failure (default `3`, clamped between `0` and `20`). |
@@ -1283,7 +1281,7 @@ cp src/chroot_distro/completions/chroot-distro.fish \
 - **Termux requires root**: unlike proot-distro, Chroot-Distro cannot run
   containers on a non-rooted Android device.
 - **Registry authentication**: private pulls and pushes need
-  `CD_DOCKER_AUTH=user:password` (or `PD_DOCKER_AUTH`). Docker
+  `CD_DOCKER_AUTH=user:password`. Docker
   `config.json` credential helpers are not read.
 - **Dockerfile builds are not BuildKit**: `RUN` executes under `chroot`,
   not a real container runtime. BuildKit-only Dockerfile features are

@@ -13,7 +13,7 @@ feature each one powers:
   IPC namespaces plus the umbrella ``CONFIG_NAMESPACES``.
 * Pseudo-filesystems that every chroot login mounts (procfs, sysfs, devpts,
   devtmpfs/tmpfs for the fresh ``/dev`` under maximum isolation).
-* Cgroups, used for the Docker-on-Android integration.
+* Cgroups.
 
 The result is intentionally advisory: a missing *required* option explains why
 ``--isolated`` / ``CD_USE_NS`` degrade on that kernel, while missing optional
@@ -87,7 +87,7 @@ KERNEL_FLAG_GROUPS: tuple[KernelFlagGroup, ...] = (
         ),
     ),
     KernelFlagGroup(
-        title="Cgroups (Docker-on-Android integration)",
+        title="Cgroups",
         flags=(
             KernelFlag("CGROUPS", "cgroup support (umbrella)", required=False),
             KernelFlag("CGROUP_DEVICE", "device access control", required=False),

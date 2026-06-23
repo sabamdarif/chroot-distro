@@ -13,15 +13,15 @@ echo -e "${BLUE}=== Starting Pre-Commit Checks ===${NC}"
 
 # Function to run a check and print status
 run_check() {
-    local name="$1"
-    shift
-    echo -e "\n${BLUE}Running ${name}...${NC}"
-    if "$@"; then
-        echo -e "${GREEN}✓ ${name} passed!${NC}"
-    else
-        echo -e "${RED}✗ ${name} failed!${NC}"
-        exit 1
-    fi
+	local name="$1"
+	shift
+	echo -e "\n${BLUE}Running ${name}...${NC}"
+	if "$@"; then
+		echo -e "${GREEN}✓ ${name} passed!${NC}"
+	else
+		echo -e "${RED}✗ ${name} failed!${NC}"
+		exit 1
+	fi
 }
 
 # Run the checks

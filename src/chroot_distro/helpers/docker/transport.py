@@ -104,7 +104,7 @@ def _http_registry_reachable(registry: str, timeout: float = 6.0) -> bool:
 
 def auth_denied_msg(image_ref: str, code: int) -> str:
     """Return a descriptive error string for 401/403 registry responses."""
-    if os.environ.get("CD_DOCKER_AUTH") or os.environ.get("PD_DOCKER_AUTH"):
+    if os.environ.get("CD_DOCKER_AUTH"):
         return (
             f"Access denied to '{image_ref}' (HTTP {code}). "
             f"Check that CD_DOCKER_AUTH=username:password is correct "
@@ -118,7 +118,7 @@ def auth_denied_msg(image_ref: str, code: int) -> str:
 
 def push_denied_msg(image_ref: str, code: int) -> str:
     """Return a context-sensitive error string for 401/403 on push."""
-    if os.environ.get("CD_DOCKER_AUTH") or os.environ.get("PD_DOCKER_AUTH"):
+    if os.environ.get("CD_DOCKER_AUTH"):
         return (
             f"Push denied for '{image_ref}' (HTTP {code}). "
             f"Check that CD_DOCKER_AUTH=username:password is correct "
@@ -157,16 +157,16 @@ def _request_body(open_fn, req, what: str) -> bytes:
 
 
 def env_basic_auth() -> str:
-    """Return a Basic auth header value from CD_DOCKER_AUTH / PD_DOCKER_AUTH, or ''.
+    """Return a Basic auth header value from CD_DOCKER_AUTH, or ''.
 
     Accepts 'username:password' — the colon is the required separator.
     """
-    raw = os.environ.get("CD_DOCKER_AUTH") or os.environ.get("PD_DOCKER_AUTH", "")
+    raw = os.environ.get("CD_DOCKER_AUTH", "")
     if not raw:
         return ""
     if ":" not in raw:
         raise RuntimeError(
-            "CD_DOCKER_AUTH/PD_DOCKER_AUTH must be in 'username:password' format "
+            "CD_DOCKER_AUTH must be in 'username:password' format "
             "(e.g. 'myuser:mypassword' or 'myuser:ghp_xxx'). "
             "A bare token without a username cannot be used — registry "
             "auth requires a token exchange with Basic credentials."
@@ -252,6 +252,6 @@ def get_auth_token(
 def auth_note(prefix_space: bool = True) -> str:
     """Return ' (user credentials)' or ' (anonymous)' for log lines."""
     head = " " if prefix_space else ""
-    if os.environ.get("CD_DOCKER_AUTH") or os.environ.get("PD_DOCKER_AUTH"):
+    if os.environ.get("CD_DOCKER_AUTH"):
         return f"{head}(user credentials)"
     return f"{head}(anonymous)"

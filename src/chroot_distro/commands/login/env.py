@@ -17,7 +17,6 @@ _SENSITIVE_ENV_KEY_RE = re.compile(
 _SENSITIVE_ENV_KEYS = frozenset(
     {
         "CD_DOCKER_AUTH",
-        "PD_DOCKER_AUTH",
         "GITHUB_TOKEN",
         "GH_TOKEN",
     }
