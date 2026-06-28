@@ -1111,6 +1111,27 @@ def _command_login_inner_once(container_name: str, args) -> None:
                         )
                     else:
                         mount_manager.apply_special_mount(rootfs, sm, holder=holder)
+
+                # Under maximum isolation, `/dev/ptmx` must be a symlink to `pts/ptmx`
+                # pointing to the private `devpts` multiplexer inside the fresh `/dev` tmpfs.
+                # Only create it if it is missing or is not already a symbolic link.
+                if max_isolation and use_namespaces:
+                    ptmx_path = os.path.join(rootfs, "dev/ptmx")
+                    if holder is not None:
+                        is_link = holder.run(["test", "-L", ptmx_path]).returncode == 0
+                        if not is_link:
+                            if holder.run(["test", "-e", ptmx_path]).returncode == 0:
+                                holder.run(["rm", "-f", ptmx_path])
+                            cmd = ["ln", "-s", "pts/ptmx", ptmx_path]
+                            holder.run(cmd, capture_output=True, text=True)
+                    else:
+                        try:
+                            if not os.path.islink(ptmx_path):
+                                if os.path.exists(ptmx_path):
+                                    os.remove(ptmx_path)
+                                os.symlink("pts/ptmx", ptmx_path)
+                        except OSError as exc:
+                            log.debug("Failed to create ptmx symlink: %s", exc)
             except Exception as e:
                 if pipe_w is not None:
                     with contextlib.suppress(OSError):
