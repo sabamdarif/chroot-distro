@@ -1147,3 +1147,42 @@ def test_resolve_rootfs_path_loop(tmp_path):
     with pytest.raises(OSError) as excinfo:
         resolve_rootfs_path(str(rootfs), "/a")
     assert excinfo.value.errno == errno.ELOOP
+
+
+def test_translate_host_path_to_guest():
+    from chroot_distro.commands.login import _translate_host_path_to_guest
+
+    rootfs = "/var/lib/chroot-distro/ubuntu"
+
+    # Test cases mapping (host_path, resolved_binds) -> expected_guest_path
+    resolved_binds = [
+        ("/dev", "/var/lib/chroot-distro/ubuntu/dev"),
+        ("/sys", "/var/lib/chroot-distro/ubuntu/sys"),
+        ("/home/sabamdarif", "/var/lib/chroot-distro/ubuntu/home/saba"),
+        ("/home/sabamdarif/Documents/Github/chroot-distro", "/var/lib/chroot-distro/ubuntu/workspace"),
+    ]
+
+    # Exact match on longer/more specific bind mount
+    assert _translate_host_path_to_guest(
+        "/home/sabamdarif/Documents/Github/chroot-distro", rootfs, resolved_binds
+    ) == "/workspace"
+
+    # Subpath match under longer/more specific bind mount
+    assert _translate_host_path_to_guest(
+        "/home/sabamdarif/Documents/Github/chroot-distro/src", rootfs, resolved_binds
+    ) == "/workspace/src"
+
+    # Subpath match under less specific/home bind mount
+    assert _translate_host_path_to_guest(
+        "/home/sabamdarif/Downloads", rootfs, resolved_binds
+    ) == "/home/saba/Downloads"
+
+    # No match
+    assert _translate_host_path_to_guest(
+        "/var/log", rootfs, resolved_binds
+    ) == "/var/log"
+
+    # Exact match on home directory
+    assert _translate_host_path_to_guest(
+        "/home/sabamdarif", rootfs, resolved_binds
+    ) == "/home/saba"

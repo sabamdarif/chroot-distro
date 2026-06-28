@@ -461,6 +461,34 @@ def _command_login_inner(container_name: str, args) -> None:
         _command_login_inner_once(container_name, args)
 
 
+def _translate_host_path_to_guest(host_path: str, rootfs: str, resolved_binds: list[tuple[str, str]]) -> str:
+    """Translate a host path to its corresponding guest path based on the resolved bind mounts."""
+    host_path = os.path.normpath(host_path)
+
+    best_match_src = None
+    best_match_dst = None
+
+    for src, dst in resolved_binds:
+        src_norm = os.path.normpath(src)
+        # Check if host_path starts with src_norm.
+        match = host_path == src_norm or host_path.startswith(src_norm + os.sep)
+
+        if match and (best_match_src is None or len(src_norm) > len(best_match_src)):
+            best_match_src = src_norm
+            best_match_dst = dst
+
+    if best_match_src is not None and best_match_dst is not None:
+        rel_to_rootfs = os.path.relpath(best_match_dst, rootfs)
+        guest_base = "/" if rel_to_rootfs == "." else "/" + rel_to_rootfs.lstrip("/")
+
+        rel_from_src = os.path.relpath(host_path, best_match_src)
+        if rel_from_src == ".":
+            return guest_base
+        return os.path.normpath(os.path.join(guest_base, rel_from_src))
+
+    return host_path
+
+
 def _command_login_inner_once(container_name: str, args) -> None:
     rootfs = container_rootfs(container_name)
     if not os.path.isdir(rootfs):
@@ -917,6 +945,10 @@ def _command_login_inner_once(container_name: str, args) -> None:
         dist_type=dist_type,
         nvidia_integration=has_nvidia,
     )
+
+    # Translate login_wd from host path to guest path if applicable
+    if login_wd:
+        login_wd = _translate_host_path_to_guest(login_wd, rootfs, resolved_binds)
 
     # Merge NVIDIA env vars into child_env (before user overrides)
     if has_nvidia:
