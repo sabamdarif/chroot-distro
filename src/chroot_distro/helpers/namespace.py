@@ -497,6 +497,18 @@ class NamespaceHolder:
             try:
                 from chroot_distro.syscalls.nsenter import enter_namespaces
                 enter_namespaces(self.pid, flags)
+                if flags & CLONE_NEWPID:
+                    # Double-fork so that the process calling mount_filesystem()
+                    # is inside the new PID namespace (since setns(2) on a PID
+                    # namespace only places subsequent children in the namespace).
+                    inner_pid = os.fork()
+                    if inner_pid != 0:
+                        _, status = os.waitpid(inner_pid, 0)
+                        os._exit(
+                            os.WEXITSTATUS(status)
+                            if os.WIFEXITED(status)
+                            else 1
+                        )
                 mount_filesystem(source, target, fstype, options=options)
                 os._exit(0)
             except Exception as exc:

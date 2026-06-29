@@ -205,19 +205,18 @@ def create_holder_process(
 
     Synchronisation
     ~~~~~~~~~~~~~~~
-    The holder writes a single byte (``b'K'``) to signal readiness:
+    The holder (or launcher) signals readiness and communicates the holder's
+    host PID to the parent using an internal pipe.
 
-    * If *ready_fd* ≥ 0 the byte is written there (caller owns the fd).
-    * Otherwise an internal ``os.pipe()`` is used and the parent blocks
-      on the read end until the holder is ready.
+    * If *ready_fd* ≥ 0 the byte ``b'K'`` is also written there.
 
     PID namespace handling
     ~~~~~~~~~~~~~~~~~~~~~~
     When ``CLONE_NEWPID`` is included in *flags* an extra fork is
     performed so the actual holder becomes PID 1 inside the new PID
     namespace.  The intermediate "launcher" process waits for the holder
-    to signal readiness before exiting, which lets the original parent
-    detect launch failures via ``os.waitpid``.
+    to signal readiness, sends the holder's host PID back to the parent,
+    and then exits.
 
     Args:
         flags: ``CLONE_NEW*`` bitmask for ``unshare(2)``.
@@ -227,58 +226,54 @@ def create_holder_process(
             to ``-1`` (the default) an internal pipe is created.
 
     Returns:
-        The PID of the holder process (the one that is sleeping).
+        The host PID of the actual holder process (the one that is sleeping).
 
     Raises:
         OSError: If ``unshare(2)`` or ``fork(2)`` fails, or if the
             holder process exits before signalling readiness.
         RuntimeError: If the holder fails to start.
     """
-    # --- Set up synchronisation pipe if the caller did not provide one. ---
-    if ready_fd >= 0:
-        pipe_r: int | None = None
-        notify_fd = ready_fd
-    else:
-        pipe_r, notify_fd = os.pipe()
+    # Pipe to send the actual holder's host PID back to the parent.
+    pid_r, pid_w = os.pipe()
 
     launcher_pid = os.fork()
     if launcher_pid > 0:
         # ---- Original (parent) process ----
-        if notify_fd != ready_fd:
-            # We own the write end in the parent – close it so we see EOF
-            # if the child dies without writing.
-            os.close(notify_fd)
+        os.close(pid_w)
 
-        if pipe_r is not None:
-            # Block until the holder signals readiness.
+        # Read the actual holder's PID from the pipe.
+        try:
+            data = os.read(pid_r, 32)
+        finally:
+            os.close(pid_r)
+
+        if not data:
+            # The launcher or holder died before writing the PID.
+            _reap_child(launcher_pid)
+            raise RuntimeError(
+                "namespace holder process failed to start "
+                "(no readiness signal received)"
+            )
+
+        try:
+            holder_pid = int(data.decode().strip())
+        except ValueError as exc:
+            _reap_child(launcher_pid)
+            raise RuntimeError(
+                f"namespace holder process sent invalid PID: {data!r}"
+            ) from exc
+
+        # If the caller provided a ready_fd, write the ready byte.
+        if ready_fd >= 0:
             try:
-                data = os.read(pipe_r, 1)
-            finally:
-                os.close(pipe_r)
-            if data != b"K":
-                # The holder died before becoming ready.
-                _reap_child(launcher_pid)
-                raise RuntimeError(
-                    "namespace holder process failed to start "
-                    "(no readiness signal received)"
-                )
+                os.write(ready_fd, b"K")
+            except OSError:
+                log.exception("failed to write to caller ready_fd")
 
-        # The holder may be the launcher itself or a grandchild.  If
-        # CLONE_NEWPID was requested the grandchild is the real holder
-        # and its PID was sent through the pipe by the launcher.  For
-        # the simple (no PID-ns) case the launcher *is* the holder.
-        #
-        # We always return launcher_pid because:
-        #   • Without PID-ns: launcher == holder.
-        #   • With PID-ns: the launcher is the direct child we can
-        #     waitpid() on; the grandchild (PID 1 in the new ns) is
-        #     reachable via /proc/<launcher_pid>/ns/*.
-        return launcher_pid
+        return holder_pid
 
     # ---- Launcher (child) process ----
-    # Close the read end of the pipe if we created one.
-    if pipe_r is not None:
-        os.close(pipe_r)
+    os.close(pid_r)
 
     try:
         py_unshare(flags)
@@ -287,27 +282,44 @@ def create_holder_process(
         os._exit(1)
 
     if flags & CLONE_NEWPID:
-        # Fork again so the grandchild becomes PID 1 in the new PID
-        # namespace.
+        # Fork again so the grandchild becomes PID 1 in the new PID namespace.
+        # Create a pipe to synchronize the launcher with the grandchild's readiness.
+        sync_r, sync_w = os.pipe()
+
         grandchild_pid = os.fork()
         if grandchild_pid > 0:
-            # Launcher: wait for the grandchild to signal readiness,
-            # then exit.  Keeping the launcher alive until the holder
-            # is ready lets the original parent detect failures.
-            #
-            # The grandchild will write to notify_fd, so we do NOT
-            # close it here – just wait and exit.
+            # Launcher:
+            os.close(sync_w)
+            # Wait for the grandchild to complete its setup and signal readiness.
             try:
-                _, status = os.waitpid(grandchild_pid, 0)
+                ready_signal = os.read(sync_r, 1)
+            except OSError:
+                ready_signal = b""
+            finally:
+                os.close(sync_r)
+
+            if ready_signal == b"K":
+                # Grandchild is ready. Send its host PID to the parent.
+                try:
+                    os.write(pid_w, str(grandchild_pid).encode())
+                except OSError:
+                    pass
+            os.close(pid_w)
+
+            # Wait for the grandchild to exit (it won't, unless killed).
+            try:
+                os.waitpid(grandchild_pid, 0)
             except ChildProcessError:
                 pass
             os._exit(0)
 
         # Grandchild – this is the actual holder (PID 1).
-        _run_holder(notify_fd, rootfs)
+        os.close(sync_r)
+        os.close(pid_w)
+        _run_holder(sync_w, rootfs)
     else:
         # No PID namespace – the launcher itself is the holder.
-        _run_holder(notify_fd, rootfs)
+        _run_holder(pid_w, rootfs)
 
     # Should never be reached.
     os._exit(1)
