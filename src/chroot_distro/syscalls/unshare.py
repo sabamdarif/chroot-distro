@@ -19,47 +19,30 @@ create_holder_process
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
-import signal
 import time
 
 from chroot_distro.syscalls._constants import (
-    CLONE_NEWCGROUP,
-    CLONE_NEWIPC,
-    CLONE_NEWNET,
-    CLONE_NEWNS,
     CLONE_NEWPID,
-    CLONE_NEWUSER,
-    CLONE_NEWUTS,
-    MS_NODEV,
-    MS_NOEXEC,
-    MS_NOSUID,
     MS_PRIVATE,
     MS_REC,
-    NS_FILE_MAP,
 )
 from chroot_distro.syscalls._libc import (
-    check_syscall,
-    get_libc,
     libc_mount,
-    libc_sethostname,
     py_unshare,
 )
 
 log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# 1. native_unshare – thin wrapper
+# 1. native_unshare - thin wrapper
 # ---------------------------------------------------------------------------
 
 
 def native_unshare(flags: int) -> None:
-    """Call ``unshare(2)`` to disassociate the calling process from namespaces.
-
-    This is a thin convenience wrapper around :func:`py_unshare` that
-    exists so callers within this package need not import from ``_libc``
-    directly.
+    """Call ``unshare(2)`` directly.
 
     Args:
         flags: A bitmask of ``CLONE_NEW*`` constants specifying which
@@ -73,7 +56,7 @@ def native_unshare(flags: int) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 2. unshare_and_fork – namespace creation with optional PID-ns fork
+# 2. unshare_and_fork - namespace creation with optional PID-ns fork
 # ---------------------------------------------------------------------------
 
 
@@ -88,8 +71,8 @@ def unshare_and_fork(
     created after ``unshare(2)`` becomes PID 1 in the new PID namespace.
     This function handles the fork transparently:
 
-    * **Parent** – returns the child's PID (positive integer).
-    * **Child**  – resets mount propagation to *propagation* and returns 0.
+    * **Parent** - returns the child's PID (positive integer).
+    * **Child**  - resets mount propagation to *propagation* and returns 0.
 
     If ``CLONE_NEWPID`` is **not** in *flags* no fork occurs and the
     function returns ``0`` in the (sole) calling process.
@@ -114,20 +97,18 @@ def unshare_and_fork(
 
     pid = os.fork()
     if pid > 0:
-        # Parent – return child PID.
+        # Parent - return child PID.
         return pid
 
     # Child (PID 1 inside the new PID namespace).
-    try:
+    with contextlib.suppress(OSError):
         libc_mount(None, b"/", None, propagation, None)
-    except OSError:
-        pass  # Best-effort; may fail if mount NS was not unshared.
 
     return 0
 
 
 # ---------------------------------------------------------------------------
-# 3. probe_namespace_support – discover supported CLONE_NEW* flags
+# 3. probe_namespace_support - discover supported CLONE_NEW* flags
 # ---------------------------------------------------------------------------
 
 
@@ -159,14 +140,14 @@ def probe_namespace_support(flags: int) -> int:
 
         pid = os.fork()
         if pid == 0:
-            # Child – attempt the unshare and exit.
+            # Child - attempt the unshare and exit.
             try:
                 py_unshare(bit)
             except OSError:
                 os._exit(1)
             os._exit(0)
 
-        # Parent – wait for the child.
+        # Parent - wait for the child.
         _, status = os.waitpid(pid, 0)
         if os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0:
             supported |= bit
@@ -186,7 +167,7 @@ def probe_namespace_support(flags: int) -> int:
 
 
 # ---------------------------------------------------------------------------
-# 4. create_holder_process – long-lived namespace holder
+# 4. create_holder_process - long-lived namespace holder
 # ---------------------------------------------------------------------------
 
 
@@ -250,18 +231,13 @@ def create_holder_process(
         if not data:
             # The launcher or holder died before writing the PID.
             _reap_child(launcher_pid)
-            raise RuntimeError(
-                "namespace holder process failed to start "
-                "(no readiness signal received)"
-            )
+            raise RuntimeError("namespace holder process failed to start (no readiness signal received)")
 
         try:
             holder_pid = int(data.decode().strip())
         except ValueError as exc:
             _reap_child(launcher_pid)
-            raise RuntimeError(
-                f"namespace holder process sent invalid PID: {data!r}"
-            ) from exc
+            raise RuntimeError(f"namespace holder process sent invalid PID: {data!r}") from exc
 
         # If the caller provided a ready_fd, write the ready byte.
         if ready_fd >= 0:
@@ -300,25 +276,21 @@ def create_holder_process(
 
             if ready_signal == b"K":
                 # Grandchild is ready. Send its host PID to the parent.
-                try:
+                with contextlib.suppress(OSError):
                     os.write(pid_w, str(grandchild_pid).encode())
-                except OSError:
-                    pass
             os.close(pid_w)
 
             # Wait for the grandchild to exit (it won't, unless killed).
-            try:
+            with contextlib.suppress(ChildProcessError):
                 os.waitpid(grandchild_pid, 0)
-            except ChildProcessError:
-                pass
             os._exit(0)
 
-        # Grandchild – this is the actual holder (PID 1).
+        # Grandchild - this is the actual holder (PID 1).
         os.close(sync_r)
         os.close(pid_w)
         _run_holder(sync_w, rootfs)
     else:
-        # No PID namespace – the launcher itself is the holder.
+        # No PID namespace - the launcher itself is the holder.
         _run_holder(pid_w, rootfs)
 
     # Should never be reached.
@@ -333,7 +305,7 @@ def create_holder_process(
 def _run_holder(notify_fd: int, rootfs: str | None) -> None:
     """Execute the holder loop: set propagation, chroot, signal, sleep.
 
-    This function never returns – it either sleeps forever or calls
+    This function never returns - it either sleeps forever or calls
     ``os._exit``.
 
     Args:
@@ -341,10 +313,8 @@ def _run_holder(notify_fd: int, rootfs: str | None) -> None:
         rootfs: Optional root filesystem to ``chroot`` into.
     """
     # 1. Set mount propagation to private.
-    try:
+    with contextlib.suppress(OSError):
         libc_mount(None, b"/", None, MS_REC | MS_PRIVATE, None)
-    except OSError:
-        pass  # Best-effort.
 
     # 2. Isolate into rootfs if requested.
     if rootfs is not None:
@@ -381,7 +351,5 @@ def _reap_child(pid: int) -> None:
     Args:
         pid: The child PID to reap.
     """
-    try:
+    with contextlib.suppress(ChildProcessError):
         os.waitpid(pid, 0)
-    except ChildProcessError:
-        pass

@@ -8,7 +8,7 @@ import os
 import signal
 import subprocess
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from chroot_distro.constants import IS_TERMUX, PROGRAM_NAME, RUNTIME_DIR
 from chroot_distro.exceptions import ChrootDistroError, MountError
@@ -22,19 +22,20 @@ from chroot_distro.syscalls._constants import (
     MS_REC,
     MS_SLAVE,
     NS_FILE_MAP,
-    cli_flags_to_bitmask,
     bitmask_to_cli_flags,
+    cli_flags_to_bitmask,
 )
 from chroot_distro.syscalls._libc import libc_sethostname
 from chroot_distro.syscalls.mount import bind_mount, mount_filesystem, set_propagation
 from chroot_distro.syscalls.nsenter import (
-    check_ns_accessible,
     filter_accessible_namespaces,
     run_in_namespaces,
 )
 from chroot_distro.syscalls.umount import native_umount
 from chroot_distro.syscalls.unshare import (
     create_holder_process,
+)
+from chroot_distro.syscalls.unshare import (
     probe_namespace_support as _probe_ns_support,
 )
 
@@ -79,6 +80,7 @@ class NamespaceError(ChrootDistroError):
 
 
 # ── State file helpers ───────────────────────────────────────────────────────
+
 
 def _container_data_dir(container_name: str) -> str:
     data_dir = os.path.join(RUNTIME_DIR, "data", container_name)
@@ -141,6 +143,7 @@ def probe_namespace_support(flags: tuple[str, ...] = _REQUIRED_PROBE_FLAGS) -> l
 
 # ── Isolation mode persistence ───────────────────────────────────────────────
 
+
 def read_isolation_mode(container_name: str) -> str | None:
     path = _isolation_mode_file(container_name)
     if not os.path.isfile(path):
@@ -164,6 +167,7 @@ def clear_isolation_mode(container_name: str) -> None:
 
 
 # ── Process helpers ──────────────────────────────────────────────────────────
+
 
 def _pid_alive(pid: int) -> bool:
     try:
@@ -339,6 +343,7 @@ def filter_flags_by_ns_files(pid: int, flags: list[str]) -> list[str]:
 
 # ── NamespaceHolder ──────────────────────────────────────────────────────────
 
+
 @dataclass
 class NamespaceHolder:
     """A long-lived process holding mount/PID/UTS/IPC namespaces."""
@@ -401,9 +406,7 @@ class NamespaceHolder:
             env=env,
         )
         if check and result.returncode != 0:
-            raise subprocess.CalledProcessError(
-                result.returncode, cmd, result.stdout, result.stderr
-            )
+            raise subprocess.CalledProcessError(result.returncode, cmd, result.stdout, result.stderr)
         return result
 
     def is_mounted(self, target: str) -> bool:
@@ -440,11 +443,13 @@ class NamespaceHolder:
         if child_pid == 0:
             try:
                 from chroot_distro.syscalls.nsenter import enter_namespaces
+
                 enter_namespaces(self.pid, flags)
                 bind_mount(source, target, recursive=recursive, readonly=readonly, options=clean_opts)
                 os._exit(0)
             except Exception as exc:
                 import sys
+
                 try:
                     sys.stderr.write(f"do_bind_mount: {exc}\n")
                     sys.stderr.flush()
@@ -458,21 +463,22 @@ class NamespaceHolder:
         if os.WIFSIGNALED(status):
             raise MountError(f"Bind mount {source} -> {target} killed by signal {os.WTERMSIG(status)}")
 
-    def do_umount(self, target: str, *, lazy: bool = False) -> None:
+    def do_umount(self, target: str, *, lazy: bool = False, force: bool = False) -> None:
         """Unmount target inside this holder's namespaces."""
         flags = self._live_ns_flags()
         child_pid = os.fork()
         if child_pid == 0:
             try:
                 from chroot_distro.syscalls.nsenter import enter_namespaces
+
                 enter_namespaces(self.pid, flags)
-                native_umount(target, lazy=lazy)
+                native_umount(target, lazy=lazy, force=force)
                 os._exit(0)
             except Exception:
                 # Try lazy unmount as fallback
                 if not lazy:
                     try:
-                        native_umount(target, lazy=True)
+                        native_umount(target, lazy=True, force=force)
                         os._exit(0)
                     except Exception:
                         pass
@@ -496,6 +502,7 @@ class NamespaceHolder:
         if child_pid == 0:
             try:
                 from chroot_distro.syscalls.nsenter import enter_namespaces
+
                 enter_namespaces(self.pid, flags)
                 if flags & CLONE_NEWPID:
                     # Double-fork so that the process calling mount_filesystem()
@@ -504,15 +511,12 @@ class NamespaceHolder:
                     inner_pid = os.fork()
                     if inner_pid != 0:
                         _, status = os.waitpid(inner_pid, 0)
-                        os._exit(
-                            os.WEXITSTATUS(status)
-                            if os.WIFEXITED(status)
-                            else 1
-                        )
+                        os._exit(os.WEXITSTATUS(status) if os.WIFEXITED(status) else 1)
                 mount_filesystem(source, target, fstype, options=options)
                 os._exit(0)
             except Exception as exc:
                 import sys
+
                 try:
                     sys.stderr.write(f"do_mount_filesystem: {exc}\n")
                     sys.stderr.flush()
@@ -533,6 +537,7 @@ class NamespaceHolder:
         if child_pid == 0:
             try:
                 from chroot_distro.syscalls.nsenter import enter_namespaces
+
                 enter_namespaces(self.pid, flags)
                 set_propagation(target, propagation)
                 os._exit(0)
@@ -545,6 +550,7 @@ class NamespaceHolder:
 
 
 # ── Holder lifecycle ─────────────────────────────────────────────────────────
+
 
 def get_live_holder(container_name: str) -> NamespaceHolder | None:
     """Return an active holder for the container, or None."""
@@ -654,13 +660,11 @@ def _create_holder(
     _remove_holder_state(container_name)
 
     before_pids = _snapshot_all_pids()
-    before_sleep = _snapshot_sleep_infinity_pids()
+    _snapshot_sleep_infinity_pids()
 
     # ── Custom holder command path (subprocess-based, preserves pipe sync) ──
     if holder_cmd:
-        return _create_holder_subprocess(
-            container_name, flags, holder_cmd, pipe_r, env, before_pids
-        )
+        return _create_holder_subprocess(container_name, flags, holder_cmd, pipe_r, env, before_pids)
 
     # ── Native holder path (no subprocess) ──
     self_chroot_holder = bool(rootfs)
@@ -733,6 +737,7 @@ def _create_holder_subprocess(
     holder_cmd with pipe-based synchronization.
     """
     import shutil
+
     from chroot_distro.constants import TERMUX_PREFIX
 
     def _resolve_unshare() -> str:
@@ -837,9 +842,7 @@ def acquire_holder(
     if existing is not None:
         return existing
     flags = probe_unshare_flags()
-    return _create_holder(
-        container_name, flags, holder_cmd=holder_cmd, pipe_r=pipe_r, env=env, rootfs=rootfs
-    )
+    return _create_holder(container_name, flags, holder_cmd=holder_cmd, pipe_r=pipe_r, env=env, rootfs=rootfs)
 
 
 def release_holder(container_name: str) -> None:
@@ -892,6 +895,7 @@ def set_namespace_hostname(holder: NamespaceHolder, hostname: str) -> bool:
     if child_pid == 0:
         try:
             from chroot_distro.syscalls.nsenter import enter_namespaces
+
             enter_namespaces(holder.pid, holder._live_ns_flags())
             libc_sethostname(hostname)
             os._exit(0)

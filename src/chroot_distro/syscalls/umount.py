@@ -13,9 +13,9 @@ from chroot_distro.syscalls._constants import MNT_DETACH, MNT_FORCE
 from chroot_distro.syscalls._libc import libc_umount2
 
 __all__ = [
-    "native_umount",
     "MNT_DETACH",
     "MNT_FORCE",
+    "native_umount",
 ]
 
 

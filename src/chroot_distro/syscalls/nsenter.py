@@ -26,6 +26,7 @@ filter_accessible_namespaces
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import signal
@@ -183,10 +184,8 @@ def enter_namespaces(target_pid: int, namespaces: int) -> None:
             )
     finally:
         for fd in fds.values():
-            try:
+            with contextlib.suppress(OSError):
                 os.close(fd)
-            except OSError:
-                pass
 
 
 def enter_and_exec(
@@ -221,7 +220,7 @@ def enter_and_exec(
             requested.  Defaults to ``True``.
 
     Returns:
-        Exit code of the executed command (0–255).
+        Exit code of the executed command (0-255).
 
     Raises:
         OSError: If forking or entering namespaces fails.
@@ -240,11 +239,7 @@ def enter_and_exec(
                     # Middle process: wait for inner child and propagate
                     # its exit code.
                     _, status = os.waitpid(inner_pid, 0)
-                    os._exit(
-                        os.WEXITSTATUS(status)
-                        if os.WIFEXITED(status)
-                        else 128 + os.WTERMSIG(status)
-                    )
+                    os._exit(os.WEXITSTATUS(status) if os.WIFEXITED(status) else 128 + os.WTERMSIG(status))
 
             # Innermost child (or direct child if no double-fork).
             os.execvpe(command[0], command, env if env is not None else os.environ)
@@ -327,10 +322,8 @@ def run_in_namespaces(
                 # now).
                 for fd in (stdout_r, stdout_w, stderr_r, stderr_w):
                     if fd is not None:
-                        try:
+                        with contextlib.suppress(OSError):
                             os.close(fd)
-                        except OSError:
-                            pass
 
             enter_namespaces(target_pid, namespaces)
             os.execvpe(command[0], command, env if env is not None else os.environ)
@@ -349,11 +342,12 @@ def run_in_namespaces(
         stdout_data: bytes | str | None = None
         stderr_data: bytes | str | None = None
 
+        _timed_out = False
+        old_handler = None
+
         try:
             if timeout is not None:
                 # Install a SIGALRM handler to enforce the timeout.
-                _timed_out = False
-
                 def _alarm_handler(signum: int, frame: object) -> None:
                     nonlocal _timed_out
                     _timed_out = True
@@ -390,10 +384,10 @@ def run_in_namespaces(
 
             _, status = os.waitpid(child_pid, 0)
 
-            if timeout is not None:
+            if timeout is not None and old_handler is not None:
                 signal.alarm(0)  # Cancel pending alarm.
-                signal.signal(signal.SIGALRM, old_handler)  # type: ignore[possibly-undefined]
-                if _timed_out:  # type: ignore[possibly-undefined]
+                signal.signal(signal.SIGALRM, old_handler)
+                if _timed_out:
                     # The alarm fired before waitpid returned—shouldn't
                     # normally happen because SIGALRM interrupts waitpid,
                     # but handle gracefully.
@@ -402,12 +396,9 @@ def run_in_namespaces(
                         os.waitpid(child_pid, 0)
                     except OSError:
                         pass
-                    raise subprocess.TimeoutExpired(command, timeout)
+                    raise subprocess.TimeoutExpired(command, float(timeout))
 
-            if os.WIFEXITED(status):
-                returncode = os.WEXITSTATUS(status)
-            else:
-                returncode = -(os.WTERMSIG(status))
+            returncode = os.WEXITSTATUS(status) if os.WIFEXITED(status) else -os.WTERMSIG(status)
 
         except InterruptedError:
             # waitpid was interrupted by SIGALRM (timeout path).
@@ -416,19 +407,17 @@ def run_in_namespaces(
                 os.waitpid(child_pid, 0)
             except OSError:
                 pass
-            if timeout is not None:
+            if timeout is not None and old_handler is not None:
                 signal.alarm(0)
-                signal.signal(signal.SIGALRM, old_handler)  # type: ignore[possibly-undefined]
-            raise subprocess.TimeoutExpired(command, timeout)
+                signal.signal(signal.SIGALRM, old_handler)
+            raise subprocess.TimeoutExpired(command, float(timeout or 0)) from None
 
         finally:
             # Ensure pipe fds are closed even on unexpected errors.
             for fd in (stdout_r, stderr_r):
                 if fd is not None:
-                    try:
+                    with contextlib.suppress(OSError):
                         os.close(fd)
-                    except OSError:
-                        pass
 
         return subprocess.CompletedProcess(
             args=command,

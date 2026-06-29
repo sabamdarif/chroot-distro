@@ -12,7 +12,6 @@ import chroot_distro.helpers.namespace as namespace
 import chroot_distro.helpers.session as session
 from chroot_distro.commands.login import bindings
 from chroot_distro.commands.login.chroot_cmd import ChrootConfig, build_chroot_args, build_chroot_config
-from chroot_distro.syscalls.chroot import chroot_and_run
 from chroot_distro.commands.login.env import (
     ANDROID_HOST_ENV_VARS,
     IMAGE_ENV_BLOCKED,
@@ -70,6 +69,7 @@ from chroot_distro.locking import ContainerLock
 from chroot_distro.message import crit_error, warn
 from chroot_distro.names import require_valid_name
 from chroot_distro.paths import container_dir, container_log_path, container_rootfs
+from chroot_distro.syscalls.chroot import chroot_and_run
 
 log = logging.getLogger(__name__)
 
@@ -979,6 +979,7 @@ def _command_login_inner_once(container_name: str, args) -> None:
         sess_count = session.increment(container_name, lock_fh=lock_fh)
         if sess_count == 1:
             from chroot_distro.helpers.rootfs import write_resolv_conf
+
             write_resolv_conf(rootfs)
             if use_namespaces:
                 try:
@@ -1118,9 +1119,7 @@ def _command_login_inner_once(container_name: str, args) -> None:
                     enable_shm=not minimal,
                 )
                 for sm in specials:
-                    is_maxiso_dev = (
-                        max_isolation and use_namespaces and sm.fstype == "tmpfs" and sm.target == "/dev"
-                    )
+                    is_maxiso_dev = max_isolation and use_namespaces and sm.fstype == "tmpfs" and sm.target == "/dev"
                     if is_maxiso_dev:
                         # The fresh /dev tmpfs is best-effort under max
                         # isolation: if the kernel denies it (SELinux on some
@@ -1129,9 +1128,7 @@ def _command_login_inner_once(container_name: str, args) -> None:
                         # on-disk /dev. That is still not a host bind, so the
                         # session stays isolated; we just populate the device
                         # nodes directly on the rootfs /dev directory.
-                        mounted = mount_manager.apply_special_mount(
-                            rootfs, sm, holder=holder, force_optional=True
-                        )
+                        mounted = mount_manager.apply_special_mount(rootfs, sm, holder=holder, force_optional=True)
                         if not mounted:
                             warn(
                                 "Could not mount a fresh tmpfs /dev; using the "

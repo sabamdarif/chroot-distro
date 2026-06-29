@@ -1,3 +1,4 @@
+import contextlib
 import logging
 import os
 import shlex
@@ -171,24 +172,18 @@ def build_chroot_config(
     parsed_groups: list[int] | None = None
 
     if login_uid is not None:
-        try:
+        with contextlib.suppress(ValueError, TypeError):
             uid = int(login_uid)
-        except (ValueError, TypeError):
-            pass
 
     if login_gid is not None:
-        try:
+        with contextlib.suppress(ValueError, TypeError):
             gid = int(login_gid)
-        except (ValueError, TypeError):
-            pass
 
     if groups:
         parsed_groups = []
         for g in groups:
-            try:
+            with contextlib.suppress(ValueError, TypeError):
                 parsed_groups.append(int(g))
-            except (ValueError, TypeError):
-                pass
 
     # Resolve inner command with workdir wrapping (same logic as build_chroot_args).
     cmd = list(inner_cmd) if inner_cmd else []
@@ -221,4 +216,3 @@ def build_chroot_config(
         groups=parsed_groups,
         workdir=effective_wd,
     )
-

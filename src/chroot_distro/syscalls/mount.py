@@ -31,20 +31,20 @@ from chroot_distro.syscalls._libc import libc_mount
 #   from chroot_distro.syscalls.mount import MS_PRIVATE
 # without touching _constants directly.
 __all__ = [
-    "native_mount",
-    "bind_mount",
-    "mount_filesystem",
-    "set_propagation",
     "MS_BIND",
-    "MS_REC",
-    "MS_REMOUNT",
-    "MS_RDONLY",
-    "MS_NOSUID",
     "MS_NODEV",
     "MS_NOEXEC",
+    "MS_NOSUID",
     "MS_PRIVATE",
-    "MS_SLAVE",
+    "MS_RDONLY",
+    "MS_REC",
+    "MS_REMOUNT",
     "MS_SHARED",
+    "MS_SLAVE",
+    "bind_mount",
+    "mount_filesystem",
+    "native_mount",
+    "set_propagation",
 ]
 
 # ---------------------------------------------------------------------------
@@ -99,8 +99,8 @@ def _parse_mount_options(options: str) -> int:
         return 0
 
     flags = 0
-    for token in options.split(","):
-        token = token.strip()
+    for raw_token in options.split(","):
+        token = raw_token.strip()
         bit = _OPTION_FLAG_MAP.get(token)
         if bit is not None:
             flags |= bit
@@ -121,8 +121,8 @@ def _parse_and_split_mount_options(options: str, initial_flags: int = 0) -> tupl
 
     flags = initial_flags
     data_tokens = []
-    for token in options.split(","):
-        token = token.strip()
+    for raw_token in options.split(","):
+        token = raw_token.strip()
         bit = _OPTION_FLAG_MAP.get(token)
         if bit is not None:
             flags |= bit

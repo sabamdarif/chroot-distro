@@ -1,4 +1,4 @@
-"""Shared libc handle, errno helper, and Python 3.10–3.11 backports.
+"""Shared libc handle, errno helper, and Python 3.10-3.11 backports.
 
 Every syscall module in this package imports its libc handle and error
 checking from here, ensuring a single ``ctypes.CDLL`` instance is reused
@@ -27,12 +27,12 @@ def get_libc() -> ctypes.CDLL:
     The handle is created with ``use_errno=True`` so that ``ctypes.get_errno()``
     returns the thread-local errno after each call.
     """
-    global _libc_handle
+    global _libc_handle  # noqa: PLW0603
     if _libc_handle is not None:
         return _libc_handle
     with _libc_lock:
-        if _libc_handle is not None:  # double-check
-            return _libc_handle
+        if _libc_handle is not None:
+            return _libc_handle  # type: ignore[unreachable]
         name = ctypes.util.find_library("c")
         if name is None:
             # Fallback: on many Linux systems the soname is predictable.
@@ -59,30 +59,29 @@ def check_syscall(result: int, func_name: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Python 3.10–3.11 backports for os.unshare / os.setns
+# Python 3.10-3.11 backports for os.unshare / os.setns
 # ---------------------------------------------------------------------------
 
 if sys.version_info >= (3, 12):
-    # Python 3.12+ exposes these natively.
-    py_unshare = os.unshare  # type: ignore[attr-defined]
-    py_setns = os.setns  # type: ignore[attr-defined]
+    from os import setns as py_setns
+    from os import unshare as py_unshare
 else:
 
     def py_unshare(flags: int) -> None:
-        """Call ``unshare(2)`` via ctypes (backport for Python < 3.12)."""
+        """Call ``unshare(2)`` directly using ctypes."""
         libc = get_libc()
         result = libc.unshare(ctypes.c_int(flags))
         check_syscall(result, "unshare")
 
-    def py_setns(fd: int, nstype: int = 0) -> None:
-        """Call ``setns(2)`` via ctypes (backport for Python < 3.12)."""
+    def py_setns(fd: int, nstype: int) -> None:
+        """Call ``setns(2)`` directly using ctypes."""
         libc = get_libc()
         result = libc.setns(ctypes.c_int(fd), ctypes.c_int(nstype))
         check_syscall(result, "setns")
 
 
 # ---------------------------------------------------------------------------
-# Additional raw syscall wrappers not in the os module
+# Linux syscall wrappers
 # ---------------------------------------------------------------------------
 
 
@@ -93,10 +92,7 @@ def libc_mount(
     flags: int,
     data: bytes | None,
 ) -> None:
-    """Call ``mount(2)`` via ctypes.
-
-    All string arguments must already be encoded to ``bytes``.
-    """
+    """Call Linux ``mount(2)`` via ctypes."""
     libc = get_libc()
     result = libc.mount(
         source,
@@ -109,17 +105,14 @@ def libc_mount(
 
 
 def libc_umount2(target: bytes, flags: int) -> None:
-    """Call ``umount2(2)`` via ctypes.
-
-    *target* must be an encoded bytes path.
-    """
+    """Call Linux ``umount2(2)`` via ctypes."""
     libc = get_libc()
     result = libc.umount2(target, ctypes.c_int(flags))
     check_syscall(result, "umount2")
 
 
 def libc_sethostname(name: str) -> None:
-    """Call ``sethostname(2)`` via ctypes."""
+    """Call Linux ``sethostname(2)`` via ctypes."""
     libc = get_libc()
     name_bytes = name.encode()
     result = libc.sethostname(name_bytes, len(name_bytes))
@@ -136,10 +129,12 @@ def libc_prctl(option: int, *args: int) -> int:
     libc = get_libc()
     # prctl takes up to 5 unsigned long arguments after the option.
     padded = list(args) + [0] * (4 - len(args))
-    return libc.prctl(
-        ctypes.c_int(option),
-        ctypes.c_ulong(padded[0]),
-        ctypes.c_ulong(padded[1]),
-        ctypes.c_ulong(padded[2]),
-        ctypes.c_ulong(padded[3]),
+    return int(
+        libc.prctl(
+            ctypes.c_int(option),
+            ctypes.c_ulong(padded[0]),
+            ctypes.c_ulong(padded[1]),
+            ctypes.c_ulong(padded[2]),
+            ctypes.c_ulong(padded[3]),
+        )
     )

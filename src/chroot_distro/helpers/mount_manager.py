@@ -5,13 +5,12 @@ import errno
 import logging
 import os
 import re
-import subprocess
 from typing import TYPE_CHECKING
 
 from chroot_distro.exceptions import MountError
 from chroot_distro.message import warn
 from chroot_distro.syscalls._constants import MS_REC, MS_SLAVE
-from chroot_distro.syscalls.mount import bind_mount, mount_filesystem, native_mount, set_propagation
+from chroot_distro.syscalls.mount import bind_mount, mount_filesystem, set_propagation
 from chroot_distro.syscalls.umount import native_umount
 
 if TYPE_CHECKING:
@@ -337,9 +336,7 @@ def _fs_supported(fstype: str) -> bool:
         return False
 
 
-def apply_special_mount(
-    rootfs: str, sm, holder: NamespaceHolder | None = None, force_optional: bool = False
-) -> bool:
+def apply_special_mount(rootfs: str, sm, holder: NamespaceHolder | None = None, force_optional: bool = False) -> bool:
     """Execute a single SpecialMount inside rootfs.
 
     Returns True on success, False on failure (when optional). Raises

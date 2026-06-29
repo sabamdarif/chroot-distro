@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 import os
 import signal
+import subprocess
 import sys
 
 log = logging.getLogger(__name__)
@@ -132,7 +133,7 @@ def chroot_and_exec(
     Returns
     -------
     int
-        The child's exit code (0–255).  If the child was killed by a
+        The child's exit code (0-255).  If the child was killed by a
         signal, returns 128 + signal_number.
     """
     child_pid = os.fork()
@@ -182,7 +183,7 @@ def chroot_and_run(
     capture_output: bool = False,
     text: bool = False,
     timeout: int | None = None,
-) -> "CompletedProcess":
+) -> subprocess.CompletedProcess:
     """Fork, chroot, exec command, and capture output.
 
     Similar to :func:`chroot_and_exec` but returns a

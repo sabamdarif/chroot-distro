@@ -1,17 +1,18 @@
 """Unit tests for native namespace isolation helpers."""
 
-from unittest.mock import MagicMock, mock_open, patch
 import os
 import signal
+from unittest.mock import MagicMock, mock_open, patch
+
 import pytest
 
 from chroot_distro.helpers import namespace as ns
 from chroot_distro.syscalls._constants import (
+    CLONE_NEWCGROUP,
+    CLONE_NEWIPC,
     CLONE_NEWNS,
     CLONE_NEWPID,
     CLONE_NEWUTS,
-    CLONE_NEWIPC,
-    CLONE_NEWCGROUP,
     MS_PRIVATE,
     MS_REC,
     MS_SLAVE,
@@ -20,6 +21,7 @@ from chroot_distro.syscalls._constants import (
 # ---------------------------------------------------------------------------
 # CD_USE_NS environment detection
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.parametrize("value", ["1", "true", "TRUE", "Yes", "on", "  on  "])
 def test_use_ns_env_enabled_truthy(value):
@@ -53,6 +55,7 @@ def test_should_use_namespaces_env_enables_without_flag():
 # Namespace probing
 # ---------------------------------------------------------------------------
 
+
 @patch("chroot_distro.helpers.namespace._probe_ns_support")
 def test_probe_unshare_flags_requires_mount(mock_probe):
     # If CLONE_NEWNS is not supported, it must raise NamespaceError.
@@ -81,6 +84,7 @@ def test_probe_namespace_support_reports_missing(mock_probe):
 # Namespace helper operations
 # ---------------------------------------------------------------------------
 
+
 def test_set_namespace_hostname_skips_without_uts():
     holder = MagicMock(container_name="alpine")
     with patch("chroot_distro.helpers.namespace._read_holder_flags", return_value=CLONE_NEWNS | CLONE_NEWPID):
@@ -89,8 +93,7 @@ def test_set_namespace_hostname_skips_without_uts():
 
 @patch("chroot_distro.helpers.namespace.os.fork", return_value=9999)
 @patch("chroot_distro.helpers.namespace.os.waitpid", return_value=(9999, 0))
-@patch("chroot_distro.helpers.namespace.check_ns_accessible", return_value=True)
-def test_set_namespace_hostname_success(mock_check, mock_waitpid, mock_fork):
+def test_set_namespace_hostname_success(mock_waitpid, mock_fork):
     holder = MagicMock(container_name="alpine", pid=123)
     holder._live_ns_flags.return_value = CLONE_NEWUTS
     with patch("chroot_distro.helpers.namespace._read_holder_flags", return_value=CLONE_NEWUTS):
@@ -125,6 +128,7 @@ def test_make_mount_private_returns_false_when_all_fail():
 # ---------------------------------------------------------------------------
 # Holder state and lifecycle
 # ---------------------------------------------------------------------------
+
 
 @patch("chroot_distro.helpers.namespace.filter_accessible_namespaces", return_value=CLONE_NEWNS)
 @patch("chroot_distro.helpers.namespace._pid_alive", return_value=True)
