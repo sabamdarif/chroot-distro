@@ -92,7 +92,7 @@ def native_chroot(
         os.setuid(uid)
 
     if command is not None:
-        os.execvp(command[0], command)
+        _try_exec(command, dict(os.environ))
 
 
 def chroot_and_exec(
@@ -157,7 +157,7 @@ def chroot_and_exec(
             if uid is not None:
                 os.setuid(uid)
 
-            os.execvp(command[0], command)
+            _try_exec(command, dict(os.environ))
         except Exception as exc:
             # If anything fails in the child, write to stderr and exit.
             try:
@@ -250,7 +250,7 @@ def chroot_and_run(
             if uid is not None:
                 os.setuid(uid)
 
-            os.execvp(command[0], command)
+            _try_exec(command, dict(os.environ))
         except Exception as exc:
             try:
                 sys.stderr.write(f"chroot_and_run: {exc}\n")
@@ -334,3 +334,75 @@ def _read_all(fd: int) -> bytes:
             break
         chunks.append(chunk)
     return b"".join(chunks)
+
+
+def _read_pt_interp(data: bytes, is64: bool, endian: str) -> str | None:
+    """Extract the PT_INTERP path from raw ELF *data*, or None."""
+    import struct as _struct
+
+    pt_interp = 3
+    if is64:
+        (e_phoff,) = _struct.unpack_from(endian + "Q", data, 32)
+        e_phentsize, e_phnum = _struct.unpack_from(endian + "HH", data, 54)
+        for i in range(e_phnum):
+            base = e_phoff + i * e_phentsize
+            p_type, = _struct.unpack_from(endian + "I", data, base)
+            if p_type == pt_interp:
+                p_offset, = _struct.unpack_from(endian + "Q", data, base + 8)
+                p_filesz, = _struct.unpack_from(endian + "Q", data, base + 32)
+                return data[p_offset : p_offset + p_filesz].rstrip(b"\x00").decode("ascii", "replace")
+    else:
+        (e_phoff,) = _struct.unpack_from(endian + "I", data, 28)
+        e_phentsize, e_phnum = _struct.unpack_from(endian + "HH", data, 42)
+        for i in range(e_phnum):
+            base = e_phoff + i * e_phentsize
+            p_type, = _struct.unpack_from(endian + "I", data, base)
+            if p_type == pt_interp:
+                p_offset, = _struct.unpack_from(endian + "I", data, base + 4)
+                p_filesz, = _struct.unpack_from(endian + "I", data, base + 16)
+                return data[p_offset : p_offset + p_filesz].rstrip(b"\x00").decode("ascii", "replace")
+    return None
+
+
+def _binary_interpreter(target: str) -> str | None:
+    """Return *target*'s PT_INTERP (dynamic linker) path, or None.
+
+    Best-effort: reads the ELF header and program headers. Used to run the
+    shell via its interpreter explicitly when a direct execve fails with
+    ENOENT despite the binary and interpreter both existing (a Termux/Android
+    quirk on the chroot login path).
+    """
+    try:
+        with open(target, "rb") as fh:
+            head = fh.read(64)
+            if head[:4] != b"\x7fELF":
+                return None
+            is64 = head[4] == 2
+            endian = "<" if head[5] == 1 else ">"
+            fh.seek(0)
+            return _read_pt_interp(fh.read(), is64, endian)
+    except OSError:
+        return None
+
+
+def _try_exec(cmd: list[str], run_env: dict[str, str]) -> None:
+    """Attempt to exec *cmd*; on ENOENT for an existing binary, retry via its
+    ELF interpreter. Returns the final OSError (this never returns on success).
+
+    A direct ``execve`` of a dynamically linked guest binary can fail with
+    ENOENT on some Termux/Android kernels even though the binary, its
+    architecture and its PT_INTERP all exist inside the chroot. Re-running it
+    as ``<interpreter> <binary> <args...>`` makes the dynamic linker load the
+    program explicitly and sidesteps that failure.
+    """
+    import errno as _errno
+
+    try:
+        os.execvpe(cmd[0], cmd, run_env)
+    except OSError as exc:
+        if exc.errno != _errno.ENOENT or not os.path.exists(cmd[0]):
+            raise
+        interp = _binary_interpreter(cmd[0])
+        if not interp or not os.path.exists(interp):
+            raise
+        os.execvpe(interp, [interp, *cmd], run_env)
