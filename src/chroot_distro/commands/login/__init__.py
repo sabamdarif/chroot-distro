@@ -11,7 +11,8 @@ import chroot_distro.helpers.mount_manager as mount_manager
 import chroot_distro.helpers.namespace as namespace
 import chroot_distro.helpers.session as session
 from chroot_distro.commands.login import bindings
-from chroot_distro.commands.login.chroot_cmd import build_chroot_args
+from chroot_distro.commands.login.chroot_cmd import ChrootConfig, build_chroot_args, build_chroot_config
+from chroot_distro.syscalls.chroot import chroot_and_run
 from chroot_distro.commands.login.env import (
     ANDROID_HOST_ENV_VARS,
     IMAGE_ENV_BLOCKED,
@@ -960,6 +961,7 @@ def _command_login_inner_once(container_name: str, args) -> None:
     holder = None
     pipe_w = None
     chroot_args = None
+    chroot_config: ChrootConfig | None = None
 
     try:
         host_mounts_exist = bool(mount_manager.get_active_mounts(rootfs))
@@ -1283,6 +1285,15 @@ def _command_login_inner_once(container_name: str, args) -> None:
             inner_cmd=inner,
             is_run=run_inner is not None,
         )
+        chroot_config = build_chroot_config(
+            rootfs=rootfs,
+            login_uid=login_uid,
+            login_gid=login_gid,
+            groups=groups,
+            workdir=login_wd,
+            inner_cmd=inner,
+            is_run=run_inner is not None,
+        )
 
     exec_argv = chroot_args
     if holder is not None:
@@ -1352,7 +1363,19 @@ def _command_login_inner_once(container_name: str, args) -> None:
                         namespace.clear_isolation_mode(container_name)
     else:
         try:
-            subprocess.run(exec_argv, env=child_env, check=False)
+            if chroot_config is not None and holder is None:
+                # Native path: chroot + exec without spawning the chroot binary.
+                chroot_and_run(
+                    chroot_config.rootfs,
+                    chroot_config.command,
+                    uid=chroot_config.uid,
+                    gid=chroot_config.gid,
+                    groups=chroot_config.groups,
+                    workdir=chroot_config.workdir,
+                    env=child_env,
+                )
+            else:
+                subprocess.run(exec_argv, env=child_env, check=False)
         finally:
             if _sess_handle is not None:
                 _sess_handle.close()

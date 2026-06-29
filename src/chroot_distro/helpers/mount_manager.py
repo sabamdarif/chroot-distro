@@ -1,47 +1,23 @@
 from __future__ import annotations
 
 import contextlib
+import errno
 import logging
 import os
 import re
-import shutil
 import subprocess
 from typing import TYPE_CHECKING
 
-from chroot_distro.constants import IS_TERMUX, TERMUX_PREFIX
 from chroot_distro.exceptions import MountError
 from chroot_distro.message import warn
+from chroot_distro.syscalls._constants import MS_REC, MS_SLAVE
+from chroot_distro.syscalls.mount import bind_mount, mount_filesystem, native_mount, set_propagation
+from chroot_distro.syscalls.umount import native_umount
 
 if TYPE_CHECKING:
     from chroot_distro.helpers.namespace import NamespaceHolder
 
 log = logging.getLogger(__name__)
-
-
-def _resolve_mount() -> str:
-    if IS_TERMUX:
-        termux_mount = os.path.join(TERMUX_PREFIX, "bin", "mount")
-        if os.path.isfile(termux_mount):
-            return termux_mount
-    resolved = shutil.which("mount")
-    if not resolved:
-        raise MountError(
-            "Required executable 'mount' not found on the system. Please install mount-utils or ensure it is in your PATH."
-        )
-    return resolved
-
-
-def _resolve_umount() -> str:
-    if IS_TERMUX:
-        termux_umount = os.path.join(TERMUX_PREFIX, "bin", "umount")
-        if os.path.isfile(termux_umount):
-            return termux_umount
-    resolved = shutil.which("umount")
-    if not resolved:
-        raise MountError(
-            "Required executable 'umount' not found on the system. Please install mount-utils or ensure it is in your PATH."
-        )
-    return resolved
 
 
 def decode_mount_path(path: str) -> str:
@@ -107,12 +83,6 @@ def is_mounted(target: str, holder: NamespaceHolder | None = None) -> bool:
     except OSError:
         pass
     return False
-
-
-def _run_mount_cmd(cmd: list[str], holder: NamespaceHolder | None) -> subprocess.CompletedProcess:
-    if holder is not None:
-        return holder.run(cmd, capture_output=True, text=True)
-    return subprocess.run(cmd, capture_output=True, text=True, check=False)
 
 
 # Mount options accepted in a --bind spec that are not kernel mount(2)
@@ -185,45 +155,27 @@ def safe_mount(
     if is_mounted(target, holder=holder):
         return
 
-    try:
-        cmd = [_resolve_mount(), "--rbind" if recursive else "--bind", source_abs, target]
-        result = _run_mount_cmd(cmd, holder)
-        if result.returncode != 0:
-            raise subprocess.CalledProcessError(
-                result.returncode,
-                result.args,
-                result.stdout,
-                result.stderr,
-            )
-    except subprocess.CalledProcessError as e:
-        if created_stub:
-            # Remove the empty stub we created so it does not shadow a real
-            # file (e.g. the container's own libGL.so) when the bind fails.
-            with contextlib.suppress(OSError):
-                os.remove(target)
-        stderr = (e.stderr or "").strip() if hasattr(e, "stderr") else ""
-        raise MountError(f"Failed to mount {source} to {target}: {stderr}") from e
-
     kernel_options = _filter_bind_options(options)
-    if not kernel_options:
-        return
 
-    remount_flags = "remount,bind"
-    if recursive:
-        remount_flags = "remount,rbind"
-    try:
-        remount_cmd = [_resolve_mount(), "-o", f"{remount_flags},{kernel_options}", target]
-        result = _run_mount_cmd(remount_cmd, holder)
-        if result.returncode != 0:
-            raise subprocess.CalledProcessError(
-                result.returncode,
-                result.args,
-                result.stdout,
-                result.stderr,
-            )
-    except subprocess.CalledProcessError as e:
-        stderr = (e.stderr or "").strip() if hasattr(e, "stderr") else ""
-        raise MountError(f"Failed to apply mount options '{kernel_options}' to {target}: {stderr}") from e
+    if holder is not None:
+        # When a namespace holder is active, mount operations must happen
+        # inside the holder's mount namespace. Use run_in_namespaces.
+        try:
+            holder.do_bind_mount(source_abs, target, recursive=recursive, options=kernel_options)
+        except (OSError, MountError) as e:
+            if created_stub:
+                with contextlib.suppress(OSError):
+                    os.remove(target)
+            raise MountError(f"Failed to mount {source} to {target}: {e}") from e
+    else:
+        # Direct syscall path — no holder, no subprocess.
+        try:
+            bind_mount(source_abs, target, recursive=recursive, options=kernel_options)
+        except OSError as e:
+            if created_stub:
+                with contextlib.suppress(OSError):
+                    os.remove(target)
+            raise MountError(f"Failed to mount {source} to {target}: {e}") from e
 
 
 def create_dev_nodes(
@@ -275,20 +227,23 @@ def make_rslave(target: str, holder: NamespaceHolder | None = None) -> bool:
     target_abs = os.path.realpath(target)
     if not is_mounted(target_abs, holder=holder):
         return False
-    try:
-        result = _run_mount_cmd([_resolve_mount(), "--make-rslave", target_abs], holder)
-        if result.returncode != 0:
-            log.debug(
-                "make-rslave failed for %s: %s",
-                target_abs,
-                (result.stderr or "").strip(),
-            )
+
+    if holder is not None:
+        try:
+            holder.do_set_propagation(target_abs, MS_REC | MS_SLAVE)
+            log.debug("Set rslave propagation on %s (via holder)", target_abs)
+            return True
+        except Exception:
+            log.debug("make-rslave exception for %s (via holder)", target_abs, exc_info=True)
             return False
-    except Exception:
-        log.debug("make-rslave exception for %s", target_abs, exc_info=True)
-        return False
-    log.debug("Set rslave propagation on %s", target_abs)
-    return True
+    else:
+        try:
+            set_propagation(target_abs, MS_REC | MS_SLAVE)
+        except OSError:
+            log.debug("make-rslave failed for %s", target_abs, exc_info=True)
+            return False
+        log.debug("Set rslave propagation on %s", target_abs)
+        return True
 
 
 # Recursive bind targets (/dev, /run and friends) frequently report
@@ -313,42 +268,36 @@ def safe_unmount(target: str, holder: NamespaceHolder | None = None) -> None:
     if not is_mounted(target, holder=holder):
         return
 
+    if holder is not None:
+        # Unmount inside the holder's mount namespace.
+        try:
+            holder.do_umount(target)
+        except MountError:
+            raise
+        except Exception as e:
+            raise MountError(f"Failed to unmount {target}: {e}") from e
+        return
+
+    # Direct syscall path — no holder.
     try:
-        result = _run_mount_cmd([_resolve_umount(), target], holder)
-        if result.returncode != 0:
-            raise subprocess.CalledProcessError(
-                result.returncode,
-                result.args,
-                result.stdout,
-                result.stderr,
-            )
-    except subprocess.CalledProcessError as e:
-        stderr = (e.stderr or "").strip() if hasattr(e, "stderr") else ""
-        # "not mounted" means the mount is already gone (e.g. it was
-        # shadowed by a parent bind mount and became unreachable). Treat
-        # it as a successful unmount rather than escalating to lazy/error.
-        if "not mounted" in stderr:
+        native_umount(target)
+    except OSError as e:
+        if e.errno == errno.EINVAL:
+            # "not mounted" — already gone.
             log.debug("umount reports '%s' is not mounted; treating as already unmounted.", target)
             return
+        err_msg = str(e)
         if _is_recursive_bind_target(target):
-            log.debug("Standard umount failed for %s (%s); using lazy umount.", target, stderr)
+            log.debug("Standard umount failed for %s (%s); using lazy umount.", target, err_msg)
         else:
-            warn(f"Standard umount failed for {target} ({stderr}). Trying lazy umount...")
+            warn(f"Standard umount failed for {target} ({err_msg}). Trying lazy umount...")
         try:
-            result = _run_mount_cmd([_resolve_umount(), "-l", target], holder)
-            if result.returncode != 0:
-                raise subprocess.CalledProcessError(
-                    result.returncode,
-                    result.args,
-                    result.stdout,
-                    result.stderr,
-                )
-        except subprocess.CalledProcessError as e_lazy:
-            lazy_stderr = (e_lazy.stderr or "").strip() if hasattr(e_lazy, "stderr") else ""
-            if "not mounted" in lazy_stderr:
+            native_umount(target, lazy=True)
+        except OSError as e_lazy:
+            if e_lazy.errno == errno.EINVAL:
                 log.debug("Lazy umount reports '%s' is not mounted; treating as already unmounted.", target)
                 return
-            raise MountError(f"Failed to unmount {target} (lazy umount also failed): {lazy_stderr}") from e_lazy
+            raise MountError(f"Failed to unmount {target} (lazy umount also failed): {e_lazy}") from e_lazy
 
 
 def unmount_all(rootfs: str, holder: NamespaceHolder | None = None) -> None:
@@ -460,35 +409,28 @@ def apply_special_mount(
         option_attempts.append("")
 
     last_err = ""
-    last_code = 0
-    last_cmd: list[str] = []
     for opts in option_attempts:
-        cmd = [_resolve_mount(), "-t", sm.fstype]
-        if opts:
-            cmd += ["-o", opts]
-        cmd += [sm.source, target]
-        last_cmd = cmd
-        try:
-            if holder is not None:
-                result = holder.run(cmd, capture_output=True, text=True, timeout=15)
-            else:
-                result = subprocess.run(cmd, capture_output=True, text=True, timeout=15, check=False)
-        except subprocess.TimeoutExpired as exc:
-            msg = f"mount timeout for {sm.fstype} at {target}"
-            if optional:
-                log.debug(msg)
-                return False
-            raise RuntimeError(msg) from exc
-
-        if result.returncode == 0:
-            log.debug("Mounted %s at %s (options=%r)", sm.fstype, sm.target, opts)
-            return True
-        last_code = result.returncode
-        last_err = ((result.stderr or "").strip() or (result.stdout or "").strip())
-        log.debug("mount -t %s opts=%r failed (rc=%s): %s", sm.fstype, opts, last_code, last_err)
+        if holder is not None:
+            # Inside a namespace holder, use holder.do_mount_filesystem()
+            try:
+                holder.do_mount_filesystem(sm.source, target, sm.fstype, options=opts)
+                log.debug("Mounted %s at %s (options=%r) via holder", sm.fstype, sm.target, opts)
+                return True
+            except OSError as e:
+                last_err = str(e)
+                log.debug("mount -t %s opts=%r failed via holder: %s", sm.fstype, opts, last_err)
+        else:
+            # Direct syscall path.
+            try:
+                mount_filesystem(sm.source, target, sm.fstype, options=opts)
+                log.debug("Mounted %s at %s (options=%r)", sm.fstype, sm.target, opts)
+                return True
+            except OSError as e:
+                last_err = str(e)
+                log.debug("mount -t %s opts=%r failed (native): %s", sm.fstype, opts, last_err)
 
     detail = last_err or "(no error output)"
-    msg = f"mount -t {sm.fstype} at {target} failed (exit {last_code}): {detail}; cmd: {' '.join(last_cmd)}"
+    msg = f"mount -t {sm.fstype} at {target} failed: {detail}"
     if optional:
         log.debug(msg)
         return False

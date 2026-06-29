@@ -1,3 +1,4 @@
+import logging
 import os
 import shlex
 import shutil
@@ -5,6 +6,19 @@ import sys
 
 from chroot_distro.constants import IS_TERMUX
 from chroot_distro.exceptions import RootRequiredError
+from chroot_distro.syscalls._constants import (
+    CAP_DAC_OVERRIDE,
+    CAP_MKNOD,
+    CAP_SETGID,
+    CAP_SETUID,
+    CAP_SYS_ADMIN,
+    CAP_SYS_CHROOT,
+    PR_CAP_AMBIENT,
+    PR_CAP_AMBIENT_IS_SET,
+)
+from chroot_distro.syscalls._libc import libc_prctl
+
+log = logging.getLogger(__name__)
 
 # Runtime CD_* environment variables that influence behaviour *after* the
 # tool re-executes as root. They must be forwarded explicitly across the
@@ -69,13 +83,75 @@ def _find_escalation_tool() -> list[str] | None:
     return None
 
 
+# ---------------------------------------------------------------------------
+# Linux capability checking
+# ---------------------------------------------------------------------------
+
+# The minimum set of capabilities chroot-distro needs.
+REQUIRED_CAPS: tuple[int, ...] = (
+    CAP_SYS_CHROOT,  # chroot(2)
+    CAP_SYS_ADMIN,   # mount(2), umount2(2), unshare(2), setns(2)
+    CAP_SETUID,       # setuid(2) — switch to container user
+    CAP_SETGID,       # setgid(2), setgroups(2)
+    CAP_MKNOD,        # mknod(2) — create /dev nodes
+    CAP_DAC_OVERRIDE, # file access inside rootfs
+)
+
+
+def _check_proc_cap(cap: int) -> bool:
+    """Fall back to reading /proc/self/status for the effective capability set."""
+    try:
+        with open("/proc/self/status") as fh:
+            for line in fh:
+                if line.startswith("CapEff:"):
+                    cap_hex = int(line.split(":")[1].strip(), 16)
+                    return bool(cap_hex & (1 << cap))
+    except (OSError, ValueError, IndexError):
+        pass
+    return False
+
+
+def has_capability(cap: int) -> bool:
+    """Check if the current process has a specific Linux capability.
+
+    Tries ``prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, cap)`` first,
+    falls back to parsing ``/proc/self/status`` CapEff.
+    """
+    result = libc_prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, cap)
+    if result >= 0:
+        return bool(result)
+    # prctl may return -1 if ambient caps are not supported; fall back.
+    return _check_proc_cap(cap)
+
+
+def has_required_capabilities() -> bool:
+    """Return True if all required capabilities are available.
+
+    Root (UID 0) is assumed to have all capabilities.
+    """
+    if os.getuid() == 0:
+        return True
+    return all(has_capability(cap) for cap in REQUIRED_CAPS)
+
+
 def elevate_or_die() -> None:
     """Attempt to re-execute the current script with root privileges.
 
-    If already elevating (to prevent infinite loops) or if no escalation tool is found,
-    raises RootRequiredError.
+    The check order is:
+
+    1. Already root → return immediately.
+    2. File capabilities are set → return (no sudo needed).
+    3. Otherwise → re-exec via sudo/doas/pkexec/su.
+
+    If already elevating (to prevent infinite loops) or if no escalation
+    tool is found, raises RootRequiredError.
     """
     if is_root():
+        return
+
+    # Phase 2: check if we have sufficient file capabilities.
+    if has_required_capabilities():
+        log.debug("Running with file capabilities — sudo not required")
         return
 
     # Check loop sentinel

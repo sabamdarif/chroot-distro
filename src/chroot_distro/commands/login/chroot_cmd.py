@@ -2,12 +2,32 @@ import logging
 import os
 import shlex
 import shutil
+from dataclasses import dataclass, field
 
 from chroot_distro.commands.login.passwd import resolve_rootfs_path
 from chroot_distro.constants import IS_TERMUX, TERMUX_PREFIX
 from chroot_distro.exceptions import ChrootDistroError
 
 log = logging.getLogger(__name__)
+
+
+@dataclass
+class ChrootConfig:
+    """Structured representation of a chroot invocation.
+
+    Unlike :func:`build_chroot_args` which returns a command-line ``list[str]``
+    for the GNU ``chroot`` binary, this dataclass carries the individual
+    parameters so that :func:`chroot_distro.syscalls.chroot.chroot_and_exec`
+    can be called directly without parsing them back out of a string.
+    """
+
+    rootfs: str
+    command: list[str] = field(default_factory=list)
+    uid: int | None = None
+    gid: int | None = None
+    groups: list[int] | None = None
+    workdir: str = "/"
+    env: dict[str, str] | None = None
 
 
 def _find_rootfs_shell(rootfs: str) -> str | None:
@@ -128,3 +148,77 @@ def build_chroot_args(
         args.extend(cmd)
 
     return args
+
+
+def build_chroot_config(
+    rootfs: str,
+    login_uid: str | None = None,
+    login_gid: str | None = None,
+    groups: list[str] | None = None,
+    workdir: str = "",
+    inner_cmd: list[str] | None = None,
+    is_run: bool = False,
+) -> ChrootConfig:
+    """Build a :class:`ChrootConfig` for native chroot execution.
+
+    The signature mirrors :func:`build_chroot_args` so callers can
+    construct both the legacy command-list and the structured config
+    from the same parameters.  The ``ChrootConfig`` is consumed by
+    :func:`chroot_distro.syscalls.chroot.chroot_and_exec`.
+    """
+    uid: int | None = None
+    gid: int | None = None
+    parsed_groups: list[int] | None = None
+
+    if login_uid is not None:
+        try:
+            uid = int(login_uid)
+        except (ValueError, TypeError):
+            pass
+
+    if login_gid is not None:
+        try:
+            gid = int(login_gid)
+        except (ValueError, TypeError):
+            pass
+
+    if groups:
+        parsed_groups = []
+        for g in groups:
+            try:
+                parsed_groups.append(int(g))
+            except (ValueError, TypeError):
+                pass
+
+    # Resolve inner command with workdir wrapping (same logic as build_chroot_args).
+    cmd = list(inner_cmd) if inner_cmd else []
+    effective_wd = workdir if workdir else "/"
+
+    if workdir and workdir != "/" and not is_run:
+        shell_path = _find_rootfs_shell(rootfs)
+        if shell_path:
+            quoted_workdir = shlex.quote(workdir)
+            wrapped = (
+                f"cd {quoted_workdir} 2>/dev/null || cd /; exec {shlex.join(cmd)}"
+                if cmd
+                else f"cd {quoted_workdir} 2>/dev/null || cd /"
+            )
+            cmd = [shell_path, "-c", wrapped]
+            effective_wd = "/"  # cd is handled inside the shell wrapper
+        else:
+            log.debug(
+                "No usable shell in rootfs %s; skipping workdir cd to %s",
+                rootfs,
+                workdir,
+            )
+            effective_wd = "/"
+
+    return ChrootConfig(
+        rootfs=rootfs,
+        command=cmd,
+        uid=uid,
+        gid=gid,
+        groups=parsed_groups,
+        workdir=effective_wd,
+    )
+

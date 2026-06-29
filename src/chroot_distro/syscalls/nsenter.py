@@ -1,0 +1,463 @@
+"""Wrap ``setns(2)`` for entering existing Linux namespaces.
+
+This module provides pure-Python replacements for the ``nsenter(1)`` binary.
+Namespace file descriptors are opened from ``/proc/<pid>/ns/<name>`` and
+joined via :func:`~chroot_distro.syscalls._libc.py_setns`.
+
+The two-pass strategy in :func:`enter_namespaces` mirrors the approach used
+by ``util-linux nsenter.c``: the first pass silently attempts every non-user
+namespace (some may fail because the caller has not yet entered the user
+namespace), and the second pass enters any remaining namespaces, raising on
+error.
+
+Functions
+---------
+check_ns_accessible
+    Probe whether a namespace file can be opened.
+enter_namespaces
+    Join one or more namespaces of a running process.
+enter_and_exec
+    Fork, enter namespaces, and ``execvpe`` a command.
+run_in_namespaces
+    Higher-level wrapper returning :class:`subprocess.CompletedProcess`.
+filter_accessible_namespaces
+    Return only the namespace bits whose ``/proc`` files are accessible.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import signal
+import subprocess
+
+from chroot_distro.syscalls._constants import (
+    CLONE_NEWCGROUP,
+    CLONE_NEWIPC,
+    CLONE_NEWNET,
+    CLONE_NEWNS,
+    CLONE_NEWPID,
+    CLONE_NEWTIME,
+    CLONE_NEWUSER,
+    CLONE_NEWUTS,
+    NS_FILE_MAP,
+)
+from chroot_distro.syscalls._libc import py_setns
+
+log = logging.getLogger(__name__)
+
+# Ordered list of namespace types used for iteration.  User namespace is
+# placed last so that de-privileging happens after all other namespaces have
+# been entered (the common case for unprivileged containers).
+_NS_ORDER: list[int] = [
+    CLONE_NEWNS,
+    CLONE_NEWPID,
+    CLONE_NEWUTS,
+    CLONE_NEWIPC,
+    CLONE_NEWCGROUP,
+    CLONE_NEWNET,
+    CLONE_NEWTIME,
+    CLONE_NEWUSER,
+]
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _ns_path(pid: int, nstype: int) -> str:
+    """Return the ``/proc/<pid>/ns/<name>`` path for *nstype*.
+
+    Args:
+        pid: Target process ID.
+        nstype: One of the ``CLONE_NEW*`` constants.
+
+    Returns:
+        Absolute path to the namespace file.
+
+    Raises:
+        KeyError: If *nstype* is not in :data:`NS_FILE_MAP`.
+    """
+    return f"/proc/{pid}/ns/{NS_FILE_MAP[nstype]}"
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+
+def check_ns_accessible(pid: int, nstype: int) -> bool:
+    """Return ``True`` if the namespace file for *nstype* can be opened.
+
+    Attempts to open ``/proc/<pid>/ns/<name>`` with ``O_RDONLY``.  On
+    success the file descriptor is closed immediately and ``True`` is
+    returned.  On :class:`OSError` (e.g. ``EACCES``, ``ENOENT``) the
+    function returns ``False``.
+
+    Args:
+        pid: Target process ID whose namespace to probe.
+        nstype: A ``CLONE_NEW*`` constant identifying the namespace type.
+
+    Returns:
+        ``True`` if the namespace file is accessible, ``False`` otherwise.
+    """
+    path = _ns_path(pid, nstype)
+    try:
+        fd = os.open(path, os.O_RDONLY)
+    except OSError:
+        log.debug("namespace file not accessible: %s", path)
+        return False
+    os.close(fd)
+    return True
+
+
+def enter_namespaces(target_pid: int, namespaces: int) -> None:
+    """Enter one or more namespaces of *target_pid*.
+
+    For each bit set in *namespaces*, the corresponding
+    ``/proc/<target_pid>/ns/<name>`` file is opened and passed to
+    ``setns(2)``.
+
+    A two-pass strategy (modeled on ``util-linux nsenter.c``) is used:
+
+    * **Pass 1** — attempt to enter every requested *non-user* namespace.
+      Errors are suppressed because some namespaces (e.g. mount, PID)
+      may require the caller to be inside the target user namespace
+      first.
+    * **Pass 2** — enter any namespaces that were not joined in pass 1,
+      including the user namespace.  Errors in this pass are fatal and
+      result in an :class:`OSError`.
+
+    All file descriptors are closed after use regardless of success or
+    failure.
+
+    Args:
+        target_pid: PID of the process whose namespaces to enter.
+        namespaces: Bitmask of ``CLONE_NEW*`` flags indicating which
+            namespaces to join.
+
+    Raises:
+        OSError: If a namespace cannot be entered in pass 2.
+    """
+    # Collect (nstype, fd) pairs for all requested namespaces.
+    requested: list[int] = [ns for ns in _NS_ORDER if namespaces & ns]
+    fds: dict[int, int] = {}
+    try:
+        for nstype in requested:
+            path = _ns_path(target_pid, nstype)
+            fds[nstype] = os.open(path, os.O_RDONLY)
+
+        entered: set[int] = set()
+
+        # Pass 1: non-user namespaces (suppress errors).
+        for nstype in requested:
+            if nstype == CLONE_NEWUSER:
+                continue
+            try:
+                py_setns(fds[nstype], nstype)
+                entered.add(nstype)
+                log.debug(
+                    "pass 1: entered %s namespace of pid %d",
+                    NS_FILE_MAP[nstype],
+                    target_pid,
+                )
+            except OSError as exc:
+                log.debug(
+                    "pass 1: deferred %s namespace of pid %d (%s)",
+                    NS_FILE_MAP[nstype],
+                    target_pid,
+                    exc,
+                )
+
+        # Pass 2: remaining namespaces (errors are fatal).
+        for nstype in requested:
+            if nstype in entered:
+                continue
+            py_setns(fds[nstype], nstype)
+            entered.add(nstype)
+            log.debug(
+                "pass 2: entered %s namespace of pid %d",
+                NS_FILE_MAP[nstype],
+                target_pid,
+            )
+    finally:
+        for fd in fds.values():
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+
+def enter_and_exec(
+    target_pid: int,
+    namespaces: int,
+    command: list[str],
+    *,
+    env: dict[str, str] | None = None,
+    fork_for_pid: bool = True,
+) -> int:
+    """Fork, enter namespaces, and ``execvpe`` a command.
+
+    The function forks a child process that calls
+    :func:`enter_namespaces` and then replaces itself with *command* via
+    :func:`os.execvpe`.
+
+    When *fork_for_pid* is ``True`` **and** :data:`CLONE_NEWPID` is among
+    the requested namespaces, an additional fork is performed *after*
+    entering namespaces.  This causes the ``exec``-ed process to see
+    itself as PID 1 (or higher) inside the new PID namespace, which is
+    the expected behavior for most container work-loads.
+
+    The parent process waits for the (outer) child and returns its exit
+    code.
+
+    Args:
+        target_pid: PID of the process whose namespaces to enter.
+        namespaces: Bitmask of ``CLONE_NEW*`` flags.
+        command: Command and arguments to execute (``argv``).
+        env: Optional environment mapping.  Defaults to :data:`os.environ`.
+        fork_for_pid: Whether to double-fork when a PID namespace is
+            requested.  Defaults to ``True``.
+
+    Returns:
+        Exit code of the executed command (0–255).
+
+    Raises:
+        OSError: If forking or entering namespaces fails.
+    """
+    child_pid = os.fork()
+    if child_pid == 0:
+        # --- child ---
+        try:
+            enter_namespaces(target_pid, namespaces)
+
+            if fork_for_pid and (namespaces & CLONE_NEWPID):
+                # Double-fork so the exec'd process is PID >1 in the
+                # new PID namespace.
+                inner_pid = os.fork()
+                if inner_pid != 0:
+                    # Middle process: wait for inner child and propagate
+                    # its exit code.
+                    _, status = os.waitpid(inner_pid, 0)
+                    os._exit(
+                        os.WEXITSTATUS(status)
+                        if os.WIFEXITED(status)
+                        else 128 + os.WTERMSIG(status)
+                    )
+
+            # Innermost child (or direct child if no double-fork).
+            os.execvpe(command[0], command, env if env is not None else os.environ)
+        except BaseException:
+            os._exit(127)
+    else:
+        # --- parent ---
+        _, status = os.waitpid(child_pid, 0)
+        if os.WIFEXITED(status):
+            return os.WEXITSTATUS(status)
+        return 128 + os.WTERMSIG(status)
+
+
+def run_in_namespaces(
+    target_pid: int,
+    namespaces: int,
+    command: list[str],
+    *,
+    capture_output: bool = False,
+    text: bool = False,
+    timeout: int | None = None,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess:
+    """Enter namespaces and run a command, returning a :class:`~subprocess.CompletedProcess`.
+
+    This is a higher-level interface that replaces the old
+    ``NamespaceHolder.run()`` method which spawned the external
+    ``nsenter`` binary as a subprocess.
+
+    The function forks a child process that enters the target namespaces
+    and ``exec``-s *command*.  When *capture_output* is ``True``, pipes
+    are set up for ``stdout`` and ``stderr`` and their contents are
+    collected in the parent.
+
+    Args:
+        target_pid: PID of the process whose namespaces to enter.
+        namespaces: Bitmask of ``CLONE_NEW*`` flags.
+        command: Command and arguments to execute (``argv``).
+        capture_output: If ``True``, capture stdout and stderr via
+            pipes.
+        text: If ``True``, decode captured stdout/stderr as UTF-8 with
+            ``errors='replace'``.
+        timeout: Optional timeout in seconds.  If the child has not
+            exited within *timeout* seconds, it is sent ``SIGKILL`` and
+            :class:`subprocess.TimeoutExpired` is raised.
+        env: Optional environment mapping.  Defaults to :data:`os.environ`.
+
+    Returns:
+        A :class:`subprocess.CompletedProcess` instance whose
+        :attr:`~subprocess.CompletedProcess.args` is *command* and whose
+        :attr:`~subprocess.CompletedProcess.returncode` is the child's
+        exit status.
+
+    Raises:
+        subprocess.TimeoutExpired: If *timeout* is exceeded.
+        OSError: If forking or pipe creation fails.
+    """
+    # Set up optional pipes.
+    stdout_r: int | None = None
+    stdout_w: int | None = None
+    stderr_r: int | None = None
+    stderr_w: int | None = None
+
+    if capture_output:
+        stdout_r, stdout_w = os.pipe()
+        stderr_r, stderr_w = os.pipe()
+
+    child_pid = os.fork()
+
+    if child_pid == 0:
+        # --- child ---
+        try:
+            if capture_output:
+                # Redirect stdout/stderr to the write ends of the pipes.
+                assert stdout_w is not None
+                assert stderr_w is not None
+                os.dup2(stdout_w, 1)
+                os.dup2(stderr_w, 2)
+                # Close all pipe fds in the child (we only need 1 and 2
+                # now).
+                for fd in (stdout_r, stdout_w, stderr_r, stderr_w):
+                    if fd is not None:
+                        try:
+                            os.close(fd)
+                        except OSError:
+                            pass
+
+            enter_namespaces(target_pid, namespaces)
+            os.execvpe(command[0], command, env if env is not None else os.environ)
+        except BaseException:
+            os._exit(127)
+    else:
+        # --- parent ---
+        # Close write ends of pipes in the parent so we get EOF when the
+        # child exits.
+        if capture_output:
+            assert stdout_w is not None
+            assert stderr_w is not None
+            os.close(stdout_w)
+            os.close(stderr_w)
+
+        stdout_data: bytes | str | None = None
+        stderr_data: bytes | str | None = None
+
+        try:
+            if timeout is not None:
+                # Install a SIGALRM handler to enforce the timeout.
+                _timed_out = False
+
+                def _alarm_handler(signum: int, frame: object) -> None:
+                    nonlocal _timed_out
+                    _timed_out = True
+
+                old_handler = signal.signal(signal.SIGALRM, _alarm_handler)
+                signal.alarm(timeout)
+
+            if capture_output:
+                assert stdout_r is not None
+                assert stderr_r is not None
+                # Read all data from the pipes.
+                stdout_chunks: list[bytes] = []
+                stderr_chunks: list[bytes] = []
+                # We read from both pipes.  Since the child may produce
+                # output on both at the same time, we use a simple
+                # sequential read (the child's pipe buffer is finite and
+                # the kernel will buffer for us).
+                with open(stdout_r, "rb", closefd=True) as f_out:
+                    stdout_r = None  # Ownership transferred to file obj
+                    stdout_chunks.append(f_out.read())
+                with open(stderr_r, "rb", closefd=True) as f_err:
+                    stderr_r = None
+                    stderr_chunks.append(f_err.read())
+
+                raw_stdout = b"".join(stdout_chunks)
+                raw_stderr = b"".join(stderr_chunks)
+
+                if text:
+                    stdout_data = raw_stdout.decode("utf-8", errors="replace")
+                    stderr_data = raw_stderr.decode("utf-8", errors="replace")
+                else:
+                    stdout_data = raw_stdout
+                    stderr_data = raw_stderr
+
+            _, status = os.waitpid(child_pid, 0)
+
+            if timeout is not None:
+                signal.alarm(0)  # Cancel pending alarm.
+                signal.signal(signal.SIGALRM, old_handler)  # type: ignore[possibly-undefined]
+                if _timed_out:  # type: ignore[possibly-undefined]
+                    # The alarm fired before waitpid returned—shouldn't
+                    # normally happen because SIGALRM interrupts waitpid,
+                    # but handle gracefully.
+                    try:
+                        os.kill(child_pid, signal.SIGKILL)
+                        os.waitpid(child_pid, 0)
+                    except OSError:
+                        pass
+                    raise subprocess.TimeoutExpired(command, timeout)
+
+            if os.WIFEXITED(status):
+                returncode = os.WEXITSTATUS(status)
+            else:
+                returncode = -(os.WTERMSIG(status))
+
+        except InterruptedError:
+            # waitpid was interrupted by SIGALRM (timeout path).
+            try:
+                os.kill(child_pid, signal.SIGKILL)
+                os.waitpid(child_pid, 0)
+            except OSError:
+                pass
+            if timeout is not None:
+                signal.alarm(0)
+                signal.signal(signal.SIGALRM, old_handler)  # type: ignore[possibly-undefined]
+            raise subprocess.TimeoutExpired(command, timeout)
+
+        finally:
+            # Ensure pipe fds are closed even on unexpected errors.
+            for fd in (stdout_r, stderr_r):
+                if fd is not None:
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass
+
+        return subprocess.CompletedProcess(
+            args=command,
+            returncode=returncode,
+            stdout=stdout_data,
+            stderr=stderr_data,
+        )
+
+
+def filter_accessible_namespaces(pid: int, namespaces: int) -> int:
+    """Return only the namespace bits whose ``/proc`` files are accessible.
+
+    Iterates over each ``CLONE_NEW*`` bit set in *namespaces* and calls
+    :func:`check_ns_accessible` for each.  Bits for which the namespace
+    file cannot be opened are cleared.
+
+    This is useful for gracefully degrading when certain namespace types
+    are not available (e.g. ``CLONE_NEWTIME`` on older kernels or
+    ``CLONE_NEWUSER`` in restricted environments).
+
+    Args:
+        pid: Target process ID.
+        namespaces: Bitmask of ``CLONE_NEW*`` flags to test.
+
+    Returns:
+        A bitmask containing only the accessible namespace flags.
+    """
+    result = 0
+    for nstype in _NS_ORDER:
+        if namespaces & nstype and check_ns_accessible(pid, nstype):
+            result |= nstype
+    return result

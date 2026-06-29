@@ -27,24 +27,21 @@ from __future__ import annotations
 
 import argparse
 import contextlib
-import ctypes
-import ctypes.util
 import json
 import os
 import sys
 import time
 
-# mount(2) flag constants (from <linux/mount.h> / <sys/mount.h>).
-MS_RDONLY = 1
-MS_NOSUID = 2
-MS_NODEV = 4
-MS_NOEXEC = 8
-MS_REC = 16384
-MS_PRIVATE = 1 << 18
-
-S_IFCHR = 0o020000
-
-HOLDER_SLEEP_SECONDS = 2147483647
+from chroot_distro.syscalls._constants import (
+    MS_NODEV,
+    MS_NOEXEC,
+    MS_NOSUID,
+    MS_PRIVATE,
+    MS_RDONLY,
+    MS_REC,
+    S_IFCHR,
+)
+from chroot_distro.syscalls._libc import libc_mount
 
 
 def _libc() -> ctypes.CDLL:
@@ -76,11 +73,9 @@ def _make_node(path: str, major: int, minor: int, mode: int) -> None:
 def setup(config: dict) -> None:
     rootfs = config["rootfs"]
     dev_nodes = config.get("dev_nodes", [])
-    libc = _libc()
-
     # Detach our mount tree from the host so nothing we do propagates back.
     with contextlib.suppress(OSError):
-        _mount(libc, "none", "/", "", MS_REC | MS_PRIVATE, None)
+        _mount("none", "/", "", MS_REC | MS_PRIVATE, None)
 
     os.chroot(rootfs)
     os.chdir("/")
@@ -88,28 +83,27 @@ def setup(config: dict) -> None:
     # Fresh procfs reflecting this PID namespace, hardened.
     os.makedirs("/proc", exist_ok=True)
     try:
-        _mount(libc, "proc", "/proc", "proc", MS_NOSUID | MS_NODEV | MS_NOEXEC, "hidepid=2")
+        _mount("proc", "/proc", "proc", MS_NOSUID | MS_NODEV | MS_NOEXEC, "hidepid=2")
     except OSError:
         # Some kernels reject hidepid in this context; retry without it.
-        _mount(libc, "proc", "/proc", "proc", MS_NOSUID | MS_NODEV | MS_NOEXEC, None)
+        _mount("proc", "/proc", "proc", MS_NOSUID | MS_NODEV | MS_NOEXEC, None)
 
     # Read-only sysfs (best effort: not all Android kernels allow a fresh one).
     try:
         os.makedirs("/sys", exist_ok=True)
-        _mount(libc, "sysfs", "/sys", "sysfs", MS_RDONLY | MS_NOSUID | MS_NODEV | MS_NOEXEC, None)
+        _mount("sysfs", "/sys", "sysfs", MS_RDONLY | MS_NOSUID | MS_NODEV | MS_NOEXEC, None)
     except OSError:
         pass
 
     # Fresh /dev tmpfs with the minimal device nodes.
     os.makedirs("/dev", exist_ok=True)
-    _mount(libc, "tmpfs", "/dev", "tmpfs", MS_NOSUID, "mode=0755,size=64M")
+    _mount("tmpfs", "/dev", "tmpfs", MS_NOSUID, "mode=0755,size=64M")
     for name, major, minor, mode in dev_nodes:
         _make_node("/dev/" + name, major, minor, mode)
 
     # devpts for login ptys, plus the /dev/ptmx -> pts/ptmx symlink.
     os.makedirs("/dev/pts", exist_ok=True)
     _mount(
-        libc,
         "devpts",
         "/dev/pts",
         "devpts",
@@ -126,7 +120,7 @@ def setup(config: dict) -> None:
     # Fresh /dev/shm.
     try:
         os.makedirs("/dev/shm", exist_ok=True)
-        _mount(libc, "tmpfs", "/dev/shm", "tmpfs", MS_NOSUID | MS_NODEV, "size=256M,mode=1777")
+        _mount("tmpfs", "/dev/shm", "tmpfs", MS_NOSUID | MS_NODEV, "size=256M,mode=1777")
     except OSError:
         pass
 
