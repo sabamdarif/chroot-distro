@@ -107,6 +107,30 @@ def _parse_mount_options(options: str) -> int:
     return flags
 
 
+def _parse_and_split_mount_options(options: str, initial_flags: int = 0) -> tuple[int, str]:
+    """Parse comma-separated mount options.
+
+    Generic VFS options are parsed into flags, while unknown or filesystem-specific
+    options are kept as a comma-separated string for filesystem-specific data.
+
+    Returns:
+        A tuple of (combined_MS_flags, filesystem_specific_options_string).
+    """
+    if not options:
+        return initial_flags, ""
+
+    flags = initial_flags
+    data_tokens = []
+    for token in options.split(","):
+        token = token.strip()
+        bit = _OPTION_FLAG_MAP.get(token)
+        if bit is not None:
+            flags |= bit
+        else:
+            data_tokens.append(token)
+    return flags, ",".join(data_tokens)
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -213,9 +237,11 @@ def mount_filesystem(
     Use this for pseudo-filesystems commonly required inside a chroot:
     ``proc``, ``sysfs``, ``tmpfs``, ``devpts``, etc.
 
-    Unlike :func:`bind_mount`, the *options* string here is **not**
-    parsed into ``MS_*`` flags — it is passed verbatim as the *data*
-    argument to ``mount(2)`` (e.g. ``"mode=0620,gid=5"`` for devpts).
+    Generic VFS options found in *options* (e.g. ``"ro"``, ``"nosuid"``,
+    ``"nodev"``, ``"noexec"``) are automatically parsed and merged into the VFS
+    *flags*, while filesystem-specific options are forwarded to the driver's
+    *data* parameter. This avoids ``EINVAL`` failures from drivers that do
+    not recognise generic options.
 
     Args:
         source: Source device name (often the same as *fstype* for
@@ -224,8 +250,7 @@ def mount_filesystem(
         fstype: Filesystem type (e.g. ``"proc"``, ``"sysfs"``,
             ``"tmpfs"``, ``"devpts"``).
         flags: ``MS_*`` flag bitmask.  Defaults to ``0``.
-        options: Filesystem-specific option string passed as *data* to
-            ``mount(2)``.  Pass an empty string if not needed.
+        options: Mount options string.  Pass an empty string if not needed.
 
     Raises:
         OSError: If the underlying ``mount(2)`` call fails.
@@ -234,7 +259,8 @@ def mount_filesystem(
         >>> mount_filesystem("proc", "/chroot/proc", "proc", flags=MS_NOSUID | MS_NODEV | MS_NOEXEC)
         >>> mount_filesystem("tmpfs", "/chroot/tmp", "tmpfs", options="size=64m,mode=1777")
     """
-    native_mount(source, target, fstype, flags, options or None)
+    parsed_flags, data = _parse_and_split_mount_options(options, flags)
+    native_mount(source, target, fstype, parsed_flags, data or None)
 
 
 def set_propagation(target: str, propagation: int) -> None:

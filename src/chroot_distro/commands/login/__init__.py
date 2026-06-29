@@ -978,6 +978,8 @@ def _command_login_inner_once(container_name: str, args) -> None:
     with session.lock(container_name) as lock_fh:
         sess_count = session.increment(container_name, lock_fh=lock_fh)
         if sess_count == 1:
+            from chroot_distro.helpers.rootfs import write_resolv_conf
+            write_resolv_conf(rootfs)
             if use_namespaces:
                 try:
                     # A detached run must use a plain holder and reach the
