@@ -34,15 +34,15 @@ import os
 import sys
 import time
 
-# mount(2) flag constants (from <linux/mount.h> / <sys/mount.h>).
-MS_RDONLY = 1
-MS_NOSUID = 2
-MS_NODEV = 4
-MS_NOEXEC = 8
-MS_REC = 16384
-MS_PRIVATE = 1 << 18
-
-S_IFCHR = 0o020000
+from chroot_distro.syscalls._constants import (
+    MS_NODEV,
+    MS_NOEXEC,
+    MS_NOSUID,
+    MS_PRIVATE,
+    MS_RDONLY,
+    MS_REC,
+    S_IFCHR,
+)
 
 HOLDER_SLEEP_SECONDS = 2147483647
 
@@ -52,7 +52,7 @@ def _libc() -> ctypes.CDLL:
     return ctypes.CDLL(name, use_errno=True)
 
 
-def _mount(libc, source, target, fstype, flags, data) -> None:
+def _mount(libc, source, target, fstype, flags, data=None) -> None:
     s = source.encode() if source else None
     t = target.encode()
     f = fstype.encode() if fstype else None

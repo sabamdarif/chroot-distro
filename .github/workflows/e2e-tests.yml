@@ -1,0 +1,409 @@
+name: Integration Tests (E2E)
+
+on:
+    push:
+        branches: ["**"]
+    pull_request:
+        branches: ["**"]
+
+jobs:
+    e2e:
+        name: E2E Tests (Python ${{ matrix.python-version }})
+        runs-on: ubuntu-latest
+        strategy:
+            fail-fast: false
+            matrix:
+                python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+
+        steps:
+            # ── Setup ──────────────────────────────────────────────────────
+            - name: Checkout Code
+              uses: actions/checkout@v7
+
+            - name: Set up Python ${{ matrix.python-version }}
+              uses: actions/setup-python@v6
+              with:
+                  python-version: ${{ matrix.python-version }}
+
+            - name: Install chroot-distro
+              run: |
+                  sudo pip install . --break-system-packages
+                  chroot-distro --version
+
+            # ── Phase 0: Smoke Tests ───────────────────────────────────────
+            - name: "Smoke: --version"
+              run: chroot-distro --version
+
+            - name: "Smoke: --help"
+              run: chroot-distro --help
+
+            - name: "Smoke: list (empty)"
+              run: sudo chroot-distro list
+
+            - name: "Smoke: ps"
+              run: sudo chroot-distro ps
+
+            - name: "Smoke: search alpine"
+              run: chroot-distro search alpine
+
+            - name: "Smoke: info"
+              run: sudo chroot-distro info
+
+            - name: "Smoke: clear-cache"
+              run: sudo chroot-distro clear-cache
+
+            # ── Phase 1: Install Containers ────────────────────────────────
+            - name: "Install: Alpine"
+              run: sudo chroot-distro install alpine:latest
+
+            - name: "Install: Debian"
+              run: sudo chroot-distro install debian:bookworm-slim
+
+            - name: "Verify: list shows both containers"
+              run: |
+                  output=$(sudo chroot-distro list 2>&1)
+                  echo "$output"
+                  echo "$output" | grep -q "alpine"
+                  echo "$output" | grep -q "debian"
+
+            - name: "Verify: list verbose"
+              run: sudo chroot-distro list -v
+
+            # ── Phase 2: Login & Command Execution ─────────────────────────
+            - name: "Login: Alpine - verify os-release"
+              run: |
+                  output=$(sudo chroot-distro login alpine -- cat /etc/os-release)
+                  echo "$output"
+                  echo "$output" | grep -qi "alpine"
+
+            - name: "Login: Debian - verify os-release"
+              run: |
+                  output=$(sudo chroot-distro login debian -- cat /etc/os-release)
+                  echo "$output"
+                  echo "$output" | grep -qi "debian"
+
+            - name: "Login: Debian --user root"
+              run: |
+                  output=$(sudo chroot-distro login debian --user root -- whoami)
+                  echo "$output"
+                  echo "$output" | grep -q "root"
+
+            - name: "Login: Debian --work-dir /tmp"
+              run: |
+                  output=$(sudo chroot-distro login debian --work-dir /tmp -- pwd)
+                  echo "$output"
+                  echo "$output" | grep -q "/tmp"
+
+            - name: "Login: Debian --env injection"
+              run: |
+                  output=$(sudo chroot-distro login debian --env TEST_VAR=hello123 -- printenv TEST_VAR)
+                  echo "$output"
+                  echo "$output" | grep -q "hello123"
+
+            # ── Phase 3: Isolation / Escape Prevention ─────────────────────
+            - name: "Isolation: Debian --isolated login"
+              run: |
+                  output=$(sudo chroot-distro login debian --isolated -- cat /etc/os-release)
+                  echo "$output"
+                  echo "$output" | grep -qi "debian"
+                  # Must NOT contain the host OS (Ubuntu on GitHub runners)
+                  if echo "$output" | grep -qi "ID=ubuntu"; then
+                    echo "FAIL: Host OS leaked into isolated container!"
+                    exit 1
+                  fi
+                  echo "PASS: Isolated container shows correct OS"
+
+            - name: "Isolation: Debian escape attempt via /proc/1/root"
+              run: |
+                  output=$(sudo chroot-distro login debian --isolated -- \
+                    sh -c 'cat /proc/1/root/etc/os-release 2>/dev/null || echo ESCAPE_BLOCKED')
+                  echo "$output"
+                  if echo "$output" | grep -qi "ID=ubuntu"; then
+                    echo "FAIL: Chroot escape detected! Host OS visible from inside container."
+                    exit 1
+                  fi
+                  echo "PASS: Escape blocked or contained"
+
+            - name: "Unmount: Debian after isolation test"
+              run: sudo chroot-distro unmount debian || true
+
+            - name: "Isolation: Alpine --isolated login"
+              run: |
+                  output=$(sudo chroot-distro login alpine --isolated -- cat /etc/os-release)
+                  echo "$output"
+                  echo "$output" | grep -qi "alpine"
+                  if echo "$output" | grep -qi "ID=ubuntu"; then
+                    echo "FAIL: Host OS leaked into isolated container!"
+                    exit 1
+                  fi
+                  echo "PASS: Isolated container shows correct OS"
+
+            - name: "Isolation: Alpine escape attempt via /proc/1/root"
+              run: |
+                  output=$(sudo chroot-distro login alpine --isolated -- \
+                    sh -c 'cat /proc/1/root/etc/os-release 2>/dev/null || echo ESCAPE_BLOCKED')
+                  echo "$output"
+                  if echo "$output" | grep -qi "ID=ubuntu"; then
+                    echo "FAIL: Chroot escape detected!"
+                    exit 1
+                  fi
+                  echo "PASS: Escape blocked or contained"
+
+            - name: "Unmount: Alpine after isolation test"
+              run: sudo chroot-distro unmount alpine || true
+
+            # ── Phase 4: httpd Service Test (foreground) ───────────────────
+            - name: "Install: httpd"
+              run: sudo chroot-distro install httpd:latest
+
+            - name: "Run: httpd foreground (backgrounded) and verify"
+              run: |
+                  sudo chroot-distro run httpd &
+                  HTTPD_PID=$!
+                  echo "httpd launched (shell PID: $HTTPD_PID), waiting for it to start..."
+
+                  # Poll until httpd responds or timeout after 60 seconds
+                  success=false
+                  for i in $(seq 1 30); do
+                    if curl -s http://localhost/ 2>/dev/null | grep -q "It works!"; then
+                      echo "httpd is serving on attempt $i!"
+                      success=true
+                      break
+                    fi
+                    sleep 2
+                  done
+
+                  if [ "$success" = false ]; then
+                    echo "FAIL: httpd did not start serving within 60 seconds"
+                    curl -v http://localhost/ 2>&1 || true
+                    exit 1
+                  fi
+
+                  # Final assertion on response content
+                  response=$(curl -s http://localhost/)
+                  echo "--- httpd response ---"
+                  echo "$response"
+                  echo "--- end response ---"
+                  echo "$response" | grep -q "It works!"
+                  echo "PASS: httpd serves the default page"
+
+            - name: "Kill: httpd after foreground test"
+              run: sudo chroot-distro kill httpd
+
+            - name: "Verify: ps after kill"
+              run: sudo chroot-distro ps
+
+            - name: "Unmount: httpd after foreground test"
+              run: sudo chroot-distro unmount httpd || true
+
+            # ── Phase 5: Detach Mode Test ──────────────────────────────────
+            - name: "Run: httpd --detach"
+              run: |
+                  sudo chroot-distro run --detach httpd
+                  echo "httpd launched in detached mode"
+
+            - name: "Verify: httpd serving in detached mode"
+              run: |
+                  success=false
+                  for i in $(seq 1 30); do
+                    if curl -s http://localhost/ 2>/dev/null | grep -q "It works!"; then
+                      echo "httpd is serving in detached mode on attempt $i!"
+                      success=true
+                      break
+                    fi
+                    sleep 2
+                  done
+
+                  if [ "$success" = false ]; then
+                    echo "FAIL: httpd did not start serving in detached mode"
+                    exit 1
+                  fi
+
+                  response=$(curl -s http://localhost/)
+                  echo "$response"
+                  echo "$response" | grep -q "It works!"
+                  echo "PASS: httpd serves in detached mode"
+
+            - name: "Verify: ps shows detached session"
+              run: |
+                  output=$(sudo chroot-distro ps 2>&1)
+                  echo "$output"
+                  echo "$output" | grep -qi "httpd"
+                  echo "PASS: Detached session visible in ps"
+
+            - name: "Kill: httpd (detached)"
+              run: sudo chroot-distro kill httpd
+
+            - name: "Unmount: httpd after detach test"
+              run: sudo chroot-distro unmount httpd || true
+
+            # ── Phase 6: Namespace Isolation (CD_USE_NS=1) ─────────────────
+            - name: "Namespace: Debian login with CD_USE_NS=1"
+              run: |
+                  output=$(sudo env CD_USE_NS=1 chroot-distro login debian -- cat /etc/os-release)
+                  echo "$output"
+                  echo "$output" | grep -qi "debian"
+                  if echo "$output" | grep -qi "ID=ubuntu"; then
+                    echo "FAIL: Host OS leaked under namespace isolation!"
+                    exit 1
+                  fi
+                  echo "PASS: Namespace isolation shows correct OS"
+
+            - name: "Namespace: Alpine login with CD_USE_NS=1"
+              run: |
+                  output=$(sudo env CD_USE_NS=1 chroot-distro login alpine -- cat /etc/os-release)
+                  echo "$output"
+                  echo "$output" | grep -qi "alpine"
+                  if echo "$output" | grep -qi "ID=ubuntu"; then
+                    echo "FAIL: Host OS leaked under namespace isolation!"
+                    exit 1
+                  fi
+                  echo "PASS: Namespace isolation shows correct OS for Alpine"
+
+            - name: "Unmount: Debian after namespace test"
+              run: sudo chroot-distro unmount debian || true
+
+            - name: "Unmount: Alpine after namespace test"
+              run: sudo chroot-distro unmount alpine || true
+
+            # ── Phase 7: Container Management Operations ───────────────────
+            - name: "Rename: alpine -> alpine-test"
+              run: sudo chroot-distro rename alpine alpine-test
+
+            - name: "Verify: list shows alpine-test, not alpine"
+              run: |
+                  output=$(sudo chroot-distro list -q 2>&1)
+                  echo "$output"
+                  echo "$output" | grep -q "alpine-test"
+
+            - name: "Copy: file from container to host"
+              run: |
+                  sudo chroot-distro copy alpine-test:/etc/hostname ./hostname-test
+                  echo "Copied hostname:"
+                  cat ./hostname-test
+
+            - name: "Sync: host directory to container"
+              run: |
+                  mkdir -p /tmp/sync-src
+                  echo "sync-test-content" > /tmp/sync-src/testfile.txt
+                  sudo chroot-distro sync /tmp/sync-src alpine-test:/tmp/sync-dest
+                  output=$(sudo chroot-distro login alpine-test -- cat /tmp/sync-dest/testfile.txt)
+                  echo "$output"
+                  echo "$output" | grep -q "sync-test-content"
+                  echo "PASS: Sync works correctly"
+
+            - name: "Unmount: alpine-test after sync"
+              run: sudo chroot-distro unmount alpine-test || true
+
+            - name: "Backup: alpine-test"
+              run: |
+                  sudo chroot-distro backup alpine-test -o /tmp/alpine-test-backup.tar.gz
+                  ls -lh /tmp/alpine-test-backup.tar.gz
+                  echo "PASS: Backup created successfully"
+
+            - name: "Diff: alpine-test"
+              run: |
+                  sudo chroot-distro diff alpine-test || true
+                  echo "PASS: Diff command ran"
+
+            - name: "Remove: alpine-test"
+              run: sudo chroot-distro remove alpine-test
+
+            - name: "Verify: alpine-test removed from list"
+              run: |
+                  output=$(sudo chroot-distro list 2>&1)
+                  echo "$output"
+                  if echo "$output" | grep -q "alpine-test"; then
+                    echo "FAIL: Container not removed!"
+                    exit 1
+                  fi
+                  echo "PASS: Container removed successfully"
+
+            - name: "Restore: from backup"
+              run: |
+                  sudo chroot-distro restore /tmp/alpine-test-backup.tar.gz
+                  output=$(sudo chroot-distro list 2>&1)
+                  echo "$output"
+                  echo "$output" | grep -q "alpine-test"
+                  echo "PASS: Container restored from backup"
+
+            - name: "Verify: restored container works"
+              run: |
+                  output=$(sudo chroot-distro login alpine-test -- cat /etc/os-release)
+                  echo "$output"
+                  echo "$output" | grep -qi "alpine"
+                  echo "PASS: Restored container is functional"
+
+            - name: "Unmount: alpine-test after restore verify"
+              run: sudo chroot-distro unmount alpine-test || true
+
+            - name: "Remove: restored alpine-test"
+              run: sudo chroot-distro remove alpine-test
+
+            - name: "Reset: debian"
+              run: sudo chroot-distro reset debian
+
+            - name: "Verify: debian works after reset"
+              run: |
+                  output=$(sudo chroot-distro login debian -- cat /etc/os-release)
+                  echo "$output"
+                  echo "$output" | grep -qi "debian"
+                  echo "PASS: Debian container works after reset"
+
+            - name: "Unmount: debian after reset verify"
+              run: sudo chroot-distro unmount debian || true
+
+            # ── Phase 8: Build Test ────────────────────────────────────────
+            - name: "Build: create test Dockerfile"
+              run: |
+                  mkdir -p /tmp/test-build-context
+                  cat > /tmp/test-build-context/Dockerfile << 'DOCKERFILE'
+                  FROM alpine:latest
+                  RUN echo "chroot-distro-build-test" > /built.txt
+                  DOCKERFILE
+                  echo "--- Dockerfile ---"
+                  cat /tmp/test-build-context/Dockerfile
+
+            - name: "Build: run chroot-distro build"
+              run: |
+                  sudo chroot-distro build /tmp/test-build-context \
+                    -t test-build:latest \
+                    --install-as test-build
+                  echo "PASS: Build completed"
+
+            - name: "Verify: built container content"
+              run: |
+                  output=$(sudo chroot-distro login test-build -- cat /built.txt)
+                  echo "$output"
+                  echo "$output" | grep -q "chroot-distro-build-test"
+                  echo "PASS: Built container has expected content"
+
+            - name: "Unmount: test-build"
+              run: sudo chroot-distro unmount test-build || true
+
+            - name: "Remove: test-build"
+              run: sudo chroot-distro remove test-build
+
+            # ── Phase 9: Final Cleanup ─────────────────────────────────────
+            - name: "Cleanup: remove all containers"
+              if: always()
+              run: |
+                  echo "=== Killing all sessions ==="
+                  sudo chroot-distro kill httpd 2>/dev/null || true
+                  echo "=== Unmounting all containers ==="
+                  for name in httpd debian alpine alpine-test test-build; do
+                    sudo chroot-distro unmount "$name" 2>/dev/null || true
+                  done
+                  echo "=== Removing all containers ==="
+                  for name in httpd debian alpine alpine-test test-build; do
+                    sudo chroot-distro remove "$name" 2>/dev/null || true
+                  done
+                  echo "=== Final state ==="
+                  sudo chroot-distro list
+                  echo "=== Cleanup complete ==="
+
+            - name: "Final: verify clean state"
+              if: always()
+              run: |
+                  output=$(sudo chroot-distro list -q 2>&1)
+                  echo "Remaining containers: '$output'"

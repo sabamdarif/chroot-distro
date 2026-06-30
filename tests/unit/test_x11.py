@@ -136,23 +136,37 @@ def test_get_bindings_x11_auth_binds():
 
 
 def test_provision_guest_xauthority(tmp_path):
+    import socket
+    import struct
+
     rootfs = tmp_path / "rootfs"
     rootfs.mkdir()
     host_xauth = tmp_path / "host.xauth"
-    host_xauth.write_bytes(b"\x00")
+
+    # Build a real .Xauthority binary entry for display :1
+    # Format: family(uint16) + len-prefixed address + len-prefixed number
+    #         + len-prefixed name + len-prefixed data
+    hostname = socket.gethostname().encode("ascii", errors="replace")
+    number = b"1"
+    name = b"MIT-MAGIC-COOKIE-1"
+    data = b"\xde\xad\xbe\xef" * 4  # 16-byte cookie
+
+    entry = (
+        struct.pack(">H", 256)  # FAMILY_LOCAL
+        + struct.pack(">H", len(hostname))
+        + hostname
+        + struct.pack(">H", len(number))
+        + number
+        + struct.pack(">H", len(name))
+        + name
+        + struct.pack(">H", len(data))
+        + data
+    )
+    host_xauth.write_bytes(entry)
 
     guest_file = rootfs / "var" / "tmp" / ".chroot-distro-xauthority"
 
-    def fake_run(cmd, capture_output, check):
-        if cmd[:4] == ["xauth", "-f", str(host_xauth), "extract"]:
-            guest_file.parent.mkdir(parents=True, exist_ok=True)
-            guest_file.write_bytes(b"guest-cookie")
-            return type("R", (), {"returncode": 0})()
-        return type("R", (), {"returncode": 1})()
-
     with (
-        patch("shutil.which", return_value="/usr/bin/xauth"),
-        patch("subprocess.run", side_effect=fake_run),
         patch("os.chown"),
         patch("os.path.isfile", return_value=True),
     ):
@@ -167,6 +181,27 @@ def test_provision_guest_xauthority(tmp_path):
     assert result == GUEST_XAUTHORITY_PATH
     assert guest_file.is_file()
     assert oct(guest_file.stat().st_mode & 0o777) == "0o600"
+
+
+def test_provision_guest_xauthority_no_xauth(tmp_path):
+    """When the host .Xauthority file has no matching entries, return None."""
+    rootfs = tmp_path / "rootfs"
+    rootfs.mkdir()
+    host_xauth = tmp_path / "host.xauth"
+    # Write an empty file — no entries to extract.
+    host_xauth.write_bytes(b"")
+
+    with patch("os.path.isfile", return_value=True):
+        assert (
+            provision_guest_xauthority(
+                str(rootfs),
+                host_xauthority=str(host_xauth),
+                display=":1",
+                guest_uid=1001,
+                guest_gid=1001,
+            )
+            is None
+        )
 
 
 def test_discover_runtime_xauthority(tmp_path):
@@ -192,20 +227,6 @@ def test_discover_runtime_xauthority(tmp_path):
         ),
     ):
         assert _discover_runtime_xauthority(1000) == str(newer)
-
-
-def test_provision_guest_xauthority_no_xauth(tmp_path):
-    with patch("shutil.which", return_value=None):
-        assert (
-            provision_guest_xauthority(
-                str(tmp_path),
-                host_xauthority="/home/user/.Xauthority",
-                display=":1",
-                guest_uid=1001,
-                guest_gid=1001,
-            )
-            is None
-        )
 
 
 def test_get_host_env_var():

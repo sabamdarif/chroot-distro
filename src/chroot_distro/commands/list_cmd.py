@@ -2,7 +2,6 @@ import contextlib
 import errno
 import json
 import os
-import subprocess
 import typing
 from dataclasses import dataclass
 
@@ -37,25 +36,37 @@ def _iter_container_names() -> list[str]:
         return []
 
 
-def _rootfs_size_bytes(rootfs: str) -> int:
+def _same_device(path: str, dev: int) -> bool:
+    """Return True if *path* is on the same device as *dev*."""
     try:
-        out = subprocess.check_output(
-            ["du", "-sb", "-x", "--", rootfs],
-            stderr=subprocess.DEVNULL,
-            text=True,
-        )
-        return int(out.split(maxsplit=1)[0])
-    except (OSError, ValueError, subprocess.SubprocessError):
-        return _rootfs_size_walk(rootfs)
+        return os.lstat(path).st_dev == dev
+    except OSError:
+        return False
 
 
-def _rootfs_size_walk(rootfs: str) -> int:
+def _rootfs_size_bytes(rootfs: str) -> int:
+    """Calculate total apparent size in bytes, staying on one filesystem.
+
+    Equivalent to ``du -sb -x -- <rootfs>`` but without the external binary.
+    Uses ``os.lstat()`` to get apparent file sizes and respects filesystem
+    boundaries (the ``-x`` flag behavior).
+    """
+    try:
+        root_dev = os.lstat(rootfs).st_dev
+    except OSError:
+        return 0
+
     total = 0
-    for dirpath, _, filenames in os.walk(rootfs, followlinks=False):
+    for dirpath, dirnames, filenames in os.walk(rootfs, followlinks=False):
+        # -x behavior: prune directories on different filesystems
+        dirnames[:] = [d for d in dirnames if _same_device(os.path.join(dirpath, d), root_dev)]
+        # Count the directory entry itself
+        with contextlib.suppress(OSError):
+            total += os.lstat(dirpath).st_size
+        # Count all files (and symlinks, sockets, etc.)
         for filename in filenames:
-            path = os.path.join(dirpath, filename)
             try:
-                total += os.path.getsize(path)
+                total += os.lstat(os.path.join(dirpath, filename)).st_size
             except OSError:
                 continue
     return total

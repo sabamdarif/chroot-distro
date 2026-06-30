@@ -50,9 +50,7 @@ def test_filter_bind_options_drops_selinux_flags():
     assert mm._filter_bind_options("") == ""
 
 
-@patch("chroot_distro.helpers.mount_manager._run_mount_cmd")
-def test_safe_mount_no_options_is_single_bind(mock_run):
-    mock_run.return_value = MagicMock(returncode=0)
+def test_safe_mount_no_options_is_single_bind():
     holder = MagicMock()
     with (
         patch("os.path.isdir", return_value=True),
@@ -60,17 +58,14 @@ def test_safe_mount_no_options_is_single_bind(mock_run):
         patch("os.path.realpath", side_effect=lambda p: p),
         patch("os.makedirs"),
         patch.object(mm, "is_mounted", return_value=False),
-        patch("shutil.which", return_value="/bin/mount"),
     ):
         mm.safe_mount("/host/src", "/tmp/rootfs/mnt", holder=holder)
-    # Only the initial bind, no remount
-    assert mock_run.call_count == 1
-    assert mock_run.call_args[0][0][1:] == ["--bind", "/host/src", "/tmp/rootfs/mnt"]
+    holder.do_bind_mount.assert_called_once_with(
+        "/host/src", "/tmp/rootfs/mnt", recursive=False, options=""
+    )
 
 
-@patch("chroot_distro.helpers.mount_manager._run_mount_cmd")
-def test_safe_mount_ro_issues_remount(mock_run):
-    mock_run.return_value = MagicMock(returncode=0)
+def test_safe_mount_ro_issues_remount():
     holder = MagicMock()
     with (
         patch("os.path.isdir", return_value=True),
@@ -78,19 +73,14 @@ def test_safe_mount_ro_issues_remount(mock_run):
         patch("os.path.realpath", side_effect=lambda p: p),
         patch("os.makedirs"),
         patch.object(mm, "is_mounted", return_value=False),
-        patch("shutil.which", return_value="/bin/mount"),
     ):
         mm.safe_mount("/host/src", "/tmp/rootfs/mnt", holder=holder, options="ro")
-    assert mock_run.call_count == 2
-    first = mock_run.call_args_list[0][0][0]
-    second = mock_run.call_args_list[1][0][0]
-    assert first[1:] == ["--bind", "/host/src", "/tmp/rootfs/mnt"]
-    assert second[1:] == ["-o", "remount,bind,ro", "/tmp/rootfs/mnt"]
+    holder.do_bind_mount.assert_called_once_with(
+        "/host/src", "/tmp/rootfs/mnt", recursive=False, options="ro"
+    )
 
 
-@patch("chroot_distro.helpers.mount_manager._run_mount_cmd")
-def test_safe_mount_only_selinux_option_skips_remount(mock_run):
-    mock_run.return_value = MagicMock(returncode=0)
+def test_safe_mount_only_selinux_option_skips_remount():
     holder = MagicMock()
     with (
         patch("os.path.isdir", return_value=True),
@@ -98,16 +88,14 @@ def test_safe_mount_only_selinux_option_skips_remount(mock_run):
         patch("os.path.realpath", side_effect=lambda p: p),
         patch("os.makedirs"),
         patch.object(mm, "is_mounted", return_value=False),
-        patch("shutil.which", return_value="/bin/mount"),
     ):
         mm.safe_mount("/host/src", "/tmp/rootfs/mnt", holder=holder, options="z")
-    # z is dropped -> no kernel options -> no remount
-    assert mock_run.call_count == 1
+    holder.do_bind_mount.assert_called_once_with(
+        "/host/src", "/tmp/rootfs/mnt", recursive=False, options=""
+    )
 
 
-@patch("chroot_distro.helpers.mount_manager._run_mount_cmd")
-def test_safe_mount_recursive_ro_uses_rbind_remount(mock_run):
-    mock_run.return_value = MagicMock(returncode=0)
+def test_safe_mount_recursive_ro_uses_rbind_remount():
     holder = MagicMock()
     with (
         patch("os.path.isdir", return_value=True),
@@ -115,8 +103,8 @@ def test_safe_mount_recursive_ro_uses_rbind_remount(mock_run):
         patch("os.path.realpath", side_effect=lambda p: p),
         patch("os.makedirs"),
         patch.object(mm, "is_mounted", return_value=False),
-        patch("shutil.which", return_value="/bin/mount"),
     ):
         mm.safe_mount("/host/src", "/tmp/rootfs/mnt", holder=holder, recursive=True, options="ro")
-    second = mock_run.call_args_list[1][0][0]
-    assert second[1:] == ["-o", "remount,rbind,ro", "/tmp/rootfs/mnt"]
+    holder.do_bind_mount.assert_called_once_with(
+        "/host/src", "/tmp/rootfs/mnt", recursive=True, options="ro"
+    )

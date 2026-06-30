@@ -1051,11 +1051,11 @@ def test_holder_run_argv_drops_unopenable_ipc_at_call_time():
     """run_argv must drop a namespace whose ns file is unopenable right now,
     but always keep the essential mount namespace."""
     from chroot_distro.helpers import namespace as ns
+    from chroot_distro.syscalls._constants import CLONE_NEWNS, CLONE_NEWUTS, CLONE_NEWIPC, CLONE_NEWPID
 
     holder = ns.NamespaceHolder(
         pid=4321,
-        nsenter_flags=["--mount", "--uts", "--ipc", "--pid"],
-        nsenter_exe="/usr/bin/nsenter",
+        ns_flags=CLONE_NEWNS | CLONE_NEWUTS | CLONE_NEWIPC | CLONE_NEWPID,
         container_name="debian",
     )
 
@@ -1070,39 +1070,21 @@ def test_holder_run_argv_drops_unopenable_ipc_at_call_time():
     assert "--ipc" not in argv
     assert "--mount" in argv
     assert "--pid" in argv and "--uts" in argv
-    assert argv[:3] == ["/usr/bin/nsenter", "--target", "4321"]
+    assert argv[:3] == ["nsenter", "--target", "4321"]
 
 
 def test_holder_run_argv_keeps_mount_even_if_unopenable():
     from chroot_distro.helpers import namespace as ns
+    from chroot_distro.syscalls._constants import CLONE_NEWNS
 
     holder = ns.NamespaceHolder(
         pid=1,
-        nsenter_flags=["--mount"],
-        nsenter_exe="/usr/bin/nsenter",
+        ns_flags=CLONE_NEWNS,
         container_name="x",
     )
     with patch.object(ns.os, "open", side_effect=OSError(2, "nope")):
         argv = holder.run_argv(["true"])
     assert "--mount" in argv
-
-
-def test_holder_unshare_argv_max_isolation_chroots():
-    """The max-isolation holder must chroot into the rootfs before sleeping so
-    PID 1's root is inside the container (closes chroot /proc/1/root escape)."""
-    from chroot_distro.helpers.namespace import _holder_unshare_argv
-
-    plain = _holder_unshare_argv("/usr/bin/unshare", ["--pid", "--mount"])
-    assert plain[-2:] == ["sleep", "2147483647"]
-    assert "--fork" in plain
-
-    chrooted = _holder_unshare_argv("/usr/bin/unshare", ["--pid", "--mount"], rootfs="/fake/rootfs")
-    assert chrooted[-3] == "python3"
-    assert chrooted[-2] == "-c"
-    launcher = chrooted[-1]
-    assert "os.chroot('/fake/rootfs')" in launcher
-    assert "time.sleep(" in launcher
-    assert "--fork" in chrooted
 
 
 def test_special_mounts_max_isolation_proc_hidepid():

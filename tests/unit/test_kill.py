@@ -55,9 +55,9 @@ def test_kill_not_running(mock_log, mock_mount, mock_session, mock_isdir, mock_r
 @patch("chroot_distro.commands.kill.session")
 @patch("chroot_distro.commands.kill.mount_manager")
 @patch("chroot_distro.commands.kill.log_info")
-@patch("subprocess.run")
+@patch("chroot_distro.syscalls.umount.native_umount")
 def test_kill_standard_unmount_success(
-    mock_run, mock_log, mock_mount, mock_session, mock_lock, mock_isdir, mock_rootfs, *_mocks
+    mock_native_umount, mock_log, mock_mount, mock_session, mock_lock, mock_isdir, mock_rootfs, *_mocks
 ):
     """If standard unmount succeeds, we don't need lazy/kill/forceful."""
     args = MagicMock()
@@ -72,22 +72,17 @@ def test_kill_standard_unmount_success(
         [],  # Step 3 check
         [],  # Step 4 check
     ]
-    mock_mount._resolve_umount.return_value = "/bin/umount"
 
     mock_lock_instance = MagicMock()
     mock_lock_instance.acquire.return_value = True
     mock_lock.return_value = mock_lock_instance
 
-    mock_run_res = MagicMock()
-    mock_run_res.returncode = 0
-    mock_run.return_value = mock_run_res
+    mock_native_umount.return_value = None
 
     command_kill(args)
 
     mock_lock_instance.acquire.assert_called_once()
-    mock_run.assert_called_once_with(
-        ["/bin/umount", "/mock/containers/ubuntu/rootfs/proc"], capture_output=True, text=True, check=False
-    )
+    mock_native_umount.assert_called_once_with("/mock/containers/ubuntu/rootfs/proc", lazy=False, force=False)
     mock_session.reset.assert_called_once_with("ubuntu")
     mock_log.assert_any_call("Container 'ubuntu' successfully killed and unmounted.")
     mock_lock_instance.release.assert_called_once()
@@ -100,9 +95,9 @@ def test_kill_standard_unmount_success(
 @patch("chroot_distro.commands.kill.session")
 @patch("chroot_distro.commands.kill.mount_manager")
 @patch("chroot_distro.commands.kill.log_info")
-@patch("subprocess.run")
+@patch("chroot_distro.syscalls.umount.native_umount")
 def test_kill_lazy_unmount_success(
-    mock_run, mock_log, mock_mount, mock_session, mock_lock, mock_isdir, mock_rootfs, *_mocks
+    mock_native_umount, mock_log, mock_mount, mock_session, mock_lock, mock_isdir, mock_rootfs, *_mocks
 ):
     """If standard unmount fails, lazy unmount succeeds."""
     args = MagicMock()
@@ -117,28 +112,20 @@ def test_kill_lazy_unmount_success(
         [],  # Step 3 check
         [],  # Step 4 check
     ]
-    mock_mount._resolve_umount.return_value = "/bin/umount"
 
     mock_lock_instance = MagicMock()
     mock_lock_instance.acquire.return_value = True
     mock_lock.return_value = mock_lock_instance
 
-    # Standard umount fails, lazy umount succeeds
-    mock_run_res_fail = MagicMock(returncode=1)
-    mock_run_res_ok = MagicMock(returncode=0)
-    mock_run.side_effect = [mock_run_res_fail, mock_run_res_ok]
+    # Standard umount fails (raises OSError), lazy umount succeeds (returns None)
+    mock_native_umount.side_effect = [OSError("mock fail"), None]
 
     command_kill(args)
 
-    mock_run.assert_has_calls(
+    mock_native_umount.assert_has_calls(
         [
-            call(["/bin/umount", "/mock/containers/ubuntu/rootfs/proc"], capture_output=True, text=True, check=False),
-            call(
-                ["/bin/umount", "-l", "/mock/containers/ubuntu/rootfs/proc"],
-                capture_output=True,
-                text=True,
-                check=False,
-            ),
+            call("/mock/containers/ubuntu/rootfs/proc", lazy=False, force=False),
+            call("/mock/containers/ubuntu/rootfs/proc", lazy=True, force=False),
         ]
     )
     mock_session.reset.assert_called_once_with("ubuntu")
@@ -152,7 +139,7 @@ def test_kill_lazy_unmount_success(
 @patch("chroot_distro.commands.kill.session")
 @patch("chroot_distro.commands.kill.mount_manager")
 @patch("chroot_distro.commands.kill.log_info")
-@patch("subprocess.run")
+@patch("chroot_distro.syscalls.umount.native_umount")
 @patch("chroot_distro.commands.kill.os.kill")
 @patch("chroot_distro.commands.kill.time.sleep")
 @patch("chroot_distro.commands.kill.time.time")
@@ -160,7 +147,7 @@ def test_kill_process_then_unmount(
     mock_time,
     mock_sleep,
     mock_kill,
-    mock_run,
+    mock_native_umount,
     mock_log,
     mock_mount,
     mock_session,
@@ -195,7 +182,6 @@ def test_kill_process_then_unmount(
         [],
         [],
     ]
-    mock_mount._resolve_umount.return_value = "/bin/umount"
 
     mock_lock_instance = MagicMock()
     mock_lock_instance.acquire.return_value = True
@@ -204,13 +190,11 @@ def test_kill_process_then_unmount(
     mock_time.side_effect = [0, 0.1, 0.2, 0.3]
 
     # Standard umounts fail, lazy umounts succeed
-    mock_run_res_fail = MagicMock(returncode=1)
-    mock_run_res_ok = MagicMock(returncode=0)
-    mock_run.side_effect = [
-        mock_run_res_fail,  # Step 1 standard
-        mock_run_res_fail,  # Step 2 lazy
-        mock_run_res_fail,  # Step 3 post-kill standard
-        mock_run_res_ok,  # Step 3 post-kill lazy
+    mock_native_umount.side_effect = [
+        OSError("mock fail"),  # Step 1 standard
+        OSError("mock fail"),  # Step 2 lazy
+        OSError("mock fail"),  # Step 3 post-kill standard
+        None,  # Step 3 post-kill lazy
     ]
 
     command_kill(args)
@@ -227,10 +211,10 @@ def test_kill_process_then_unmount(
 @patch("chroot_distro.commands.kill.session")
 @patch("chroot_distro.commands.kill.mount_manager")
 @patch("chroot_distro.commands.kill.log_info")
-@patch("subprocess.run")
+@patch("chroot_distro.syscalls.umount.native_umount")
 @patch("chroot_distro.commands.kill.crit_error")
 def test_kill_forceful_failure_diagnostic(
-    mock_crit_error, mock_run, mock_log, mock_mount, mock_session, mock_lock, mock_isdir, mock_rootfs, *_mocks
+    mock_crit_error, mock_native_umount, mock_log, mock_mount, mock_session, mock_lock, mock_isdir, mock_rootfs, *_mocks
 ):
     """If forceful unmount also fails, we output detailed diagnostics."""
     args = MagicMock()
@@ -239,14 +223,13 @@ def test_kill_forceful_failure_diagnostic(
     mock_session.get_active_chroot_pids.return_value = []
     # get_active_mounts always returns a mount
     mock_mount.get_active_mounts.return_value = ["/mock/containers/ubuntu/rootfs/proc"]
-    mock_mount._resolve_umount.return_value = "/bin/umount"
 
     mock_lock_instance = MagicMock()
     mock_lock_instance.acquire.return_value = True
     mock_lock.return_value = mock_lock_instance
 
     # All umount commands fail
-    mock_run.return_value = MagicMock(returncode=1)
+    mock_native_umount.side_effect = OSError("mock fail")
 
     with pytest.raises(SystemExit) as exc_info:
         command_kill(args)
@@ -267,7 +250,7 @@ def test_kill_forceful_failure_diagnostic(
 @patch("chroot_distro.commands.kill.session")
 @patch("chroot_distro.commands.kill.mount_manager")
 @patch("chroot_distro.commands.kill.log_info")
-@patch("subprocess.run")
+@patch("chroot_distro.syscalls.umount.native_umount")
 @patch("chroot_distro.commands.kill.os.kill")
 @patch("chroot_distro.commands.kill.time.sleep")
 @patch("chroot_distro.commands.kill.time.time")
@@ -275,7 +258,7 @@ def test_kill_lock_conflict_bypass(
     mock_time,
     mock_sleep,
     mock_kill,
-    mock_run,
+    mock_native_umount,
     mock_log,
     mock_mount,
     mock_session,
@@ -297,7 +280,6 @@ def test_kill_lock_conflict_bypass(
         [],  # Step 3 post-kill lazy
         [],  # Step 4 check
     ]
-    mock_mount._resolve_umount.return_value = "/bin/umount"
 
     mock_lock_instance = MagicMock()
     # First acquire fails, second acquire (after processes killed) succeeds
@@ -305,7 +287,7 @@ def test_kill_lock_conflict_bypass(
     mock_lock.return_value = mock_lock_instance
 
     mock_time.side_effect = [0, 0.1, 0.2, 0.3]
-    mock_run.return_value = MagicMock(returncode=0)
+    mock_native_umount.return_value = None
 
     command_kill(args)
 
@@ -393,4 +375,3 @@ def test_kill_by_name_still_works(mock_log, mock_mount, mock_session, mock_isdir
     command_kill(args)
 
     mock_log.assert_called_once_with("Container 'ubuntu' is not running.")
-

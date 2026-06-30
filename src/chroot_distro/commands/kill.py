@@ -2,7 +2,6 @@ import contextlib
 import json
 import os
 import signal
-import subprocess
 import sys
 import time
 
@@ -87,19 +86,18 @@ def command_kill(args) -> None:
         log_info(f"Container '{container_name}' is not running.")
         return
 
-    umount_bin = mount_manager._resolve_umount()
+    def run_umount(target_path: str, *, lazy: bool = False, force: bool = False) -> bool:
+        try:
+            if holder is not None:
+                holder.do_umount(target_path, lazy=lazy, force=force)
+            else:
+                from chroot_distro.syscalls.umount import native_umount
 
-    def run_umount(target_path: str, flags: list[str] | None = None) -> bool:
-        cmd = [umount_bin]
-        if flags:
-            cmd.extend(flags)
-        cmd.append(target_path)
-
-        if holder is not None:
-            res = holder.run(cmd, capture_output=True, text=True)
-        else:
-            res = subprocess.run(cmd, capture_output=True, text=True, check=False)
-        return res.returncode == 0
+                native_umount(target_path, lazy=lazy, force=force)
+            return True
+        except Exception as exc:
+            log_info(f"Unmount of {target_path} failed: {exc}")
+            return False
 
     lock = ContainerLock(container_name, exclusive=True, command="kill")
     acquired = lock.acquire()
@@ -119,7 +117,7 @@ def command_kill(args) -> None:
         if active_mounts:
             log_info("Some mounts remain busy. Attempting lazy unmount...")
             for m in active_mounts:
-                run_umount(m, ["-l"])
+                run_umount(m, lazy=True)
 
         # Step 3: Kill processes and unmount again if active PIDs or mounts remain
         active_pids = session.get_active_chroot_pids(container_name)
@@ -158,14 +156,14 @@ def command_kill(args) -> None:
                 if active_mounts:
                     log_info("Retrying lazy unmount after killing processes...")
                     for m in active_mounts:
-                        run_umount(m, ["-l"])
+                        run_umount(m, lazy=True)
 
         # Step 4: Forceful unmount and detailed error if still failed
         active_mounts = mount_manager.get_active_mounts(rootfs_dir, holder=holder)
         if active_mounts:
             log_info("Some mounts still remain. Attempting forceful unmount...")
             for m in active_mounts:
-                run_umount(m, ["-f"])
+                run_umount(m, force=True)
 
             active_mounts = mount_manager.get_active_mounts(rootfs_dir, holder=holder)
             if active_mounts:

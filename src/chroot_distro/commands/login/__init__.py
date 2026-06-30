@@ -11,7 +11,7 @@ import chroot_distro.helpers.mount_manager as mount_manager
 import chroot_distro.helpers.namespace as namespace
 import chroot_distro.helpers.session as session
 from chroot_distro.commands.login import bindings
-from chroot_distro.commands.login.chroot_cmd import build_chroot_args
+from chroot_distro.commands.login.chroot_cmd import ChrootConfig, build_chroot_args, build_chroot_config
 from chroot_distro.commands.login.env import (
     ANDROID_HOST_ENV_VARS,
     IMAGE_ENV_BLOCKED,
@@ -69,6 +69,7 @@ from chroot_distro.locking import ContainerLock
 from chroot_distro.message import crit_error, warn
 from chroot_distro.names import require_valid_name
 from chroot_distro.paths import container_dir, container_log_path, container_rootfs
+from chroot_distro.syscalls.chroot import chroot_and_run
 
 log = logging.getLogger(__name__)
 
@@ -960,6 +961,7 @@ def _command_login_inner_once(container_name: str, args) -> None:
     holder = None
     pipe_w = None
     chroot_args = None
+    chroot_config: ChrootConfig | None = None
 
     try:
         host_mounts_exist = bool(mount_manager.get_active_mounts(rootfs))
@@ -976,6 +978,9 @@ def _command_login_inner_once(container_name: str, args) -> None:
     with session.lock(container_name) as lock_fh:
         sess_count = session.increment(container_name, lock_fh=lock_fh)
         if sess_count == 1:
+            from chroot_distro.helpers.rootfs import write_resolv_conf
+
+            write_resolv_conf(rootfs)
             if use_namespaces:
                 try:
                     # A detached run must use a plain holder and reach the
@@ -1114,9 +1119,7 @@ def _command_login_inner_once(container_name: str, args) -> None:
                     enable_shm=not minimal,
                 )
                 for sm in specials:
-                    is_maxiso_dev = (
-                        max_isolation and use_namespaces and sm.fstype == "tmpfs" and sm.target == "/dev"
-                    )
+                    is_maxiso_dev = max_isolation and use_namespaces and sm.fstype == "tmpfs" and sm.target == "/dev"
                     if is_maxiso_dev:
                         # The fresh /dev tmpfs is best-effort under max
                         # isolation: if the kernel denies it (SELinux on some
@@ -1125,9 +1128,7 @@ def _command_login_inner_once(container_name: str, args) -> None:
                         # on-disk /dev. That is still not a host bind, so the
                         # session stays isolated; we just populate the device
                         # nodes directly on the rootfs /dev directory.
-                        mounted = mount_manager.apply_special_mount(
-                            rootfs, sm, holder=holder, force_optional=True
-                        )
+                        mounted = mount_manager.apply_special_mount(rootfs, sm, holder=holder, force_optional=True)
                         if not mounted:
                             warn(
                                 "Could not mount a fresh tmpfs /dev; using the "
@@ -1283,6 +1284,15 @@ def _command_login_inner_once(container_name: str, args) -> None:
             inner_cmd=inner,
             is_run=run_inner is not None,
         )
+        chroot_config = build_chroot_config(
+            rootfs=rootfs,
+            login_uid=login_uid,
+            login_gid=login_gid,
+            groups=groups,
+            workdir=login_wd,
+            inner_cmd=inner,
+            is_run=run_inner is not None,
+        )
 
     exec_argv = chroot_args
     if holder is not None:
@@ -1352,7 +1362,19 @@ def _command_login_inner_once(container_name: str, args) -> None:
                         namespace.clear_isolation_mode(container_name)
     else:
         try:
-            subprocess.run(exec_argv, env=child_env, check=False)
+            if chroot_config is not None and holder is None:
+                # Native path: chroot + exec without spawning the chroot binary.
+                chroot_and_run(
+                    chroot_config.rootfs,
+                    chroot_config.command,
+                    uid=chroot_config.uid,
+                    gid=chroot_config.gid,
+                    groups=chroot_config.groups,
+                    workdir=chroot_config.workdir,
+                    env=child_env,
+                )
+            else:
+                subprocess.run(exec_argv, env=child_env, check=False)
         finally:
             if _sess_handle is not None:
                 _sess_handle.close()
