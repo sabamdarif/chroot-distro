@@ -6,8 +6,8 @@ import contextlib
 import glob
 import os
 import pwd
-import shutil
-import subprocess
+
+from chroot_distro.helpers.xauthority import extract_entries
 
 GUEST_XAUTHORITY_PATH = "/var/tmp/.chroot-distro-xauthority"
 
@@ -214,8 +214,6 @@ def provision_guest_xauthority(
     """
     if not display or not host_xauthority or not os.path.isfile(host_xauthority):
         return None
-    if shutil.which("xauth") is None:
-        return None
 
     guest_host_path = os.path.join(rootfs, GUEST_XAUTHORITY_PATH.lstrip("/"))
     try:
@@ -226,25 +224,16 @@ def provision_guest_xauthority(
     with contextlib.suppress(OSError):
         os.remove(guest_host_path)
 
-    for name in _display_names(display):
-        try:
-            result = subprocess.run(
-                ["xauth", "-f", host_xauthority, "extract", guest_host_path, name],
-                capture_output=True,
-                check=False,
-            )
-        except OSError:
-            return None
-        if result.returncode == 0 and os.path.isfile(guest_host_path):
-            try:
-                os.chown(guest_host_path, guest_uid, guest_gid)
-                os.chmod(guest_host_path, 0o600)
-            except OSError:
-                with contextlib.suppress(OSError):
-                    os.remove(guest_host_path)
-                return None
-            return GUEST_XAUTHORITY_PATH
+    if not extract_entries(host_xauthority, guest_host_path, _display_names(display)):
         with contextlib.suppress(OSError):
             os.remove(guest_host_path)
+        return None
 
-    return None
+    try:
+        os.chown(guest_host_path, guest_uid, guest_gid)
+        os.chmod(guest_host_path, 0o600)
+    except OSError:
+        with contextlib.suppress(OSError):
+            os.remove(guest_host_path)
+        return None
+    return GUEST_XAUTHORITY_PATH

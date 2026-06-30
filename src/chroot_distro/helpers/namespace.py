@@ -216,7 +216,7 @@ def _read_holder_pid(container_name: str) -> int | None:
         curr_start_time = _get_process_start_time(pid)
         if curr_start_time is None or abs(curr_start_time - start_time) > 0.1:
             is_valid = False
-    elif not is_custom and not _is_sleep_infinity_holder(pid):
+    elif not is_custom and not _is_legacy_sleep_holder(pid):
         is_valid = False
 
     if not is_valid:
@@ -279,7 +279,8 @@ def _proc_comm(pid: int) -> str:
         return ""
 
 
-def _is_sleep_infinity_holder(pid: int) -> bool:
+def _is_legacy_sleep_holder(pid: int) -> bool:
+    """Check if *pid* is a legacy ``sleep infinity`` namespace holder."""
     if _proc_comm(pid) != "sleep":
         return False
     try:
@@ -571,13 +572,14 @@ def get_live_holder(container_name: str) -> NamespaceHolder | None:
     )
 
 
-def _snapshot_sleep_infinity_pids() -> set[int]:
+def _snapshot_legacy_holder_pids() -> set[int]:
+    """Return PIDs of all running legacy ``sleep``-based holders."""
     pids: set[int] = set()
     for entry in os.listdir("/proc"):
         if not entry.isdigit():
             continue
         pid = int(entry)
-        if _is_sleep_infinity_holder(pid):
+        if _is_legacy_sleep_holder(pid):
             pids.add(pid)
     return pids
 
@@ -602,8 +604,8 @@ def _is_custom_holder(pid: int, pipe_r: int) -> bool:
     return f"os.read({pipe_r}, 1)" in cmdline
 
 
-def _descendant_sleep_holders(launcher_pid: int, max_depth: int = 4) -> list[int]:
-    """Return ``sleep infinity`` holders reachable from *launcher_pid*."""
+def _descendant_legacy_holders(launcher_pid: int, max_depth: int = 4) -> list[int]:
+    """Return legacy ``sleep``-based holders reachable from *launcher_pid*."""
     found: list[int] = []
     seen: set[int] = {launcher_pid}
     frontier = [launcher_pid]
@@ -611,7 +613,7 @@ def _descendant_sleep_holders(launcher_pid: int, max_depth: int = 4) -> list[int
     while frontier and depth <= max_depth:
         next_frontier: list[int] = []
         for pid in frontier:
-            if pid != launcher_pid and _is_sleep_infinity_holder(pid) and pid not in found:
+            if pid != launcher_pid and _is_legacy_sleep_holder(pid) and pid not in found:
                 found.append(pid)
             for child_pid in _read_host_child_pids(pid):
                 if child_pid not in seen:
@@ -624,15 +626,15 @@ def _descendant_sleep_holders(launcher_pid: int, max_depth: int = 4) -> list[int
 
 def _pick_new_holder_pid(before: set[int], launcher_pid: int | None = None) -> int | None:
     if launcher_pid is not None:
-        if launcher_pid not in before and _is_sleep_infinity_holder(launcher_pid):
+        if launcher_pid not in before and _is_legacy_sleep_holder(launcher_pid):
             return launcher_pid
-        descendants = [pid for pid in _descendant_sleep_holders(launcher_pid) if pid not in before]
+        descendants = [pid for pid in _descendant_legacy_holders(launcher_pid) if pid not in before]
         if descendants:
             if len(descendants) == 1:
                 return descendants[0]
             return min(descendants, key=lambda pid: os.stat(f"/proc/{pid}").st_mtime)
 
-    candidates = [pid for pid in _snapshot_sleep_infinity_pids() if pid not in before]
+    candidates = [pid for pid in _snapshot_legacy_holder_pids() if pid not in before]
     if not candidates:
         return None
     if len(candidates) == 1:
@@ -660,7 +662,7 @@ def _create_holder(
     _remove_holder_state(container_name)
 
     before_pids = _snapshot_all_pids()
-    _snapshot_sleep_infinity_pids()
+    _snapshot_legacy_holder_pids()
 
     # ── Custom holder command path (subprocess-based, preserves pipe sync) ──
     if holder_cmd:
