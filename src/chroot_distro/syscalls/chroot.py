@@ -386,11 +386,11 @@ def _binary_interpreter(target: str) -> str | None:
 
 
 def _try_exec(cmd: list[str], run_env: dict[str, str]) -> None:
-    """Attempt to exec *cmd*; on ENOENT for an existing binary, retry via its
+    """Attempt to exec *cmd*; on ENOENT or EACCES for an existing binary, retry via its
     ELF interpreter. Returns the final OSError (this never returns on success).
 
     A direct ``execve`` of a dynamically linked guest binary can fail with
-    ENOENT on some Termux/Android kernels even though the binary, its
+    ENOENT or EACCES on some Termux/Android kernels even though the binary, its
     architecture and its PT_INTERP all exist inside the chroot. Re-running it
     as ``<interpreter> <binary> <args...>`` makes the dynamic linker load the
     program explicitly and sidesteps that failure.
@@ -400,7 +400,7 @@ def _try_exec(cmd: list[str], run_env: dict[str, str]) -> None:
     try:
         os.execvpe(cmd[0], cmd, run_env)
     except OSError as exc:
-        if exc.errno != _errno.ENOENT or not os.path.exists(cmd[0]):
+        if exc.errno not in (_errno.ENOENT, _errno.EACCES) or not os.path.exists(cmd[0]):
             raise
         interp = _binary_interpreter(cmd[0])
         if not interp or not os.path.exists(interp):
