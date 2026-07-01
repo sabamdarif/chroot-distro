@@ -30,6 +30,7 @@ import contextlib
 import ctypes
 import ctypes.util
 import json
+import logging
 import os
 import sys
 import time
@@ -43,6 +44,8 @@ from chroot_distro.syscalls._constants import (
     MS_REC,
     S_IFCHR,
 )
+
+log = logging.getLogger(__name__)
 
 HOLDER_SLEEP_SECONDS = 2147483647
 
@@ -66,11 +69,11 @@ def _make_node(path: str, major: int, minor: int, mode: int) -> None:
     try:
         os.mknod(path, S_IFCHR | mode, os.makedev(major, minor))
         os.chmod(path, mode)
-    except FileExistsError:
-        pass
-    except OSError:
+    except FileExistsError as exc:
+        log.debug("Node %s already exists: %s", path, exc)
+    except OSError as exc:
         # mknod can be denied on some Android kernels; the node is best-effort.
-        pass
+        log.debug("Failed to mknod %s (best-effort): %s", path, exc)
 
 
 def setup(config: dict) -> None:
@@ -97,8 +100,8 @@ def setup(config: dict) -> None:
     try:
         os.makedirs("/sys", exist_ok=True)
         _mount(libc, "sysfs", "/sys", "sysfs", MS_RDONLY | MS_NOSUID | MS_NODEV | MS_NOEXEC, None)
-    except OSError:
-        pass
+    except OSError as exc:
+        log.warning("Failed to mount sysfs (best-effort): %s", exc)
 
     # Fresh /dev tmpfs with the minimal device nodes.
     os.makedirs("/dev", exist_ok=True)
@@ -120,15 +123,15 @@ def setup(config: dict) -> None:
         if os.path.islink("/dev/ptmx") or os.path.exists("/dev/ptmx"):
             os.remove("/dev/ptmx")
         os.symlink("/dev/pts/ptmx", "/dev/ptmx")
-    except OSError:
-        pass
+    except OSError as exc:
+        log.warning("Failed to create /dev/ptmx symlink: %s", exc)
 
     # Fresh /dev/shm.
     try:
         os.makedirs("/dev/shm", exist_ok=True)
         _mount(libc, "tmpfs", "/dev/shm", "tmpfs", MS_NOSUID | MS_NODEV, "size=256M,mode=1777")
-    except OSError:
-        pass
+    except OSError as exc:
+        log.warning("Failed to mount /dev/shm: %s", exc)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -147,8 +150,8 @@ def main(argv: list[str] | None = None) -> int:
             try:
                 os.write(ready_fd, ("E" + str(exc))[:240].encode())
                 os.close(ready_fd)
-            except OSError:
-                pass
+            except OSError as write_exc:
+                log.warning("Failed to write setup failure to ready_fd: %s", write_exc)
         sys.stderr.write(f"max-isolation holder setup failed: {exc}\n")
         return 1
 
@@ -156,8 +159,8 @@ def main(argv: list[str] | None = None) -> int:
         try:
             os.write(ready_fd, b"K")
             os.close(ready_fd)
-        except OSError:
-            pass
+        except OSError as exc:
+            log.warning("Failed to write setup success to ready_fd: %s", exc)
 
     time.sleep(HOLDER_SLEEP_SECONDS)
     return 0

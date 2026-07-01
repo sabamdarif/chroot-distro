@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import contextlib
 import glob
+import logging
 import os
 import pwd
 
 from chroot_distro.helpers.xauthority import extract_entries
+
+log = logging.getLogger(__name__)
 
 GUEST_XAUTHORITY_PATH = "/var/tmp/.chroot-distro-xauthority"
 
@@ -59,8 +62,8 @@ def get_invoking_env() -> dict[str, str]:
                         env[k.decode("utf-8", errors="replace")] = v.decode("utf-8", errors="replace")
                 _EnvCache.value = env
                 return env
-        except Exception:
-            pass
+        except Exception as exc:
+            log.debug("Failed to read environment from process %s: %s", pid, exc)
         pid = _get_ppid(pid)
     _EnvCache.value = {}
     return {}

@@ -1,4 +1,5 @@
 import contextlib
+import logging
 import os
 import shutil
 import stat
@@ -10,6 +11,8 @@ else:
     from backports.zstd import tarfile
 
 from chroot_distro.progress import ByteCounter, clear_bar, draw_bytes_bar
+
+log = logging.getLogger(__name__)
 
 
 def extract_tar_to_rootfs(
@@ -155,8 +158,8 @@ def _remove_fstree(path: str) -> None:
             shutil.rmtree(path, ignore_errors=True)
         else:
             os.remove(path)
-    except OSError:
-        pass
+    except OSError as exc:
+        log.debug("Failed to remove fstree %s: %s", path, exc)
 
 
 def _write_symlink(dest: str, member) -> None:

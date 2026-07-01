@@ -1,5 +1,6 @@
 import contextlib
 import grp
+import logging
 import os
 import pwd
 import stat
@@ -11,6 +12,8 @@ from chroot_distro.constants import (
     TERMUX_PREFIX,
 )
 from chroot_distro.helpers.android import termux_home_owner_ids
+
+log = logging.getLogger(__name__)
 
 # Local stub resolvers that only work when the matching daemon runs in the
 # same network namespace (e.g. systemd-resolved on the host).
@@ -59,8 +62,8 @@ def _read_resolv_nameservers(path: str) -> list[str]:
         try:
             with open(_SYSTEMD_UPSTREAM_RESOLV) as fh:
                 return _parse_nameservers(fh.read())
-        except OSError:
-            pass
+        except OSError as exc:
+            log.debug("Failed to read systemd upstream resolv file: %s", exc)
     return []
 
 
@@ -138,9 +141,7 @@ def ensure_hosts_entry(rootfs: str, *hostnames: str) -> None:
     if not to_add:
         return
 
-    suffix = ("" if existing.endswith("\n") or not existing else "\n") + "".join(
-        f"127.0.0.1   {h}\n" for h in to_add
-    )
+    suffix = ("" if existing.endswith("\n") or not existing else "\n") + "".join(f"127.0.0.1   {h}\n" for h in to_add)
     with contextlib.suppress(OSError), open(path, "a") as fh:
         fh.write(suffix)
 
@@ -173,8 +174,8 @@ def register_android_ids(rootfs: str) -> None:
             fh.write(f"aid_{username_result}:x:{uid}:{gid}:Termux:/:/sbin/nologin\n")
         with open(shadow_path, "a") as fh:
             fh.write(f"aid_{username_result}:*:18446:0:99999:7:::\n")
-    except OSError:
-        pass
+    except OSError as exc:
+        log.warning("Failed to write to passwd or shadow file in setup_android_permissions_legacy: %s", exc)
 
     try:
         _, termux_gid = termux_home_owner_ids()
@@ -196,16 +197,16 @@ def register_android_ids(rootfs: str) -> None:
                     parts = line.strip().split(":")
                     if parts and parts[0]:
                         existing_groups.add(parts[0])
-        except OSError:
-            pass
+        except OSError as exc:
+            log.warning("Failed to read group file in setup_android_permissions_legacy: %s", exc)
 
     if os.path.exists(group_path) and "termux" not in existing_groups:
         try:
             with open(group_path, "a") as fh:
                 fh.write(f"termux:x:{termux_gid}:\n")
             existing_groups.add("termux")
-        except OSError:
-            pass
+        except OSError as exc:
+            log.warning("Failed to write to group file in setup_android_permissions_legacy: %s", exc)
 
     for g in all_gids:
         if g == termux_gid:
@@ -224,8 +225,8 @@ def register_android_ids(rootfs: str) -> None:
             if os.path.exists(gshadow_path):
                 with open(gshadow_path, "a") as fh:
                     fh.write(f"{aid_gname}:*::root,aid_{username_result}\n")
-        except OSError:
-            pass
+        except OSError as exc:
+            log.warning("Failed to append to group or gshadow file in setup_android_permissions_legacy: %s", exc)
 
     # Ensure Android-specific groups exist in /etc/group
     android_groups = [
@@ -251,5 +252,5 @@ def register_android_ids(rootfs: str) -> None:
                     if gname not in existing_groups:
                         fh.write(gline + "\n")
                         existing_groups.add(gname)
-        except OSError:
-            pass
+        except OSError as exc:
+            log.warning("Failed to write Android-specific groups in setup_android_permissions_legacy: %s", exc)

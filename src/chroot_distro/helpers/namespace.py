@@ -454,8 +454,8 @@ class NamespaceHolder:
                 try:
                     sys.stderr.write(f"do_bind_mount: {exc}\n")
                     sys.stderr.flush()
-                except Exception:
-                    pass
+                except Exception as write_exc:
+                    log.warning("sys.stderr.write failed in child: %s", write_exc)
                 os._exit(1)
 
         _, status = os.waitpid(child_pid, 0)
@@ -481,8 +481,8 @@ class NamespaceHolder:
                     try:
                         native_umount(target, lazy=True, force=force)
                         os._exit(0)
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        log.debug("Fallback lazy unmount of %s failed: %s", target, exc)
                 os._exit(1)
 
         _, status = os.waitpid(child_pid, 0)
@@ -521,8 +521,8 @@ class NamespaceHolder:
                 try:
                     sys.stderr.write(f"do_mount_filesystem: {exc}\n")
                     sys.stderr.flush()
-                except Exception:
-                    pass
+                except Exception as write_exc:
+                    log.warning("sys.stderr.write failed in child: %s", write_exc)
                 os._exit(1)
 
         _, status = os.waitpid(child_pid, 0)
@@ -590,8 +590,8 @@ def _snapshot_all_pids() -> set[int]:
         for entry in os.listdir("/proc"):
             if entry.isdigit():
                 pids.add(int(entry))
-    except OSError:
-        pass
+    except OSError as exc:
+        log.warning("Failed to list /proc to snapshot all pids: %s", exc)
     return pids
 
 
@@ -914,8 +914,8 @@ def set_namespace_hostname(holder: NamespaceHolder, hostname: str) -> bool:
         result = holder.run(["hostname", hostname], capture_output=True, text=True)
         if result.returncode == 0:
             return True
-    except OSError:
-        pass
+    except OSError as exc:
+        log.debug("Hostname binary fallback failed: %s", exc)
 
     # Last resort: write to /proc/sys/kernel/hostname.
     try:
@@ -926,8 +926,8 @@ def set_namespace_hostname(holder: NamespaceHolder, hostname: str) -> bool:
         )
         if result.returncode == 0:
             return True
-    except OSError:
-        pass
+    except OSError as exc:
+        log.warning("Last resort hostname change failed: %s", exc)
     return False
 
 

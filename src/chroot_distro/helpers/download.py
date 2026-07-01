@@ -2,6 +2,7 @@ import contextlib
 import functools
 import hashlib
 import json
+import logging
 import os
 import shutil
 import signal
@@ -32,6 +33,8 @@ from chroot_distro.progress import (
     loading_line,
 )
 from chroot_distro.rate_limit import TokenBucket
+
+log = logging.getLogger(__name__)
 
 __all__ = (
     "certificate_error_msg",
@@ -627,8 +630,8 @@ def _download_multi(
                     )
                     for s in meta.get("segments", [])
                 ]
-        except (OSError, ValueError, KeyError, json.JSONDecodeError):
-            pass
+        except (OSError, ValueError, KeyError, json.JSONDecodeError) as exc:
+            log.debug("Failed to load chunks metadata from %s: %s", chunks_meta_path, exc)
 
     if not segments:
         # Clean up any potential stale chunk files
@@ -658,8 +661,8 @@ def _download_multi(
             }
             with open(chunks_meta_path, "w", encoding="utf-8") as f:
                 json.dump(meta, f)
-        except (OSError, ValueError):
-            pass
+        except (OSError, ValueError) as exc:
+            log.warning("Failed to save chunk download metadata to %s: %s", chunks_meta_path, exc)
 
     if len(segments) == 1:
         raise _FallbackToSingleError

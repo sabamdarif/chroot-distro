@@ -481,8 +481,8 @@ def system_bindings() -> list[tuple[str, str]]:
                 with open(real, "rb") as fh:
                     fh.read(1)
                 binds.append((real, real))
-            except OSError:
-                pass
+            except OSError as exc:
+                log.debug("File %s not readable, skipping binding: %s", real, exc)
     return binds
 
 

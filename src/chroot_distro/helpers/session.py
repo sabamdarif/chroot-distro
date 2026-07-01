@@ -1,10 +1,13 @@
 import contextlib
 import fcntl
+import logging
 import os
 import typing
 
 from chroot_distro.constants import RUNTIME_DIR
 from chroot_distro.paths import container_rootfs
+
+log = logging.getLogger(__name__)
 
 
 def _get_session_file_and_lock(name: str):
@@ -40,10 +43,10 @@ def get_active_chroot_pids(name: str) -> list[int]:
                 root_link = os.path.realpath(f"/proc/{pid}/root")
                 if root_link == rootfs_abs:
                     pids.append(pid)
-            except (OSError, PermissionError):
-                pass
-    except OSError:
-        pass
+            except (OSError, PermissionError) as exc:
+                log.debug("Failed to read root link of process %s: %s", pid, exc)
+    except OSError as exc:
+        log.warning("Failed to list /proc: %s", exc)
     return pids
 
 

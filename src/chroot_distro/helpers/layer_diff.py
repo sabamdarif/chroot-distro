@@ -3,6 +3,7 @@ import gzip
 import hashlib
 import io
 import json
+import logging
 import os
 import stat
 import sys
@@ -22,6 +23,8 @@ from chroot_distro.progress import (
     draw_bytes_bar,
     progress_active,
 )
+
+log = logging.getLogger(__name__)
 
 _CRC_CHUNK = 65536
 
@@ -456,8 +459,8 @@ def write_files_layer(file_map: dict[str, typing.Any], out_path: str) -> tuple[s
                 st = os.lstat(entry)
                 if stat.S_ISREG(st.st_mode):
                     total += st.st_size
-            except OSError:
-                pass
+            except OSError as exc:
+                log.debug("Failed to lstat %s for size estimation: %s", entry, exc)
 
     def _populate(tf: tarfile.TarFile) -> None:
         # Synthesise parent directory entries so the layer applies
@@ -512,8 +515,8 @@ def _add_entry(tf: tarfile.TarFile, rootfs: str, rel: str) -> None:
             tinfo.linkname = target
             tinfo.size = 0
             tf.addfile(tinfo)
-        except OSError:
-            pass
+        except OSError as exc:
+            log.warning("Failed to add symlink %s to tar: %s", rel, exc)
     elif stat.S_ISDIR(st.st_mode):
         tinfo.type = tarfile.DIRTYPE
         tinfo.size = 0
@@ -524,8 +527,8 @@ def _add_entry(tf: tarfile.TarFile, rootfs: str, rel: str) -> None:
         try:
             with open(full, "rb") as fobj:
                 tf.addfile(tinfo, fobj)
-        except OSError:
-            pass
+        except OSError as exc:
+            log.warning("Failed to add file %s to tar: %s", rel, exc)
     # Other types intentionally skipped (devices, FIFOs).
 
 

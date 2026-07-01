@@ -340,8 +340,8 @@ def _run_holder(notify_fd: int, rootfs: str | None) -> None:
     try:
         while True:
             time.sleep(2147483647)
-    except (KeyboardInterrupt, SystemExit):
-        pass
+    except (KeyboardInterrupt, SystemExit) as exc:
+        log.debug("Holder process interrupted: %s", exc)
     os._exit(0)
 
 

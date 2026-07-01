@@ -146,8 +146,8 @@ def _resolve_login_user(rootfs: str, container_name: str, user_arg: str) -> dict
     try:
         passwd_path = resolve_rootfs_path(rootfs, "/etc/passwd")
         passwd_available = os.path.isfile(passwd_path)
-    except OSError:
-        pass
+    except OSError as exc:
+        log.warning("Failed to check if passwd file is available: %s", exc)
 
     if passwd_available:
         if user_spec.isdigit():
@@ -270,8 +270,8 @@ def _check_arch_mismatch(container_path: str) -> None:
             f"Install qemu-user-static and register binfmt_misc handlers "
             f"for cross-architecture support."
         )
-    except (OSError, ValueError, json.JSONDecodeError):
-        pass
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        log.warning("Could not check container/host architecture mismatch: %s", exc)
 
 
 def _build_termux_env(rootfs, container_path, extra_env, minimal, isolated, container_name=""):
@@ -397,8 +397,8 @@ def _check_shell_available(rootfs, container_path, login_shell, container_name):
                     manifest_shell,
                 )
                 return manifest_shell
-        except OSError:
-            pass
+        except OSError as exc:
+            log.debug("Failed to check if manifest shell is available: %s", exc)
 
     has_ep_or_cmd = False
     try:
@@ -406,8 +406,8 @@ def _check_shell_available(rootfs, container_path, login_shell, container_name):
             data = json.load(fh)
         cfg = (data.get("image_config") or {}).get("config", {})
         has_ep_or_cmd = bool((cfg.get("Entrypoint") or []) or (cfg.get("Cmd") or []))
-    except (OSError, ValueError):
-        pass
+    except (OSError, ValueError) as exc:
+        log.debug("Failed to read image Entrypoint/Cmd config from manifest: %s", exc)
 
     if has_ep_or_cmd:
         crit_error(
@@ -1214,8 +1214,8 @@ def _command_login_inner_once(container_name: str, args) -> None:
                     os.write(pipe_w, b"\n")
                     os.close(pipe_w)
                     pipe_w = None
-                except OSError:
-                    pass
+                except OSError as exc:
+                    log.warning("Failed to trigger mount namespace holder process: %s", exc)
         else:
             # Not the first session: bind mounts are NOT re-applied, so any
             # mount-affecting flag passed now is silently ignored because the

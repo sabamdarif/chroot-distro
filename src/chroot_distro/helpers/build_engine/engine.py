@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import re
 import typing
@@ -22,6 +23,8 @@ from chroot_distro.helpers.docker import (
 from chroot_distro.helpers.dockerfile import expand_vars
 from chroot_distro.helpers.rootfs import write_hosts, write_resolv_conf
 from chroot_distro.message import C, log_info
+
+log = logging.getLogger(__name__)
 
 _FROM_RE = re.compile(r"^\s*(\S+)(?:\s+AS\s+(\S+))?\s*$", re.IGNORECASE)
 _FROM_AS_RE = re.compile(r"\s+AS\s+(\S+)\s*$", re.IGNORECASE)
@@ -324,8 +327,8 @@ class BuildEngine:
             try:
                 write_resolv_conf(rootfs_dir)
                 write_hosts(rootfs_dir)
-            except OSError:
-                pass
+            except OSError as exc:
+                log.warning("Failed to configure DNS for build stage: %s", exc)
 
         # Fire ONBUILD triggers from the base image's config.
         base_onbuild = (stage.image_config.get("config") or {}).get("OnBuild") or []

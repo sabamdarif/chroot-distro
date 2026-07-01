@@ -4,7 +4,7 @@ import stat
 import sys
 from contextlib import ExitStack, suppress
 
-from chroot_distro.message import crit_error, log_error, log_info
+from chroot_distro.message import crit_error, log_error, log_info, warn
 from chroot_distro.paths import (
     container_locks_for_spec_pair,
     resolve_container_path,
@@ -194,11 +194,11 @@ def _rmtree_robust(path: str) -> None:
             with suppress(OSError):
                 os.chmod(root, os.stat(root).st_mode | stat.S_IRWXU)
             for fname in files:
+                fpath = os.path.join(root, fname)
                 try:
-                    fpath = os.path.join(root, fname)
                     os.chmod(fpath, os.stat(fpath).st_mode | stat.S_IRUSR | stat.S_IWUSR)
-                except OSError:
-                    pass
+                except OSError as exc:
+                    warn(f"Failed to change permissions for '{fpath}': {exc}")
         try:
             shutil.rmtree(path)
         except OSError as exc:

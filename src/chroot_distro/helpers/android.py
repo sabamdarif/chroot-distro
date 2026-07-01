@@ -27,8 +27,8 @@ def _read_data_mount() -> tuple[str, str, str] | None:
                 parts = line.split()
                 if len(parts) >= 4 and parts[1] == "/data":
                     return parts[0], parts[1], parts[3]
-    except OSError:
-        pass
+    except OSError as exc:
+        log.debug("Failed to read /proc/mounts: %s", exc)
     return None
 
 
@@ -120,8 +120,8 @@ def configure_android_rootfs(rootfs: str) -> None:
                     if line.startswith("_apt:"):
                         has_apt = True
                         break
-        except OSError:
-            pass
+        except OSError as exc:
+            log.warning("Failed to read /etc/passwd in setup_android_permissions: %s", exc)
 
     # 2. Add missing Android groups or append root (and _apt) to them
     modified = False
@@ -157,8 +157,8 @@ def configure_android_rootfs(rootfs: str) -> None:
             with open(group_path, "w") as f:
                 for parts in existing_groups.values():
                     f.write(":".join(parts) + "\n")
-        except OSError:
-            pass
+        except OSError as exc:
+            log.warning("Failed to write /etc/group in setup_android_permissions: %s", exc)
 
     # 3. Add aid_inet/aid_net_raw to default user add config (etc/adduser.conf)
     adduser_conf = os.path.join(rootfs, "etc", "adduser.conf")
@@ -174,8 +174,8 @@ def configure_android_rootfs(rootfs: str) -> None:
             if not has_extra_groups:
                 with open(adduser_conf, "a") as f:
                     f.write('\nEXTRA_GROUPS="aid_inet aid_net_raw aid_bt_admin aid_bt_net"\n')
-        except OSError:
-            pass
+        except OSError as exc:
+            log.warning("Failed to configure adduser.conf in setup_android_permissions: %s", exc)
 
     # 4. _apt permission fix for Debian/Ubuntu based distros
     if has_apt and os.path.exists(passwd_path):
@@ -210,7 +210,7 @@ def configure_android_rootfs(rootfs: str) -> None:
                                 os.chown(os.path.join(root, d), _apt_uid, 3003)
                             for file in files:
                                 os.chown(os.path.join(root, file), _apt_uid, 3003)
-                    except Exception:
-                        pass
-        except OSError:
-            pass
+                    except Exception as exc:
+                        log.warning("Failed to chown apt directory %s in setup_android_permissions: %s", apt_dir, exc)
+        except OSError as exc:
+            log.warning("Failed to update /etc/passwd in setup_android_permissions: %s", exc)

@@ -394,8 +394,8 @@ def run_in_namespaces(
                     try:
                         os.kill(child_pid, signal.SIGKILL)
                         os.waitpid(child_pid, 0)
-                    except OSError:
-                        pass
+                    except OSError as exc:
+                        log.debug("Failed to kill or wait for timed out child process %s: %s", child_pid, exc)
                     raise subprocess.TimeoutExpired(command, float(timeout))
 
             returncode = os.WEXITSTATUS(status) if os.WIFEXITED(status) else -os.WTERMSIG(status)
@@ -405,8 +405,8 @@ def run_in_namespaces(
             try:
                 os.kill(child_pid, signal.SIGKILL)
                 os.waitpid(child_pid, 0)
-            except OSError:
-                pass
+            except OSError as exc:
+                log.debug("Failed to kill or wait for child process %s on interrupt: %s", child_pid, exc)
             if timeout is not None and old_handler is not None:
                 signal.alarm(0)
                 signal.signal(signal.SIGALRM, old_handler)

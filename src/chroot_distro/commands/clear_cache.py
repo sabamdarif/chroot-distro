@@ -4,7 +4,7 @@ import shutil
 import stat
 
 from chroot_distro.constants import BASE_CACHE_DIR
-from chroot_distro.message import log_error, log_info
+from chroot_distro.message import log_error, log_info, warn
 from chroot_distro.progress import fmt_size
 
 
@@ -16,8 +16,8 @@ def _ensure_readable(path: str) -> None:
             os.chmod(path, st.st_mode | stat.S_IRWXU)
         else:
             os.chmod(path, st.st_mode | stat.S_IRUSR | stat.S_IWUSR)
-    except OSError:
-        pass
+    except OSError as exc:
+        warn(f"Failed to change permissions on cache path '{path}': {exc}")
 
 
 def command_clear_cache(args) -> None:

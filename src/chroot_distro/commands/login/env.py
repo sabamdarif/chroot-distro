@@ -1,9 +1,13 @@
 import contextlib
 import json
+import logging
 import os
 import re
 
 from chroot_distro.constants import TERMUX_PREFIX
+from chroot_distro.message import warn
+
+log = logging.getLogger(__name__)
 
 # Conservative identifier syntax for env var names: a leading letter or
 # underscore followed by letters, digits, or underscores.
@@ -221,8 +225,8 @@ def inject_termux_profile(
         os.chmod(snippet, 0o600)
         if owner_uid is not None and owner_gid is not None:
             os.chown(snippet, owner_uid, owner_gid)
-    except OSError:
-        pass
+    except OSError as exc:
+        warn(f"Failed to write environment snippet file: {exc}")
 
 
 def resolve_term(rootfs: str, term: str | None) -> str:
@@ -258,7 +262,7 @@ def resolve_term(rootfs: str, term: str | None) -> str:
         try:
             if os.path.isfile(path1) or os.path.isfile(path2):
                 return term
-        except OSError:
-            pass
+        except OSError as exc:
+            log.debug("Failed to check terminfo path: %s", exc)
 
     return "xterm-256color"

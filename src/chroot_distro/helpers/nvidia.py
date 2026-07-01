@@ -297,8 +297,8 @@ def find_nvidia_configs() -> list[tuple[str, str]]:
                     full = os.path.join(root, fname)
                     if os.path.isfile(full):
                         binds.append((full, full))
-    except OSError:
-        pass
+    except OSError as exc:
+        log.debug("Failed to search /etc for NVIDIA configuration files: %s", exc)
 
     # 2. Specific ICD/EGL/Vulkan config files
     config_globs = (

@@ -2,11 +2,14 @@ import contextlib
 import errno
 import fcntl
 import hashlib
+import logging
 import os
 import typing
 
 from chroot_distro.constants import RUNTIME_DIR
 from chroot_distro.exceptions import LockConflictError
+
+log = logging.getLogger(__name__)
 
 LOCKS_DIR = os.path.join(RUNTIME_DIR, "locks")
 _BUILD_LOCKS_DIR = os.path.join(LOCKS_DIR, "build")
@@ -120,8 +123,8 @@ class _FlockBase:
         try:
             fd.write(f"{os.getpid()} {self._command}\n")
             fd.flush()
-        except OSError:
-            pass
+        except OSError as exc:
+            log.warning("Failed to write PID and command to lock file %s: %s", self._lock_path, exc)
 
         self._fd = fd
         if self._exclusive:

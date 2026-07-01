@@ -1,4 +1,7 @@
+import logging
 import os
+
+log = logging.getLogger(__name__)
 
 
 def resolve_id(rootfs_dir: str, name: str, is_group: bool, default: int) -> int:
@@ -26,8 +29,8 @@ def resolve_id(rootfs_dir: str, name: str, is_group: bool, default: int) -> int:
                         return int(parts[2])
                     except ValueError:
                         return default
-    except OSError:
-        pass
+    except OSError as exc:
+        log.debug("Failed to read user/group database at %s: %s", path, exc)
     return default
 
 

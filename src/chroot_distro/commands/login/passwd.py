@@ -1,6 +1,9 @@
 import contextlib
 import errno
+import logging
 import os
+
+log = logging.getLogger(__name__)
 
 
 def resolve_rootfs_path(rootfs: str, guest_path: str) -> str:
@@ -66,8 +69,8 @@ def read_passwd_field(rootfs: str, user: str, field_index: int) -> str:
                 parts = line.strip().split(":")
                 if parts and parts[0] == user and len(parts) > field_index:
                     return parts[field_index]
-    except OSError:
-        pass
+    except OSError as exc:
+        log.debug("Failed to read fields from /etc/passwd: %s", exc)
     return ""
 
 
@@ -83,8 +86,8 @@ def find_passwd_by_uid(rootfs: str, uid: str) -> tuple:
                 parts = line.strip().split(":")
                 if len(parts) >= 7 and parts[2] == uid:
                     return (parts[5], parts[6], parts[3])
-    except OSError:
-        pass
+    except OSError as exc:
+        log.debug("Failed to find passwd entry by UID: %s", exc)
     return ("", "", "")
 
 
@@ -100,8 +103,8 @@ def read_group_gid(rootfs: str, group: str) -> str:
                 parts = line.strip().split(":")
                 if parts and parts[0] == group and len(parts) > 2:
                     return parts[2]
-    except OSError:
-        pass
+    except OSError as exc:
+        log.debug("Failed to read group GID from /etc/group: %s", exc)
     return ""
 
 
@@ -175,8 +178,8 @@ def set_passwd_uid_gid(
     try:
         with open(shadow_path, "w") as fh:
             fh.writelines(shadow_out)
-    except OSError:
-        pass
+    except OSError as exc:
+        log.warning("Failed to write to shadow database at %s: %s", shadow_path, exc)
     return True
 
 
@@ -211,14 +214,14 @@ def resolve_host_home(login_user: str | None = None) -> str | None:
     if sudo_user:
         try:
             return pwd.getpwnam(sudo_user).pw_dir
-        except (KeyError, OSError):
-            pass
+        except (KeyError, OSError) as exc:
+            log.debug("Failed to resolve home for sudo user '%s': %s", sudo_user, exc)
 
     if os.getuid() != 0:
         try:
             return pwd.getpwuid(os.getuid()).pw_dir
-        except (KeyError, OSError):
-            pass
+        except (KeyError, OSError) as exc:
+            log.debug("Failed to resolve home for current UID: %s", exc)
 
     for env_name in ("LOGNAME", "USER"):
         name = os.environ.get(env_name)
@@ -231,8 +234,8 @@ def resolve_host_home(login_user: str | None = None) -> str | None:
     if login_user:
         try:
             return pwd.getpwnam(login_user).pw_dir
-        except (KeyError, OSError):
-            pass
+        except (KeyError, OSError) as exc:
+            log.debug("Failed to resolve home for login user '%s': %s", login_user, exc)
 
     return None
 
@@ -247,8 +250,8 @@ def _next_free_uid(rootfs: str, reserved: set[int]) -> int:
                 parts = line.strip().split(":")
                 if len(parts) >= 3 and parts[2].isdigit():
                     used.add(int(parts[2]))
-    except OSError:
-        pass
+    except OSError as exc:
+        log.debug("Failed to read passwd file when scanning for free UID: %s", exc)
     candidate = 1001
     while candidate in used:
         candidate += 1
@@ -304,8 +307,8 @@ def sync_passwd_to_path_owner(
     try:
         if os.path.realpath(host_path) == os.path.realpath("/root"):
             return False
-    except OSError:
-        pass
+    except OSError as exc:
+        log.debug("Failed to resolve real path for host_path %s: %s", host_path, exc)
     set_passwd_uid_gid(rootfs, username, st.st_uid, st.st_gid)
     release_passwd_uid_conflicts(
         rootfs,
@@ -387,6 +390,6 @@ def find_user_groups(rootfs: str, username: str, primary_gid: str) -> list[str]:
                     users = parts[3].split(",") if parts[3] else []
                     if username in users and gid not in gids:
                         gids.append(gid)
-    except OSError:
-        pass
+    except OSError as exc:
+        log.debug("Failed to read group file to find user groups: %s", exc)
     return gids

@@ -1,7 +1,10 @@
 import json
+import logging
 import re
 import shlex
 import typing
+
+log = logging.getLogger(__name__)
 
 # All Dockerfile instructions, per
 # https://docs.docker.com/reference/dockerfile/. MAINTAINER is
@@ -324,8 +327,8 @@ def _parse_flags(text: str) -> tuple[dict[str, str], str]:
                     flags[key] = val
                     text = text[consumed:]
                     continue
-                except (StopIteration, ValueError):
-                    pass
+                except (StopIteration, ValueError) as exc:
+                    log.debug("Failed to parse flag with shlex: %s", exc)
         flags[key] = val
         text = text[m.end() :]
     return flags, text

@@ -11,7 +11,7 @@ else:
 import chroot_distro.helpers.mount_manager as mount_manager
 import chroot_distro.helpers.session as session
 from chroot_distro.locking import ContainerLock
-from chroot_distro.message import crit_error, log_error, log_info
+from chroot_distro.message import crit_error, log_error, log_info, warn
 from chroot_distro.names import require_valid_name
 from chroot_distro.paths import container_manifest, container_rootfs
 from chroot_distro.progress import (
@@ -123,8 +123,8 @@ def _add_path(
         try:
             with open(src, "rb") as fh:
                 tf.addfile(info, _ReadCounter(fh, on_read) if on_read else fh)
-        except OSError:
-            pass
+        except OSError as exc:
+            warn(f"Failed to backup file {src}: {exc}")
     else:
         tf.addfile(info)
 
@@ -147,8 +147,8 @@ def _fix_permissions(rootfs_dir: str) -> None:
                         os.chmod(fpath, mode | stat.S_IRUSR | stat.S_IXUSR)
                     else:
                         os.chmod(fpath, mode | stat.S_IRUSR)
-            except OSError:
-                pass
+            except OSError as exc:
+                warn(f"Failed to check or set permission on {fpath}: {exc}")
 
 
 def command_backup(args) -> None:

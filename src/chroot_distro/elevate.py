@@ -90,11 +90,11 @@ def _find_escalation_tool() -> list[str] | None:
 # The minimum set of capabilities chroot-distro needs.
 REQUIRED_CAPS: tuple[int, ...] = (
     CAP_SYS_CHROOT,  # chroot(2)
-    CAP_SYS_ADMIN,   # mount(2), umount2(2), unshare(2), setns(2)
-    CAP_SETUID,       # setuid(2) — switch to container user
-    CAP_SETGID,       # setgid(2), setgroups(2)
-    CAP_MKNOD,        # mknod(2) — create /dev nodes
-    CAP_DAC_OVERRIDE, # file access inside rootfs
+    CAP_SYS_ADMIN,  # mount(2), umount2(2), unshare(2), setns(2)
+    CAP_SETUID,  # setuid(2) — switch to container user
+    CAP_SETGID,  # setgid(2), setgroups(2)
+    CAP_MKNOD,  # mknod(2) — create /dev nodes
+    CAP_DAC_OVERRIDE,  # file access inside rootfs
 )
 
 
@@ -106,8 +106,8 @@ def _check_proc_cap(cap: int) -> bool:
                 if line.startswith("CapEff:"):
                     cap_hex = int(line.split(":")[1].strip(), 16)
                     return bool(cap_hex & (1 << cap))
-    except (OSError, ValueError, IndexError):
-        pass
+    except (OSError, ValueError, IndexError) as exc:
+        log.warning("Failed to read capabilities from /proc/self/status: %s", exc)
     return False
 
 

@@ -19,10 +19,13 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import logging
 import os
 import socket
 import struct
 from typing import BinaryIO
+
+log = logging.getLogger(__name__)
 
 # --- Family constants (match X11 protocol / libXau) -------------------------
 
@@ -155,9 +158,9 @@ def read_xauthority(path: str) -> list[XauthEntry]:
                 if entry is None:
                     break
                 entries.append(entry)
-    except (OSError, ValueError):
+    except (OSError, ValueError) as exc:
         # File missing, unreadable, or contains garbage — return what we have.
-        pass
+        log.warning("Failed to read Xauthority file at %s: %s", path, exc)
     return entries
 
 

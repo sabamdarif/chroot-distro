@@ -1,5 +1,6 @@
 import contextlib
 import json
+import logging
 import os
 import shlex
 import typing
@@ -16,6 +17,8 @@ from chroot_distro.helpers.build_engine.run_step import do_run
 from chroot_distro.helpers.build_engine.users import resolve_user_for_chroot
 from chroot_distro.helpers.docker import layer_cache_path
 from chroot_distro.helpers.layer_diff import write_files_layer
+
+log = logging.getLogger(__name__)
 
 
 def do_arg(engine: typing.Any, instr: dict[str, typing.Any]) -> None:
@@ -231,8 +234,8 @@ def do_healthcheck(engine: typing.Any, instr: dict[str, typing.Any]) -> None:
         parsed = json.loads(rest)
         if isinstance(parsed, list):
             argv = ["CMD", *list(parsed)]
-    except (json.JSONDecodeError, ValueError):
-        pass
+    except (json.JSONDecodeError, ValueError) as exc:
+        log.debug("HEALTHCHECK not JSON-formatted, fallback to CMD-SHELL: %s", exc)
     if argv is None:
         argv = ["CMD-SHELL", rest]
     cfg["Healthcheck"] = {"Test": argv}

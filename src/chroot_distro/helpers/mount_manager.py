@@ -79,8 +79,8 @@ def is_mounted(target: str, holder: NamespaceHolder | None = None) -> bool:
                 mount_point = decode_mount_path(parts[1])
                 if os.path.realpath(mount_point) == target_abs:
                     return True
-    except OSError:
-        pass
+    except OSError as exc:
+        log.warning("Failed to check if %s is mounted: %s", target, exc)
     return False
 
 
@@ -137,8 +137,8 @@ def safe_mount(
             if os.path.getsize(source_abs) == 0:
                 log.debug("Skipping bind of zero-byte source %s -> %s", source, target)
                 return
-        except OSError:
-            pass
+        except OSError as exc:
+            log.debug("Failed to get size of mount source %s: %s", source_abs, exc)
 
     # Track whether we create an empty stub target so we can remove it if the
     # bind fails (otherwise the empty stub shadows a real rootfs file).

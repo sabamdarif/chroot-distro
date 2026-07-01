@@ -25,6 +25,7 @@ from chroot_distro.message import (
     log_error,
     log_info,
     msg,
+    warn,
 )
 from chroot_distro.names import is_valid_name
 from chroot_distro.paths import (
@@ -100,8 +101,8 @@ def _remove_existing(dest: str, member: tarfile.TarInfo) -> None:
             os.remove(dest)
         elif os.path.isdir(dest) and not member.isdir():
             shutil.rmtree(dest)
-    except OSError:
-        pass
+    except OSError as exc:
+        warn(f"Failed to remove existing entry at {dest}: {exc}")
 
 
 _SKIP = (None, None)
@@ -439,8 +440,8 @@ def command_restore(args) -> None:
                         if member.mode:
                             with contextlib.suppress(OSError):
                                 os.chmod(dest, stat.S_IMODE(member.mode))
-                    except OSError:
-                        pass
+                    except OSError as exc:
+                        warn(f"Failed to extract hard link fallback {member.name} to {dest}: {exc}")
 
                 elif member.isreg():
                     fobj = tf.extractfile(member)
@@ -460,8 +461,8 @@ def command_restore(args) -> None:
                             os.lchown(dest, member.uid, member.gid)
                         with contextlib.suppress(OSError):
                             os.chmod(dest, stat.S_IMODE(member.mode))
-                    except OSError:
-                        pass
+                    except OSError as exc:
+                        warn(f"Failed to extract file {member.name} to {dest}: {exc}")
                     finally:
                         fobj.close()
 

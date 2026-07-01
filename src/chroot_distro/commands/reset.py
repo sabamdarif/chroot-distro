@@ -10,7 +10,7 @@ import chroot_distro.helpers.session as session
 from chroot_distro.commands.install import command_install
 from chroot_distro.commands.remove import _remove_path
 from chroot_distro.locking import ContainerLock
-from chroot_distro.message import crit_error, log_error, log_info
+from chroot_distro.message import crit_error, log_error, log_info, warn
 from chroot_distro.names import require_valid_name
 from chroot_distro.paths import container_manifest, container_rootfs
 
@@ -36,8 +36,8 @@ def command_reset(args) -> None:
                 manifest_data = json.load(fh)
             image_ref = manifest_data.get("image_ref")
             override_arch = manifest_data.get("arch")
-        except (OSError, json.JSONDecodeError):
-            pass
+        except (OSError, json.JSONDecodeError) as exc:
+            warn(f"Failed to read container manifest at {manifest_path}: {exc}")
 
     if not image_ref:
         crit_error(f"container '{container_name}' has no OCI manifest. Reset is supported for OCI images only.")

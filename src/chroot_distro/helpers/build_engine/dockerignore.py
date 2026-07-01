@@ -1,6 +1,9 @@
 import fnmatch
 import glob as _glob
+import logging
 import os
+
+log = logging.getLogger(__name__)
 
 
 def load_dockerignore(build_dir: str) -> list[str]:
@@ -14,8 +17,10 @@ def load_dockerignore(build_dir: str) -> list[str]:
                 if not s or s.startswith("#"):
                     continue
                 patterns.append(s)
-    except OSError:
-        pass
+    except FileNotFoundError as exc:
+        log.debug("No .dockerignore found at %s: %s", path, exc)
+    except OSError as exc:
+        log.warning("Failed to load .dockerignore at %s: %s", path, exc)
     return patterns
 
 

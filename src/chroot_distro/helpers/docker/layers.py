@@ -2,6 +2,7 @@ import contextlib
 import functools
 import hashlib
 import json
+import logging
 import os
 import shutil
 import signal
@@ -34,6 +35,8 @@ from chroot_distro.helpers.download import (
 )
 from chroot_distro.helpers.tar_extract import extract_tar_to_rootfs
 from chroot_distro.progress import REDRAW_THRESHOLD_BYTES, AggregateByteProgress, clear_bar, draw_bytes_bar
+
+log = logging.getLogger(__name__)
 
 _MAX_RETRIES = 3
 _RETRY_BACKOFF = (2, 5, 10)  # seconds to wait between retries
@@ -139,8 +142,8 @@ def download_blob(
                                 )
                                 for s in meta.get("segments", [])
                             ]
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        log.debug("Failed to load docker layer download metadata: %s", exc)
 
                 if not segments:
                     for i in range(connections + 5):
@@ -168,8 +171,8 @@ def download_blob(
                         }
                         with open(chunks_meta_path, "w", encoding="utf-8") as f:
                             json.dump(meta, f)
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        log.warning("Failed to save docker layer download metadata: %s", exc)
 
                 if len(segments) == 1:
                     raise _FallbackToSingleError
@@ -267,8 +270,8 @@ def download_blob(
                         signal.signal(signal.SIGINT, prev_sigint)
                     if byte_progress is None:
                         progress.clear()
-        except _FallbackToSingleError:
-            pass
+        except _FallbackToSingleError as exc:
+            log.debug("Multi-connection download not supported or failed, falling back to single connection: %s", exc)
         except Exception:
             raise
 

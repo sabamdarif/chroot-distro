@@ -163,8 +163,8 @@ def chroot_and_exec(
             try:
                 sys.stderr.write(f"chroot_and_exec: {exc}\n")
                 sys.stderr.flush()
-            except Exception:
-                pass
+            except Exception as stderr_exc:
+                log.debug("Failed to write chroot_and_exec failure to stderr: %s", stderr_exc)
             os._exit(127)
 
     # --- Parent process ---
@@ -255,8 +255,8 @@ def chroot_and_run(
             try:
                 sys.stderr.write(f"chroot_and_run: {exc}\n")
                 sys.stderr.flush()
-            except Exception:
-                pass
+            except Exception as stderr_exc:
+                log.debug("Failed to write chroot_and_run failure to stderr: %s", stderr_exc)
             os._exit(127)
 
     # --- Parent process ---
@@ -346,20 +346,20 @@ def _read_pt_interp(data: bytes, is64: bool, endian: str) -> str | None:
         e_phentsize, e_phnum = _struct.unpack_from(endian + "HH", data, 54)
         for i in range(e_phnum):
             base = e_phoff + i * e_phentsize
-            p_type, = _struct.unpack_from(endian + "I", data, base)
+            (p_type,) = _struct.unpack_from(endian + "I", data, base)
             if p_type == pt_interp:
-                p_offset, = _struct.unpack_from(endian + "Q", data, base + 8)
-                p_filesz, = _struct.unpack_from(endian + "Q", data, base + 32)
+                (p_offset,) = _struct.unpack_from(endian + "Q", data, base + 8)
+                (p_filesz,) = _struct.unpack_from(endian + "Q", data, base + 32)
                 return data[p_offset : p_offset + p_filesz].rstrip(b"\x00").decode("ascii", "replace")
     else:
         (e_phoff,) = _struct.unpack_from(endian + "I", data, 28)
         e_phentsize, e_phnum = _struct.unpack_from(endian + "HH", data, 42)
         for i in range(e_phnum):
             base = e_phoff + i * e_phentsize
-            p_type, = _struct.unpack_from(endian + "I", data, base)
+            (p_type,) = _struct.unpack_from(endian + "I", data, base)
             if p_type == pt_interp:
-                p_offset, = _struct.unpack_from(endian + "I", data, base + 4)
-                p_filesz, = _struct.unpack_from(endian + "I", data, base + 16)
+                (p_offset,) = _struct.unpack_from(endian + "I", data, base + 4)
+                (p_filesz,) = _struct.unpack_from(endian + "I", data, base + 16)
                 return data[p_offset : p_offset + p_filesz].rstrip(b"\x00").decode("ascii", "replace")
     return None
 
