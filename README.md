@@ -101,40 +101,6 @@ On startup, commands that modify containers or mounts verify that the effective 
 
 `list`, `ps`, `search`, `info`, and `help` do not require root on Termux and are run immediately. On regular Linux, `list`, `ps`, and `info` still elevate to inspect root-owned data.
 
-### Running without `sudo` (File Capabilities)
-
-Instead of running as root via `sudo`, you can grant specific Linux capabilities to the Python interpreter using `setcap`. Chroot-Distro will detect these capabilities automatically and skip the `sudo` re-exec.
-
-**Required capabilities:**
-
-| Capability | Purpose |
-|---|---|
-| `CAP_SYS_CHROOT` | `chroot(2)` into the container rootfs |
-| `CAP_SYS_ADMIN` | `mount(2)`, `umount2(2)`, `unshare(2)`, `setns(2)` |
-| `CAP_SETUID` | Switch to the container user |
-| `CAP_SETGID` | Switch groups inside the container |
-| `CAP_MKNOD` | Create device nodes in `/dev` |
-| `CAP_DAC_OVERRIDE` | Access files inside the rootfs |
-
-**Setup (dedicated venv — recommended):**
-
-```sh
-python3 -m venv /opt/chroot-distro-venv
-/opt/chroot-distro-venv/bin/pip install chroot-distro
-sudo setcap 'cap_sys_chroot,cap_sys_admin,cap_setuid,cap_setgid,cap_mknod,cap_dac_override=eip' \
-  /opt/chroot-distro-venv/bin/python3
-```
-
-Or set capabilities on the system Python (grants these caps to **all** scripts run by that interpreter):
-
-```sh
-sudo setcap 'cap_sys_chroot,cap_sys_admin,cap_setuid,cap_setgid,cap_mknod,cap_dac_override=eip' "$(which python3)"
-```
-
-**Verify:** `getcap $(which python3)` — then run `chroot-distro login ubuntu` without `sudo`.
-
-**Remove:** `sudo setcap -r $(which python3)`
-
 ### Quick start
 
 ```sh
