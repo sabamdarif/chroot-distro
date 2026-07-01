@@ -5,7 +5,7 @@
 [![License](https://img.shields.io/github/license/sabamdarif/chroot-distro?style=flat)](LICENSE)
 
 
-Chroot-Distro is a utility for managing rootful Linux containers in Termux and on standard Linux hosts. It uses the host kernel's native `chroot` and bind mounts (`mount --bind`) to provide a high-performance, near-native Linux environment.
+Chroot-Distro is a utility for managing rootful Linux containers in Termux and on standard Linux hosts. It uses the host kernel's native `chroot(2)` and `mount(2)` system calls directly (instead of running external binaries) to provide a high-performance, near-native Linux environment.
 
 Containers are created by pulling Docker/OCI images directly from Docker Hub (or any compatible registry), or by extracting a local tarball / OCI image archive. The container filesystem is assembled from the image layers and stored locally, ready to be entered at any time.
 
@@ -56,7 +56,7 @@ Chroot-Distro lets you run a full Linux userland — Ubuntu, Debian, Alpine, Arc
 ### Installation
 
 Chroot-Distro requires **Python 3.10 or newer**. There are no third-party
-Python dependencies. Because it uses native `chroot` and bind mounts, the
+Python dependencies. Because it uses native `chroot(2)` and `mount(2)` system calls, the
 effective user for mutating operations must be **root** (see
 [First-run check](#first-run-check)).
 
@@ -313,10 +313,10 @@ BuildKit-only features (`RUN --mount`, `RUN --network`,
 `RUN --security`, `COPY --link`, `COPY --parents`) are rejected with an
 explicit error.
 
-**`chroot` requirement:**
+**`chroot(2)` requirement:**
 
 If the Dockerfile contains any `RUN` instruction, each step executes
-inside the in-progress rootfs via `chroot` and therefore requires root.
+inside the in-progress rootfs via the `chroot(2)` system call and therefore requires root.
 Metadata-only builds (`COPY`/`ADD`/`ENV`/… without `RUN`) run in
 pure-Python mode and do not require root.
 
@@ -398,7 +398,7 @@ chroot-distro login ubuntu --get-chroot-cmd
 | Option | Description |
 |---|---|
 | `-u`, `--user USER` | Log in as USER (default: `root`). Accepts `name`, numeric `uid`, `name:group`, or `uid:gid`. |
-| `--isolated` | Reduce host exposure and enable namespace isolation (mount, PID, UTS, IPC, and cgroup when supported, via `unshare`/`nsenter`). Binds **no** host paths at all — `--shared-home`, `--shared-tmp`, `--shared-display`/`--shared-x11`, and `--bind` are all ignored (with a warning) when combined with `--isolated`, since there's nothing for them to bind into. Mutually exclusive with `--minimal`. To get the same namespace isolation **without** reducing the mount set (so `--shared-*`/`--bind` keep working), set `CD_USE_NS=1` instead (see [Environment variables](#environment-variables)). |
+| `--isolated` | Reduce host exposure and enable namespace isolation (mount, PID, UTS, IPC, and cgroup when supported, via `unshare(2)`/`setns(2)` system calls directly). Binds **no** host paths at all — `--shared-home`, `--shared-tmp`, `--shared-display`/`--shared-x11`, and `--bind` are all ignored (with a warning) when combined with `--isolated`, since there's nothing for them to bind into. Mutually exclusive with `--minimal`. To get the same namespace isolation **without** reducing the mount set (so `--shared-*`/`--bind` keep working), set `CD_USE_NS=1` instead (see [Environment variables](#environment-variables)). |
 | `--minimal` | Bare minimum chroot: core pseudo-filesystems only (`/dev`, `/proc`, `/sys`, plus `/run`, `/dev/pts`, `/dev/shm` when present). Stripped guest environment. Mutually exclusive with `--isolated`. |
 | `--shared-home` | Bind the invoking user's host home into the guest home (or `/root` for root). On Termux, binds `TERMUX_HOME`. Ignored under `--isolated`. |
 | `--shared-tmp` | Bind host tmp (`/tmp` on Linux, `$PREFIX/tmp` on Termux) to `/tmp` in the guest. Opt-in only: by default the container gets its own fresh `/tmp`, not the host's. Ignored under `--isolated`. |
@@ -429,8 +429,8 @@ works independently of display sharing and isn't available on Termux.
 #### Namespace isolation (`--isolated` and `CD_USE_NS`)
 
 With `--isolated`, chroot-distro creates a per-container namespace holder
-(`unshare`) and runs bind mounts, special mounts, and `chroot` inside that
-environment (`nsenter`). Supported namespaces: **mount**, **PID**, **UTS**,
+(via the `unshare(2)` system call) and runs bind mounts, special mounts, and `chroot(2)` inside that
+environment (via the `setns(2)` system call). Supported namespaces: **mount**, **PID**, **UTS**,
 **IPC**, and **cgroup**. The cgroup namespace is acquired best-effort (used
 when the kernel supports it, skipped otherwise); the **mount/PID/UTS/IPC**
 set is **all-or-nothing**: chroot-distro probes that set first, and if any
@@ -717,7 +717,7 @@ Aliases: umount, um
 Safely unmount a container's bind mounts. If chroot processes are still
 running, `SIGTERM` is sent (with `SIGKILL` after two seconds if needed),
 the session counter is reset to `0`, and all bind mounts are removed.
-If a path is busy, a lazy unmount (`umount -l`) is attempted as a
+If a path is busy, a lazy unmount (via the `umount2(2)` system call with `MNT_DETACH`) is attempted as a
 fallback.
 
 ---
@@ -996,13 +996,13 @@ in the [`install`](#install--install-a-container) section.
 
 Chroot-Distro uses real kernel features rather than path rewriting:
 
-- **Bind mounts** (`mount --bind`) for host directories inside the guest.
+- **Bind mounts** (via the `mount(2)` system call) for host directories inside the guest.
 - **Session tracking** under `$RUNTIME_DIR/data/<name>/sessions` (counter)
   and `$RUNTIME_DIR/sessions/<pid>.json` (per-session registry for `ps`,
   with `flock`-based liveness detection).
 - **Automatic mount/unmount**: the first session mounts; the last session
   exiting unmounts everything.
-- **Lazy unmount fallback** (`umount -l`) when a target is busy.
+- **Lazy unmount fallback** (via the `umount2(2)` system call with `MNT_DETACH`) when a target is busy.
 
 A typical `login` invocation looks roughly like:
 
@@ -1177,7 +1177,7 @@ cp src/chroot_distro/completions/chroot-distro.fish \
 
 ### Kernel and chroot limitations
 
-- **Root required**: real `chroot` and bind mounts need appropriate
+- **Root required**: the `chroot(2)` and `mount(2)` system calls require appropriate
   privileges; there is no rootless mode.
 - **No real init**: `systemd`, socket-activated supervisors, and full
   init systems generally do not work. Individual long-running processes
@@ -1187,7 +1187,7 @@ cp src/chroot_distro/completions/chroot-distro.fish \
   guest.
 - **Namespaces**: `--isolated` (or `CD_USE_NS=1`) provides
   mount/PID/UTS/IPC isolation, plus the cgroup namespace when the kernel
-  supports it, via `unshare`/`nsenter`. There is no user-namespace mapping
+  supports it, using the `unshare(2)` and `setns(2)` system calls directly. There is no user-namespace mapping
   and no parity with Docker or Podman. (Networking is intentionally
   excluded from this isolation set — see
   [Design choices](#design-choices-not-limitations) above.)
