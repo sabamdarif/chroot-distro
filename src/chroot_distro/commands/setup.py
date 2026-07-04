@@ -24,12 +24,16 @@ import subprocess
 import sys
 import time
 
+import chroot_distro
 from chroot_distro.constants import IS_TERMUX
 from chroot_distro.daemon import GROUP_NAME, SOCKET_PATH
 from chroot_distro.exceptions import ChrootDistroError
 from chroot_distro.message import log_info, msg, warn
 
 _DAEMON_CMD = f"{sys.executable} -m chroot_distro daemon"
+
+# Supported init systems for the group-gated root daemon (real Linux only).
+_SUPPORTED_INITS = "systemd, OpenRC, runit, dinit, or sysvinit"
 
 _SYSTEMD_SOCKET_PATH = "/etc/systemd/system/chroot-distro.socket"
 _SYSTEMD_SERVICE_PATH = "/etc/systemd/system/chroot-distro.service"
@@ -178,6 +182,37 @@ def _add_user_to_group(username: str) -> None:
     os.replace(tmp_path, "/etc/group")
 
 
+def _package_dir() -> str:
+    """Absolute directory the ``chroot_distro`` package is imported from."""
+    return os.path.dirname(os.path.abspath(chroot_distro.__file__))
+
+
+def _writable_by_non_root(path: str) -> str | None:
+    """Return the first path component owned/writable by a non-root user.
+
+    The daemon re-executes ``{sys.executable} -m chroot_distro`` as root, so
+    if any directory along the package path is owned by (or group/other
+    writable for) an unprivileged user, that user can replace the code root
+    runs. Walk up from the package directory to the filesystem root and
+    report the first offending component.
+    """
+    current = path
+    while True:
+        try:
+            st = os.stat(current)
+        except OSError:
+            break
+        # Non-root owner, or writable by group/others, means an unprivileged
+        # user could tamper with the code the root daemon executes.
+        if st.st_uid != 0 or (st.st_mode & 0o022):
+            return current
+        parent = os.path.dirname(current)
+        if parent == current:
+            break
+        current = parent
+    return None
+
+
 def _invoking_user(explicit: str | None) -> str | None:
     if explicit:
         return explicit
@@ -311,17 +346,40 @@ def _uninstall_service() -> None:
 
 
 def command_setup(args: argparse.Namespace) -> None:
+    if IS_TERMUX:
+        # The group-gated daemon needs a real Linux init system to run the
+        # root service; Termux has none and uses native su instead, so setup
+        # is neither possible nor needed here.
+        raise ChrootDistroError(
+            "'chroot-distro setup' is meant only for a real Linux host running "
+            f"one of: {_SUPPORTED_INITS}.\n"
+            "On Termux there is no root init system: chroot-distro elevates via "
+            "your root manager's 'su' (Magisk / KernelSU / APatch) directly, so "
+            "no setup is required. Just run a command such as "
+            "'chroot-distro install alpine' and approve the one-time su grant."
+        )
+
     if os.getuid() != 0:
         raise ChrootDistroError("setup must run as root (it elevates automatically).")
 
-    if IS_TERMUX:
-        # Getting here means su already granted root: the one-time setup on
-        # Termux is simply accepting (and remembering) the grant in your
-        # root manager app (Magisk / KernelSU / APatch).
-        log_info("Root access via su is working.")
-        log_info("Enable 'remember' for Termux in your root manager app and")
-        log_info("future chroot-distro commands will never prompt again.")
-        return
+    # A root daemon that imports chroot_distro from a user-writable location is
+    # a local privilege escalation, and a `pip install --user` install is not
+    # even importable by root's Python. Refuse and point at a root-owned
+    # install before we write a broken/unsafe service unit.
+    offender = _writable_by_non_root(_package_dir())
+    if offender is not None:
+        raise ChrootDistroError(
+            "chroot-distro is installed in a location writable by a non-root "
+            f"user:\n    {_package_dir()}\n"
+            f"(offending path component: {offender})\n\n"
+            "The root daemon re-executes this code as root, so it must be owned "
+            "by root and not user-writable. A 'pip install --user' install also "
+            "is not importable by root's Python, so the daemon would fail with "
+            "'No module named chroot_distro'.\n\n"
+            "Reinstall system-wide as root and re-run setup, for example:\n"
+            "    sudo pip install chroot-distro\n"
+            "    sudo chroot-distro setup"
+        )
 
     if getattr(args, "uninstall", False):
         _uninstall_service()

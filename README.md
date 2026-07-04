@@ -95,12 +95,22 @@ pip install .                     # regular install
 # Debian/Ubuntu example:
 sudo apt install python3-pip
 
-pip install chroot-distro
+sudo pip install chroot-distro
 # or from a checkout:
 git clone https://github.com/sabamdarif/chroot-distro
 cd chroot-distro
-pip install .
+sudo pip install .
 ```
+
+> **Install as root, not `--user`.** On a regular Linux host, install
+> system-wide with `sudo` (not `pip install --user`). The passwordless
+> daemon set up by `sudo chroot-distro setup` re-executes this code **as
+> root**, so it must live in a root-owned, non-user-writable location. A
+> `pip install --user` install lives under your home directory, which means
+> (a) root's Python cannot import it and the daemon fails with `No module
+> named chroot_distro`, and (b) any process running as your user could edit
+> the code the root daemon executes. `chroot-distro setup` detects a
+> user-writable install and refuses, telling you to reinstall with `sudo`.
 
 ### First-run check
 
