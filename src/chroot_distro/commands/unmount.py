@@ -7,6 +7,7 @@ import time
 import chroot_distro.helpers.mount_manager as mount_manager
 import chroot_distro.helpers.namespace as namespace
 import chroot_distro.helpers.session as session
+from chroot_distro.constants import IS_TERMUX
 from chroot_distro.locking import ContainerLock
 from chroot_distro.message import crit_error, log_info, warn
 from chroot_distro.names import require_valid_name
@@ -81,6 +82,15 @@ def command_unmount(args) -> None:
             namespace.release_holder(container_name)
             namespace.clear_isolation_mode(container_name)
             holder = None
+
+        # 4. Termux: sweep stale mounts in the global (init) mount
+        # namespace. Mounts created there by earlier `su --mount-master`
+        # runs propagate into app namespaces as slave copies that cannot be
+        # unmounted locally; the origin must be removed at the source, which
+        # then propagates the removal everywhere.
+        if IS_TERMUX:
+            log_info("Cleaning stale container mounts in other mount namespaces...")
+            mount_manager.deep_clean_container_mounts(container_name)
 
         remaining_mounts = mount_manager.get_active_mounts(rootfs_dir)
         if remaining_mounts:

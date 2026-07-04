@@ -308,6 +308,95 @@ def unmount_all(rootfs: str, holder: NamespaceHolder | None = None) -> None:
         safe_unmount(m, holder=holder)
 
 
+def _sweep_matching_mounts(marker: str) -> int:
+    """Unmount every mount whose mount point contains *marker*, deepest first.
+
+    Matches raw /proc/self/mounts entries by substring so that aliases of
+    the same rootfs under different prefixes (/data/data, /data/user/0,
+    /data_mirror/...) and recursive rootfs/.../rootfs phantom paths are all
+    caught. EINVAL/ENOENT mean the mount is already gone; anything else
+    falls back to a lazy unmount. Returns the number of removed mounts.
+    """
+    try:
+        with open("/proc/self/mounts") as f:
+            lines = f.readlines()
+    except OSError:
+        return 0
+    targets: list[str] = []
+    for line in lines:
+        parts = line.strip().split()
+        if len(parts) < 2:
+            continue
+        mount_point = decode_mount_path(parts[1])
+        if marker + "/" in mount_point or mount_point.endswith(marker):
+            targets.append(mount_point)
+    targets.sort(key=lambda p: len(p.split(os.sep)), reverse=True)
+    removed = 0
+    for target in targets:
+        try:
+            native_umount(target)
+            removed += 1
+        except OSError as e:
+            if e.errno in (errno.EINVAL, errno.ENOENT):
+                continue
+            try:
+                native_umount(target, lazy=True)
+                removed += 1
+            except OSError:
+                log.debug("deep-clean: failed to unmount %s", target, exc_info=True)
+    return removed
+
+
+def deep_clean_container_mounts(container_name: str) -> None:
+    """Remove a container's mounts from the init (global) mount namespace.
+
+    Stale mounts created in the global namespace (e.g. by earlier
+    ``su --mount-master`` runs) propagate into app namespaces as slave
+    copies. Unmounting a slave never removes its master, so they cannot be
+    cleaned from a per-session namespace. Entering PID 1's mount namespace
+    and unmounting the origin mounts propagates the removal to every slave,
+    which also clears the copies visible inside the Termux app namespace.
+
+    The global-namespace sweep runs in a forked child so the caller's own
+    mount namespace is never changed. Requires root; every failure is
+    non-fatal and merely logged (a reboot then remains the fallback).
+    """
+    from chroot_distro.syscalls._constants import CLONE_NEWNS
+    from chroot_distro.syscalls.nsenter import check_ns_accessible, enter_namespaces
+
+    if os.getuid() != 0:
+        return
+
+    marker = f"/chroot-distro/containers/{container_name}/rootfs"
+
+    # Sweep the caller's namespace first: the substring match catches
+    # aliases and phantom paths the rootfs-prefix walk in unmount_all
+    # cannot see.
+    _sweep_matching_mounts(marker)
+
+    if not check_ns_accessible(1, CLONE_NEWNS):
+        log.debug("deep-clean: init mount namespace is not accessible")
+        return
+
+    pid = os.fork()
+    if pid == 0:
+        # --- child: enter the global (init) mount namespace and sweep ---
+        try:
+            enter_namespaces(1, CLONE_NEWNS)
+            _sweep_matching_mounts(marker)
+            os._exit(0)
+        except BaseException:
+            os._exit(1)
+    _, status = os.waitpid(pid, 0)
+    if os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0:
+        log.debug("deep-clean: global mount namespace sweep completed")
+    else:
+        warn(
+            "Could not clean stale container mounts in the global mount "
+            "namespace; a device reboot may be required to remove them."
+        )
+
+
 def ensure_no_mounts(rootfs: str, holder: NamespaceHolder | None = None) -> None:
     """Verify that no mount points exist under rootfs.
 
