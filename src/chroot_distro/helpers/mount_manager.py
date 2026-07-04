@@ -347,6 +347,44 @@ def _sweep_matching_mounts(marker: str) -> int:
     return removed
 
 
+def _pids_with_container_mounts(marker: str) -> list[int]:
+    """Return one PID per distinct mount namespace whose table contains *marker*.
+
+    Scans /proc/<pid>/ns/mnt symlinks to deduplicate namespaces, skips the
+    caller's own namespace, and pre-filters by reading /proc/<pid>/mounts so
+    only namespaces that actually hold container mounts are visited.
+    """
+    seen: set[str] = set()
+    pids: list[int] = []
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return pids
+    try:
+        own_ns = os.readlink("/proc/self/ns/mnt")
+    except OSError:
+        own_ns = ""
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        pid = int(entry)
+        try:
+            ns_id = os.readlink(f"/proc/{pid}/ns/mnt")
+        except OSError:
+            continue
+        if ns_id in seen or ns_id == own_ns:
+            continue
+        seen.add(ns_id)
+        try:
+            with open(f"/proc/{pid}/mounts") as f:
+                if marker not in f.read():
+                    continue
+        except OSError:
+            continue
+        pids.append(pid)
+    return pids
+
+
 def deep_clean_container_mounts(container_name: str) -> None:
     """Remove a container's mounts from the init (global) mount namespace.
 
@@ -362,7 +400,7 @@ def deep_clean_container_mounts(container_name: str) -> None:
     non-fatal and merely logged (a reboot then remains the fallback).
     """
     from chroot_distro.syscalls._constants import CLONE_NEWNS
-    from chroot_distro.syscalls.nsenter import check_ns_accessible, enter_namespaces
+    from chroot_distro.syscalls.nsenter import enter_namespaces
 
     if os.getuid() != 0:
         return
@@ -374,26 +412,39 @@ def deep_clean_container_mounts(container_name: str) -> None:
     # cannot see.
     _sweep_matching_mounts(marker)
 
-    if not check_ns_accessible(1, CLONE_NEWNS):
-        log.debug("deep-clean: init mount namespace is not accessible")
-        return
+    # Sweep every other mount namespace that still holds container mounts.
+    # The stale origins are not necessarily in init's namespace:
+    # `su --mount-master` enters magiskd's namespace (where /data_mirror
+    # lives), and the copies propagated into app namespaces are MNT_LOCKED
+    # slaves whose umount2 fails with EINVAL locally. Unmounting at the true
+    # origin propagates the removal to every slave, locked ones included.
+    for pid in _pids_with_container_mounts(marker):
+        child = os.fork()
+        if child == 0:
+            # --- child: enter the target mount namespace and sweep ---
+            try:
+                enter_namespaces(pid, CLONE_NEWNS)
+                _sweep_matching_mounts(marker)
+                os._exit(0)
+            except BaseException:
+                os._exit(1)
+        _, status = os.waitpid(child, 0)
+        if not (os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0):
+            log.debug("deep-clean: sweep failed for mount namespace of pid %d", pid)
 
-    pid = os.fork()
-    if pid == 0:
-        # --- child: enter the global (init) mount namespace and sweep ---
-        try:
-            enter_namespaces(1, CLONE_NEWNS)
-            _sweep_matching_mounts(marker)
-            os._exit(0)
-        except BaseException:
-            os._exit(1)
-    _, status = os.waitpid(pid, 0)
-    if os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0:
-        log.debug("deep-clean: global mount namespace sweep completed")
-    else:
+    # Final pass in the caller's namespace: origin unmounts above may have
+    # already cleared everything via propagation.
+    _sweep_matching_mounts(marker)
+
+    try:
+        with open("/proc/self/mounts") as f:
+            still_present = marker in f.read()
+    except OSError:
+        still_present = False
+    if still_present:
         warn(
-            "Could not clean stale container mounts in the global mount "
-            "namespace; a device reboot may be required to remove them."
+            "Some stale container mounts could not be removed from their "
+            "origin mount namespace; a device reboot may be required."
         )
 
 
