@@ -281,8 +281,10 @@ def safe_unmount(target: str, holder: NamespaceHolder | None = None) -> None:
     try:
         native_umount(target)
     except OSError as e:
-        if e.errno == errno.EINVAL:
-            # "not mounted" — already gone.
+        if e.errno in (errno.EINVAL, errno.ENOENT):
+            # EINVAL: "not mounted" — already gone. ENOENT: the mount point
+            # vanished, e.g. a shared-propagation peer was removed when its
+            # sibling was unmounted. Either way there is nothing to unmount.
             log.debug("umount reports '%s' is not mounted; treating as already unmounted.", target)
             return
         err_msg = str(e)
@@ -293,7 +295,7 @@ def safe_unmount(target: str, holder: NamespaceHolder | None = None) -> None:
         try:
             native_umount(target, lazy=True)
         except OSError as e_lazy:
-            if e_lazy.errno == errno.EINVAL:
+            if e_lazy.errno in (errno.EINVAL, errno.ENOENT):
                 log.debug("Lazy umount reports '%s' is not mounted; treating as already unmounted.", target)
                 return
             raise MountError(f"Failed to unmount {target} (lazy umount also failed): {e_lazy}") from e_lazy

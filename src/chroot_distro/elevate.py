@@ -209,9 +209,12 @@ def _termux_root_env_exports() -> str:
         "LANG": "en_US.UTF-8",
         "_CHROOT_DISTRO_ELEVATING": "1",
     }
-    termux_exec = os.path.join(TERMUX_PREFIX, "lib", "libtermux-exec.so")
-    if os.path.exists(termux_exec):
-        exports["LD_PRELOAD"] = termux_exec
+    # termux-exec >= 2.0 renamed the preload library; probe both names.
+    for lib_name in ("libtermux-exec-ld-preload.so", "libtermux-exec.so"):
+        termux_exec = os.path.join(TERMUX_PREFIX, "lib", lib_name)
+        if os.path.exists(termux_exec):
+            exports["LD_PRELOAD"] = termux_exec
+            break
     for name in _FORWARDED_ENV_VARS:
         value = os.environ.get(name)
         if value is not None:
@@ -234,13 +237,31 @@ def _elevate_termux() -> None:
         )
 
     help_text = _su_help_text(su)
-    command = _termux_root_env_exports() + "; exec " + shlex.join(get_reexec_argv())
+    # su changes the working directory; restore it on the root side like
+    # termux-sudo does (`cd -- $CURRENT_WORKING_DIR`).
+    try:
+        cwd = os.getcwd()
+    except OSError:
+        cwd = "/"
+    command = (
+        _termux_root_env_exports()
+        + "; cd " + shlex.quote(cwd) + " 2>/dev/null || cd /"
+        + "; exec " + shlex.join(get_reexec_argv())
+    )
 
     argv: list[str] = [su]
-    # --mount-master: Magisk isolates each root session in its own mount
-    # namespace by default; without the global namespace our container
-    # mounts would vanish between invocations.
-    if "--mount-master" in help_text:
+    # --mount-master is intentionally NOT used by default, matching
+    # termux-sudo (it only adds the flag when the sudo HOME is on / or
+    # /system, which never applies here). In the global root namespace
+    # /data is MS_SHARED, so binding /data inside a rootfs that itself
+    # lives under /data makes child binds propagate back into themselves:
+    # recursive rootfs/.../rootfs/... phantom mounts that break unmount
+    # cleanup and shadow the devpts instance needed for login ptys.
+    # Magisk's default "requester" namespace is the Termux app's own
+    # (slave propagation): mounts are still shared across all Termux
+    # sessions but never recurse. Set CD_SU_MOUNT_MASTER=1 to force the
+    # old global-namespace behaviour.
+    if os.environ.get("CD_SU_MOUNT_MASTER") == "1" and "--mount-master" in help_text:
         argv.append("--mount-master")
     if "--preserve-environment" in help_text:
         argv.append("--preserve-environment")
