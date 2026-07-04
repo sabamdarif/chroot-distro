@@ -22,7 +22,9 @@ from chroot_distro.commands.rename import command_rename
 from chroot_distro.commands.reset import command_reset
 from chroot_distro.commands.restore import command_restore
 from chroot_distro.commands.run import command_run
+from chroot_distro.commands.daemon_cmd import command_daemon
 from chroot_distro.commands.search import command_search
+from chroot_distro.commands.setup import command_setup
 from chroot_distro.commands.sync import command_sync
 from chroot_distro.commands.unmount import command_unmount
 from chroot_distro.constants import IS_TERMUX, PROGRAM_NAME, PROGRAM_VERSION
@@ -60,6 +62,8 @@ _COMMAND_HANDLERS = {
     "ps": command_ps,
     "diff": command_diff,
     "search": command_search,
+    "setup": command_setup,
+    "daemon": command_daemon,
     "info": command_info,
     "help": command_help,
 }
@@ -189,8 +193,14 @@ def main() -> None:
     # only read /proc and container metadata, so they are exempt on Termux like
     # `help`. On Linux containers are installed by root and live in root's data
     # dir, so these commands still elevate there to read the right location.
+    if canonical == "daemon" and os.getuid() != 0:
+        # The daemon is started by the init system and must already be
+        # root; never self-elevate it (that could recurse through itself).
+        crit_error("the daemon must be started as root (normally by your init system).")
+        sys.exit(1)
+
     requires_root = False
-    if canonical in ("help", "search"):
+    if canonical in ("help", "search", "daemon"):
         requires_root = False
     elif IS_TERMUX:
         if canonical not in ("list", "ps", "info"):

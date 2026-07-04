@@ -11,7 +11,7 @@ Containers are created by pulling Docker/OCI images directly from Docker Hub (or
 
 Chroot-Distro can also **build** OCI images from a Dockerfile (no Docker daemon required), storing the result in the local manifest cache or exporting it as a standalone OCI tarball.
 
-Chroot-Distro requires **root privileges** on the host. Mutating commands automatically re-execute themselves via `sudo`, `doas`, `pkexec`, or `su` when needed (see [First-run check](#first-run-check)).
+Chroot-Distro requires **root privileges** on the host, but you don't have to type a password every time: a one-time `sudo chroot-distro setup` enables Docker-style passwordless operation through the `chroot-distro` group (see [Passwordless setup](#passwordless-setup-linux)). On Termux, Android's native `su` is used directly — no `sudo`/`tsu` package needed.
 
 ---
 
@@ -69,9 +69,16 @@ effective user for mutating operations must be **root** (see
 3. Install Chroot-Distro:
 
 ```sh
-pkg install coreutils sudo python mount-utils
+pkg install coreutils python mount-utils
 pip install chroot-distro
 ```
+
+No `sudo`/`tsu` package is required: Chroot-Distro talks to your root
+manager's `su` binary directly and sets up the Termux environment
+(`PATH`, `libtermux-exec.so` preload, writable root `HOME`, `TMPDIR`)
+itself. The first privileged command triggers the root manager's grant
+dialog (Magisk / KernelSU / APatch) — enable **remember** there and no
+further prompts will ever appear.
 
 From a local checkout:
 
@@ -97,9 +104,44 @@ pip install .
 
 ### First-run check
 
-On startup, commands that modify containers or mounts verify that the effective UID is `0`. If not, Chroot-Distro auto-elevates when not root by re-executing itself using, in order: `sudo`, `doas`, `pkexec`, or `su`.
+On startup, commands that modify containers or mounts verify that the effective UID is `0`. If not, Chroot-Distro elevates automatically using the first mechanism that works:
+
+1. **File capabilities** — if the process already holds the six required capabilities, no elevation happens at all.
+2. **Termux:** Android's `su` binary directly (Magisk / KernelSU / APatch), with the full Termux environment set up on the root side.
+3. **Linux:** the passwordless `chroot-distro` daemon socket, if [Passwordless setup](#passwordless-setup-linux) has been run.
+4. Fallback: `sudo`, `doas`, `pkexec`, or `su` (these prompt for a password).
 
 `list`, `ps`, `search`, `info`, and `help` do not require root on Termux and are run immediately. On regular Linux, `list`, `ps`, and `info` still elevate to inspect root-owned data.
+
+### Passwordless setup (Linux)
+
+Just like adding your user to the `docker` group lets you run `docker` without a password, Chroot-Distro ships a group-gated root daemon (pure Python, no third-party code, no `sudoers` edits). Enable it once:
+
+```sh
+sudo chroot-distro setup
+```
+
+This one command:
+
+1. creates the **`chroot-distro`** system group,
+2. adds your user to it (equivalent to `sudo usermod -aG chroot-distro $USER`),
+3. detects your init system — **systemd** (with on-demand socket activation), **OpenRC**, **runit**, **dinit**, or **sysvinit** — and installs + starts the matching service, which owns the root socket at `/run/chroot-distro.sock` (`root:chroot-distro`, mode `0660`).
+
+Then **log out and back in** (or run `newgrp chroot-distro`) so the group membership takes effect. From that point on, every `chroot-distro` command runs with no password prompt.
+
+To add another user later:
+
+```sh
+sudo usermod -aG chroot-distro <username>
+```
+
+To remove the service again:
+
+```sh
+sudo chroot-distro setup --uninstall
+```
+
+> **Security note:** membership of the `chroot-distro` group grants root-equivalent access on the host (exactly like the `docker` group). Only add trusted users.
 
 ### Quick start
 

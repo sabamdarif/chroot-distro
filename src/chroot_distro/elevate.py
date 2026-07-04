@@ -2,9 +2,10 @@ import logging
 import os
 import shlex
 import shutil
+import subprocess
 import sys
 
-from chroot_distro.constants import IS_TERMUX
+from chroot_distro.constants import IS_TERMUX, TERMUX_HOME, TERMUX_PREFIX
 from chroot_distro.exceptions import RootRequiredError
 from chroot_distro.syscalls._constants import (
     CAP_DAC_OVERRIDE,
@@ -134,35 +135,193 @@ def has_required_capabilities() -> bool:
     return all(has_capability(cap) for cap in REQUIRED_CAPS)
 
 
+# ---------------------------------------------------------------------------
+# Termux: native `su` elevation (no external sudo/tsu wrapper needed)
+# ---------------------------------------------------------------------------
+
+# Known su binary locations on rooted Android (Magisk, KernelSU, APatch,
+# LineageOS su, older SuperSU layouts). Mirrors termux-sudo's search list.
+_SU_SEARCH_PATHS = (
+    "/system/bin/su",
+    "/debug_ramdisk/su",
+    "/system/xbin/su",
+    "/sbin/su",
+    "/sbin/bin/su",
+    "/system/sbin/su",
+    "/su/xbin/su",
+    "/su/bin/su",
+    "/magisk/.core/bin/su",
+)
+
+
+def _find_termux_su() -> str | None:
+    override = os.environ.get("CD_SU_PATH")
+    if override and os.access(override, os.X_OK):
+        return override
+    for path in _SU_SEARCH_PATHS:
+        if os.access(path, os.X_OK):
+            return path
+    return shutil.which("su")
+
+
+def _su_help_text(su: str) -> str:
+    """Probe `su --help` to discover supported options (never prompts)."""
+    env = {k: v for k, v in os.environ.items() if k not in ("LD_PRELOAD", "LD_LIBRARY_PATH")}
+    try:
+        proc = subprocess.run(
+            [su, "--help"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            stdin=subprocess.DEVNULL,
+            env=env,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return (proc.stdout or "") + (proc.stderr or "")
+
+
+def _termux_root_env_exports() -> str:
+    """Shell prelude replicating what termux-sudo sets up for the root side.
+
+    Plain Magisk/KernelSU ``su -c`` drops into a raw Android environment
+    (toybox PATH, mksh, no writable HOME). Four fixes make Termux binaries
+    and pip-installed entry points work under root:
+
+    - PATH with Termux's bin dirs *before* /system/bin
+    - LD_PRELOAD=libtermux-exec.so so ``#!/usr/bin/env python3``-style
+      shebangs are rewritten to Termux paths (Android has no /usr/bin)
+    - a writable HOME inside the Termux rootfs (~/.suroot)
+    - TMPDIR pointing at Termux's tmp
+    """
+    suroot = os.path.join(TERMUX_HOME, ".suroot")
+    try:
+        os.makedirs(suroot, exist_ok=True)
+    except OSError:
+        suroot = TERMUX_HOME
+    termux_bin = os.path.join(TERMUX_PREFIX, "bin")
+    exports: dict[str, str] = {
+        "PATH": f"{termux_bin}:{termux_bin}/applets:/system/bin:/system/xbin",
+        "HOME": suroot,
+        "TMPDIR": os.path.join(TERMUX_PREFIX, "tmp"),
+        "PREFIX": TERMUX_PREFIX,
+        "TERM": os.environ.get("TERM", "xterm-256color"),
+        "LANG": "en_US.UTF-8",
+        "_CHROOT_DISTRO_ELEVATING": "1",
+    }
+    termux_exec = os.path.join(TERMUX_PREFIX, "lib", "libtermux-exec.so")
+    if os.path.exists(termux_exec):
+        exports["LD_PRELOAD"] = termux_exec
+    for name in _FORWARDED_ENV_VARS:
+        value = os.environ.get(name)
+        if value is not None:
+            exports[name] = value
+    return "; ".join(f"export {key}={shlex.quote(value)}" for key, value in exports.items())
+
+
+def _elevate_termux() -> None:
+    """Re-exec as root through Android's `su`, Termux-environment-aware.
+
+    Never returns on success. The root manager (Magisk/KernelSU/APatch)
+    shows its grant dialog only the first time; with 'remember' enabled
+    every later run is passwordless and prompt-free.
+    """
+    su = _find_termux_su()
+    if su is None:
+        raise RootRequiredError(
+            "chroot-distro requires root, but no 'su' binary was found. "
+            "Is this device rooted (Magisk, KernelSU, APatch)?"
+        )
+
+    help_text = _su_help_text(su)
+    command = _termux_root_env_exports() + "; exec " + shlex.join(get_reexec_argv())
+
+    argv: list[str] = [su]
+    # --mount-master: Magisk isolates each root session in its own mount
+    # namespace by default; without the global namespace our container
+    # mounts would vanish between invocations.
+    if "--mount-master" in help_text:
+        argv.append("--mount-master")
+    if "--preserve-environment" in help_text:
+        argv.append("--preserve-environment")
+    # Allocate a tty for -c on newer Magisk builds.
+    if "--interactive" in help_text:
+        argv.append("--interactive")
+    bash = os.path.join(TERMUX_PREFIX, "bin", "bash")
+    if "--shell" in help_text and os.access(bash, os.X_OK):
+        argv += ["--shell", bash]
+    argv += ["-c", command]
+
+    # Magisk's su itself breaks when exec'd with Termux's LD_PRELOAD /
+    # LD_LIBRARY_PATH; the prelude re-exports them on the root side.
+    os.environ.pop("LD_PRELOAD", None)
+    os.environ.pop("LD_LIBRARY_PATH", None)
+
+    try:
+        os.execvp(argv[0], argv)
+    except OSError as e:
+        raise RootRequiredError(f"Failed to execute '{su}': {e}") from e
+
+
+# ---------------------------------------------------------------------------
+# Linux: group-gated daemon delegation (Docker-style, passwordless)
+# ---------------------------------------------------------------------------
+
+
+def _try_daemon_delegation() -> None:
+    """Delegate to the root daemon socket when available.
+
+    Exits the process with the delegated command's exit code on success;
+    returns normally when the daemon is unavailable or access was denied
+    so the caller can fall back to sudo/doas/pkexec/su.
+    """
+    from chroot_distro.daemon import run_client
+
+    exit_code = run_client(sys.argv[1:])
+    if exit_code is not None:
+        sys.exit(exit_code)
+
+
 def elevate_or_die() -> None:
-    """Attempt to re-execute the current script with root privileges.
+    """Attempt to re-execute the current process with root privileges.
 
     The check order is:
 
     1. Already root → return immediately.
-    2. File capabilities are set → return (no sudo needed).
-    3. Otherwise → re-exec via sudo/doas/pkexec/su.
+    2. Required file capabilities are present → return (no elevation).
+    3. Termux → exec Android's ``su`` directly with a Termux-aware
+       environment (no external sudo/tsu wrapper required).
+    4. Linux → delegate to the group-gated root daemon socket if
+       ``chroot-distro setup`` has been run (passwordless).
+    5. Fall back to sudo/doas/pkexec/su.
 
-    If already elevating (to prevent infinite loops) or if no escalation
-    tool is found, raises RootRequiredError.
+    Raises RootRequiredError when elevation loops or no mechanism exists.
     """
     if is_root():
         return
 
     # Phase 2: check if we have sufficient file capabilities.
     if has_required_capabilities():
-        log.debug("Running with file capabilities — sudo not required")
+        log.debug("Running with file capabilities — elevation not required")
         return
 
     # Check loop sentinel
     if os.environ.get("_CHROOT_DISTRO_ELEVATING") == "1":
         raise RootRequiredError("Privilege elevation loop detected. The tool is still not running as root.")
 
+    if IS_TERMUX:
+        _elevate_termux()
+        return  # unreachable — _elevate_termux never returns on success
+
+    # Passwordless path: the chroot-distro group + daemon socket.
+    _try_daemon_delegation()
+
     tool_cmd = _find_escalation_tool()
     if not tool_cmd:
         raise RootRequiredError(
             "chroot-distro requires root privileges, but no privilege elevation tool "
-            "(sudo, doas, pkexec, su) was found on the system."
+            "(sudo, doas, pkexec, su) was found on the system. For passwordless "
+            "operation run 'chroot-distro setup' once as root."
         )
 
     # Set loop sentinel env var in the child environment

@@ -163,6 +163,8 @@ def build_parser() -> _CdArgumentParser:
     _ps(sub)
     _diff(sub)
     _search(sub)
+    _setup(sub)
+    _daemon(sub)
     _info(sub)
 
     return parser
@@ -411,6 +413,22 @@ def _search(sub):
     p.add_argument("term", nargs="?", default=None)
     p.add_argument("-l", "--limit", type=int, default=25, metavar="N")
     p.add_argument("-q", "--quiet", action="store_true")
+    p.add_argument("-h", "--help", action="store_true")
+
+
+def _setup(sub):
+    p = sub.add_parser("setup", add_help=False)
+    p._cd_command = "setup"
+    p.add_argument("--user", dest="setup_user", default=None, metavar="USERNAME")
+    p.add_argument("--uninstall", action="store_true")
+    p.add_argument("-q", "--quiet", action="store_true")
+    p.add_argument("-h", "--help", action="store_true")
+
+
+def _daemon(sub):
+    p = sub.add_parser("daemon", add_help=False)
+    p._cd_command = "daemon"
+    p.add_argument("--persist", action="store_true")
     p.add_argument("-h", "--help", action="store_true")
 
 
