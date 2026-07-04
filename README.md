@@ -27,6 +27,7 @@ Chroot-Distro requires **root privileges** on the host, but you don't have to ty
    * [`list`](#list--list-installed-containers)
    * [`ps`](#ps--list-active-sessions)
    * [`search`](#search--search-docker-hub)
+   * [`setup`](#setup--enable-passwordless-operation-linux)
    * [`diff`](#diff--inspect-filesystem-changes)
    * [`remove`](#remove--delete-a-container)
    * [`kill`](#kill--forcibly-stop-a-running-container)
@@ -709,6 +710,38 @@ Requires network access; does **not** require root.
 ```sh
 chroot-distro search nextcloud
 chroot-distro search --limit 50 ubuntu
+```
+
+---
+
+### `setup` — Enable passwordless operation (Linux)
+
+```
+chroot-distro setup [--uninstall]
+```
+
+One-time setup that enables Docker-style passwordless operation on a
+regular Linux host. Run once as root; it creates the `chroot-distro`
+group, adds the invoking user to it, and installs + starts the
+group-gated root daemon under your init system (**systemd**, **OpenRC**,
+**runit**, **dinit**, or **sysvinit**). See
+[Passwordless setup (Linux)](#passwordless-setup-linux) for the full
+workflow, group management, and the security note.
+
+chroot-distro must be installed system-wide as root (not
+`pip install --user`); a user-writable install is refused because the
+daemon re-executes the code as root. Not applicable on Termux, which
+uses the root manager's native `su` and needs no setup.
+
+| Option | Description |
+|---|---|
+| `--uninstall` | Stop and remove the daemon service. The `chroot-distro` group is kept. |
+
+**Examples:**
+
+```sh
+sudo chroot-distro setup
+sudo chroot-distro setup --uninstall
 ```
 
 ---

@@ -682,6 +682,59 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
             f"{PROGRAM_NAME} search --limit 50 ubuntu",
         ],
     },
+    "setup": {
+        "usage": "setup [--uninstall]",
+        "summary": (
+            "One-time passwordless setup for a regular Linux host "
+            "(Docker's docker-group model). Run once as root:"
+            "\n\n"
+            "  1. creates the 'chroot-distro' system group,\n"
+            "  2. adds the invoking user to it,\n"
+            "  3. detects the init system and installs + starts the "
+            "root daemon service."
+            "\n\n"
+            "Supported init systems: systemd (with socket activation), "
+            "OpenRC, runit, dinit, and sysvinit. The daemon owns a "
+            "root socket at /run/chroot-distro.sock "
+            "(root:chroot-distro, mode 0660); group members are then "
+            "authorised without any password prompt."
+            "\n\n"
+            "After setup, log out and back in (or run "
+            "'newgrp chroot-distro') so the new group membership takes "
+            "effect. Add more users later with "
+            "'usermod -aG chroot-distro <username>'."
+            "\n\n"
+            "chroot-distro must be installed system-wide as root (not "
+            "'pip install --user'): the daemon re-executes this code as "
+            "root, so a user-writable install is refused."
+            "\n\n"
+            "Not applicable on Termux, which elevates via the root "
+            "manager's native 'su' and needs no setup."
+        ),
+        "options": [
+            ("-h, --help", "Show this help."),
+            (
+                "--uninstall",
+                "Stop and remove the daemon service. The "
+                "'chroot-distro' group is kept (remove it manually with "
+                "'groupdel chroot-distro' if desired).",
+            ),
+        ],
+        "examples": [
+            f"sudo {PROGRAM_NAME} setup",
+            f"sudo {PROGRAM_NAME} setup --uninstall",
+        ],
+        "footer": [
+            {
+                "title": "SECURITY NOTE",
+                "intro": (
+                    "Membership of the 'chroot-distro' group grants "
+                    "root-equivalent access on the host (exactly like "
+                    "the 'docker' group). Only add trusted users."
+                ),
+            },
+        ],
+    },
     "info": {
         "usage": "info",
         "aliases": ("version-info", "nf"),
@@ -775,5 +828,6 @@ TOP_COMMANDS = [
     ("kill", "Forcibly stop a running container."),
     ("diff", "Inspect filesystem changes in a container."),
     ("search", "Search Docker Hub for images."),
+    ("setup", "Enable Docker-style passwordless operation (Linux)."),
     ("info", "Show host and container diagnostics for bug reports."),
 ]
