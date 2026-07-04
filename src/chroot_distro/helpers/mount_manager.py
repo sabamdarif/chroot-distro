@@ -111,10 +111,17 @@ def safe_mount(
     holder: NamespaceHolder | None = None,
     recursive: bool = False,
     options: str = "",
+    required_child: str = "",
 ) -> None:
     """Safely mount source to target using bind mount.
 
     Creates target directory or file if they do not exist.
+
+    When *required_child* is given (e.g. ``"ptmx"`` for the /dev bind), an
+    already-mounted target is only trusted if that child entry exists;
+    otherwise the bind is stacked on top. This recovers from stale
+    MNT_LOCKED mounts (whose origin namespace died) that shadow the target
+    but lack what the guest needs and cannot be unmounted.
 
     When *options* is given (e.g. ``"ro"`` or ``"ro,nosuid"``), a second
     ``mount -o remount,bind,<options>`` is issued after the initial bind:
@@ -152,7 +159,20 @@ def safe_mount(
             created_stub = True
 
     if is_mounted(target, holder=holder):
-        return
+        # Normally an existing mount is trusted (concurrent sessions share
+        # mounts). But a stale mount from a dead namespace can shadow the
+        # target while missing what the guest needs — e.g. a leftover
+        # MNT_LOCKED tmpfs on /dev without a ptmx node, which umount2
+        # cannot remove (EINVAL). When *required_child* is set, probe for
+        # it and mount over the stale mount when it is missing.
+        if not required_child or holder is not None or os.path.exists(os.path.join(target, required_child)):
+            return
+        log.debug(
+            "Target %s is mounted but missing '%s'; mounting %s over the stale mount",
+            target,
+            required_child,
+            source,
+        )
 
     kernel_options = _filter_bind_options(options)
 
@@ -478,6 +498,34 @@ def _fs_supported(fstype: str) -> bool:
         return False
 
 
+def _mount_fs_and_options(target: str) -> tuple[str, str]:
+    """Return (fstype, options) of the topmost mount at *target*.
+
+    /proc/self/mounts lists mounts in mount order, so the last matching
+    entry is the visible top of any stack at that path. Returns ("", "")
+    when no entry matches.
+    """
+    target_abs = os.path.realpath(target)
+    fstype = ""
+    options = ""
+    try:
+        with open("/proc/self/mounts") as f:
+            for line in f:
+                parts = line.strip().split()
+                if len(parts) < 4:
+                    continue
+                mount_point = decode_mount_path(parts[1])
+                try:
+                    if os.path.realpath(mount_point) == target_abs:
+                        fstype = parts[2]
+                        options = parts[3]
+                except OSError:
+                    continue
+    except OSError:
+        return ("", "")
+    return (fstype, options)
+
+
 def apply_special_mount(rootfs: str, sm, holder: NamespaceHolder | None = None, force_optional: bool = False) -> bool:
     """Execute a single SpecialMount inside rootfs.
 
@@ -529,7 +577,21 @@ def apply_special_mount(rootfs: str, sm, holder: NamespaceHolder | None = None, 
             return False
 
     if is_mounted(target, holder=holder):
-        return True
+        # Trust an existing mount only when it looks like the one we would
+        # create. Stale mounts from dead namespaces are MNT_LOCKED (umount2
+        # fails with EINVAL) and must be mounted over instead. For devpts,
+        # the host instance (and binds of it) carries ptmxmode=000, which
+        # breaks pty allocation in the login session; our newinstance devpts
+        # uses ptmxmode=0666, so its presence identifies the correct mount.
+        if holder is not None:
+            return True
+        fstype, opts = _mount_fs_and_options(target)
+        if sm.fstype == "devpts":
+            if "ptmxmode=666" in opts:
+                return True
+        elif fstype == sm.fstype:
+            return True
+        # Fall through: stack the correct mount on top of the stale one.
 
     # Build the list of option strings to try, simplest-last. Android's toybox
     # `mount` and SELinux frequently reject tmpfs option strings (e.g. size=)

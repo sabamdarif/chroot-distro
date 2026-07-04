@@ -1065,6 +1065,7 @@ def _command_login_inner_once(container_name: str, args) -> None:
 
             # Phase 1: bind mounts
             run_root = os.path.realpath(os.path.join(rootfs, "run"))
+            dev_root = os.path.realpath(os.path.join(rootfs, "dev"))
             for src, dst in resolved_binds:
                 try:
                     dst_real = os.path.realpath(dst)
@@ -1080,6 +1081,9 @@ def _command_login_inner_once(container_name: str, args) -> None:
                         holder=holder,
                         recursive=(is_run or is_wsl),
                         options=mount_options,
+                        # A stale, unremovable (MNT_LOCKED) mount can shadow
+                        # /dev without providing ptmx; detect and mount over.
+                        required_child="ptmx" if dst_real == dev_root else "",
                     )
                 except Exception as e:
                     if pipe_w is not None:
