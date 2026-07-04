@@ -8,6 +8,7 @@ from chroot_distro.commands.backup import command_backup
 from chroot_distro.commands.build import command_build
 from chroot_distro.commands.clear_cache import command_clear_cache
 from chroot_distro.commands.copy import command_copy
+from chroot_distro.commands.daemon_cmd import command_daemon
 from chroot_distro.commands.diff import command_diff
 from chroot_distro.commands.help import HELP_COMMANDS, command_help
 from chroot_distro.commands.info import command_info
@@ -22,7 +23,6 @@ from chroot_distro.commands.rename import command_rename
 from chroot_distro.commands.reset import command_reset
 from chroot_distro.commands.restore import command_restore
 from chroot_distro.commands.run import command_run
-from chroot_distro.commands.daemon_cmd import command_daemon
 from chroot_distro.commands.search import command_search
 from chroot_distro.commands.setup import command_setup
 from chroot_distro.commands.sync import command_sync

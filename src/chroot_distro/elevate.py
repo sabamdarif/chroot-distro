@@ -175,6 +175,7 @@ def _su_help_text(su: str) -> str:
             timeout=10,
             stdin=subprocess.DEVNULL,
             env=env,
+            check=False,
         )
     except (OSError, subprocess.TimeoutExpired):
         return ""

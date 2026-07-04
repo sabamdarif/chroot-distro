@@ -22,6 +22,7 @@ the socket itself and, unless started with ``--persist``, exits after an
 idle timeout.
 """
 
+import contextlib
 import grp
 import json
 import logging
@@ -86,17 +87,13 @@ def run_client(argv: list[str]) -> int | None:
         return None
 
     def _relay(signum: int, _frame: object) -> None:
-        try:
+        with contextlib.suppress(OSError):
             conn.sendall(json.dumps({"signal": signum}).encode() + b"\n")
-        except OSError:
-            pass
 
     previous_handlers = {}
     for sig in _RELAY_SIGNALS:
-        try:
+        with contextlib.suppress(OSError, ValueError):
             previous_handlers[sig] = signal.signal(sig, _relay)
-        except (OSError, ValueError):
-            pass
 
     try:
         buf = b""
@@ -127,10 +124,8 @@ def run_client(argv: list[str]) -> int | None:
                     return int(reply["exit"])
     finally:
         for sig, handler in previous_handlers.items():
-            try:
+            with contextlib.suppress(OSError, ValueError):
                 signal.signal(sig, handler)
-            except (OSError, ValueError):
-                pass
         conn.close()
 
 
@@ -154,10 +149,8 @@ def _bind_socket() -> socket.socket:
         raise ChrootDistroError(
             f"group '{GROUP_NAME}' does not exist. Run 'sudo chroot-distro setup' first."
         ) from exc
-    try:
+    with contextlib.suppress(FileNotFoundError):
         os.unlink(SOCKET_PATH)
-    except FileNotFoundError:
-        pass
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     sock.bind(SOCKET_PATH)
     os.chown(SOCKET_PATH, 0, gid)
@@ -191,10 +184,8 @@ def _peer_is_authorised(conn: socket.socket) -> tuple[bool, int]:
 
 
 def _send_json(conn: socket.socket, payload: dict) -> None:
-    try:
+    with contextlib.suppress(OSError):
         conn.sendall(json.dumps(payload).encode() + b"\n")
-    except OSError:
-        pass
 
 
 def _spawn(header: dict, fds: list[int]) -> int:
@@ -225,7 +216,6 @@ def _spawn(header: dict, fds: list[int]) -> int:
         os.execve(sys.executable, argv, env)
     finally:
         os._exit(127)
-    return 0  # unreachable; keeps type-checkers happy
 
 
 def _wait_and_relay(conn: socket.socket, pid: int) -> int:
@@ -242,16 +232,14 @@ def _wait_and_relay(conn: socket.socket, pid: int) -> int:
             return 128 - code if code < 0 else code
         try:
             chunk = conn.recv(4096)
-        except socket.timeout:
+        except TimeoutError:
             continue
         except OSError:
             chunk = b""
         if chunk == b"":
             # Client disconnected: tear the command down.
-            try:
+            with contextlib.suppress(ProcessLookupError):
                 os.kill(pid, signal.SIGHUP)
-            except ProcessLookupError:
-                pass
             try:
                 _done, status = os.waitpid(pid, 0)
                 code = os.waitstatus_to_exitcode(status)
@@ -269,10 +257,8 @@ def _wait_and_relay(conn: socket.socket, pid: int) -> int:
             except (ValueError, TypeError):
                 continue
             if signum in _RELAYABLE_SIGNAL_NUMBERS:
-                try:
+                with contextlib.suppress(ProcessLookupError, PermissionError):
                     os.kill(pid, signum)
-                except (ProcessLookupError, PermissionError):
-                    pass
 
 
 def _handle_connection(conn: socket.socket) -> None:
@@ -339,7 +325,7 @@ def serve(persist: bool = False) -> None:
         while True:
             try:
                 conn, _addr = sock.accept()
-            except socket.timeout:
+            except TimeoutError:
                 if not persist and time.monotonic() - last_activity > IDLE_TIMEOUT_SECONDS:
                     log.info("idle for %.0fs — exiting", IDLE_TIMEOUT_SECONDS)
                     return
@@ -351,7 +337,5 @@ def serve(persist: bool = False) -> None:
     finally:
         sock.close()
         if not activated:
-            try:
+            with contextlib.suppress(OSError):
                 os.unlink(SOCKET_PATH)
-            except OSError:
-                pass

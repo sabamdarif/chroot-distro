@@ -693,15 +693,15 @@ def test_get_bindings_termux_dist_type():
         srcs = {src for src, _ in binds}
         dsts = {dst for _, dst in binds}
 
-        # Check system_bindings and TERMUX_PREFIX are skipped
-        assert "/system" not in srcs
+        # Check that TERMUX_PREFIX and /data are skipped for termux-type containers
         assert f"/fake/rootfs{TERMUX_PREFIX}" not in dsts
-
-        # Check that cache bindings are skipped
-        assert "/data/data/com.termux/cache" not in srcs
-
-        # Check that host's /data is skipped
         assert "/data" not in srcs
+
+        # Check that system_bindings ARE included (needed for termux-exec to work on Android hosts)
+        assert "/system" in srcs
+
+        # Check that termux app cache bindings are skipped (termux-type has its own)
+        assert "/data/data/com.termux/cache" not in srcs
 
 
 def test_custom_bind_overrides_data_on_termux():

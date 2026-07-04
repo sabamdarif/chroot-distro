@@ -16,6 +16,7 @@ verifies and reports status.
 """
 
 import argparse
+import contextlib
 import grp
 import os
 import pwd
@@ -257,7 +258,7 @@ def _write(path: str, content: str, mode: int = 0o644) -> None:
 
 def _run_quiet(argv: list[str]) -> bool:
     try:
-        return subprocess.run(argv, capture_output=True).returncode == 0
+        return subprocess.run(argv, capture_output=True, check=False).returncode == 0
     except OSError:
         return False
 
@@ -275,7 +276,9 @@ def _install_service(init: str) -> None:
         _write(_SYSTEMD_SERVICE_PATH, _SYSTEMD_SERVICE.replace("@CMD@", _DAEMON_CMD))
         _run_quiet(["systemctl", "daemon-reload"])
         if not _run_quiet(["systemctl", "enable", "--now", "chroot-distro.socket"]):
-            warn("could not enable chroot-distro.socket — enable it manually with: systemctl enable --now chroot-distro.socket")
+            warn(
+                "could not enable chroot-distro.socket — enable it manually with: systemctl enable --now chroot-distro.socket"
+            )
     elif init == "openrc":
         _write(_OPENRC_PATH, _OPENRC_SCRIPT.replace("@PYTHON@", sys.executable), mode=0o755)
         _run_quiet(["rc-update", "add", "chroot-distro", "default"])
@@ -325,18 +328,12 @@ def _uninstall_service() -> None:
         _SYSV_PATH,
         os.path.join(_RUNIT_DIR, "run"),
     ):
-        try:
+        with contextlib.suppress(OSError):
             os.unlink(path)
-        except OSError:
-            pass
-    try:
+    with contextlib.suppress(OSError):
         os.rmdir(_RUNIT_DIR)
-    except OSError:
-        pass
-    try:
+    with contextlib.suppress(OSError):
         os.unlink(SOCKET_PATH)
-    except OSError:
-        pass
     _run_quiet(["systemctl", "daemon-reload"])
 
 

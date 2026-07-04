@@ -74,12 +74,7 @@ pkg install coreutils python mount-utils
 pip install chroot-distro
 ```
 
-No `sudo`/`tsu` package is required: Chroot-Distro talks to your root
-manager's `su` binary directly and sets up the Termux environment
-(`PATH`, `libtermux-exec.so` preload, writable root `HOME`, `TMPDIR`)
-itself. The first privileged command triggers the root manager's grant
-dialog (Magisk / KernelSU / APatch) — enable **remember** there and no
-further prompts will ever appear.
+No `sudo`/`tsu` package is required.
 
 From a local checkout:
 
@@ -106,12 +101,7 @@ sudo pip install .
 > **Install as root, not `--user`.** On a regular Linux host, install
 > system-wide with `sudo` (not `pip install --user`). The passwordless
 > daemon set up by `sudo chroot-distro setup` re-executes this code **as
-> root**, so it must live in a root-owned, non-user-writable location. A
-> `pip install --user` install lives under your home directory, which means
-> (a) root's Python cannot import it and the daemon fails with `No module
-> named chroot_distro`, and (b) any process running as your user could edit
-> the code the root daemon executes. `chroot-distro setup` detects a
-> user-writable install and refuses, telling you to reinstall with `sudo`.
+> root**, so it must live in a root-owned, non-user-writable location.
 
 ### First-run check
 
