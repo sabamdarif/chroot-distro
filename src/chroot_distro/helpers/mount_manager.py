@@ -269,7 +269,9 @@ def make_rslave(target: str, holder: NamespaceHolder | None = None) -> bool:
 # "target is busy" on logout because nested submounts or short-lived handles
 # linger. This is benign: the lazy umount below always succeeds. Suppress the
 # alarming warning for these and clean up quietly.
-_RECURSIVE_BIND_BASENAMES = frozenset({"dev", "run", "proc", "sys"})
+_RECURSIVE_BIND_BASENAMES = frozenset(
+    {"dev", "run", "proc", "sys", "apex", "system", "vendor", "odm", "product", "system_ext"}
+)
 
 
 def _is_recursive_bind_target(target: str) -> bool:

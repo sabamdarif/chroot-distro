@@ -25,6 +25,7 @@ from chroot_distro.helpers.android import configure_android_rootfs
 from chroot_distro.helpers.docker import derive_alias, pull_image
 from chroot_distro.helpers.download import download_file
 from chroot_distro.helpers.rootfs import (
+    guest_etc_path,
     register_android_ids,
     write_hosts,
     write_resolv_conf,
@@ -239,7 +240,7 @@ def _run_install(
             log_info("Updating '/etc/hosts'...")
             write_hosts(rootfs_dir)
 
-            if IS_TERMUX and os.path.isfile(os.path.join(rootfs_dir, "etc", "passwd")):
+            if IS_TERMUX and os.path.isfile(guest_etc_path(rootfs_dir, "/etc/passwd")):
                 log_info("Registering Android-specific UIDs and GIDs...")
                 register_android_ids(rootfs_dir)
                 configure_android_rootfs(rootfs_dir)

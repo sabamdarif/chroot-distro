@@ -791,7 +791,11 @@ def _command_login_inner_once(container_name: str, args) -> None:
             if net_gid not in groups:
                 groups.append(net_gid)
 
-    if IS_TERMUX and not skip_extra_mounts and not minimal:
+    # Strip the host Termux $PREFIX/bin from PATH for normal distros only:
+    # a termux-type container's own binaries live exactly at $PREFIX/bin
+    # inside its rootfs, so removing it would leave the guest with no
+    # usable PATH (chmod/mkdir/cp/ls/apt "command not found" at login).
+    if IS_TERMUX and dist_type != "termux" and not skip_extra_mounts and not minimal:
         termux_bin = f"{TERMUX_PREFIX}/bin"
         components = [c for c in child_env.get("PATH", "").split(":") if c and c != termux_bin]
         child_env["PATH"] = ":".join(components)
@@ -1074,12 +1078,26 @@ def _command_login_inner_once(container_name: str, args) -> None:
                     # come along.
                     is_run = dst_real == run_root or dst_real.startswith(run_root + os.sep)
                     is_wsl = src == "/usr/lib/wsl"
+                    # Android system partitions must be bound recursively:
+                    # /apex is a tmpfs whose entries (com.android.runtime, …)
+                    # are separate nested mounts, and /system/bin/linker64 is
+                    # a symlink into /apex/com.android.runtime. A plain bind
+                    # captures only empty mountpoint stubs, leaving the guest
+                    # without a bionic dynamic linker (execve -> ENOENT).
+                    is_android_sys = IS_TERMUX and src in (
+                        "/apex",
+                        "/system",
+                        "/vendor",
+                        "/odm",
+                        "/product",
+                        "/system_ext",
+                    )
                     mount_options = resolved_bind_options.get(os.path.realpath(dst), "")
                     mount_manager.safe_mount(
                         src,
                         dst,
                         holder=holder,
-                        recursive=(is_run or is_wsl),
+                        recursive=(is_run or is_wsl or is_android_sys),
                         options=mount_options,
                         # A stale, unremovable (MNT_LOCKED) mount can shadow
                         # /dev without providing ptmx; detect and mount over.

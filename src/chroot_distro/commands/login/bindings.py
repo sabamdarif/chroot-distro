@@ -590,10 +590,16 @@ def get_bindings(
         for src, dst in storage_bindings():
             binds.append((src, dst))
 
-        # Android system directories (/apex, /system, /vendor, …). Bound only for normal-type.
-        if dist_type != "termux":
-            for src, dst in system_bindings():
-                binds.append((src, dst))
+        # Android system directories (/apex, /system, /vendor, …). Bound for
+        # BOTH dist types. A termux-type guest ships fake /system stubs meant
+        # for non-Android hosts (including an old bundled bionic linker that
+        # cannot direct-exec programs and only prints "This is <prog>, the
+        # helper program for dynamic executables"). On a real Android host
+        # the guest must see the device's real /system — exactly like the
+        # host Termux app — so that termux-exec's system-linker-exec wrapping
+        # and getprop/property reads work.
+        for src, dst in system_bindings():
+            binds.append((src, dst))
 
         # Termux app's private dirs. A termux-type guest ships its own
         # /data/data/com.termux and must never see the host's.

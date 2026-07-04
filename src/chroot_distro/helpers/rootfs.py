@@ -146,10 +146,27 @@ def ensure_hosts_entry(rootfs: str, *hostnames: str) -> None:
         fh.write(suffix)
 
 
+def guest_etc_path(rootfs: str, guest_path: str) -> str:
+    """Resolve *guest_path* to its host location, keeping symlinks inside rootfs.
+
+    Some images (e.g. termux-docker) ship /etc/passwd and /etc/group as
+    symlinks with absolute targets such as /system/etc/passwd. Opening those
+    directly from the host follows the symlink to the HOST's /system, which
+    is read-only on Android (EROFS). Resolving within the rootfs redirects
+    reads/writes to the container's own file instead.
+    """
+    from chroot_distro.commands.login.passwd import resolve_rootfs_path
+
+    try:
+        return resolve_rootfs_path(rootfs, guest_path)
+    except OSError:
+        return os.path.join(rootfs, guest_path.lstrip("/"))
+
+
 def register_android_ids(rootfs: str) -> None:
     """Add the Termux Android UID/GID entries to passwd/shadow/group/gshadow."""
-    for p in ("etc/passwd", "etc/shadow", "etc/group", "etc/gshadow"):
-        full = os.path.join(rootfs, p)
+    for p in ("/etc/passwd", "/etc/shadow", "/etc/group", "/etc/gshadow"):
+        full = guest_etc_path(rootfs, p)
         if os.path.exists(full):
             with contextlib.suppress(OSError):
                 os.chmod(
@@ -164,10 +181,10 @@ def register_android_ids(rootfs: str) -> None:
     except Exception:
         return
 
-    passwd_path = os.path.join(rootfs, "etc", "passwd")
-    shadow_path = os.path.join(rootfs, "etc", "shadow")
-    group_path = os.path.join(rootfs, "etc", "group")
-    gshadow_path = os.path.join(rootfs, "etc", "gshadow")
+    passwd_path = guest_etc_path(rootfs, "/etc/passwd")
+    shadow_path = guest_etc_path(rootfs, "/etc/shadow")
+    group_path = guest_etc_path(rootfs, "/etc/group")
+    gshadow_path = guest_etc_path(rootfs, "/etc/gshadow")
 
     try:
         with open(passwd_path, "a") as fh:

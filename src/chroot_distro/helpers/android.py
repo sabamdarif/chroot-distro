@@ -95,7 +95,12 @@ def configure_android_rootfs(rootfs: str) -> None:
     if not IS_TERMUX:
         return
 
-    group_path = os.path.join(rootfs, "etc", "group")
+    # Resolve through in-rootfs symlinks: termux-docker's /etc/group and
+    # /etc/passwd are absolute symlinks into /system/etc, which must not be
+    # followed on the host (read-only Android /system -> EROFS).
+    from chroot_distro.helpers.rootfs import guest_etc_path
+
+    group_path = guest_etc_path(rootfs, "/etc/group")
     if not os.path.exists(group_path):
         return
 
@@ -112,7 +117,7 @@ def configure_android_rootfs(rootfs: str) -> None:
 
     # 1.5 Check if _apt exists in passwd
     has_apt = False
-    passwd_path = os.path.join(rootfs, "etc", "passwd")
+    passwd_path = guest_etc_path(rootfs, "/etc/passwd")
     if os.path.exists(passwd_path):
         try:
             with open(passwd_path) as f:
