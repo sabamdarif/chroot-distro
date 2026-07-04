@@ -47,7 +47,28 @@ _ACCEPT_POLL_SECONDS = 30.0
 _HEADER_LIMIT = 1024 * 1024
 
 # Non-CD_* environment variables the client may forward to the root side.
-_CLIENT_ENV_ALLOWLIST = ("TERM", "LANG", "COLUMNS", "LINES")
+# Display/session/audio vars are included so that --shared-display works
+# when the tool is elevated through the daemon socket (the daemon's child
+# process is in a different process tree from the user's shell, so the
+# get_invoking_env() walk cannot reach the user's environment).
+_CLIENT_ENV_ALLOWLIST = (
+    "TERM",
+    "LANG",
+    "COLUMNS",
+    "LINES",
+    # Display / Wayland / X11
+    "DISPLAY",
+    "WAYLAND_DISPLAY",
+    "XAUTHORITY",
+    "XDG_RUNTIME_DIR",
+    "XDG_SESSION_TYPE",
+    "XDG_CURRENT_DESKTOP",
+    "DESKTOP_SESSION",
+    # Audio
+    "PULSE_SERVER",
+    # D-Bus
+    "DBUS_SESSION_BUS_ADDRESS",
+)
 
 # Terminal signals the client relays to the root-side child.
 _RELAY_SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGQUIT)
@@ -188,7 +209,7 @@ def _send_json(conn: socket.socket, payload: dict) -> None:
         conn.sendall(json.dumps(payload).encode() + b"\n")
 
 
-def _spawn(header: dict, fds: list[int]) -> int:
+def _spawn(header: dict, fds: list[int], *, peer_uid: int = 0) -> int:
     """Fork and exec the CLI as root on the client's file descriptors."""
     pid = os.fork()
     if pid != 0:
@@ -205,6 +226,14 @@ def _spawn(header: dict, fds: list[int]) -> int:
             "HOME": "/root",
             "_CHROOT_DISTRO_ELEVATING": "1",
         }
+        # Propagate the invoking user's identity so that
+        # resolve_invoking_uid() returns the real user UID, not root.
+        # Without this, display helpers fall back to /run/user/0 which
+        # does not exist.
+        if peer_uid > 0:
+            env["SUDO_UID"] = str(peer_uid)
+            with contextlib.suppress(KeyError, OSError):
+                env["SUDO_USER"] = pwd.getpwuid(peer_uid).pw_name
         for key, value in header.get("env", {}).items():
             if key.startswith("CD_") or key in _CLIENT_ENV_ALLOWLIST:
                 env[key] = str(value)
@@ -292,7 +321,7 @@ def _handle_connection(conn: socket.socket) -> None:
             _send_json(conn, {"error": "malformed request"})
             return
         log.info("uid %d -> chroot-distro %s", uid, " ".join(map(str, header["argv"])))
-        pid = _spawn(header, fds)
+        pid = _spawn(header, fds, peer_uid=uid)
         for fd in fds:
             os.close(fd)
         exit_code = _wait_and_relay(conn, pid)

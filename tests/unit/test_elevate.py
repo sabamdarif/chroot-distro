@@ -13,6 +13,12 @@ from chroot_distro.elevate import (
 from chroot_distro.exceptions import RootRequiredError
 
 
+@pytest.fixture(autouse=True)
+def mock_try_daemon_delegation():
+    with patch("chroot_distro.elevate._try_daemon_delegation", return_value=None):
+        yield
+
+
 def test_is_root():
     with patch("os.getuid", return_value=0):
         assert is_root() is True

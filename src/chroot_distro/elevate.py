@@ -34,6 +34,24 @@ _FORWARDED_ENV_VARS = (
     "CD_DOWNLOAD_RATE_LIMIT",
 )
 
+# Display/session/audio variables needed by --shared-display. These are
+# forwarded as a belt-and-suspenders complement to the get_invoking_env()
+# process-tree walk: doas/pkexec/su do not set SUDO_UID, so the walk
+# looks for UID 0 processes and never finds the user's session vars.
+# The values are non-secret session metadata (socket names, runtime-dir
+# paths), so exposing them in /proc/*/cmdline is harmless.
+_FORWARDED_DISPLAY_VARS = (
+    "DISPLAY",
+    "WAYLAND_DISPLAY",
+    "XAUTHORITY",
+    "XDG_RUNTIME_DIR",
+    "XDG_SESSION_TYPE",
+    "XDG_CURRENT_DESKTOP",
+    "DESKTOP_SESSION",
+    "PULSE_SERVER",
+    "DBUS_SESSION_BUS_ADDRESS",
+)
+
 
 def is_root() -> bool:
     """Check if the current process is running with root privileges (UID 0)."""
@@ -41,9 +59,9 @@ def is_root() -> bool:
 
 
 def _forwarded_env_assignments() -> list[str]:
-    """Return ``VAR=value`` strings for the CD_* vars present in the env."""
+    """Return ``VAR=value`` strings for the CD_* and display vars present in the env."""
     assignments: list[str] = []
-    for name in _FORWARDED_ENV_VARS:
+    for name in (*_FORWARDED_ENV_VARS, *_FORWARDED_DISPLAY_VARS):
         value = os.environ.get(name)
         if value is not None:
             assignments.append(f"{name}={value}")
@@ -216,7 +234,7 @@ def _termux_root_env_exports() -> str:
         if os.path.exists(termux_exec):
             exports["LD_PRELOAD"] = termux_exec
             break
-    for name in _FORWARDED_ENV_VARS:
+    for name in (*_FORWARDED_ENV_VARS, *_FORWARDED_DISPLAY_VARS):
         value = os.environ.get(name)
         if value is not None:
             exports[name] = value
