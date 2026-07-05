@@ -171,8 +171,20 @@ def test_gather_capabilities_reports_no_escalation_tool():
         patch.object(info, "_lsm_status", return_value=None),
         patch.object(info, "_free_disk", return_value=("10 GiB free", "info")),
         patch.object(info, "_cache_size", return_value=("empty", "info")),
+        patch.object(info, "_layer_cache_size", return_value=("empty", "info")),
     ):
         caps = info._gather_capabilities(images=[], host_arch="x86_64")
     priv = next(c for c in caps if c.label == "Privileges")
     assert priv.level == "bad"
     assert "no sudo" in priv.value
+
+
+def test_render_basic_outputs_new_fields():
+    with patch.object(info, "msg") as mock_msg:
+        info._render_basic()
+    assert mock_msg.called
+    rendered = " ".join(str(c.args[0]) for c in mock_msg.call_args_list if c.args)
+    assert "Executable" in rendered
+    assert "Module path" in rendered
+    assert "Cache location" in rendered
+    assert "OCI layer cache" in rendered

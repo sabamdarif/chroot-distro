@@ -3,6 +3,7 @@ import os
 import platform
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass, field
 
 from chroot_distro.arch import detect_installed_arch, get_device_cpu_arch, supports_32bit
@@ -29,7 +30,6 @@ from chroot_distro.constants import (
     CANONICAL_PROGRAM_NAME,
     IS_TERMUX,
     LAYER_CACHE_DIR,
-    MANIFEST_CACHE_DIR,
     PROGRAM_NAME,
     PROGRAM_VERSION,
     RUNTIME_DIR,
@@ -282,28 +282,38 @@ def _free_disk(path: str) -> tuple[str, str]:
     return value, level
 
 
-def _dir_size_bytes(path: str) -> int:
+def _dir_size_bytes(path: str, seen_files: set[str] | None = None) -> int:
     """Return total file size under *path*, ignoring unreadable entries."""
+    if seen_files is None:
+        seen_files = set()
     total = 0
     for dirpath, _dirs, files in os.walk(path, followlinks=False):
         for name in files:
+            fpath = os.path.join(dirpath, name)
             try:
-                total += os.path.getsize(os.path.join(dirpath, name))
+                real_fpath = os.path.realpath(fpath)
+                if real_fpath in seen_files:
+                    continue
+                seen_files.add(real_fpath)
+                total += os.path.getsize(fpath)
             except OSError:
                 continue
     return total
 
 
 def _cache_size() -> tuple[str, str]:
-    """Return (value, level) describing the OCI layer + manifest cache size."""
-    seen: set[str] = set()
-    total = 0
-    for cache_dir in (LAYER_CACHE_DIR, MANIFEST_CACHE_DIR, BASE_CACHE_DIR):
-        real = os.path.realpath(cache_dir)
-        if real in seen or not os.path.isdir(cache_dir):
-            continue
-        seen.add(real)
-        total += _dir_size_bytes(cache_dir)
+    """Return (value, level) describing the download cache size (excluding layers)."""
+    seen_files: set[str] = set()
+    _dir_size_bytes(LAYER_CACHE_DIR, seen_files)
+    total = _dir_size_bytes(BASE_CACHE_DIR, seen_files)
+    if total == 0:
+        return "empty", "info"
+    return f"{fmt_size(total)} (clear with '{PROGRAM_NAME} clear-cache')", "info"
+
+
+def _layer_cache_size() -> tuple[str, str]:
+    """Return (value, level) describing the OCI layer cache size."""
+    total = _dir_size_bytes(LAYER_CACHE_DIR)
     if total == 0:
         return "empty", "info"
     return f"{fmt_size(total)} (clear with '{PROGRAM_NAME} clear-cache')", "info"
@@ -360,6 +370,9 @@ def _gather_capabilities(images: list["_ImageInfo"], host_arch: str) -> list[_Ca
 
     cache_value, cache_level = _cache_size()
     caps.append(_Capability("Download cache", cache_value, cache_level))
+
+    layer_value, layer_level = _layer_cache_size()
+    caps.append(_Capability("OCI layer cache", layer_value, layer_level))
 
     return caps
 
@@ -451,12 +464,31 @@ def _render_section(title: str) -> None:
 
 
 def _render_basic() -> None:
-    label_w = 16
+    label_w = 18
     _render_section(f"{CANONICAL_PROGRAM_NAME}")
     msg(_kv("Program", PROGRAM_NAME, label_w))
     msg(_kv("Version", PROGRAM_VERSION, label_w))
     msg(_kv("Python", platform.python_version(), label_w))
+
+    exe_path = shutil.which("chroot-distro")
+    if not exe_path and sys.argv and os.path.exists(sys.argv[0]):
+        exe_path = os.path.abspath(sys.argv[0])
+    if not exe_path:
+        exe_path = "unknown"
+    msg(_kv("Executable", exe_path, label_w))
+
+    module_dir = "unknown"
+    try:
+        import chroot_distro
+        if chroot_distro.__file__:
+            module_dir = os.path.dirname(os.path.dirname(os.path.abspath(chroot_distro.__file__)))
+    except Exception:
+        pass
+    msg(_kv("Module path", module_dir, label_w))
+
     msg(_kv("Data location", RUNTIME_DIR, label_w))
+    msg(_kv("Cache location", BASE_CACHE_DIR, label_w))
+    msg(_kv("OCI layer cache", LAYER_CACHE_DIR, label_w))
 
 
 def _render_host(host: _HostInfo, host_arch: str) -> None:
