@@ -225,6 +225,7 @@ def _spawn(header: dict, fds: list[int], *, peer_uid: int = 0) -> int:
             "PATH": DEFAULT_PATH_ENV,
             "HOME": "/root",
             "_CHROOT_DISTRO_ELEVATING": "1",
+            "_CHROOT_DISTRO_DAEMON": "1",
         }
         # Propagate the invoking user's identity so that
         # resolve_invoking_uid() returns the real user UID, not root.

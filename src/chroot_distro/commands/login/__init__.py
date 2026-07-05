@@ -1282,7 +1282,8 @@ def _command_login_inner_once(container_name: str, args) -> None:
     # `script` allocates a fresh pty from the newinstance devpts as the child's
     # controlling terminal, which has a matching node -> ttyname() succeeds.
     # Only wrap genuine interactive logins (not `run`, not explicit -c).
-    if IS_TERMUX and run_inner is None and not login_cmd and not minimal:
+    is_daemon = os.environ.get("_CHROOT_DISTRO_DAEMON") == "1"
+    if (IS_TERMUX or is_daemon) and run_inner is None and not login_cmd and not minimal:
         if _rootfs_has_script(rootfs):
             # script(1) forks the command onto a freshly allocated pty (from the
             # chroot's newinstance devpts via /dev/ptmx) as its controlling
