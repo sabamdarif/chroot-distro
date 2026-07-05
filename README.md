@@ -70,7 +70,7 @@ effective user for mutating operations must be **root** (see
 3. Install Chroot-Distro:
 
 ```sh
-pkg install coreutils python mount-utils
+pkg install python
 pip install chroot-distro
 ```
 
@@ -1266,9 +1266,6 @@ cp src/chroot_distro/completions/chroot-distro.fish \
   and no parity with Docker or Podman. (Networking is intentionally
   excluded from this isolation set — see
   [Design choices](#design-choices-not-limitations) above.)
-- **Bind mount hygiene**: crashed sessions or orphan processes can leave
-  mounts busy; `unmount` and lazy unmount mitigate this but orphaned
-  processes should be cleaned up.
 
 ### Chroot-Distro limitations
 
