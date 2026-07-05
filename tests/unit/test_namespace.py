@@ -164,6 +164,7 @@ def test_release_holder(mock_kill, mock_read, mock_remove):
 @patch("chroot_distro.helpers.namespace.filter_accessible_namespaces")
 @patch("chroot_distro.helpers.namespace._remove_holder_state")
 @patch("chroot_distro.helpers.namespace._pid_alive", return_value=True)
+@patch("chroot_distro.helpers.namespace.RUNTIME_DIR", "/tmp")
 def test_create_holder_success(mock_alive, mock_remove, mock_filter, mock_create):
     mock_create.return_value = 555
     mock_filter.return_value = CLONE_NEWNS | CLONE_NEWPID

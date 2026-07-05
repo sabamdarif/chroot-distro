@@ -63,6 +63,7 @@ Requires=chroot-distro.socket
 [Service]
 Type=exec
 ExecStart=@CMD@
+Delegate=yes
 """
 
 _OPENRC_SCRIPT = """#!/sbin/openrc-run

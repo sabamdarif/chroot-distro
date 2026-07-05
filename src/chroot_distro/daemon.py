@@ -91,6 +91,8 @@ def run_client(argv: list[str]) -> int | None:
     available / the caller is not authorised (so the caller can fall back
     to another elevation mechanism).
     """
+    if os.environ.get("CD_NO_DAEMON") == "1":
+        return None
     if not os.path.exists(SOCKET_PATH):
         return None
     conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -167,9 +169,7 @@ def _bind_socket() -> socket.socket:
     try:
         gid = grp.getgrnam(GROUP_NAME).gr_gid
     except KeyError as exc:
-        raise ChrootDistroError(
-            f"group '{GROUP_NAME}' does not exist. Run 'sudo chroot-distro setup' first."
-        ) from exc
+        raise ChrootDistroError(f"group '{GROUP_NAME}' does not exist. Run 'sudo chroot-distro setup' first.") from exc
     with contextlib.suppress(FileNotFoundError):
         os.unlink(SOCKET_PATH)
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -356,6 +356,9 @@ def serve(persist: bool = False) -> None:
             try:
                 conn, _addr = sock.accept()
             except TimeoutError:
+                if any(t.name == "connection-handler" for t in threading.enumerate()):
+                    last_activity = time.monotonic()
+                    continue
                 if not persist and time.monotonic() - last_activity > IDLE_TIMEOUT_SECONDS:
                     log.info("idle for %.0fs — exiting", IDLE_TIMEOUT_SECONDS)
                     return
@@ -363,7 +366,12 @@ def serve(persist: bool = False) -> None:
             except OSError:
                 return
             last_activity = time.monotonic()
-            threading.Thread(target=_handle_connection, args=(conn,), daemon=True).start()
+            threading.Thread(
+                target=_handle_connection,
+                args=(conn,),
+                name="connection-handler",
+                daemon=True,
+            ).start()
     finally:
         sock.close()
         if not activated:
