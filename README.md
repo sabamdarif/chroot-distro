@@ -98,10 +98,9 @@ cd chroot-distro
 sudo pip install .
 ```
 
-> **Install as root, not `--user`.** On a regular Linux host, install
-> system-wide with `sudo` (not `pip install --user`). The passwordless
-> daemon set up by `sudo chroot-distro setup` re-executes this code **as
-> root**, so it must live in a root-owned, non-user-writable location.
+> [!NOTE]
+> **System-wide vs. User installation:** On a regular Linux host, you can install the package at the user level (e.g., `pip install .` or `pip install chroot-distro`), but commands will fall back to prompting for your sudo/doas password at runtime.
+> If you want the passwordless, Docker-style daemon experience (`sudo chroot-distro setup`), you **must** install it system-wide with `sudo` (not `--user`). The daemon executes the code **as root**, so the package must reside in a secure, root-owned, non-user-writable location.
 
 ### First-run check
 
