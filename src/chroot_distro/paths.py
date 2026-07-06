@@ -79,3 +79,15 @@ def container_locks_for_spec_pair(src_spec: str, dst_spec: str, command: str) ->
     if src_name:
         return [ContainerLock(src_name, exclusive=False, command=command)]
     return []
+
+
+def installed_containers() -> list[str]:
+    """Return sorted names of all installed containers (those with a rootfs)."""
+    try:
+        return sorted(
+            e for e in os.listdir(CONTAINERS_DIR)
+            if os.path.isdir(container_rootfs(e))
+        )
+    except OSError:
+        return []
+

@@ -67,6 +67,7 @@ def command_unmount(args) -> None:
         # 2. Reset session count to 0
         log_info(f"Setting active sessions count for '{container_name}' to 0.")
         session.reset(container_name)
+        session.clear_mount_options(container_name)
 
         holder = namespace.get_live_holder(container_name)
 

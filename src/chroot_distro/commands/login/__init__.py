@@ -6,6 +6,7 @@ import shlex
 import signal
 import subprocess
 import sys
+from collections.abc import Callable
 
 import chroot_distro.helpers.mount_manager as mount_manager
 import chroot_distro.helpers.namespace as namespace
@@ -70,6 +71,7 @@ from chroot_distro.message import crit_error, warn
 from chroot_distro.names import require_valid_name
 from chroot_distro.paths import container_dir, container_log_path, container_rootfs
 from chroot_distro.syscalls.chroot import chroot_and_run
+from chroot_distro.syscalls.nsenter import enter_and_run_with_pty
 
 log = logging.getLogger(__name__)
 
@@ -92,16 +94,7 @@ def _safe_hostname(name: str) -> str:
     return name
 
 
-def _rootfs_has_script(rootfs: str) -> bool:
-    """Return True if util-linux `script` is available inside the rootfs."""
-    for guest_bin in ("/usr/bin/script", "/bin/script"):
-        host_path = os.path.join(rootfs, guest_bin.lstrip("/"))
-        try:
-            if os.path.isfile(host_path) or (os.path.islink(host_path) and os.path.exists(host_path)):
-                return True
-        except OSError:
-            continue
-    return False
+
 
 
 def command_login(args) -> None:
@@ -1230,6 +1223,16 @@ def _command_login_inner_once(container_name: str, args) -> None:
 
                 log_info(f"Image declares exposed ports: {', '.join(exposed)}")
 
+            # Phase 6: Persist the mount options used by this first session.
+            session.save_mount_options(container_name, {
+                "shared_display": shared_display,
+                "shared_tmp": shared_tmp,
+                "shared_home": use_shared_home,
+                "custom_binds": sorted(custom_binds),
+                "use_namespaces": use_namespaces,
+                "isolated": max_isolation,
+            })
+
             # Trigger the holder to start execution by closing the pipe
             if pipe_w is not None:
                 try:
@@ -1239,20 +1242,63 @@ def _command_login_inner_once(container_name: str, args) -> None:
                 except OSError as exc:
                     log.warning("Failed to trigger mount namespace holder process: %s", exc)
         else:
-            # Not the first session: bind mounts are NOT re-applied, so any
-            # mount-affecting flag passed now is silently ignored because the
-            # container is already mounted from an earlier login. Warn so the
-            # user knows to unmount first (e.g. --shared-display added after a
-            # plain login -> no display/audio/D-Bus sockets, Wayland and
-            # notify-send fail to connect).
-            if shared_display or shared_tmp or use_shared_home or custom_binds:
-                warn(
-                    f"Container '{container_name}' is already mounted from an "
-                    f"earlier session; mount options (--shared-display, "
-                    f"--shared-tmp, --shared-home, --bind) are ignored for this "
-                    f"login. Run '{PROGRAM_NAME} unmount {container_name}' and "
-                    f"log in again to apply them."
-                )
+            # Not the first session: bind mounts are NOT re-applied.
+            # Compare the current mount options against the first session's
+            # options and only warn/error when they actually differ.
+            stored = session.load_mount_options(container_name)
+            current_opts = {
+                "shared_display": shared_display,
+                "shared_tmp": shared_tmp,
+                "shared_home": use_shared_home,
+                "custom_binds": sorted(custom_binds),
+                "use_namespaces": use_namespaces,
+                "isolated": max_isolation,
+            }
+            if stored is not None and stored != current_opts:
+                # Isolation-level mismatches are incompatible.
+                if current_opts["isolated"] != stored.get("isolated", False):
+                    session.decrement(container_name, lock_fh=lock_fh)
+                    crit_error(
+                        f"Container '{container_name}' has an active session "
+                        f"{'with' if stored.get('isolated') else 'without'} "
+                        f"--isolated. Cannot mix isolation levels. "
+                        f"Run '{PROGRAM_NAME} unmount {container_name}' first."
+                    )
+                    sys.exit(1)
+                if current_opts["use_namespaces"] != stored.get("use_namespaces", False):
+                    warn(
+                        f"Container '{container_name}' has an active session "
+                        f"{'with' if stored.get('use_namespaces') else 'without'} "
+                        f"namespace isolation (CD_USE_NS). The new session's "
+                        f"namespace mode differs and will be ignored."
+                    )
+                # Mount option differences: warn with specifics.
+                diff_flags: list[str] = []
+                for key, flag in (
+                    ("shared_display", "--shared-display"),
+                    ("shared_tmp", "--shared-tmp"),
+                    ("shared_home", "--shared-home"),
+                ):
+                    cur = current_opts.get(key, False)
+                    old = stored.get(key, False)
+                    if cur and not old:
+                        diff_flags.append(f"{flag} (requested but not in active session)")
+                    elif not cur and old:
+                        diff_flags.append(f"{flag} (active session has it, this one doesn't)")
+                _cur_raw = current_opts.get("custom_binds")
+                _old_raw = stored.get("custom_binds")
+                cur_binds: set[str] = set(_cur_raw) if isinstance(_cur_raw, list) else set()
+                old_binds: set[str] = set(_old_raw) if isinstance(_old_raw, list) else set()
+                if cur_binds != old_binds:
+                    diff_flags.append("--bind (different bind mounts)")
+                if diff_flags:
+                    warn(
+                        f"Container '{container_name}' is already mounted; "
+                        f"the following options differ from the active session "
+                        f"and are ignored: {', '.join(diff_flags)}. "
+                        f"Run '{PROGRAM_NAME} unmount {container_name}' and "
+                        f"log in again to apply them."
+                    )
             if use_namespaces:
                 holder = namespace.get_live_holder(container_name)
                 if holder is None:
@@ -1276,26 +1322,6 @@ def _command_login_inner_once(container_name: str, args) -> None:
                     )
                     sys.exit(1)
 
-    # On Termux, Android's /dev/pts nodes use device major 88 while live ptys
-    # use major 136, so the inherited login pty has no matching /dev/pts entry
-    # and glibc ttyname() fails. Running the interactive shell under util-linux
-    # `script` allocates a fresh pty from the newinstance devpts as the child's
-    # controlling terminal, which has a matching node -> ttyname() succeeds.
-    # Only wrap genuine interactive logins (not `run`, not explicit -c).
-    is_daemon = os.environ.get("_CHROOT_DISTRO_DAEMON") == "1"
-    if (IS_TERMUX or is_daemon) and run_inner is None and not login_cmd and not minimal:
-        if _rootfs_has_script(rootfs):
-            # script(1) forks the command onto a freshly allocated pty (from the
-            # chroot's newinstance devpts via /dev/ptmx) as its controlling
-            # terminal, so ttyname()/isatty() succeed. Explicit flags are more
-            # portable than the bundled "-qec" form across util-linux versions.
-            inner = ["script", "-q", "-e", "-c", shlex.join(inner), "/dev/null"]
-        else:
-            log.debug(
-                "`script` not found in rootfs %s; skipping pty wrapper. "
-                "ttyname() may fail on Android (major 88 vs 136 devpts).",
-                rootfs,
-            )
 
     if chroot_args is None:
         chroot_args = build_chroot_args(
@@ -1332,6 +1358,7 @@ def _command_login_inner_once(container_name: str, args) -> None:
             sess_count = session.decrement(container_name, lock_fh=lock_fh)
             if sess_count == 0:
                 mount_manager.unmount_all(rootfs, holder=holder)
+                session.clear_mount_options(container_name)
                 if holder is not None:
                     namespace.release_holder(container_name)
                     namespace.clear_isolation_mode(container_name)
@@ -1353,7 +1380,7 @@ def _command_login_inner_once(container_name: str, args) -> None:
     if getattr(args, "detach", False) and run_inner is not None:
         _run_detached(
             container_name,
-            exec_argv=exec_argv,
+            chroot_args=chroot_args,
             child_env=child_env,
             holder=holder,
             session_handle=_sess_handle,
@@ -1380,6 +1407,7 @@ def _command_login_inner_once(container_name: str, args) -> None:
                 sess_count = session.decrement(container_name, lock_fh=lock_fh)
                 if sess_count == 0:
                     mount_manager.unmount_all(rootfs, holder=holder)
+                    session.clear_mount_options(container_name)
                     if holder is not None:
                         namespace.release_holder(container_name)
                         namespace.clear_isolation_mode(container_name)
@@ -1396,8 +1424,18 @@ def _command_login_inner_once(container_name: str, args) -> None:
                     workdir=chroot_config.workdir,
                     env=child_env,
                 )
+            elif holder is not None:
+                # Namespace path: enter namespaces via native setns(2) + PTY.
+                enter_and_run_with_pty(
+                    holder.pid,
+                    holder._live_ns_flags(),
+                    chroot_args,
+                    env=child_env,
+                )
             else:
-                subprocess.run(exec_argv, env=child_env, check=False)
+                # Fallback: should not normally be reached.
+                import subprocess as _sp
+                _sp.run(chroot_args, env=child_env, check=False)
         finally:
             if _sess_handle is not None:
                 _sess_handle.close()
@@ -1405,6 +1443,7 @@ def _command_login_inner_once(container_name: str, args) -> None:
                 sess_count = session.decrement(container_name, lock_fh=lock_fh)
                 if sess_count == 0:
                     mount_manager.unmount_all(rootfs, holder=holder)
+                    session.clear_mount_options(container_name)
                     if holder is not None:
                         namespace.release_holder(container_name)
                         namespace.clear_isolation_mode(container_name)
@@ -1413,7 +1452,7 @@ def _command_login_inner_once(container_name: str, args) -> None:
 def _run_detached(
     container_name: str,
     *,
-    exec_argv: list,
+    chroot_args: list,
     child_env: dict,
     holder,
     session_handle=None,
@@ -1426,6 +1465,10 @@ def _run_detached(
     the container stays mounted while the detached process runs, and the
     process is discoverable via /proc/<pid>/root so 'kill' and 'unmount' tear
     it down like any other session.
+
+    When a namespace holder is present, the child enters namespaces via
+    native setns(2) before exec'ing the chroot command — no nsenter binary
+    is needed.
     """
     log_path = container_log_path(container_name)
     try:
@@ -1455,6 +1498,22 @@ def _run_detached(
     if session_handle is not None:
         extra_fds = (session_handle.fileno(),)
 
+    # Build the actual argv to exec. When a namespace holder is present,
+    # enter namespaces via native setns(2) in a preexec_fn instead of
+    # trying to exec the nsenter binary.
+    exec_argv = chroot_args
+    preexec: Callable[[], None] | None = None
+    if holder is not None:
+        from chroot_distro.syscalls.nsenter import enter_namespaces
+
+        ns_flags = holder._live_ns_flags()
+        holder_pid = holder.pid
+
+        def _preexec_fn() -> None:
+            enter_namespaces(holder_pid, ns_flags)
+
+        preexec = _preexec_fn
+
     try:
         proc = subprocess.Popen(
             exec_argv,
@@ -1464,6 +1523,7 @@ def _run_detached(
             stderr=log_fh,
             start_new_session=True,
             pass_fds=extra_fds,
+            preexec_fn=preexec,  # noqa: PLW1509
         )
     except OSError as exc:
         log_fh.close()
@@ -1474,6 +1534,7 @@ def _run_detached(
             sess_count = session.decrement(container_name, lock_fh=lock_fh)
             if sess_count == 0:
                 mount_manager.unmount_all(container_rootfs(container_name), holder=holder)
+                session.clear_mount_options(container_name)
                 if holder is not None:
                     namespace.release_holder(container_name)
                     namespace.clear_isolation_mode(container_name)

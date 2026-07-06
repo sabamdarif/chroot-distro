@@ -133,6 +133,7 @@ def command_remove(args) -> None:
 
         # Reset active session count to 0
         session.reset(container_name)
+        session.clear_mount_options(container_name)
 
         holder = namespace.get_live_holder(container_name)
 

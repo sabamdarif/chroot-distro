@@ -1,5 +1,6 @@
 import contextlib
 import fcntl
+import json
 import logging
 import os
 import typing
@@ -74,6 +75,8 @@ def _increment_inner(name: str, session_file: str) -> int:
     # Self-heal check: If process list is empty, count must be 0
     if count_val > 0 and not get_active_chroot_pids(name):
         count_val = 0
+        # Stale mount_opts.json from a crashed session — clean it up.
+        clear_mount_options(name)
 
     count_val += 1
     with open(session_file, "w") as f:
@@ -171,3 +174,46 @@ def reset(name: str) -> None:
         with open(session_file, "w") as f:
             f.write("0")
         fcntl.flock(lock_fh, fcntl.LOCK_UN)
+
+
+# ---------------------------------------------------------------------------
+# Mount options metadata
+# ---------------------------------------------------------------------------
+
+
+def _mount_opts_file(name: str) -> str:
+    data_dir = os.path.join(RUNTIME_DIR, "data", name)
+    os.makedirs(data_dir, exist_ok=True)
+    return os.path.join(data_dir, "mount_opts.json")
+
+
+def save_mount_options(name: str, opts: dict) -> None:
+    """Persist the mount options used by the first session.
+
+    Called once when ``sess_count == 1`` so that subsequent sessions can
+    compare their own options against the running configuration.
+    """
+    path = _mount_opts_file(name)
+    try:
+        with open(path, "w") as fh:
+            json.dump(opts, fh)
+    except OSError as exc:
+        log.debug("Failed to save mount options for '%s': %s", name, exc)
+
+
+def load_mount_options(name: str) -> dict[str, object] | None:
+    """Load the mount options saved by the first session, or ``None``."""
+    path = _mount_opts_file(name)
+    try:
+        with open(path) as fh:
+            data = json.load(fh)
+        return dict(data) if isinstance(data, dict) else None
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def clear_mount_options(name: str) -> None:
+    """Remove the persisted mount options file (last session teardown / self-heal)."""
+    path = _mount_opts_file(name)
+    with contextlib.suppress(OSError):
+        os.unlink(path)

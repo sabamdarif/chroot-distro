@@ -450,3 +450,73 @@ def filter_accessible_namespaces(pid: int, namespaces: int) -> int:
         if namespaces & nstype and check_ns_accessible(pid, nstype):
             result |= nstype
     return result
+
+
+def enter_and_run_with_pty(
+    target_pid: int,
+    namespaces: int,
+    command: list[str],
+    *,
+    env: dict[str, str] | None = None,
+    fork_for_pid: bool = True,
+) -> int:
+    """Enter namespaces via native ``setns(2)`` and exec *command* with a PTY.
+
+    When stdin is a terminal, allocates a fresh PTY pair so the child has
+    its own controlling terminal (enabling job control, ``ttyname()``,
+    ``tcsetpgrp()``, etc.).  The parent runs a raw-mode relay loop that
+    forwards data between the original terminal and the PTY master.
+
+    Falls back to a plain fork+exec when stdin is not a tty.
+
+    This replaces the old pattern of building an ``nsenter`` binary argv
+    and exec'ing it — everything is done via direct syscalls.
+
+    Returns the child's exit code (0-255).
+    """
+    from chroot_distro.syscalls.chroot import (
+        _copy_terminal_size,
+        _pty_relay,
+        _setup_child_pty,
+        _wait_for_child_with_signals,
+    )
+
+    use_pty = os.isatty(0)
+    master_fd = slave_fd = -1
+
+    if use_pty:
+        master_fd, slave_fd = os.openpty()
+        _copy_terminal_size(0, master_fd)
+
+    child_pid = os.fork()
+
+    if child_pid == 0:
+        # --- Child ---
+        try:
+            if use_pty:
+                _setup_child_pty(master_fd, slave_fd)
+
+            enter_namespaces(target_pid, namespaces)
+
+            if fork_for_pid and (namespaces & CLONE_NEWPID):
+                inner_pid = os.fork()
+                if inner_pid != 0:
+                    _, status = os.waitpid(inner_pid, 0)
+                    os._exit(
+                        os.WEXITSTATUS(status) if os.WIFEXITED(status)
+                        else 128 + os.WTERMSIG(status)
+                    )
+
+            os.execvpe(
+                command[0], command,
+                env if env is not None else dict(os.environ),
+            )
+        except BaseException:
+            os._exit(127)
+
+    # --- Parent ---
+    if use_pty:
+        os.close(slave_fd)
+        return _pty_relay(master_fd, child_pid)
+    return _wait_for_child_with_signals(child_pid)
+

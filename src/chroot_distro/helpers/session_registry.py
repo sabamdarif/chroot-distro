@@ -209,4 +209,27 @@ def resolve_container_by_pid(pid: int) -> str | None:
     return None
 
 
-__all__ = ("active_sessions", "register_session", "resolve_container_by_pid")
+def containers_with_active_pids() -> dict[str, list[int]]:
+    """Return ``{container_name: [pid, ...]}`` for every installed container
+    that has at least one process chrooted into its rootfs.
+
+    This is the ``/proc/*/root`` fallback used by ``ps`` to detect
+    orphaned processes that are no longer tracked by the flock-based
+    session registry (e.g. when the parent chroot-distro process crashed).
+    """
+    from chroot_distro.helpers.session import get_active_chroot_pids
+    from chroot_distro.paths import installed_containers
+
+    result: dict[str, list[int]] = {}
+    try:
+        names = installed_containers()
+    except Exception:
+        return result
+    for name in names:
+        pids = get_active_chroot_pids(name)
+        if pids:
+            result[name] = pids
+    return result
+
+
+__all__ = ("active_sessions", "containers_with_active_pids", "register_session", "resolve_container_by_pid")

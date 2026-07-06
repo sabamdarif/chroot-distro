@@ -16,7 +16,7 @@ import shlex
 import time
 
 from chroot_distro.constants import PROGRAM_NAME
-from chroot_distro.helpers.session_registry import active_sessions
+from chroot_distro.helpers.session_registry import active_sessions, containers_with_active_pids
 from chroot_distro.message import C, msg
 
 # Fixed columns (everything except the trailing, space-filling COMMAND).
@@ -29,13 +29,37 @@ def command_ps(args) -> None:
     quiet = getattr(args, "quiet", False)
     sessions = active_sessions()
 
+    # Collect PIDs already tracked by the registry so we can detect orphans.
+    tracked_pids: set[int] = {sess.get("pid", -1) for sess in sessions}
+
+    # Fallback: scan /proc/*/root for container processes not in the registry.
+    # Group by container so the table shows one row per container, not per PID.
+    untracked_rows: list[tuple[str, str, str, str, str, str]] = []
+    all_untracked_pids: list[str] = []  # flat list for --quiet mode
+    try:
+        untracked = containers_with_active_pids()
+    except Exception:
+        untracked = {}
+    for cname, pids in untracked.items():
+        orphan_pids = [p for p in pids if p not in tracked_pids]
+        if orphan_pids:
+            all_untracked_pids.extend(str(p) for p in orphan_pids)
+            count = len(orphan_pids)
+            pid_label = str(orphan_pids[0]) if count == 1 else f"{orphan_pids[0]}+{count - 1}"
+            untracked_rows.append((
+                pid_label, cname, "untracked", "?", "?",
+                f"{count} process{'es' if count != 1 else ''}",
+            ))
+
     if quiet:
         for sess in sessions:
             print(sess.get("pid", ""))
+        for pid_str in all_untracked_pids:
+            print(pid_str)
         return
 
     msg()
-    if not sessions:
+    if not sessions and not untracked_rows:
         msg(f"{C['YELLOW']}No active sessions.{C['RST']}")
         msg()
         msg(
@@ -48,6 +72,7 @@ def command_ps(args) -> None:
     now = time.time()
     rows = []
     has_detached = False
+    has_untracked = bool(untracked_rows)
     for sess in sessions:
         kind = str(sess.get("kind", "?"))
         if sess.get("detached", False):
@@ -61,6 +86,8 @@ def command_ps(args) -> None:
             _fmt_uptime(now - sess.get("start_time", now)),
             _fmt_command(sess.get("command")),
         ))
+
+    rows.extend(untracked_rows)
 
     # Fixed-column widths are content-driven; COMMAND takes the rest of
     # the terminal width and is truncated if it overflows.
@@ -79,20 +106,30 @@ def command_ps(args) -> None:
     for r in rows:
         cmd = r[-1]
         if len(cmd) > cmd_width:
-            cmd = cmd[: max(1, cmd_width - 1)] + "…"
+            cmd = cmd[: max(1, cmd_width - 1)] + "\u2026"
+        is_untracked = r[2] == "untracked"
+        color = C['YELLOW'] if is_untracked else C['CYAN']
+        name_color = C['YELLOW'] if is_untracked else C['GREEN']
         cells = [
-            f"{C['CYAN']}{r[0].ljust(widths[0])}{C['RST']}",
-            f"{C['GREEN']}{r[1].ljust(widths[1])}{C['RST']}",
-            f"{C['CYAN']}{r[2].ljust(widths[2])}{C['RST']}",
-            f"{C['CYAN']}{r[3].ljust(widths[3])}{C['RST']}",
-            f"{C['CYAN']}{r[4].ljust(widths[4])}{C['RST']}",
-            f"{C['CYAN']}{cmd}{C['RST']}",
+            f"{color}{r[0].ljust(widths[0])}{C['RST']}",
+            f"{name_color}{r[1].ljust(widths[1])}{C['RST']}",
+            f"{color}{r[2].ljust(widths[2])}{C['RST']}",
+            f"{color}{r[3].ljust(widths[3])}{C['RST']}",
+            f"{color}{r[4].ljust(widths[4])}{C['RST']}",
+            f"{color}{cmd}{C['RST']}",
         ]
         msg(pad.join(cells))
 
     msg()
     if has_detached:
         msg(f"{C['CYAN']}* detached session{C['RST']}")
+    if has_untracked:
+        msg(
+            f"{C['YELLOW']}untracked: process found via /proc but not in "
+            f"session registry (orphaned parent?). "
+            f"Use '{PROGRAM_NAME} kill <name>' to stop.{C['RST']}"
+        )
+    if has_detached or has_untracked:
         msg()
 
 

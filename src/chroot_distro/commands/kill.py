@@ -177,6 +177,7 @@ def command_kill(args) -> None:
 
         # Cleanup namespace and sessions
         session.reset(container_name)
+        session.clear_mount_options(container_name)
         if holder is not None:
             namespace.release_holder(container_name)
             namespace.clear_isolation_mode(container_name)

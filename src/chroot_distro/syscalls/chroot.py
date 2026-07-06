@@ -14,13 +14,22 @@ the C implementation.
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import logging
 import os
+import select
 import signal
 import subprocess
 import sys
 
 log = logging.getLogger(__name__)
+
+# ioctl request code to acquire a controlling terminal (standard on all Linux).
+_TIOCSCTTY = 0x540E
+# Terminal window-size ioctls.
+_TIOCGWINSZ = 0x5413
+_TIOCSWINSZ = 0x5414
 
 
 def native_chroot(
@@ -112,36 +121,26 @@ def chroot_and_exec(
     parent process is unaffected and can perform cleanup (session
     counter decrement, mount teardown, etc.).
 
-    Parameters
-    ----------
-    rootfs:
-        Path to the container's root filesystem.
-    command:
-        Command and arguments to execute inside the chroot.
-    env:
-        Environment variables for the child process.  If ``None``,
-        the current environment is inherited.
-    uid:
-        User ID to switch to inside the chroot.
-    gid:
-        Group ID to switch to inside the chroot.
-    groups:
-        Supplementary group list.
-    workdir:
-        Working directory inside the chroot (default ``"/"``).
-
-    Returns
-    -------
-    int
-        The child's exit code (0-255).  If the child was killed by a
-        signal, returns 128 + signal_number.
+    When stdin is a terminal, a fresh PTY pair is allocated so the child
+    has its own controlling terminal (enabling job control, ttyname(),
+    etc.) while the parent relays data between the original terminal and
+    the PTY master.
     """
+    use_pty = os.isatty(0)
+    master_fd = slave_fd = -1
+
+    if use_pty:
+        master_fd, slave_fd = os.openpty()
+        _copy_terminal_size(0, master_fd)
+
     child_pid = os.fork()
 
     if child_pid == 0:
         # --- Child process ---
         try:
-            # Replace environment if specified.
+            if use_pty:
+                _setup_child_pty(master_fd, slave_fd)
+
             if env is not None:
                 os.environ.clear()
                 os.environ.update(env)
@@ -149,7 +148,6 @@ def chroot_and_exec(
             os.chroot(rootfs)
             os.chdir(workdir)
 
-            # User/group switching — order: setgroups → setgid → setuid
             if groups is not None:
                 os.setgroups(groups)
             if gid is not None:
@@ -159,7 +157,6 @@ def chroot_and_exec(
 
             _try_exec(command, dict(os.environ))
         except Exception as exc:
-            # If anything fails in the child, write to stderr and exit.
             try:
                 sys.stderr.write(f"chroot_and_exec: {exc}\n")
                 sys.stderr.flush()
@@ -168,7 +165,10 @@ def chroot_and_exec(
             os._exit(127)
 
     # --- Parent process ---
-    return _wait_for_child(child_pid)
+    if use_pty:
+        os.close(slave_fd)
+        return _pty_relay(master_fd, child_pid)
+    return _wait_for_child_with_signals(child_pid)
 
 
 def chroot_and_run(
@@ -218,10 +218,15 @@ def chroot_and_run(
     import subprocess
 
     stdout_r = stdout_w = stderr_r = stderr_w = -1
+    use_pty = not capture_output and os.isatty(0)
+    master_fd = slave_fd = -1
 
     if capture_output:
         stdout_r, stdout_w = os.pipe()
         stderr_r, stderr_w = os.pipe()
+    elif use_pty:
+        master_fd, slave_fd = os.openpty()
+        _copy_terminal_size(0, master_fd)
 
     child_pid = os.fork()
 
@@ -235,6 +240,8 @@ def chroot_and_run(
                 os.dup2(stderr_w, 2)
                 os.close(stdout_w)
                 os.close(stderr_w)
+            elif use_pty:
+                _setup_child_pty(master_fd, slave_fd)
 
             if env is not None:
                 os.environ.clear()
@@ -270,8 +277,12 @@ def chroot_and_run(
         stderr_data = _read_all(stderr_r)
         os.close(stdout_r)
         os.close(stderr_r)
-
-    returncode = _wait_for_child(child_pid, timeout=timeout)
+        returncode = _wait_for_child_with_signals(child_pid, timeout=timeout)
+    elif use_pty:
+        os.close(slave_fd)
+        returncode = _pty_relay(master_fd, child_pid, timeout=timeout)
+    else:
+        returncode = _wait_for_child_with_signals(child_pid, timeout=timeout)
 
     if text:
         stdout_out: str | bytes = stdout_data.decode("utf-8", errors="replace")
@@ -289,8 +300,246 @@ def chroot_and_run(
 
 
 # ---------------------------------------------------------------------------
+# General-purpose PTY wrapper (for non-chroot commands like nsenter)
+# ---------------------------------------------------------------------------
+
+
+def run_with_pty(
+    argv: list[str],
+    *,
+    env: dict[str, str] | None = None,
+) -> int:
+    """Fork+exec *argv* with a fresh PTY for job control.
+
+    When stdin is a terminal, allocates a new PTY pair so the child has
+    its own controlling terminal (enabling job control, ttyname(), etc.)
+    while the parent relays data between the original terminal and the
+    PTY master.  Falls back to a plain fork+exec when stdin is not a tty.
+
+    Returns the child's exit code.
+    """
+    use_pty = os.isatty(0)
+    master_fd = slave_fd = -1
+
+    if use_pty:
+        master_fd, slave_fd = os.openpty()
+        _copy_terminal_size(0, master_fd)
+
+    child_pid = os.fork()
+
+    if child_pid == 0:
+        # --- Child ---
+        try:
+            if use_pty:
+                _setup_child_pty(master_fd, slave_fd)
+            run_env = dict(os.environ)
+            if env is not None:
+                run_env = env
+            os.execvpe(argv[0], argv, run_env)
+        except Exception as exc:
+            try:
+                sys.stderr.write(f"run_with_pty: {exc}\n")
+                sys.stderr.flush()
+            except Exception:
+                pass
+            os._exit(127)
+
+    # --- Parent ---
+    if use_pty:
+        os.close(slave_fd)
+        return _pty_relay(master_fd, child_pid)
+    return _wait_for_child_with_signals(child_pid)
+
+
+# ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+
+def _copy_terminal_size(src_fd: int, dst_fd: int) -> None:
+    """Copy the terminal window size from *src_fd* to *dst_fd*."""
+    with contextlib.suppress(OSError):
+        winsize = fcntl.ioctl(src_fd, _TIOCGWINSZ, b"\x00" * 8)
+        fcntl.ioctl(dst_fd, _TIOCSWINSZ, winsize)
+
+
+def _setup_child_pty(master_fd: int, slave_fd: int) -> None:
+    """Set up the child side of a PTY pair as the controlling terminal.
+
+    Called in the forked child *before* chroot/exec:
+    1. Close the master (parent keeps it).
+    2. ``setsid()`` — become session leader.
+    3. ``TIOCSCTTY`` on the slave — make it the controlling terminal.
+    4. Dup the slave to stdin/stdout/stderr.
+    """
+    os.close(master_fd)
+    os.setsid()
+    with contextlib.suppress(OSError):
+        fcntl.ioctl(slave_fd, _TIOCSCTTY, 0)
+    os.dup2(slave_fd, 0)
+    os.dup2(slave_fd, 1)
+    os.dup2(slave_fd, 2)
+    if slave_fd > 2:
+        os.close(slave_fd)
+
+
+def _pty_relay(master_fd: int, child_pid: int, *, timeout: int | None = None) -> int:
+    """Relay data between the original terminal and the PTY master.
+
+    Sets stdin to raw mode so control characters (Ctrl-C, Ctrl-Z, etc.)
+    are forwarded verbatim through the PTY to the child. Handles
+    SIGWINCH to keep the child's terminal size in sync.
+
+    Returns the child's exit code.
+    """
+    import termios
+    import tty
+
+    # ── SIGWINCH: forward terminal resize to the child pty ──
+    prev_winch: signal._HANDLER = signal.SIG_DFL
+
+    def _on_winsize(_signum: int, _frame: object) -> None:
+        _copy_terminal_size(0, master_fd)
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(child_pid, signal.SIGWINCH)
+
+    with contextlib.suppress(OSError, ValueError):
+        prev_winch = signal.signal(signal.SIGWINCH, _on_winsize)
+
+    # ── SIGTERM/SIGHUP: forward to child so it can clean up ──
+    prev_handlers: dict[signal.Signals, signal._HANDLER] = {}
+
+    def _relay_sig(signum: int, _frame: object) -> None:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(child_pid, signum)
+
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        with contextlib.suppress(OSError, ValueError):
+            prev_handlers[sig] = signal.signal(sig, _relay_sig)
+
+    # ── Set stdin to raw mode ──
+    old_attrs: list[int | list[bytes | int]] | None = None
+    try:
+        old_attrs = termios.tcgetattr(0)
+        tty.setraw(0)
+    except (termios.error, OSError):
+        pass
+
+    try:
+        _pty_copy_loop(master_fd)
+    finally:
+        # ── Restore terminal ──
+        if old_attrs is not None:
+            with contextlib.suppress(termios.error, OSError):
+                termios.tcsetattr(0, termios.TCSAFLUSH, old_attrs)
+        with contextlib.suppress(OSError):
+            os.close(master_fd)
+        with contextlib.suppress(OSError, ValueError):
+            signal.signal(signal.SIGWINCH, prev_winch)
+        for s, h in prev_handlers.items():
+            with contextlib.suppress(OSError, ValueError):
+                signal.signal(s, h)
+
+    # ── Reap child ──
+    try:
+        _, status = os.waitpid(child_pid, 0)
+        return _decode_status(status)
+    except ChildProcessError:
+        return 0
+
+
+def _pty_copy_loop(master_fd: int) -> None:
+    """Bidirectional copy between stdin/stdout and a PTY master fd."""
+    fds = [0, master_fd]
+    while fds:
+        try:
+            rfds, _, _ = select.select(fds, [], [])
+        except (OSError, ValueError, InterruptedError):
+            break
+        if 0 in rfds:
+            try:
+                data = os.read(0, 4096)
+            except OSError:
+                data = b""
+            if not data:
+                fds.remove(0)
+            else:
+                try:
+                    os.write(master_fd, data)
+                except OSError:
+                    break
+        if master_fd in rfds:
+            try:
+                data = os.read(master_fd, 4096)
+            except OSError:
+                data = b""
+            if not data:
+                break
+            try:
+                os.write(1, data)
+            except OSError:
+                break
+
+
+def _wait_for_child_with_signals(pid: int, *, timeout: int | None = None) -> int:
+    """Wait for *pid* while forwarding terminal signals to the child.
+
+    Installs handlers for SIGINT, SIGTERM and SIGHUP that relay each
+    signal to the child process.  On ``KeyboardInterrupt`` (or any
+    exception that unwinds the wait), the child is sent SIGTERM and
+    then SIGKILL after a brief grace period so it never gets orphaned.
+    """
+    received_signal: list[int] = []
+
+    def _relay(signum: int, _frame: object) -> None:
+        received_signal.append(signum)
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(pid, signum)
+
+    prev_handlers: dict[signal.Signals, signal._HANDLER] = {}
+    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        with contextlib.suppress(OSError, ValueError):
+            prev_handlers[sig] = signal.signal(sig, _relay)
+
+    try:
+        returncode = _wait_for_child(pid, timeout=timeout)
+    except BaseException:
+        # Parent is being torn down — ensure the child does not survive.
+        _kill_child(pid)
+        raise
+    finally:
+        for sig, handler in prev_handlers.items():
+            with contextlib.suppress(OSError, ValueError):
+                signal.signal(sig, handler)
+
+    # If the parent caught a relayed signal *and* the child has already
+    # exited, re-raise so the caller's cleanup (session teardown, mount
+    # cleanup) runs and the exit code reflects the signal.
+    if received_signal and returncode >= 128:
+        return returncode
+
+    return returncode
+
+
+def _kill_child(pid: int) -> None:
+    """Best-effort SIGTERM → wait → SIGKILL for *pid*."""
+    import time
+
+    with contextlib.suppress(ProcessLookupError):
+        os.kill(pid, signal.SIGTERM)
+    deadline = time.monotonic() + 1.0
+    while time.monotonic() < deadline:
+        try:
+            wpid, _ = os.waitpid(pid, os.WNOHANG)
+            if wpid != 0:
+                return
+        except ChildProcessError:
+            return
+        time.sleep(0.05)
+    with contextlib.suppress(ProcessLookupError):
+        os.kill(pid, signal.SIGKILL)
+    with contextlib.suppress(ChildProcessError):
+        os.waitpid(pid, 0)
 
 
 def _wait_for_child(pid: int, *, timeout: int | None = None) -> int:
