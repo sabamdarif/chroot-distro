@@ -1387,7 +1387,11 @@ def _command_login_inner_once(container_name: str, args) -> None:
 
     if holder is not None and holder.proc is not None:
         try:
-            holder.proc.wait()
+            if getattr(holder, "master_fd", -1) >= 0:
+                from chroot_distro.syscalls.chroot import _pty_relay
+                _pty_relay(holder.master_fd, holder.proc.pid)
+            else:
+                holder.proc.wait()
         except KeyboardInterrupt:
             with contextlib.suppress(OSError):
                 holder.proc.send_signal(signal.SIGINT)

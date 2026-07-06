@@ -353,6 +353,7 @@ class NamespaceHolder:
     ns_flags: int  # CLONE_NEW* bitmask
     container_name: str
     proc: subprocess.Popen | None = None
+    master_fd: int = -1
 
     # Kept for backward compat — callers that used nsenter_flags as
     # a list of CLI strings can still access them via this property.
@@ -756,6 +757,13 @@ def _create_holder_subprocess(
     pid_file = _holder_pid_file(container_name)
     cli_flags = bitmask_to_cli_flags(flags)
 
+    master_fd = slave_fd = -1
+    use_pty = os.isatty(0)
+    if use_pty:
+        from chroot_distro.syscalls.chroot import _copy_terminal_size
+        master_fd, slave_fd = os.openpty()
+        _copy_terminal_size(0, master_fd)
+
     assert pipe_r is not None
     python_script = (
         "import os, sys\n"
@@ -771,12 +779,32 @@ def _create_holder_subprocess(
     unshare_argv.extend(["python3", "-c", python_script, *holder_cmd])
 
     popen_kwargs: dict = {}
-    if pipe_r is not None:
-        popen_kwargs["pass_fds"] = (pipe_r,)
+    if use_pty:
+        popen_kwargs["stdin"] = slave_fd
+        popen_kwargs["stdout"] = slave_fd
+        popen_kwargs["stderr"] = slave_fd
+
+        def _preexec_fn() -> None:
+            import fcntl
+            import os
+            with contextlib.suppress(OSError):
+                os.close(master_fd)
+            os.setsid()
+            with contextlib.suppress(OSError):
+                fcntl.ioctl(slave_fd, 0x540E, 0)
+
+        popen_kwargs["preexec_fn"] = _preexec_fn
+        popen_kwargs["pass_fds"] = (pipe_r, slave_fd)
+    else:
+        if pipe_r is not None:
+            popen_kwargs["pass_fds"] = (pipe_r,)
     if env is not None:
         popen_kwargs["env"] = env
 
     proc = subprocess.Popen(unshare_argv, **popen_kwargs)
+
+    if use_pty:
+        os.close(slave_fd)
 
     success = False
     host_pid: int | None = None
@@ -816,6 +844,9 @@ def _create_holder_subprocess(
 
     finally:
         if not success:
+            if use_pty and master_fd >= 0:
+                with contextlib.suppress(OSError):
+                    os.close(master_fd)
             with contextlib.suppress(OSError):
                 proc.kill()
             if host_pid is not None:
@@ -829,6 +860,7 @@ def _create_holder_subprocess(
         ns_flags=flags,
         container_name=container_name,
         proc=proc,
+        master_fd=master_fd,
     )
 
 
