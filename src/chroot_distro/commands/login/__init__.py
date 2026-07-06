@@ -94,9 +94,6 @@ def _safe_hostname(name: str) -> str:
     return name
 
 
-
-
-
 def command_login(args) -> None:
     """Spawn an interactive shell (or custom command) inside the container."""
     container_name = args.container_name
@@ -1130,7 +1127,6 @@ def _command_login_inner_once(container_name: str, args) -> None:
                     max_isolation=max_isolation and use_namespaces,
                     enable_usb=not minimal,
                     enable_binfmt=not minimal,
-                    enable_docker_cgroup=not minimal,
                     enable_shm=not minimal,
                 )
                 for sm in specials:
@@ -1224,14 +1220,17 @@ def _command_login_inner_once(container_name: str, args) -> None:
                 log_info(f"Image declares exposed ports: {', '.join(exposed)}")
 
             # Phase 6: Persist the mount options used by this first session.
-            session.save_mount_options(container_name, {
-                "shared_display": shared_display,
-                "shared_tmp": shared_tmp,
-                "shared_home": use_shared_home,
-                "custom_binds": sorted(custom_binds),
-                "use_namespaces": use_namespaces,
-                "isolated": max_isolation,
-            })
+            session.save_mount_options(
+                container_name,
+                {
+                    "shared_display": shared_display,
+                    "shared_tmp": shared_tmp,
+                    "shared_home": use_shared_home,
+                    "custom_binds": sorted(custom_binds),
+                    "use_namespaces": use_namespaces,
+                    "isolated": max_isolation,
+                },
+            )
 
             # Trigger the holder to start execution by closing the pipe
             if pipe_w is not None:
@@ -1321,7 +1320,6 @@ def _command_login_inner_once(container_name: str, args) -> None:
                         f"log in again with --isolated."
                     )
                     sys.exit(1)
-
 
     if chroot_args is None:
         chroot_args = build_chroot_args(
@@ -1435,6 +1433,7 @@ def _command_login_inner_once(container_name: str, args) -> None:
             else:
                 # Fallback: should not normally be reached.
                 import subprocess as _sp
+
                 _sp.run(chroot_args, env=child_env, check=False)
         finally:
             if _sess_handle is not None:

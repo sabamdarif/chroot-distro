@@ -606,7 +606,6 @@ def test_special_mounts_termux_all():
         assert "devpts" in fstypes
         assert "usbfs" in fstypes
         assert "binfmt_misc" in fstypes
-        assert "cgroup" in fstypes
         assert "tmpfs" in fstypes
 
 

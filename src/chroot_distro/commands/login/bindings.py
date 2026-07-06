@@ -167,58 +167,6 @@ def _binfmt_misc_special(*, fresh_proc: bool = True) -> SpecialMount | None:
     )
 
 
-def _docker_cgroup_specials() -> list[SpecialMount]:
-    """Mount minimal cgroup controllers needed by Docker on Android.
-
-    On regular Linux, these already exist under /sys/fs/cgroup/.
-    """
-    specials = []
-
-    # On Android, the /sys/fs/cgroup directory is in the read-only sysfs.
-    # We must mount a writeable tmpfs over /sys/fs/cgroup first, so that we can
-    # create the controllers' mountpoint subdirectories.
-    specials.append(
-        SpecialMount(
-            fstype="tmpfs",
-            source="tmpfs",
-            target="/sys/fs/cgroup",
-            options="mode=0755",
-            mkdir=True,
-            optional=True,
-        )
-    )
-
-    # Legacy cgroup devices controller
-    # Required by Docker daemon to set up device access policies for containers
-    if _fs_supported("cgroup"):  # NOTE: "cgroup" not "cgroup2"
-        specials.append(
-            SpecialMount(
-                fstype="cgroup",
-                source="cgroup",
-                target="/sys/fs/cgroup/devices",
-                options="devices",
-                mkdir=True,
-                check="cgroup",
-                optional=True,
-            )
-        )
-
-        # cpuset controller (required by many Docker networking setups)
-        specials.append(
-            SpecialMount(
-                fstype="cgroup",
-                source="cgroup",
-                target="/sys/fs/cgroup/cpuset",
-                options="cpuset",
-                mkdir=True,
-                check="cgroup",
-                optional=True,
-            )
-        )
-
-    return specials
-
-
 def _max_isolation_dev_specials() -> list[SpecialMount]:
     """Return mounts that synthesise a fresh /dev for maximum isolation.
 
@@ -259,7 +207,6 @@ def get_special_mounts(
     max_isolation: bool = False,
     enable_usb: bool = True,
     enable_binfmt: bool = True,
-    enable_docker_cgroup: bool = True,  # enabled by default per user request
     enable_shm: bool = True,
 ) -> list[SpecialMount]:
     """Return list of special filesystem mounts to apply after bind mounts.
@@ -350,9 +297,6 @@ def get_special_mounts(
         sm = _binfmt_misc_special(fresh_proc=True)
         if sm:
             specials.append(sm)
-
-    if enable_docker_cgroup and IS_TERMUX:
-        specials.extend(_docker_cgroup_specials())
 
     # Under max isolation the host /dev is not bound, so the fresh tmpfs /dev
     # has no /dev/shm: always mount one. Otherwise only add it when the host
