@@ -1,4 +1,4 @@
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, patch, mock_open
 
 import chroot_distro.commands.info as info
 
@@ -164,6 +164,7 @@ def test_data_mount_flags_warns_on_nosuid():
 def test_gather_capabilities_reports_no_escalation_tool():
     with (
         patch("os.getuid", return_value=1000),
+        patch("chroot_distro.elevate.is_root_available", return_value=False),
         patch.object(info, "_detect_escalation_tool", return_value=""),
         patch.object(info, "IS_TERMUX", False),
         patch.object(info, "_binfmt_qemu_status", return_value=("binfmt_misc + qemu", "ok")),
@@ -188,3 +189,124 @@ def test_render_basic_outputs_new_fields():
     assert "Module path" in rendered
     assert "Cache location" in rendered
     assert "OCI layer cache" in rendered
+
+
+def test_userns_enabled_states():
+    # Case 1: max_user_namespaces exists and is > 0
+    mock_file = mock_open(read_data="1\n").return_value
+    real_open = open
+    def fake_open_present(path, *a, **k):
+        if path == "/proc/sys/user/max_user_namespaces":
+            return mock_file
+        return real_open(path, *a, **k)
+
+    with patch("builtins.open", side_effect=fake_open_present):
+        assert info._userns_enabled() is True
+
+    # Case 2: max_user_namespaces exists and is 0
+    mock_file_zero = mock_open(read_data="0\n").return_value
+    def fake_open_absent(path, *a, **k):
+        if path == "/proc/sys/user/max_user_namespaces":
+            return mock_file_zero
+        return real_open(path, *a, **k)
+
+
+    with patch("builtins.open", side_effect=fake_open_absent):
+        assert info._userns_enabled() is False
+
+    # Case 3: max_user_namespaces is missing/unreadable, but probe says present
+    def fake_open_error(path, *a, **k):
+        if path == "/proc/sys/user/max_user_namespaces":
+            raise OSError
+        return real_open(path, *a, **k)
+
+    with (
+        patch("builtins.open", side_effect=fake_open_error),
+        patch.object(info, "probe_flag_runtime", return_value="present")
+    ):
+        assert info._userns_enabled() is True
+
+    # Case 4: max_user_namespaces is missing/unreadable, and probe says absent
+    with (
+        patch("builtins.open", side_effect=fake_open_error),
+        patch.object(info, "probe_flag_runtime", return_value="absent")
+    ):
+        assert info._userns_enabled() is False
+
+    # Case 5: max_user_namespaces is missing/unreadable, and probe says unknown
+    with (
+        patch("builtins.open", side_effect=fake_open_error),
+        patch.object(info, "probe_flag_runtime", return_value="unknown")
+    ):
+        assert info._userns_enabled() is None
+
+
+def test_gather_capabilities_privilege_states():
+    # 1. Running as root
+    with (
+        patch("os.getuid", return_value=0),
+        patch("chroot_distro.commands.info.IS_TERMUX", False),
+        patch("chroot_distro.commands.info._binfmt_qemu_status", return_value=("", "info")),
+        patch("chroot_distro.commands.info._namespace_status", return_value=("", "info")),
+        patch("chroot_distro.commands.info._lsm_status", return_value=None),
+        patch("chroot_distro.commands.info._free_disk", return_value=("", "info")),
+        patch("chroot_distro.commands.info._cache_size", return_value=("", "info")),
+        patch("chroot_distro.commands.info._layer_cache_size", return_value=("", "info")),
+    ):
+        caps = info._gather_capabilities(images=[], host_arch="x86_64")
+        priv = next(c for c in caps if c.label == "Privileges")
+        assert priv.level == "ok"
+        assert "running as root" in priv.value
+
+    # 2. Termux, not root, but root is available
+    with (
+        patch("os.getuid", return_value=1000),
+        patch("chroot_distro.commands.info.IS_TERMUX", True),
+        patch("chroot_distro.elevate.is_root_available", return_value=True),
+        patch("chroot_distro.commands.info._data_mount_flags", return_value=("", "info")),
+        patch("chroot_distro.commands.info._binfmt_qemu_status", return_value=("", "info")),
+        patch("chroot_distro.commands.info._namespace_status", return_value=("", "info")),
+        patch("chroot_distro.commands.info._free_disk", return_value=("", "info")),
+        patch("chroot_distro.commands.info._cache_size", return_value=("", "info")),
+        patch("chroot_distro.commands.info._layer_cache_size", return_value=("", "info")),
+    ):
+        caps = info._gather_capabilities(images=[], host_arch="aarch64")
+        priv = next(c for c in caps if c.label == "Privileges")
+        assert priv.level == "info"
+        assert "root is available (can elevate via su)" in priv.value
+
+    # 3. Termux, not root, root is not available
+    with (
+        patch("os.getuid", return_value=1000),
+        patch("chroot_distro.commands.info.IS_TERMUX", True),
+        patch("chroot_distro.elevate.is_root_available", return_value=False),
+        patch("chroot_distro.commands.info._data_mount_flags", return_value=("", "info")),
+        patch("chroot_distro.commands.info._binfmt_qemu_status", return_value=("", "info")),
+        patch("chroot_distro.commands.info._namespace_status", return_value=("", "info")),
+        patch("chroot_distro.commands.info._free_disk", return_value=("", "info")),
+        patch("chroot_distro.commands.info._cache_size", return_value=("", "info")),
+        patch("chroot_distro.commands.info._layer_cache_size", return_value=("", "info")),
+    ):
+        caps = info._gather_capabilities(images=[], host_arch="aarch64")
+        priv = next(c for c in caps if c.label == "Privileges")
+        assert priv.level == "bad"
+        assert "root is not available (su not found)" in priv.value
+
+    # 4. Linux, not root, can elevate via daemon
+    with (
+        patch("os.getuid", return_value=1000),
+        patch("chroot_distro.commands.info.IS_TERMUX", False),
+        patch("chroot_distro.elevate.is_root_available", return_value=True),
+        patch("chroot_distro.commands.info._detect_escalation_tool", return_value=""),
+        patch("chroot_distro.commands.info._binfmt_qemu_status", return_value=("", "info")),
+        patch("chroot_distro.commands.info._namespace_status", return_value=("", "info")),
+        patch("chroot_distro.commands.info._lsm_status", return_value=None),
+        patch("chroot_distro.commands.info._free_disk", return_value=("", "info")),
+        patch("chroot_distro.commands.info._cache_size", return_value=("", "info")),
+        patch("chroot_distro.commands.info._layer_cache_size", return_value=("", "info")),
+    ):
+        caps = info._gather_capabilities(images=[], host_arch="x86_64")
+        priv = next(c for c in caps if c.label == "Privileges")
+        assert priv.level == "info"
+        assert "can elevate via daemon socket" in priv.value
+

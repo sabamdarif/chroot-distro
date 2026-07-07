@@ -111,7 +111,7 @@ On startup, commands that modify containers or mounts verify that the effective 
 3. **Linux:** the passwordless `chroot-distro` daemon socket, if [Passwordless setup](#passwordless-setup-linux) has been run.
 4. Fallback: `sudo`, `doas`, `pkexec`, or `su` (these prompt for a password).
 
-`list`, `ps`, `search`, `info`, and `help` do not require root on Termux and are run immediately. On regular Linux, `list`, `ps`, and `info` still elevate to inspect root-owned data.
+`list`, `ps`, `search`, and `help` do not require root on Termux and are run immediately. `info` runs with root privileges if root is available on Termux (so it can read `/proc/config.gz`), and otherwise falls back to a rootless run. On regular Linux, `list`, `ps`, and `info` always elevate to inspect root-owned data.
 
 ### Passwordless setup (Linux)
 
@@ -1016,7 +1016,7 @@ The report covers five sections:
 - **Images** — Every installed container with rootfs size, detected architecture, image source, busy/idle status, plus source URL and image type from manifest labels when available.
 - **Analysis** — Lightweight checks per image: architecture mismatch against the host, missing manifest, empty or unusual rootfs.
 
-Like `list` and `ps`, `info` is a read-only command that does not require root on Termux. On regular Linux hosts, it automatically elevates to inspect the same root-owned data directory where containers are installed.
+Like `list` and `ps`, `info` is a read-only command. On Termux, it automatically runs with root privileges if root is available (to read root-only files like `/proc/config.gz`), otherwise falling back to a rootless run. On regular Linux hosts, it always elevates to inspect the same root-owned data directory where containers are installed.
 
 ---
 

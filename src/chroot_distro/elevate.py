@@ -58,6 +58,33 @@ def is_root() -> bool:
     return os.getuid() == 0
 
 
+def is_root_available() -> bool:
+    """Check if the current process is root or can obtain root privileges."""
+    if is_root():
+        return True
+    if has_required_capabilities():
+        return True
+    if IS_TERMUX:
+        su = _find_termux_su()
+        if su is None:
+            return False
+        help_text = _su_help_text(su)
+        return "Termux does not supply tools" not in help_text and "No su program found" not in help_text
+
+    from chroot_distro.daemon import SOCKET_PATH
+    if os.environ.get("CD_NO_DAEMON") != "1" and os.path.exists(SOCKET_PATH):
+        import socket
+        conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            conn.connect(SOCKET_PATH)
+            return True
+        except OSError:
+            pass
+        finally:
+            conn.close()
+    return _find_escalation_tool() is not None
+
+
 def _forwarded_env_assignments() -> list[str]:
     """Return ``VAR=value`` strings for the CD_* and display vars present in the env."""
     assignments: list[str] = []

@@ -132,3 +132,51 @@ def test_main_termux_clears_preload():
         main()
         assert "LD_PRELOAD" not in os.environ
         assert "LD_LIBRARY_PATH" not in os.environ
+
+
+@patch("chroot_distro.cli.IS_TERMUX", True)
+def test_main_termux_info_auto_elevation():
+    mock_info = MagicMock()
+    # 1. root is available: should elevate
+    with (
+        patch("sys.argv", ["chroot-distro", "info"]),
+        patch("os.getuid", return_value=1000),
+        patch("chroot_distro.elevate.is_root_available", return_value=True),
+        patch("chroot_distro.elevate.elevate_or_die", side_effect=RootRequiredError("mock error")) as mock_elevate,
+        patch.dict("chroot_distro.cli._COMMAND_HANDLERS", {"info": mock_info}),
+    ):
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+        assert exc_info.value.code == 1
+        mock_elevate.assert_called_once()
+        mock_info.assert_not_called()
+
+    # 2. root is not available: should run rootlessly (no elevate)
+    mock_info.reset_mock()
+    with (
+        patch("sys.argv", ["chroot-distro", "info"]),
+        patch("os.getuid", return_value=1000),
+        patch("chroot_distro.elevate.is_root_available", return_value=False),
+        patch("chroot_distro.elevate.elevate_or_die") as mock_elevate,
+        patch.dict("chroot_distro.cli._COMMAND_HANDLERS", {"info": mock_info}),
+    ):
+        main()
+        mock_elevate.assert_not_called()
+        mock_info.assert_called_once()
+
+
+@patch("chroot_distro.cli.IS_TERMUX", False)
+def test_main_linux_info_always_elevates():
+    mock_info = MagicMock()
+    # On Linux, info must elevate regardless of is_root_available
+    with (
+        patch("sys.argv", ["chroot-distro", "info"]),
+        patch("os.getuid", return_value=1000),
+        patch("chroot_distro.elevate.elevate_or_die", side_effect=RootRequiredError("mock error")) as mock_elevate,
+        patch.dict("chroot_distro.cli._COMMAND_HANDLERS", {"info": mock_info}),
+    ):
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+        assert exc_info.value.code == 1
+        mock_elevate.assert_called_once()
+        mock_info.assert_not_called()

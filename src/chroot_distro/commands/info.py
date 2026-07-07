@@ -168,7 +168,11 @@ def _termux_host_info() -> _HostInfo:
         device_label = f"{device_label} ({device})"
     fields.append(("Device", device_label))
 
-    fields.append(("Kernel", platform.release() or _NA))
+    try:
+        kernel = os.uname().release
+    except (OSError, AttributeError):
+        kernel = platform.release()
+    fields.append(("Kernel", kernel or _NA))
     return _HostInfo(kind="Termux / Android", fields=fields)
 
 
@@ -188,7 +192,11 @@ def _linux_host_info() -> _HostInfo:
     if version_id:
         fields.append(("Version", version_id))
 
-    fields.append(("Kernel", platform.release() or _NA))
+    try:
+        kernel = os.uname().release
+    except (OSError, AttributeError):
+        kernel = platform.release()
+    fields.append(("Kernel", kernel or _NA))
     fields.append(("Platform", platform.platform() or _NA))
     libc_name, libc_version = platform.libc_ver()
     if libc_name:
@@ -248,6 +256,11 @@ def _userns_enabled() -> bool | None:
         with open(path, encoding="utf-8") as fh:
             return int(fh.read().strip()) > 0
     except (OSError, ValueError):
+        probe = probe_flag_runtime("USER_NS")
+        if probe == PROBE_PRESENT:
+            return True
+        if probe == PROBE_ABSENT:
+            return False
         return None
 
 
@@ -340,14 +353,24 @@ def _gather_capabilities(images: list["_ImageInfo"], host_arch: str) -> list[_Ca
     """Collect host capability checks relevant to launching containers."""
     caps: list[_Capability] = []
 
+    from chroot_distro.elevate import is_root_available
+
     is_root = os.getuid() == 0
-    tool = _detect_escalation_tool()
     if is_root:
         caps.append(_Capability("Privileges", "running as root", "ok"))
-    elif tool:
-        caps.append(_Capability("Privileges", f"not root, can elevate via {tool}", "info"))
+    elif is_root_available():
+        tool = _detect_escalation_tool()
+        if IS_TERMUX:
+            caps.append(_Capability("Privileges", "not root, root is available (can elevate via su)", "info"))
+        elif tool:
+            caps.append(_Capability("Privileges", f"not root, can elevate via {tool}", "info"))
+        else:
+            caps.append(_Capability("Privileges", "not root, can elevate via daemon socket", "info"))
     else:
-        caps.append(_Capability("Privileges", "not root, no sudo/doas/pkexec/su found", "bad"))
+        if IS_TERMUX:
+            caps.append(_Capability("Privileges", "not root, root is not available (su not found)", "bad"))
+        else:
+            caps.append(_Capability("Privileges", "not root, no sudo/doas/pkexec/su found", "bad"))
 
     if IS_TERMUX:
         value, level = _data_mount_flags()
@@ -618,14 +641,23 @@ def _render_kernel_config() -> None:
     if parsed is not None:
         msg(f"  {C['CYAN']}Read from {path}{C['RST']}")
     else:
-        msg(
-            f"  {C['CYAN']}Kernel config not readable; probing the running "
-            f"kernel instead. For a definitive report run "
-            f"'CONFIG=/path/to/.config {PROGRAM_NAME} info' or as root.{C['RST']}"
-        )
+        if IS_TERMUX:
+            msg(
+                f"  {C['CYAN']}Kernel config not readable (requires root). "
+                f"Probing the running kernel instead. For a definitive report, "
+                f"provide a config file via 'CONFIG=/path/to/.config {PROGRAM_NAME} info'.{C['RST']}"
+            )
+        else:
+            msg(
+                f"  {C['CYAN']}Kernel config not readable; probing the running "
+                f"kernel instead. For a definitive report run "
+                f"'CONFIG=/path/to/.config {PROGRAM_NAME} info' or as root.{C['RST']}"
+            )
 
     missing_required: list[str] = []
     for group in KERNEL_FLAG_GROUPS:
+        if IS_TERMUX and group.title == "Cgroups":
+            continue
         msg()
         msg(f"  {C['WHITE']}{group.title}{C['RST']}")
         label_w = max(len("CONFIG_" + flag.name) for flag in group.flags) + 1
@@ -680,9 +712,11 @@ def command_info(args) -> None:
     """Print a structured diagnostics report for bug reports and support.
 
     Read-only: collects program, host (Linux distro or Termux/Android), and
-    per-image facts plus lightweight analysis. Like ``list``/``ps`` it is
-    rootless on Termux, but elevates on regular Linux so it inspects the same
-    root-owned data directory where containers are installed.
+    per-image facts plus lightweight analysis. It runs with root privileges
+    if available (always elevates on regular Linux, and elevates on Termux if
+    root is available) so it can read root-only files like /proc/config.gz or
+    inspect root-owned data directories. If root is not available on Termux,
+    it runs rootlessly and falls back to runtime probing.
     """
     host_arch = get_device_cpu_arch()
     host = _gather_host_info()

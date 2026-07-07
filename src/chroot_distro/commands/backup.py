@@ -105,7 +105,8 @@ def _add_path(
     """Add *src* to *tf* as *arcname*, stripping ownership info."""
     try:
         st = os.lstat(src)
-    except OSError:
+    except OSError as exc:
+        warn(f"Failed to lstat {src}: {exc}")
         return
     m = st.st_mode
     if stat.S_ISBLK(m) or stat.S_ISCHR(m) or stat.S_ISFIFO(m) or stat.S_ISSOCK(m):
@@ -113,7 +114,8 @@ def _add_path(
 
     try:
         info = tf.gettarinfo(src, arcname=arcname)
-    except OSError:
+    except OSError as exc:
+        warn(f"Failed to get tar info for {src}: {exc}")
         return
     info.uid = 0
     info.gid = 0
@@ -132,11 +134,13 @@ def _add_path(
 def _fix_permissions(rootfs_dir: str) -> None:
     """Ensure all dirs and files in *rootfs_dir* are readable by owner."""
     for dirpath, _dirs, files in os.walk(rootfs_dir):
-        with contextlib.suppress(OSError):
+        try:
             os.chmod(
                 dirpath,
                 os.stat(dirpath).st_mode | stat.S_IRUSR | stat.S_IXUSR,
             )
+        except OSError as exc:
+            warn(f"Failed to set permissions on directory {dirpath}: {exc}")
         for fname in files:
             fpath = os.path.join(dirpath, fname)
             try:
@@ -243,7 +247,8 @@ def _run_backup(
     for src, _arc in entries:
         try:
             st = os.lstat(src)
-        except OSError:
+        except OSError as exc:
+            warn(f"Failed to lstat {src} during size calculation: {exc}")
             continue
         if stat.S_ISREG(st.st_mode):
             total_size += st.st_size

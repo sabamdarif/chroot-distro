@@ -116,6 +116,7 @@ def test_format_table_aligns_columns():
 
 def test_iter_container_names_permission_denied(monkeypatch):
     import errno
+    import chroot_distro.commands.list_cmd as list_cmd
 
     def _deny_listdir(*_args, **_kwargs):
         raise OSError(errno.EACCES, "Permission denied")
@@ -123,8 +124,9 @@ def test_iter_container_names_permission_denied(monkeypatch):
     monkeypatch.setattr("os.listdir", _deny_listdir)
 
     mock_warn = MagicMock()
-    monkeypatch.setattr("chroot_distro.message.warn", mock_warn)
+    monkeypatch.setattr(list_cmd, "warn", mock_warn)
 
-    from chroot_distro.commands.list_cmd import CONTAINERS_DIR, _iter_container_names
+    CONTAINERS_DIR = list_cmd.CONTAINERS_DIR
+    _iter_container_names = list_cmd._iter_container_names
     assert _iter_container_names() == []
     mock_warn.assert_called_once_with(f"Permission denied: cannot read containers directory '{CONTAINERS_DIR}'")

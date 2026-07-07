@@ -90,9 +90,7 @@ KERNEL_FLAG_GROUPS: tuple[KernelFlagGroup, ...] = (
         title="Cgroups",
         flags=(
             KernelFlag("CGROUPS", "cgroup support (umbrella)", required=False),
-            KernelFlag("CGROUP_DEVICE", "device access control", required=False),
-            KernelFlag("MEMCG", "memory controller", required=False),
-            KernelFlag("CGROUP_PIDS", "pids controller", required=False),
+            KernelFlag("CGROUP_NS", "cgroup namespace", required=False),
         ),
     ),
 )
@@ -110,7 +108,10 @@ _NOT_SET_RE = re.compile(r"^# CONFIG_([A-Z0-9_]+) is not set\b")
 
 
 def _candidate_config_paths() -> list[str]:
-    release = platform.release()
+    try:
+        release = os.uname().release
+    except (OSError, AttributeError):
+        release = platform.release()
     return [p.format(release=release) for p in _CANDIDATE_PATHS]
 
 
@@ -168,6 +169,24 @@ def _proc_filesystems() -> set[str] | None:
     return types
 
 
+def _has_fs_in_mounts(fstype: str) -> bool:
+    """Return True if fstype is active in /proc/mounts."""
+    try:
+        for path in ("/proc/mounts", "/proc/self/mounts"):
+            try:
+                with open(path, encoding="utf-8", errors="replace") as fh:
+                    for line in fh:
+                        parts = line.split()
+                        if len(parts) >= 3 and parts[2] == fstype:
+                            return True
+                break
+            except OSError:
+                continue
+    except OSError:
+        pass
+    return False
+
+
 def _ns_dir_entries() -> set[str] | None:
     """Return the namespace names listed under /proc/self/ns, or None.
 
@@ -194,13 +213,13 @@ def _ns_file_present(name: str) -> bool:
     return os.path.lexists(f"/proc/self/ns/{name}")
 
 
-def _userns_present() -> bool | None:
-    """Return True/False if user-namespace support is known, else None."""
+def _userns_present() -> bool:
+    """Return True/False if user-namespace support is active."""
     try:
         with open("/proc/sys/user/max_user_namespaces", encoding="utf-8") as fh:
             return int(fh.read().strip()) > 0
     except (OSError, ValueError):
-        return _ns_file_present("user") or None
+        return _ns_file_present("user")
 
 
 def probe_flag_runtime(name: str) -> str:
@@ -215,21 +234,19 @@ def probe_flag_runtime(name: str) -> str:
     # Namespaces: the umbrella is present if any ns file exists; each specific
     # namespace maps to its /proc/self/ns/<name> entry.
     ns_map = {
-        "NAMESPACES": ("mnt", "pid", "uts", "ipc"),
+        "NAMESPACES": ("mnt", "pid", "uts", "ipc", "cgroup"),
         "PID_NS": ("pid",),
         "UTS_NS": ("uts",),
         "IPC_NS": ("ipc",),
         "NET_NS": ("net",),
+        "CGROUP_NS": ("cgroup",),
     }
     if name in ns_map:
         files = ns_map[name]
         present = any(_ns_file_present(f) for f in files)
         return PROBE_PRESENT if present else PROBE_ABSENT
     if name == "USER_NS":
-        res = _userns_present()
-        if res is None:
-            return PROBE_UNKNOWN
-        return PROBE_PRESENT if res else PROBE_ABSENT
+        return PROBE_PRESENT if _userns_present() else PROBE_ABSENT
 
     # Pseudo-filesystems: look them up in /proc/filesystems. The mounted
     # pseudo-fs at its canonical path is also accepted, since /proc/filesystems
@@ -245,7 +262,10 @@ def probe_flag_runtime(name: str) -> str:
         fstype, mount_hint = fs_map[name]
         fstypes = _proc_filesystems()
         if fstypes is None:
-            # Could not read /proc/filesystems; fall back to the mount hint.
+            # Could not read /proc/filesystems; check /proc/mounts first,
+            # then fall back to the mount hint.
+            if _has_fs_in_mounts(fstype):
+                return PROBE_PRESENT
             if mount_hint and os.path.isdir(mount_hint):
                 return PROBE_PRESENT
             return PROBE_UNKNOWN
@@ -263,11 +283,6 @@ def probe_flag_runtime(name: str) -> str:
             return PROBE_PRESENT if has_dir else PROBE_UNKNOWN
         has_cg = ("cgroup" in fstypes) or ("cgroup2" in fstypes) or has_dir
         return PROBE_PRESENT if has_cg else PROBE_ABSENT
-    if name in ("CGROUP_DEVICE", "MEMCG", "CGROUP_PIDS"):
-        # Specific cgroup controllers can't be reliably enumerated rootlessly
-        # across cgroup v1/v2 layouts on Android, so leave them as unknown
-        # rather than risk a misleading 'missing'.
-        return PROBE_UNKNOWN
 
     return PROBE_UNKNOWN
 

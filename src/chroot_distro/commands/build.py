@@ -28,7 +28,7 @@ from chroot_distro.helpers.oci_writer import (
     write_oci_archive,
 )
 from chroot_distro.locking import BuildLock
-from chroot_distro.message import C, crit_error, log_error, log_info, msg
+from chroot_distro.message import C, crit_error, log_error, log_info, msg, warn
 from chroot_distro.names import is_valid_name, require_valid_name
 from chroot_distro.paths import container_rootfs
 from chroot_distro.progress import fmt_size
@@ -172,7 +172,8 @@ def command_build(args: typing.Any) -> None:
         build_tmp = os.path.join(RUNTIME_DIR, "build-tmp")
         try:
             os.makedirs(build_tmp, exist_ok=True)
-        except OSError:
+        except OSError as exc:
+            warn(f"Failed to create build temporary directory '{build_tmp}', falling back to '/tmp': {exc}")
             build_tmp = "/tmp"  # Fallback just in case
         tmp_root = tempfile.mkdtemp(prefix="cd-build-", dir=build_tmp)
 

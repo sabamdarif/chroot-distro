@@ -1,5 +1,5 @@
 import gzip
-from unittest.mock import patch
+from unittest.mock import patch, mock_open
 
 import chroot_distro.commands.info as info
 import chroot_distro.commands.kernel_config as kc
@@ -16,7 +16,7 @@ _SAMPLE = "\n".join(
         "CONFIG_SYSFS=y",
         "CONFIG_TMPFS=y",
         "CONFIG_CGROUPS=y",
-        "CONFIG_CGROUP_DEVICE=m",
+        "CONFIG_CGROUP_NS=m",
     ]
 )
 
@@ -28,17 +28,17 @@ def _capture(lines):
 def test_parse_kernel_config_recognizes_y_m_and_not_set():
     parsed = kc.parse_kernel_config(_SAMPLE)
     assert parsed["NAMESPACES"] == kc.CONFIG_BUILTIN
-    assert parsed["CGROUP_DEVICE"] == kc.CONFIG_MODULE
+    assert parsed["CGROUP_NS"] == kc.CONFIG_MODULE
     assert parsed["USER_NS"] == kc.CONFIG_MISSING
     # An option absent from the text is simply not in the dict.
-    assert "MEMCG" not in parsed
+    assert "NET_NS" not in parsed
 
 
 def test_lookup_flag_handles_unknown_and_absent():
     parsed = kc.parse_kernel_config(_SAMPLE)
     assert kc.lookup_flag(parsed, "PID_NS") == kc.CONFIG_BUILTIN
     # Absent from a readable config -> treated as missing.
-    assert kc.lookup_flag(parsed, "MEMCG") == kc.CONFIG_MISSING
+    assert kc.lookup_flag(parsed, "NET_NS") == kc.CONFIG_MISSING
     # No config at all -> unknown.
     assert kc.lookup_flag(None, "PID_NS") == kc.CONFIG_UNKNOWN
 
@@ -120,14 +120,32 @@ def test_probe_flag_runtime_filesystems():
         with patch.object(kc.os.path, "isdir", return_value=False):
             assert kc.probe_flag_runtime("DEVTMPFS") == kc.PROBE_ABSENT
 
-    # Unenumerable cgroup controllers stay unknown.
-    assert kc.probe_flag_runtime("CGROUP_DEVICE") == kc.PROBE_UNKNOWN
+    # Fallback to mounts when /proc/filesystems is unreadable (None)
+    with (
+        patch.object(kc, "_proc_filesystems", return_value=None),
+        patch.object(kc, "_has_fs_in_mounts", return_value=True),
+    ):
+        assert kc.probe_flag_runtime("TMPFS") == kc.PROBE_PRESENT
+
+    with (
+        patch.object(kc, "_proc_filesystems", return_value=None),
+        patch.object(kc, "_has_fs_in_mounts", return_value=False),
+    ):
+        assert kc.probe_flag_runtime("TMPFS") == kc.PROBE_UNKNOWN
+
+
+def test_has_fs_in_mounts():
+    mock_mounts = "rootfs / rootfs rw 0 0\ntmpfs /dev/shm tmpfs rw,nosuid,nodev 0 0\n"
+    with patch("builtins.open", mock_open(read_data=mock_mounts)):
+        assert kc._has_fs_in_mounts("tmpfs") is True
+        assert kc._has_fs_in_mounts("devtmpfs") is False
 
 
 def test_probe_flag_runtime_filesystem_uses_mount_hint_when_unreadable():
     # /proc/filesystems unreadable (None) but the canonical mount exists.
     with (
         patch.object(kc, "_proc_filesystems", return_value=None),
+        patch.object(kc, "_has_fs_in_mounts", return_value=False),
         patch.object(kc.os.path, "isdir", side_effect=lambda p: p == "/proc"),
     ):
         assert kc.probe_flag_runtime("PROC_FS") == kc.PROBE_PRESENT
@@ -184,3 +202,47 @@ def test_render_kernel_config_all_present_is_ok():
     ):
         info._render_kernel_config()
     assert "All kernel options required for namespace isolation are present" in "\n".join(lines)
+
+
+def test_probe_flag_runtime_userns():
+    # Case 1: max_user_namespaces exists and is > 0
+    mock_file = mock_open(read_data="1000\n").return_value
+    real_open = open
+    def fake_open_present(path, *a, **k):
+        if path == "/proc/sys/user/max_user_namespaces":
+            return mock_file
+        return real_open(path, *a, **k)
+
+    with patch("builtins.open", side_effect=fake_open_present):
+        assert kc.probe_flag_runtime("USER_NS") == kc.PROBE_PRESENT
+
+    # Case 2: max_user_namespaces exists and is 0
+    mock_file_zero = mock_open(read_data="0\n").return_value
+    def fake_open_absent(path, *a, **k):
+        if path == "/proc/sys/user/max_user_namespaces":
+            return mock_file_zero
+        return real_open(path, *a, **k)
+
+
+    with patch("builtins.open", side_effect=fake_open_absent):
+        assert kc.probe_flag_runtime("USER_NS") == kc.PROBE_ABSENT
+
+    # Case 3: max_user_namespaces is missing (OSError) and /proc/self/ns/user is present
+    def fake_open_oserror(path, *a, **k):
+        if path == "/proc/sys/user/max_user_namespaces":
+            raise OSError
+        return real_open(path, *a, **k)
+
+    with (
+        patch("builtins.open", side_effect=fake_open_oserror),
+        patch.object(kc, "_ns_dir_entries", return_value={"mnt", "user"}),
+    ):
+        assert kc.probe_flag_runtime("USER_NS") == kc.PROBE_PRESENT
+
+    # Case 4: max_user_namespaces is missing (OSError) and /proc/self/ns/user is absent
+    with (
+        patch("builtins.open", side_effect=fake_open_oserror),
+        patch.object(kc, "_ns_dir_entries", return_value={"mnt"}),
+    ):
+        assert kc.probe_flag_runtime("USER_NS") == kc.PROBE_ABSENT
+

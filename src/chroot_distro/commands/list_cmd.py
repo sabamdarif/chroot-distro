@@ -1,4 +1,3 @@
-import contextlib
 import errno
 import json
 import os
@@ -7,7 +6,7 @@ from dataclasses import dataclass
 
 from chroot_distro.constants import CONTAINERS_DIR, PROGRAM_NAME
 from chroot_distro.locking import container_busy_status
-from chroot_distro.message import C, msg
+from chroot_distro.message import C, msg, warn
 from chroot_distro.paths import container_manifest, container_rootfs
 from chroot_distro.progress import fmt_size, loading_line
 
@@ -34,8 +33,9 @@ def _iter_container_names() -> list[str]:
         return sorted(e for e in os.listdir(CONTAINERS_DIR) if os.path.isdir(container_rootfs(e)))
     except OSError as exc:
         if exc.errno in (errno.EACCES, errno.EPERM):
-            from chroot_distro.message import warn
             warn(f"Permission denied: cannot read containers directory '{CONTAINERS_DIR}'")
+        else:
+            warn(f"Failed to list containers directory '{CONTAINERS_DIR}': {exc}")
         return []
 
 
@@ -56,7 +56,8 @@ def _rootfs_size_bytes(rootfs: str) -> int:
     """
     try:
         root_dev = os.lstat(rootfs).st_dev
-    except OSError:
+    except OSError as exc:
+        warn(f"Failed to stat rootfs directory '{rootfs}': {exc}")
         return 0
 
     total = 0
@@ -64,13 +65,17 @@ def _rootfs_size_bytes(rootfs: str) -> int:
         # -x behavior: prune directories on different filesystems
         dirnames[:] = [d for d in dirnames if _same_device(os.path.join(dirpath, d), root_dev)]
         # Count the directory entry itself
-        with contextlib.suppress(OSError):
+        try:
             total += os.lstat(dirpath).st_size
+        except OSError as exc:
+            warn(f"Failed to lstat directory '{dirpath}': {exc}")
         # Count all files (and symlinks, sockets, etc.)
         for filename in filenames:
+            fpath = os.path.join(dirpath, filename)
             try:
-                total += os.lstat(os.path.join(dirpath, filename)).st_size
-            except OSError:
+                total += os.lstat(fpath).st_size
+            except OSError as exc:
+                warn(f"Failed to lstat file '{fpath}': {exc}")
                 continue
     return total
 
@@ -84,12 +89,15 @@ def _ensure_manifest_readable(manifest_path: str) -> None:
     """
     try:
         st = os.stat(manifest_path)
-    except OSError:
+    except OSError as exc:
+        warn(f"Failed to stat manifest '{manifest_path}': {exc}")
         return
     if st.st_mode & 0o004:
         return
-    with contextlib.suppress(OSError):
+    try:
         os.chmod(manifest_path, (st.st_mode & 0o777) | 0o644)
+    except OSError as exc:
+        warn(f"Failed to change permissions on manifest '{manifest_path}': {exc}")
 
 
 def _read_verbose_info(name: str) -> _VerboseInfo:
@@ -101,7 +109,8 @@ def _read_verbose_info(name: str) -> _VerboseInfo:
     try:
         with open(manifest_path, encoding="utf-8") as fh:
             data = json.loads(fh.read())
-    except (OSError, json.JSONDecodeError):
+    except (OSError, json.JSONDecodeError) as exc:
+        warn(f"Failed to read or parse manifest '{manifest_path}': {exc}")
         return _VerboseInfo()
     cfg = (data.get("image_config") or {}).get("config") or {}
     labels = cfg.get("Labels") or {}
@@ -134,8 +143,10 @@ def _read_image_source(name: str) -> str:
     except OSError as exc:
         if exc.errno in (errno.EACCES, errno.EPERM):
             return name
+        warn(f"Failed to read manifest '{manifest_path}': {exc}")
         return "unknown"
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as exc:
+        warn(f"Failed to parse manifest '{manifest_path}': {exc}")
         return "unknown"
     image_ref = data.get("image_ref") or ""
     if not image_ref:
@@ -150,7 +161,8 @@ def _container_row(name: str) -> _ContainerRow:
     rootfs = container_rootfs(name)
     try:
         size = fmt_size(_rootfs_size_bytes(rootfs))
-    except OSError:
+    except OSError as exc:
+        warn(f"Failed to calculate rootfs size for '{name}': {exc}")
         size = "?"
     return _ContainerRow(
         name=name,

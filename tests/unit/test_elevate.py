@@ -268,3 +268,96 @@ def test_elevate_termux_stub_su():
         pytest.raises(RootRequiredError, match="the 'su' command on this device is a Termux stub"),
     ):
         elevate_or_die()
+
+
+def test_is_root_available_already_root():
+    from chroot_distro.elevate import is_root_available
+    with patch("chroot_distro.elevate.is_root", return_value=True):
+        assert is_root_available() is True
+
+
+def test_is_root_available_has_caps():
+    from chroot_distro.elevate import is_root_available
+    with (
+        patch("chroot_distro.elevate.is_root", return_value=False),
+        patch("chroot_distro.elevate.has_required_capabilities", return_value=True),
+    ):
+        assert is_root_available() is True
+
+
+@patch("chroot_distro.elevate.IS_TERMUX", True)
+def test_is_root_available_termux():
+    from chroot_distro.elevate import is_root_available
+    # 1. su is found and works
+    with (
+        patch("chroot_distro.elevate.is_root", return_value=False),
+        patch("chroot_distro.elevate.has_required_capabilities", return_value=False),
+        patch("chroot_distro.elevate._find_termux_su", return_value="/system/bin/su"),
+        patch("chroot_distro.elevate._su_help_text", return_value="su version 3.0"),
+    ):
+        assert is_root_available() is True
+
+    # 2. su is not found
+    with (
+        patch("chroot_distro.elevate.is_root", return_value=False),
+        patch("chroot_distro.elevate.has_required_capabilities", return_value=False),
+        patch("chroot_distro.elevate._find_termux_su", return_value=None),
+    ):
+        assert is_root_available() is False
+
+    # 3. su is termux stub
+    with (
+        patch("chroot_distro.elevate.is_root", return_value=False),
+        patch("chroot_distro.elevate.has_required_capabilities", return_value=False),
+        patch("chroot_distro.elevate._find_termux_su", return_value="/system/bin/su"),
+        patch("chroot_distro.elevate._su_help_text", return_value="No su program found on this device. Termux does not supply tools for rooting"),
+    ):
+        assert is_root_available() is False
+
+
+@patch("chroot_distro.elevate.IS_TERMUX", False)
+def test_is_root_available_linux():
+    from chroot_distro.elevate import is_root_available
+
+    # 1. daemon socket available and connects successfully
+    with (
+        patch("chroot_distro.elevate.is_root", return_value=False),
+        patch("chroot_distro.elevate.has_required_capabilities", return_value=False),
+        patch("os.environ.get", return_value="0"),
+        patch("os.path.exists", return_value=True),
+        patch("socket.socket") as mock_sock_cls,
+    ):
+        mock_sock = mock_sock_cls.return_value
+        assert is_root_available() is True
+        mock_sock.connect.assert_called_once()
+
+    # 2. daemon socket exists but fails connection, but fallback tool available
+    with (
+        patch("chroot_distro.elevate.is_root", return_value=False),
+        patch("chroot_distro.elevate.has_required_capabilities", return_value=False),
+        patch("os.environ.get", return_value="0"),
+        patch("os.path.exists", return_value=True),
+        patch("socket.socket") as mock_sock_cls,
+        patch("chroot_distro.elevate._find_escalation_tool", return_value=["sudo"]),
+    ):
+        mock_sock = mock_sock_cls.return_value
+        mock_sock.connect.side_effect = OSError("Connection refused")
+        assert is_root_available() is True
+
+    # 3. daemon socket not used (CD_NO_DAEMON=1), but fallback tool available
+    with (
+        patch("chroot_distro.elevate.is_root", return_value=False),
+        patch("chroot_distro.elevate.has_required_capabilities", return_value=False),
+        patch.dict("os.environ", {"CD_NO_DAEMON": "1"}),
+        patch("chroot_distro.elevate._find_escalation_tool", return_value=["sudo"]),
+    ):
+        assert is_root_available() is True
+
+    # 4. no daemon, no fallback tools
+    with (
+        patch("chroot_distro.elevate.is_root", return_value=False),
+        patch("chroot_distro.elevate.has_required_capabilities", return_value=False),
+        patch.dict("os.environ", {"CD_NO_DAEMON": "1"}),
+        patch("chroot_distro.elevate._find_escalation_tool", return_value=None),
+    ):
+        assert is_root_available() is False

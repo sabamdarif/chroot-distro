@@ -187,11 +187,13 @@ def main() -> None:
         set_quiet(True)
 
     # Root check requirement:
-    # - In normal Linux: all commands require root except "help"
-    # - In Termux: all commands require root except "list" and "help"
-    # `search` is network-only and never needs root. `ps`, `list`, and `info`
-    # only read /proc and container metadata, so they are exempt on Termux like
-    # `help`. On Linux containers are installed by root and live in root's data
+    # - In normal Linux: all commands require root except "help" and "search"
+    # - In Termux: all commands require root except "list", "ps", and "help"
+    # `search` is network-only and never needs root. `ps` and `list` only read
+    # /proc and container metadata, so they are exempt on Termux like `help`.
+    # `info` will run with root privileges if root is available (to read the
+    # kernel config) but falls back to rootless run if root is not available.
+    # On Linux containers are installed by root and live in root's data
     # dir, so these commands still elevate there to read the right location.
     if canonical == "daemon" and os.getuid() != 0:
         # The daemon is started by the init system and must already be
@@ -203,7 +205,10 @@ def main() -> None:
     if canonical in ("help", "search", "daemon"):
         requires_root = False
     elif IS_TERMUX:
-        if canonical not in ("list", "ps", "info"):
+        if canonical == "info":
+            from chroot_distro.elevate import is_root_available
+            requires_root = is_root_available()
+        elif canonical not in ("list", "ps"):
             requires_root = True
     else:
         requires_root = True
