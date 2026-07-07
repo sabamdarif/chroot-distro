@@ -17,6 +17,7 @@ from chroot_distro.syscalls._constants import (
     CLONE_NEWIPC,
     CLONE_NEWNS,
     CLONE_NEWPID,
+    CLONE_NEWUSER,
     CLONE_NEWUTS,
     MS_PRIVATE,
     MS_REC,
@@ -41,18 +42,33 @@ from chroot_distro.syscalls.unshare import (
 
 log = logging.getLogger(__name__)
 
-# ── Required / optional namespace flags ──────────────────────────────────────
-# The pre-flight check is all-or-nothing over _REQUIRED_NS_FLAGS.
-_REQUIRED_NS_FLAGS: int = CLONE_NEWPID | CLONE_NEWNS | CLONE_NEWUTS | CLONE_NEWIPC
-# Cgroup NS is opportunistic (excluded on Termux/Android entirely).
-_OPTIONAL_NS_FLAGS: int = 0 if IS_TERMUX else CLONE_NEWCGROUP
-_ALL_PROBE_FLAGS: int = _REQUIRED_NS_FLAGS | _OPTIONAL_NS_FLAGS
+# ── Tiered namespace flags ───────────────────────────────────────────────────
+# Only mount namespace is truly mandatory — without it, mounts leak to the host.
+_MANDATORY_NS_FLAGS: int = CLONE_NEWNS
+
+# These provide significant security value and we strongly recommend them,
+# but the system can still function (with reduced isolation) without them.
+_RECOMMENDED_NS_FLAGS: int = (
+    CLONE_NEWPID  # Hides host processes, prevents cross-signal attacks
+    | CLONE_NEWUTS  # Isolates hostname
+    | CLONE_NEWIPC  # Isolates SysV IPC / POSIX message queues
+)
+
+# These provide additional security hardening when available.
+_ENHANCEMENT_NS_FLAGS: int = (
+    CLONE_NEWUSER  # uid remapping, capability scoping
+    | CLONE_NEWCGROUP  # Cgroup isolation
+)
+
+_ALL_PROBE_FLAGS: int = _MANDATORY_NS_FLAGS | _RECOMMENDED_NS_FLAGS | _ENHANCEMENT_NS_FLAGS
+
+# Backward-compat aliases for callers that still use the old names.
+_REQUIRED_NS_FLAGS: int = _MANDATORY_NS_FLAGS | _RECOMMENDED_NS_FLAGS
+_OPTIONAL_NS_FLAGS: int = _ENHANCEMENT_NS_FLAGS
 
 # Backward-compat: the old code stored holder flags as CLI strings.
-# We keep the same _REQUIRED_PROBE_FLAGS tuple for probe_namespace_support()
-# callers that still use the string-based API.
-_REQUIRED_PROBE_FLAGS = ("--pid", "--mount", "--uts", "--ipc")
-_OPTIONAL_PROBE_FLAGS: tuple[str, ...] = () if IS_TERMUX else ("--cgroup",)
+_REQUIRED_PROBE_FLAGS = ("--mount",)
+_OPTIONAL_PROBE_FLAGS: tuple[str, ...] = ("--pid", "--uts", "--ipc", "--user", "--cgroup")
 
 ISOLATION_MODE_NAMESPACE = "namespace"
 ISOLATION_MODE_HOST = "host"
@@ -112,13 +128,95 @@ def holder_is_max_isolation(container_name: str) -> bool:
 # ── Namespace probing (native — no subprocess) ──────────────────────────────
 
 
+@dataclass
+class NamespaceProbeResult:
+    """Result of probing kernel namespace support."""
+
+    supported: int
+    """Bitmask of supported ``CLONE_NEW*`` flags."""
+
+    missing_mandatory: int
+    """If nonzero, isolation truly cannot work (mount NS missing)."""
+
+    missing_recommended: int
+    """Significant security gaps — warn loudly but proceed."""
+
+    missing_enhancements: int
+    """Nice-to-have features — warn informatively."""
+
+    warnings: list[str]
+    """Human-readable warning messages for missing namespaces."""
+
+    @property
+    def has_userns(self) -> bool:
+        """Return True if user namespace isolation is available."""
+        return bool(self.supported & CLONE_NEWUSER)
+
+
+def probe_and_report_namespaces() -> NamespaceProbeResult:
+    """Probe all namespace types and build a structured report.
+
+    Replaces the old all-or-nothing probe. Returns a
+    :class:`NamespaceProbeResult` with per-tier breakdown and
+    human-readable warnings for anything missing.
+    """
+    from chroot_distro.helpers.isolation_warnings import format_isolation_warnings
+
+    # When running as real root (uid 0), skip CLONE_NEWUSER entirely:
+    #   1. Mapping uid 0 → 0 provides no uid isolation
+    #   2. The kernel restricts mount operations inside user namespaces
+    #      (devpts, sysfs, etc. fail with EPERM), breaking container setup
+    #   3. The capability bounding set drop (Component 3) is the proper
+    #      defense-in-depth for the root case
+    # CLONE_NEWUSER is valuable for unprivileged users who need namespace-
+    # scoped capabilities without being real root.
+    real_uid = os.getuid()
+    if real_uid == 0:
+        probe_flags = _ALL_PROBE_FLAGS & ~CLONE_NEWUSER
+        enhancement_flags = _ENHANCEMENT_NS_FLAGS & ~CLONE_NEWUSER
+    else:
+        probe_flags = _ALL_PROBE_FLAGS
+        enhancement_flags = _ENHANCEMENT_NS_FLAGS
+
+    supported = _probe_ns_support(probe_flags)
+    missing_mandatory = _MANDATORY_NS_FLAGS & ~supported
+    missing_recommended = _RECOMMENDED_NS_FLAGS & ~supported
+    missing_enhancements = enhancement_flags & ~supported
+
+    warnings = format_isolation_warnings(missing_recommended, missing_enhancements)
+    return NamespaceProbeResult(
+        supported=supported,
+        missing_mandatory=missing_mandatory,
+        missing_recommended=missing_recommended,
+        missing_enhancements=missing_enhancements,
+        warnings=warnings,
+    )
+
+
+def emit_isolation_warnings(probe_result: NamespaceProbeResult) -> None:
+    """Print isolation warnings to stderr for any missing namespaces."""
+    from chroot_distro.helpers.isolation_warnings import emit_isolation_warnings as _emit
+
+    _emit(
+        probe_result.missing_recommended,
+        probe_result.missing_enhancements,
+        probe_result.supported,
+    )
+
+
 def probe_unshare_flags() -> int:
     """Return a bitmask of supported namespace flags; mount NS is required.
 
     Replaces the old string-list based probe_unshare_flags() that shelled
     out to the ``unshare`` binary.
     """
-    supported = _probe_ns_support(_ALL_PROBE_FLAGS)
+    # Exclude CLONE_NEWUSER when running as root — see
+    # probe_and_report_namespaces() for the rationale.
+    probe_flags = _ALL_PROBE_FLAGS
+    if os.getuid() == 0:
+        probe_flags &= ~CLONE_NEWUSER
+
+    supported = _probe_ns_support(probe_flags)
 
     if not (supported & CLONE_NEWNS):
         raise NamespaceError("Mount namespace not supported by this kernel (unshare CLONE_NEWNS failed).")
@@ -761,6 +859,7 @@ def _create_holder_subprocess(
     use_pty = os.isatty(0)
     if use_pty:
         from chroot_distro.syscalls.chroot import _copy_terminal_size
+
         master_fd, slave_fd = os.openpty()
         _copy_terminal_size(0, master_fd)
 
@@ -787,6 +886,7 @@ def _create_holder_subprocess(
         def _preexec_fn() -> None:
             import fcntl
             import os
+
             with contextlib.suppress(OSError):
                 os.close(master_fd)
             os.setsid()

@@ -27,6 +27,12 @@ nsenter
 from __future__ import annotations
 
 from chroot_distro.syscalls._constants import (
+    CAP_MAC_ADMIN,
+    CAP_MAC_OVERRIDE,
+    CAP_SYS_BOOT,
+    CAP_SYS_MODULE,
+    CAP_SYS_PTRACE,
+    CAP_SYS_RAWIO,
     CLONE_NEWCGROUP,
     CLONE_NEWIPC,
     CLONE_NEWNET,
@@ -47,33 +53,45 @@ from chroot_distro.syscalls._constants import (
     MS_REMOUNT,
     MS_SHARED,
     MS_SLAVE,
+    PR_CAPBSET_DROP,
+    PR_CAPBSET_READ,
     S_IFCHR,
 )
 
 __all__ = [
+    # Capability constants
+    "CAP_MAC_ADMIN",
+    "CAP_MAC_OVERRIDE",
+    "CAP_SYS_BOOT",
+    "CAP_SYS_MODULE",
+    "CAP_SYS_PTRACE",
+    "CAP_SYS_RAWIO",
+    # Clone/namespace flags
     "CLONE_NEWCGROUP",
     "CLONE_NEWIPC",
     "CLONE_NEWNET",
     "CLONE_NEWNS",
     "CLONE_NEWPID",
-    # Clone/namespace flags
     "CLONE_NEWTIME",
     "CLONE_NEWUSER",
     "CLONE_NEWUTS",
-    "MNT_DETACH",
     # Umount flags
+    "MNT_DETACH",
     "MNT_FORCE",
+    # Mount flags
     "MS_BIND",
     "MS_NODEV",
     "MS_NOEXEC",
     "MS_NOSUID",
     "MS_PRIVATE",
-    # Mount flags
     "MS_RDONLY",
     "MS_REC",
     "MS_REMOUNT",
     "MS_SHARED",
     "MS_SLAVE",
+    # prctl constants
+    "PR_CAPBSET_DROP",
+    "PR_CAPBSET_READ",
     # Misc
     "S_IFCHR",
 ]

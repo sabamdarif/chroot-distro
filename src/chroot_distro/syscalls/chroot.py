@@ -23,6 +23,8 @@ import signal
 import subprocess
 import sys
 
+from chroot_distro.syscalls.capabilities import drop_bounding_caps
+
 log = logging.getLogger(__name__)
 
 # ioctl request code to acquire a controlling terminal (standard on all Linux).
@@ -183,6 +185,7 @@ def chroot_and_run(
     capture_output: bool = False,
     text: bool = False,
     timeout: int | None = None,
+    drop_caps: bool = False,
 ) -> subprocess.CompletedProcess:
     """Fork, chroot, exec command, and capture output.
 
@@ -249,6 +252,11 @@ def chroot_and_run(
 
             os.chroot(rootfs)
             os.chdir(workdir)
+
+            # Drop dangerous capabilities from the bounding set when no
+            # user namespace is providing capability scoping.
+            if drop_caps:
+                drop_bounding_caps()
 
             if groups is not None:
                 os.setgroups(groups)

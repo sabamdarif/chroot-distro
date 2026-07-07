@@ -214,6 +214,30 @@ CAP_SYS_ADMIN: int = 21
 CAP_MKNOD: int = 27
 """Allow mknod(2)."""
 
+CAP_SYS_MODULE: int = 16
+"""Allow loading/unloading kernel modules."""
+
+CAP_SYS_RAWIO: int = 17
+"""Allow raw I/O port access."""
+
+CAP_SYS_PTRACE: int = 19
+"""Allow ptrace and process_vm_readv/writev on arbitrary processes."""
+
+CAP_SYS_BOOT: int = 22
+"""Allow reboot(2) and kexec_load(2)."""
+
+CAP_MAC_OVERRIDE: int = 32
+"""Override Mandatory Access Control (e.g. SELinux)."""
+
+CAP_MAC_ADMIN: int = 33
+"""Allow MAC configuration changes."""
+
+PR_CAPBSET_READ: int = 23
+"""Read a capability from the bounding set."""
+
+PR_CAPBSET_DROP: int = 24
+"""Drop a capability from the bounding set (irreversible)."""
+
 # ---------------------------------------------------------------------------
 # prctl(2) constants — from <linux/prctl.h>
 # ---------------------------------------------------------------------------

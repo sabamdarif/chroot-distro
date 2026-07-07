@@ -26,6 +26,7 @@ import time
 
 from chroot_distro.syscalls._constants import (
     CLONE_NEWPID,
+    CLONE_NEWUSER,
     MS_PRIVATE,
     MS_REC,
 )
@@ -167,6 +168,43 @@ def probe_namespace_support(flags: int) -> int:
 
 
 # ---------------------------------------------------------------------------
+# 3a. _write_id_mappings - user namespace uid/gid mapping
+# ---------------------------------------------------------------------------
+
+
+def _write_id_mappings(child_pid: int) -> None:
+    """Write uid/gid mappings for a new user namespace.
+
+    Maps container uid/gid 0 to the calling process's real uid/gid.
+    This means 'root' inside the container is actually the real host
+    user -- capabilities inside the container are namespace-scoped.
+
+    Must be called from the **parent** process after the child has called
+    ``unshare(CLONE_NEWUSER)`` but before the child calls ``exec``.
+
+    The ordering is mandated by the kernel:
+
+    1. Write ``deny`` to ``/proc/<pid>/setgroups`` (required before gid_map).
+    2. Write ``uid_map``.
+    3. Write ``gid_map``.
+    """
+    real_uid = os.getuid()
+    real_gid = os.getgid()
+
+    try:
+        with open(f"/proc/{child_pid}/setgroups", "w") as fh:
+            fh.write("deny")
+    except OSError:
+        log.debug("Failed to write setgroups deny for pid %d (may not be required)", child_pid)
+
+    with open(f"/proc/{child_pid}/uid_map", "w") as fh:
+        fh.write(f"0 {real_uid} 1\n")
+
+    with open(f"/proc/{child_pid}/gid_map", "w") as fh:
+        fh.write(f"0 {real_gid} 1\n")
+
+
+# ---------------------------------------------------------------------------
 # 4. create_holder_process - long-lived namespace holder
 # ---------------------------------------------------------------------------
 
@@ -217,27 +255,104 @@ def create_holder_process(
     # Pipe to send the actual holder's host PID back to the parent.
     pid_r, pid_w = os.pipe()
 
+    # If user namespace is requested, create a dedicated pipe for id-mapping
+    # synchronisation.  The parent writes 'M' after writing uid/gid maps;
+    # the child waits for it before proceeding.
+    has_userns = bool(flags & CLONE_NEWUSER)
+    map_r = map_w = -1
+    if has_userns:
+        map_r, map_w = os.pipe()
+
     launcher_pid = os.fork()
     if launcher_pid > 0:
         # ---- Original (parent) process ----
         os.close(pid_w)
+        if map_r >= 0:
+            os.close(map_r)  # Parent only writes map_w.
 
-        # Read the actual holder's PID from the pipe.
-        try:
-            data = os.read(pid_r, 32)
-        finally:
-            os.close(pid_r)
+        if has_userns:
+            # The child will unshare(CLONE_NEWUSER) and then send its PID
+            # so we can write uid/gid mappings.
+            try:
+                data = os.read(pid_r, 64)
+            except OSError:
+                data = b""
 
-        if not data:
-            # The launcher or holder died before writing the PID.
-            _reap_child(launcher_pid)
-            raise RuntimeError("namespace holder process failed to start (no readiness signal received)")
+            if not data:
+                os.close(pid_r)
+                if map_w >= 0:
+                    os.close(map_w)
+                _reap_child(launcher_pid)
+                raise RuntimeError("namespace holder process failed to start (no readiness signal received)")
 
-        try:
-            holder_pid = int(data.decode().strip())
-        except ValueError as exc:
-            _reap_child(launcher_pid)
-            raise RuntimeError(f"namespace holder process sent invalid PID: {data!r}") from exc
+            decoded = data.decode().strip()
+
+            if decoded.startswith("MAP:"):
+                try:
+                    child_pid = int(decoded.split(":")[1])
+                except (IndexError, ValueError) as exc:
+                    os.close(pid_r)
+                    if map_w >= 0:
+                        os.close(map_w)
+                    _reap_child(launcher_pid)
+                    raise RuntimeError(f"Invalid MAP request from child: {decoded!r}") from exc
+
+                # Write uid/gid mappings for the child's user namespace.
+                try:
+                    _write_id_mappings(child_pid)
+                except OSError as exc:
+                    log.warning("Failed to write id mappings for pid %d: %s", child_pid, exc)
+
+                # Signal the child that mappings are written.
+                if map_w >= 0:
+                    with contextlib.suppress(OSError):
+                        os.write(map_w, b"M")
+                    os.close(map_w)
+                    map_w = -1
+
+                # Now read the actual holder PID.
+                try:
+                    data2 = os.read(pid_r, 32)
+                except OSError:
+                    data2 = b""
+                os.close(pid_r)
+
+                if not data2:
+                    _reap_child(launcher_pid)
+                    raise RuntimeError("namespace holder failed after id mapping")
+
+                try:
+                    holder_pid = int(data2.decode().strip())
+                except ValueError as exc:
+                    _reap_child(launcher_pid)
+                    raise RuntimeError(f"holder sent invalid PID after mapping: {data2!r}") from exc
+            else:
+                # Child decided not to use user namespace (fallback).
+                os.close(pid_r)
+                if map_w >= 0:
+                    os.close(map_w)
+                    map_w = -1
+                try:
+                    holder_pid = int(decoded)
+                except ValueError as exc:
+                    _reap_child(launcher_pid)
+                    raise RuntimeError(f"namespace holder sent invalid PID: {data!r}") from exc
+        else:
+            # No user namespace -- simple path.
+            try:
+                data = os.read(pid_r, 32)
+            finally:
+                os.close(pid_r)
+
+            if not data:
+                _reap_child(launcher_pid)
+                raise RuntimeError("namespace holder process failed to start (no readiness signal received)")
+
+            try:
+                holder_pid = int(data.decode().strip())
+            except ValueError as exc:
+                _reap_child(launcher_pid)
+                raise RuntimeError(f"namespace holder process sent invalid PID: {data!r}") from exc
 
         # If the caller provided a ready_fd, write the ready byte.
         if ready_fd >= 0:
@@ -250,12 +365,54 @@ def create_holder_process(
 
     # ---- Launcher (child) process ----
     os.close(pid_r)
+    if map_w >= 0:
+        os.close(map_w)  # Child only reads map_r.
 
     try:
         py_unshare(flags)
     except OSError:
-        log.exception("unshare failed in launcher")
-        os._exit(1)
+        if has_userns:
+            # User namespace may have caused the failure -- retry without it.
+            log.warning(
+                "unshare with CLONE_NEWUSER failed; retrying without user "
+                "namespace. Container root will have real host capabilities."
+            )
+            flags &= ~CLONE_NEWUSER
+            has_userns = False
+            if map_r >= 0:
+                os.close(map_r)
+                map_r = -1
+            try:
+                py_unshare(flags)
+            except OSError:
+                log.exception("unshare failed in launcher (second attempt)")
+                os._exit(1)
+        else:
+            log.exception("unshare failed in launcher")
+            os._exit(1)
+
+    if has_userns:
+        # Tell the parent our PID so it can write uid/gid mappings.
+        launcher_pid_val = os.getpid()
+        try:
+            os.write(pid_w, f"MAP:{launcher_pid_val}\n".encode())
+        except OSError:
+            log.exception("failed to send MAP request to parent")
+            os._exit(1)
+
+        # Wait for the parent to finish writing mappings.
+        if map_r >= 0:
+            try:
+                signal_byte = os.read(map_r, 1)
+            except OSError:
+                signal_byte = b""
+            finally:
+                os.close(map_r)
+                map_r = -1
+
+            if signal_byte != b"M":
+                log.error("Parent did not confirm id mapping write")
+                os._exit(1)
 
     if flags & CLONE_NEWPID:
         # Fork again so the grandchild becomes PID 1 in the new PID namespace.

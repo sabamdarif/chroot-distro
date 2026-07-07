@@ -880,47 +880,35 @@ def _command_login_inner_once(container_name: str, args) -> None:
                 )
 
     # Decide the effective namespace state up front so it can gate both the
-    # bind set and the special mounts below. Namespace isolation is
-    # all-or-nothing: probe the full requested set before touching the session
-    # counter or any mount.
+    # bind set and the special mounts below.  We use a tiered approach:
+    # only mount namespace is truly mandatory; everything else warns and
+    # proceeds with whatever the kernel supports.
     use_namespaces = use_ns_requested and not minimal
+    has_userns = False  # Track whether user namespace is active for cap drop.
     if use_namespaces:
-        missing = namespace.probe_namespace_support()
-        if missing:
-            if max_isolation and IS_TERMUX:
-                # Android kernels frequently cannot sustain the namespace
-                # holder (SELinux blocks the fresh tmpfs /dev; the chrooted
-                # holder dies and nsenter then fails to open even ns/mnt).
-                # Degrade to chroot-only maximum isolation: still ZERO host
-                # bind mounts, fresh pseudo-filesystems mounted directly under
-                # the rootfs, but no namespaces. Warn that without a PID
-                # namespace the /proc/<pid>/root escape cannot be closed here.
+        probe_result = namespace.probe_and_report_namespaces()
+        if probe_result.missing_mandatory:
+            # Mount namespace is the minimum for any kind of isolation.
+            if max_isolation:
                 warn(
-                    "Namespace isolation is unavailable on this Android kernel "
-                    f"(missing: {' '.join(missing)}). Using chroot-only maximum "
-                    "isolation: no host paths are bound, but without a PID "
-                    "namespace the container is NOT fully escape-proof on "
-                    "Android (e.g. via /proc/<pid>/root). For full isolation "
-                    "use a Linux host whose kernel supports namespaces."
+                    "Mount namespace (CLONE_NEWNS) is not supported on this "
+                    "kernel. This is the minimum requirement for namespace "
+                    "isolation. Falling back to chroot-only maximum isolation "
+                    "(no host paths bound, but without namespace isolation the "
+                    "container is NOT fully escape-proof, e.g. via "
+                    "/proc/<pid>/root)."
                 )
-                use_namespaces = False
-            elif max_isolation:
-                # On non-Android hosts, refuse rather than silently downgrade:
-                # the user explicitly asked for the strong, escape-proof mode.
-                crit_error(
-                    "--isolated requires Linux namespace isolation, but this "
-                    f"kernel is missing: {' '.join(missing)}. Isolation needs "
-                    "root with CAP_SYS_ADMIN and kernel support for the "
-                    "mount/PID/UTS/IPC namespaces. Run without --isolated, or "
-                    "use CD_USE_NS=1 on a kernel that supports it."
-                )
-                sys.exit(1)
             else:
                 warn(
-                    "Namespace isolation unavailable on this kernel "
-                    f"(missing: {' '.join(missing)}). Falling back to non-isolated login."
+                    "Mount namespace unavailable on this kernel (missing: --mount). Falling back to non-isolated login."
                 )
-                use_namespaces = False
+            use_namespaces = False
+        else:
+            # Mount namespace works — emit warnings for anything missing,
+            # but proceed with whatever we have.
+            has_userns = probe_result.has_userns
+            if probe_result.missing_recommended or probe_result.missing_enhancements:
+                namespace.emit_isolation_warnings(probe_result)
 
     # 1. Resolve all bind mounts
     resolved_binds, rslave_targets = bindings.get_bindings(
@@ -1389,6 +1377,7 @@ def _command_login_inner_once(container_name: str, args) -> None:
         try:
             if getattr(holder, "master_fd", -1) >= 0:
                 from chroot_distro.syscalls.chroot import _pty_relay
+
                 _pty_relay(holder.master_fd, holder.proc.pid)
             else:
                 holder.proc.wait()
@@ -1425,6 +1414,7 @@ def _command_login_inner_once(container_name: str, args) -> None:
                     groups=chroot_config.groups,
                     workdir=chroot_config.workdir,
                     env=child_env,
+                    drop_caps=not has_userns,
                 )
             elif holder is not None:
                 # Namespace path: enter namespaces via native setns(2) + PTY.
@@ -1433,6 +1423,7 @@ def _command_login_inner_once(container_name: str, args) -> None:
                     holder._live_ns_flags(),
                     chroot_args,
                     env=child_env,
+                    drop_caps=not has_userns,
                 )
             else:
                 # Fallback: should not normally be reached.

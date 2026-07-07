@@ -480,6 +480,7 @@ def _render_basic() -> None:
     module_dir = "unknown"
     try:
         import chroot_distro
+
         if chroot_distro.__file__:
             module_dir = os.path.dirname(os.path.dirname(os.path.abspath(chroot_distro.__file__)))
     except Exception:

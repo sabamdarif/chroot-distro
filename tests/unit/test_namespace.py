@@ -70,14 +70,47 @@ def test_probe_unshare_flags_requires_mount(mock_probe):
 
 @patch("chroot_distro.helpers.namespace._probe_ns_support")
 def test_probe_namespace_support_reports_missing(mock_probe):
-    # Mock probe to report CLONE_NEWNS and CLONE_NEWPID as supported,
-    # but UTS and IPC as unsupported.
+    # With the tiered architecture, _REQUIRED_PROBE_FLAGS only contains
+    # "--mount".  When mount NS is unsupported, it should be reported.
+    mock_probe.return_value = CLONE_NEWPID  # mount NS NOT supported
+    missing = ns.probe_namespace_support(ns._REQUIRED_PROBE_FLAGS)
+    assert "--mount" in missing
+
+    # When mount NS IS supported, required probe returns empty.
     mock_probe.return_value = CLONE_NEWNS | CLONE_NEWPID
     missing = ns.probe_namespace_support(ns._REQUIRED_PROBE_FLAGS)
+    assert missing == []
+
+    # Optional probe flags include pid, uts, ipc, user, cgroup.
+    mock_probe.return_value = CLONE_NEWNS | CLONE_NEWPID
+    missing = ns.probe_namespace_support(ns._OPTIONAL_PROBE_FLAGS)
     assert "--uts" in missing
     assert "--ipc" in missing
-    assert "--mount" not in missing
     assert "--pid" not in missing
+
+
+@patch("chroot_distro.helpers.namespace._probe_ns_support")
+def test_probe_and_report_namespaces_tiered(mock_probe):
+    # Simulate a kernel that supports mount, pid, uts, ipc but NOT user or cgroup.
+    from chroot_distro.syscalls._constants import CLONE_NEWUSER
+    mock_probe.return_value = CLONE_NEWNS | CLONE_NEWPID | CLONE_NEWUTS | CLONE_NEWIPC
+    result = ns.probe_and_report_namespaces()
+    assert result.missing_mandatory == 0
+    assert result.missing_recommended == 0
+    assert result.missing_enhancements & CLONE_NEWUSER
+    assert result.missing_enhancements & CLONE_NEWCGROUP
+    assert result.has_userns is False
+
+    # Simulate full support.
+    mock_probe.return_value = (
+        CLONE_NEWNS | CLONE_NEWPID | CLONE_NEWUTS | CLONE_NEWIPC
+        | CLONE_NEWUSER | CLONE_NEWCGROUP
+    )
+    result = ns.probe_and_report_namespaces()
+    assert result.missing_mandatory == 0
+    assert result.missing_recommended == 0
+    assert result.missing_enhancements == 0
+    assert result.has_userns is True
 
 
 # ---------------------------------------------------------------------------

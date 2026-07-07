@@ -72,7 +72,7 @@ KERNEL_FLAG_GROUPS: tuple[KernelFlagGroup, ...] = (
             KernelFlag("PID_NS", "PID namespace (escape-proof /proc)", required=True),
             KernelFlag("UTS_NS", "UTS namespace (container hostname)", required=True),
             KernelFlag("IPC_NS", "IPC namespace", required=True),
-            KernelFlag("USER_NS", "user namespace (rootless extras)", required=False),
+            KernelFlag("USER_NS", "user namespace (uid remapping, capability scoping)", required=False),
             KernelFlag("NET_NS", "network namespace (not yet used)", required=False),
         ),
     ),

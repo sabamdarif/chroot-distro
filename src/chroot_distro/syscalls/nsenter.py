@@ -44,6 +44,7 @@ from chroot_distro.syscalls._constants import (
     NS_FILE_MAP,
 )
 from chroot_distro.syscalls._libc import py_setns
+from chroot_distro.syscalls.capabilities import drop_bounding_caps
 
 log = logging.getLogger(__name__)
 
@@ -459,6 +460,7 @@ def enter_and_run_with_pty(
     *,
     env: dict[str, str] | None = None,
     fork_for_pid: bool = True,
+    drop_caps: bool = False,
 ) -> int:
     """Enter namespaces via native ``setns(2)`` and exec *command* with a PTY.
 
@@ -502,13 +504,16 @@ def enter_and_run_with_pty(
                 inner_pid = os.fork()
                 if inner_pid != 0:
                     _, status = os.waitpid(inner_pid, 0)
-                    os._exit(
-                        os.WEXITSTATUS(status) if os.WIFEXITED(status)
-                        else 128 + os.WTERMSIG(status)
-                    )
+                    os._exit(os.WEXITSTATUS(status) if os.WIFEXITED(status) else 128 + os.WTERMSIG(status))
+
+            # Drop dangerous capabilities when no user namespace is
+            # providing capability scoping.
+            if drop_caps:
+                drop_bounding_caps()
 
             os.execvpe(
-                command[0], command,
+                command[0],
+                command,
                 env if env is not None else dict(os.environ),
             )
         except BaseException:
@@ -519,4 +524,3 @@ def enter_and_run_with_pty(
         os.close(slave_fd)
         return _pty_relay(master_fd, child_pid)
     return _wait_for_child_with_signals(child_pid)
-

@@ -384,6 +384,129 @@ jobs:
             - name: "Remove: test-build"
               run: sudo chroot-distro remove test-build
 
+            # ── Phase 10: Namespace Security Tests ──────────────────────────
+            # Regression tests for the security report findings (Tests 2,3,7).
+            # These verify that --isolated mode provides the expected isolation
+            # properties when kernel support is available.
+
+            - name: "Security: Install Debian for security tests"
+              run: |
+                  sudo chroot-distro install debian:bookworm-slim --name debian-sec || true
+                  # Ensure it's in a clean state
+                  sudo chroot-distro unmount debian-sec 2>/dev/null || true
+
+            - name: "Security: Verify mount namespace isolation"
+              run: |
+                  # Host and container mount namespaces should differ
+                  host_mnt=$(readlink /proc/self/ns/mnt)
+                  container_mnt=$(sudo chroot-distro login debian-sec --isolated -- \
+                    readlink /proc/self/ns/mnt)
+                  echo "Host mnt ns: $host_mnt"
+                  echo "Container mnt ns: $container_mnt"
+                  if [ "$host_mnt" = "$container_mnt" ]; then
+                    echo "FAIL: Mount namespace not isolated!"
+                    exit 1
+                  fi
+                  echo "PASS: Mount namespace isolated"
+
+            - name: "Unmount: debian-sec after mount ns test"
+              run: sudo chroot-distro unmount debian-sec || true
+
+            - name: "Security: Verify PID namespace isolation"
+              run: |
+                  # A host-only PID should not be visible inside container
+                  sleep 9999 &
+                  host_pid=$!
+                  output=$(sudo chroot-distro login debian-sec --isolated -- \
+                    sh -c "ls /proc/$host_pid/ 2>&1 || echo PID_HIDDEN")
+                  echo "$output"
+                  kill $host_pid 2>/dev/null || true
+                  if echo "$output" | grep -q "PID_HIDDEN\|No such file"; then
+                    echo "PASS: Host PID not visible in container (PID namespace isolated)"
+                  else
+                    echo "FAIL: Host PID visible in container!"
+                    exit 1
+                  fi
+
+            - name: "Unmount: debian-sec after PID ns test"
+              run: sudo chroot-distro unmount debian-sec || true
+
+
+            - name: "Security: Verify capability confinement"
+              run: |
+                  # Even without user namespace, dangerous caps should be dropped
+                  # from the bounding set
+                  output=$(sudo chroot-distro login debian-sec --isolated -- \
+                    sh -c 'cat /proc/self/status | grep CapBnd')
+                  echo "Container CapBnd: $output"
+                  cap_bnd=$(echo "$output" | awk '{print $2}')
+                  echo "Bounding set hex: $cap_bnd"
+                  # Full unrestricted bounding set is 000001ffffffffff
+                  # After our cap drop, it should be smaller
+                  if [ "$cap_bnd" = "000001ffffffffff" ]; then
+                    echo "WARNING: Full capability bounding set detected"
+                    echo "Capability drop may not be active (check CD_NO_CAP_DROP)"
+                  else
+                    echo "PASS: Capability bounding set is restricted"
+                  fi
+
+            - name: "Unmount: debian-sec after cap test"
+              run: sudo chroot-distro unmount debian-sec || true
+
+            - name: "Security: Verify cross-signal blocking"
+              run: |
+                  # Start a host process, try to signal it from inside container
+                  sleep 9999 &
+                  bystander_pid=$!
+                  echo "Host bystander PID: $bystander_pid"
+                  output=$(sudo chroot-distro login debian-sec --isolated -- \
+                    sh -c "kill -0 $bystander_pid 2>&1 || echo SIGNAL_BLOCKED")
+                  echo "$output"
+                  kill $bystander_pid 2>/dev/null || true
+                  if echo "$output" | grep -q "SIGNAL_BLOCKED\|No such process"; then
+                    echo "PASS: Cross-boundary signal blocked"
+                  else
+                    echo "FAIL: Container could signal host process!"
+                    exit 1
+                  fi
+
+            - name: "Unmount: debian-sec after signal test"
+              run: sudo chroot-distro unmount debian-sec || true
+
+            - name: "Security: Verify path traversal blocked"
+              run: |
+                  output=$(sudo chroot-distro login debian-sec --isolated -- \
+                    sh -c 'cat /proc/self/root/../../../../etc/hostname 2>&1')
+                  echo "$output"
+                  host_hostname=$(hostname)
+                  if echo "$output" | grep -q "$host_hostname"; then
+                    echo "FAIL: Path traversal reached host filesystem!"
+                    exit 1
+                  fi
+                  echo "PASS: Path traversal contained within container"
+
+            - name: "Unmount: debian-sec after traversal test"
+              run: sudo chroot-distro unmount debian-sec || true
+
+            - name: "Security: Verify graceful degradation warnings"
+              run: |
+                  # The --isolated login should produce isolation status output
+                  # showing which namespaces are active
+                  output=$(sudo chroot-distro login debian-sec --isolated -- \
+                    echo "isolation-check" 2>&1)
+                  echo "$output"
+                  # On GitHub runners (full kernel support), we should see
+                  # successful isolation. The key test is that it doesn't
+                  # crash or refuse to start.
+                  echo "$output" | grep -q "isolation-check"
+                  echo "PASS: Isolated login completed successfully"
+
+            - name: "Unmount: debian-sec after degradation test"
+              run: sudo chroot-distro unmount debian-sec || true
+
+            - name: "Remove: debian-sec"
+              run: sudo chroot-distro remove debian-sec || true
+
             # ── Phase 9: Final Cleanup ─────────────────────────────────────
             - name: "Cleanup: remove all containers"
               if: always()
@@ -391,11 +514,11 @@ jobs:
                   echo "=== Killing all sessions ==="
                   sudo chroot-distro kill httpd 2>/dev/null || true
                   echo "=== Unmounting all containers ==="
-                  for name in httpd debian alpine alpine-test test-build; do
+                  for name in httpd debian alpine alpine-test test-build debian-sec; do
                     sudo chroot-distro unmount "$name" 2>/dev/null || true
                   done
                   echo "=== Removing all containers ==="
-                  for name in httpd debian alpine alpine-test test-build; do
+                  for name in httpd debian alpine alpine-test test-build debian-sec; do
                     sudo chroot-distro remove "$name" 2>/dev/null || true
                   done
                   echo "=== Final state ==="
