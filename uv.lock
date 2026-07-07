@@ -330,7 +330,7 @@ wheels = [
 
 [[package]]
 name = "chroot-distro"
-version = "2.5.2"
+version = "2.5.3"
 source = { editable = "." }
 dependencies = [
     { name = "backports-zstd", marker = "python_full_version < '3.14'" },
