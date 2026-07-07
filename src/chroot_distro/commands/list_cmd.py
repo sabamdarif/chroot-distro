@@ -32,7 +32,10 @@ class _VerboseInfo:
 def _iter_container_names() -> list[str]:
     try:
         return sorted(e for e in os.listdir(CONTAINERS_DIR) if os.path.isdir(container_rootfs(e)))
-    except OSError:
+    except OSError as exc:
+        if exc.errno in (errno.EACCES, errno.EPERM):
+            from chroot_distro.message import warn
+            warn(f"Permission denied: cannot read containers directory '{CONTAINERS_DIR}'")
         return []
 
 

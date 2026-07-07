@@ -257,3 +257,14 @@ def test_elevate_forwards_cd_use_ns_via_su():
     assert "CD_USE_NS=1" in cmd_str
     # Sentinel + CD_USE_NS appear before the program inside the command string.
     assert cmd_str.index("CD_USE_NS=1") < cmd_str.index("/usr/bin/chroot-distro")
+
+
+def test_elevate_termux_stub_su():
+    with (
+        patch("chroot_distro.elevate.is_root", return_value=False),
+        patch("chroot_distro.elevate.IS_TERMUX", True),
+        patch("chroot_distro.elevate._find_termux_su", return_value="/data/data/com.termux/files/usr/bin/su"),
+        patch("chroot_distro.elevate._su_help_text", return_value="No su program found on this device. Termux does not supply tools for rooting"),
+        pytest.raises(RootRequiredError, match="the 'su' command on this device is a Termux stub"),
+    ):
+        elevate_or_die()

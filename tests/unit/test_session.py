@@ -262,3 +262,42 @@ def test_command_ps_table_with_detached_session(capsys):
     finally:
         fd1.close()
         fd2.close()
+
+
+def test_register_session_makedirs_fails():
+    def mock_makedirs(*args, **kwargs):
+        raise OSError("Permission denied")
+
+    with patch("os.makedirs", mock_makedirs), patch("logging.Logger.warning") as mock_warn:
+        res = session_registry.register_session(
+            container="ubuntu", kind="login", command_argv=["bash"], user="root"
+        )
+        assert res is None
+        mock_warn.assert_called_once()
+        assert "Failed to create sessions directory" in mock_warn.call_args[0][0]
+
+
+def test_register_session_open_fails():
+    def mock_open(*args, **kwargs):
+        raise OSError("Permission denied")
+
+    with patch("os.makedirs", lambda *a, **k: None), patch("builtins.open", mock_open), patch("logging.Logger.warning") as mock_warn:
+        res = session_registry.register_session(
+            container="ubuntu", kind="login", command_argv=["bash"], user="root"
+        )
+        assert res is None
+        mock_warn.assert_called_once()
+        assert "Failed to create temporary session file" in mock_warn.call_args[0][0]
+
+
+def test_register_session_flock_fails(tmp_path):
+    def mock_flock(*args, **kwargs):
+        raise OSError("Flock failed")
+
+    with patch("fcntl.flock", mock_flock), patch("logging.Logger.warning") as mock_warn:
+        res = session_registry.register_session(
+            container="ubuntu", kind="login", command_argv=["bash"], user="root"
+        )
+        assert res is None
+        mock_warn.assert_called_once()
+        assert "Failed to flock session file" in mock_warn.call_args[0][0]

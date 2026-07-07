@@ -100,12 +100,14 @@ class _FlockBase:
 
         try:
             os.makedirs(os.path.dirname(self._lock_path), exist_ok=True)
-        except OSError:
+        except OSError as exc:
+            log.warning("Could not create lock directory '%s': %s. Proceeding unlocked.", os.path.dirname(self._lock_path), exc)
             return True  # Cannot create locks dir; proceed unlocked.
 
         try:
             fd = open(self._lock_path, "w")  # noqa: SIM115
-        except OSError:
+        except OSError as exc:
+            log.warning("Could not open/create lock file '%s': %s. Proceeding unlocked.", self._lock_path, exc)
             return True  # Cannot open/create lock file; proceed unlocked.
 
         if self._inheritable:

@@ -88,6 +88,10 @@ def installed_containers() -> list[str]:
             e for e in os.listdir(CONTAINERS_DIR)
             if os.path.isdir(container_rootfs(e))
         )
-    except OSError:
+    except OSError as exc:
+        import errno
+        if exc.errno in (errno.EACCES, errno.EPERM):
+            import logging
+            logging.getLogger(__name__).warning("Permission denied: cannot read containers directory '%s'", CONTAINERS_DIR)
         return []
 

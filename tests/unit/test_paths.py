@@ -93,3 +93,18 @@ def test_container_locks_for_spec_pair():
 
     locks = container_locks_for_spec_pair("/src", "/dst", "copy")
     assert len(locks) == 0
+
+
+def test_installed_containers_permission_denied(monkeypatch):
+    import errno
+
+    def _deny_listdir(*_args, **_kwargs):
+        raise OSError(errno.EACCES, "Permission denied")
+
+    monkeypatch.setattr("os.listdir", _deny_listdir)
+
+    with patch("logging.Logger.warning") as mock_warn:
+        from chroot_distro.paths import installed_containers, CONTAINERS_DIR
+        assert installed_containers() == []
+        mock_warn.assert_called_once()
+        assert "Permission denied: cannot read containers directory" in mock_warn.call_args[0][0]

@@ -21,10 +21,13 @@ from __future__ import annotations
 import contextlib
 import fcntl
 import json
+import logging
 import os
 import time
 
 from chroot_distro.constants import SESSIONS_DIR
+
+log = logging.getLogger(__name__)
 
 
 def register_session(
@@ -48,7 +51,8 @@ def register_session(
     """
     try:
         os.makedirs(SESSIONS_DIR, exist_ok=True)
-    except OSError:
+    except OSError as exc:
+        log.warning("Failed to create sessions directory '%s': %s", SESSIONS_DIR, exc)
         return None
 
     pid = os.getpid()
@@ -69,7 +73,8 @@ def register_session(
 
     try:
         fd = open(tmp_path, "w")  # noqa: SIM115
-    except OSError:
+    except OSError as exc:
+        log.warning("Failed to create temporary session file '%s': %s", tmp_path, exc)
         return None
 
     # Clear O_CLOEXEC so the fd (and its flock) can be inherited by child
@@ -79,7 +84,8 @@ def register_session(
 
     try:
         fcntl.flock(fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
+    except OSError as exc:
+        log.warning("Failed to flock session file '%s': %s", tmp_path, exc)
         _safe_close(fd)
         _safe_unlink(tmp_path)
         return None
@@ -88,7 +94,8 @@ def register_session(
         json.dump(payload, fd)
         fd.write("\n")
         fd.flush()
-    except OSError:
+    except OSError as exc:
+        log.warning("Failed to write session details to '%s': %s", tmp_path, exc)
         _safe_close(fd)
         _safe_unlink(tmp_path)
         return None
@@ -97,7 +104,8 @@ def register_session(
     # not the path, so the rename preserves the lock.
     try:
         os.replace(tmp_path, final_path)
-    except OSError:
+    except OSError as exc:
+        log.warning("Failed to publish session file (rename '%s' to '%s'): %s", tmp_path, final_path, exc)
         _safe_close(fd)
         _safe_unlink(tmp_path)
         return None
@@ -223,7 +231,8 @@ def containers_with_active_pids() -> dict[str, list[int]]:
     result: dict[str, list[int]] = {}
     try:
         names = installed_containers()
-    except Exception:
+    except Exception as exc:
+        log.warning("Failed to list installed containers: %s", exc)
         return result
     for name in names:
         pids = get_active_chroot_pids(name)

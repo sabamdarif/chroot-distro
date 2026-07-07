@@ -112,3 +112,19 @@ def test_format_table_aligns_columns():
     assert "STATUS" in lines[0]
     assert "long-name" in lines[2]
     assert "ghcr.io/org/image:tag" in lines[2]
+
+
+def test_iter_container_names_permission_denied(monkeypatch):
+    import errno
+
+    def _deny_listdir(*_args, **_kwargs):
+        raise OSError(errno.EACCES, "Permission denied")
+
+    monkeypatch.setattr("os.listdir", _deny_listdir)
+
+    mock_warn = MagicMock()
+    monkeypatch.setattr("chroot_distro.message.warn", mock_warn)
+
+    from chroot_distro.commands.list_cmd import CONTAINERS_DIR, _iter_container_names
+    assert _iter_container_names() == []
+    mock_warn.assert_called_once_with(f"Permission denied: cannot read containers directory '{CONTAINERS_DIR}'")

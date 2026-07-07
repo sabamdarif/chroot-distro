@@ -105,3 +105,27 @@ def test_build_lock(tmp_path):
         lock1.release()
         assert lock2.acquire() is True
         lock2.release()
+
+
+def test_locking_oserror_warnings(tmp_path):
+    lock_path = tmp_path / "denied/my_container.lock"
+    lock = ContainerLock("my_container", exclusive=True, command="login")
+    lock._lock_path = str(lock_path)
+
+    # 1. os.makedirs fails
+    def mock_makedirs(*args, **kwargs):
+        raise OSError("Permission denied")
+
+    with patch("os.makedirs", mock_makedirs), patch("logging.Logger.warning") as mock_warn:
+        assert lock.acquire() is True
+        mock_warn.assert_called_once()
+        assert "Could not create lock directory" in mock_warn.call_args[0][0]
+
+    # 2. open fails
+    def mock_open(*args, **kwargs):
+        raise OSError("Permission denied")
+
+    with patch("os.makedirs", lambda *a, **k: None), patch("builtins.open", mock_open), patch("logging.Logger.warning") as mock_warn:
+        assert lock.acquire() is True
+        mock_warn.assert_called_once()
+        assert "Could not open/create lock file" in mock_warn.call_args[0][0]

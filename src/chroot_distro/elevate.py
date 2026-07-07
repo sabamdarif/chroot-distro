@@ -256,6 +256,11 @@ def _elevate_termux() -> None:
         )
 
     help_text = _su_help_text(su)
+    if "Termux does not supply tools" in help_text or "No su program found" in help_text:
+        raise RootRequiredError(
+            "chroot-distro requires root, but the 'su' command on this device is a Termux stub. "
+            "Is this device rooted (Magisk, KernelSU, APatch)?"
+        )
     # su changes the working directory; restore it on the root side like
     # termux-sudo does (`cd -- $CURRENT_WORKING_DIR`).
     try:
@@ -264,8 +269,11 @@ def _elevate_termux() -> None:
         cwd = "/"
     command = (
         _termux_root_env_exports()
-        + "; cd " + shlex.quote(cwd) + " 2>/dev/null || cd /"
-        + "; exec " + shlex.join(get_reexec_argv())
+        + "; cd "
+        + shlex.quote(cwd)
+        + " 2>/dev/null || cd /"
+        + "; exec "
+        + shlex.join(get_reexec_argv())
     )
 
     argv: list[str] = [su]
