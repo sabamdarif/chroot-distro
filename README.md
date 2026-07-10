@@ -448,6 +448,7 @@ chroot-distro login ubuntu --get-chroot-cmd
 | `-b`, `--bind SRC[:DST]` | Bind-mount a custom host path (repeatable). `DST` must be an absolute guest path. Ignored under `--isolated`. |
 | `-w`, `--work-dir PATH` | Initial working directory (default: user's home). |
 | `-e`, `--env VAR=VALUE` | Set a guest environment variable (repeatable). |
+| `--entrypoint EXECUTABLE` | (`run` only) Replace the image Entrypoint for this run; Cmd is cleared and any trailing `-- args` become the new arguments. |
 | `--get-chroot-cmd` | Print the fully assembled `env` + `chroot` command line and exit. |
 
 #### Display sharing
@@ -602,6 +603,15 @@ Entrypoint/Cmd).
 | Only `Entrypoint` | `ARGS` | `Entrypoint + ARGS` |
 | Neither | _(none)_ | Error |
 | Neither | `ARGS` | `ARGS` |
+| any | `--entrypoint EXE` | `EXE` (Entrypoint replaced, Cmd cleared) |
+| any | `--entrypoint EXE -- ARGS` | `EXE + ARGS` |
+
+`--entrypoint` (or the `CD_ENTRYPOINT` env var) replaces the image
+Entrypoint entirely for this run, mirroring `docker run --entrypoint`;
+Cmd is cleared and any trailing `-- args` become the new arguments.
+The `CD_USER`, `CD_WORKDIR`, and `CD_ENV` environment variables provide
+the same defaults as `--user`, `--work-dir`, and `--env` (a CLI flag
+always wins over the matching env var).
 
 When `--work-dir` is not given, `run` uses the image `WorkingDir`
 (falling back to `/`).
@@ -614,6 +624,7 @@ When `--work-dir` is not given, `run` uses the image `WorkingDir`
 ```sh
 chroot-distro run hello-world
 chroot-distro run ubuntu -- /bin/echo hi
+chroot-distro run ubuntu --entrypoint /bin/echo -- overridden
 chroot-distro run nextcloud --get-chroot-cmd
 ```
 
@@ -1163,6 +1174,10 @@ The application dynamically computes paths based on the environment (Termux/Andr
 | `CD_DOWNLOAD_MAX_RETRIES` | Maximum retry attempts per connection failure (default `3`, clamped between `0` and `20`). |
 | `CD_USE_NS` | When truthy (`1`/`true`/`yes`/`on`), every `login`/`run` uses full Linux namespace isolation (mount, PID, UTS, IPC, and cgroup when supported) **without** skipping any default bind mounts. Differs from `--isolated`, which also reduces the mount set. Forwarded across privilege elevation automatically. |
 | `CD_FORCE_NO_COLORS` | When set, disables ANSI colours in Chroot-Distro output. |
+| `CD_USER` | Default user for `login`/`run` (`name`, `uid`, or `uid:gid`) when `--user` is not given. Precedence: `--user` > `CD_USER` > image `User` > `root`. |
+| `CD_WORKDIR` | Default working directory for `login`/`run` when `--work-dir` is not given. Precedence: `--work-dir` > `CD_WORKDIR` > image `WorkingDir` > home/`/`. |
+| `CD_ENV` | Newline-separated `VAR=VALUE` entries added to the guest environment (lines without `=` are ignored). Layered before `--env`, so a matching `--env` wins. |
+| `CD_ENTRYPOINT` | Replaces the image Entrypoint for `run` when `--entrypoint` is not given (Cmd is cleared). Precedence: `--entrypoint` > `CD_ENTRYPOINT` > image `Entrypoint`. `run` only. |
 | `COLUMNS` | Fallback terminal width for `--help` rendering. |
 | `TERM`, `COLORTERM` | Inherited into the guest (always; even in `--minimal`). `TERM` defaults to `xterm-256color` when unset on the host. |
 

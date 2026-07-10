@@ -369,6 +369,13 @@ def _run(sub):
     p.add_argument("container_name", nargs="?", default=None)
     _add_login_or_run_common(p)
     p.add_argument(
+        "--entrypoint",
+        dest="entrypoint",
+        default=None,
+        metavar="EXECUTABLE",
+        help="Replace the image Entrypoint for this run (Cmd is cleared).",
+    )
+    p.add_argument(
         "-d",
         "--detach",
         dest="detach",

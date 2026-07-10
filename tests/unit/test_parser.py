@@ -103,3 +103,25 @@ def test_parser_run_detach_with_run_args():
     args, _ = parse_cli_args(parser, ["run", "alpine", "--detach", "--", "sleep", "100"])
     assert args.detach is True
     assert args.run_args == ["sleep", "100"]
+
+
+def test_parser_run_entrypoint():
+    parser = build_parser()
+    args, _ = parse_cli_args(parser, ["run", "alpine", "--entrypoint", "/bin/echo", "--", "hi"])
+    assert args.command == "run"
+    assert args.entrypoint == "/bin/echo"
+    assert args.run_args == ["hi"]
+
+
+def test_parser_run_entrypoint_defaults_none():
+    parser = build_parser()
+    args = parser.parse_args(["run", "alpine"])
+    assert args.entrypoint is None
+
+
+def test_parser_login_has_no_entrypoint():
+    # --entrypoint is a run-only flag; login must not define it.
+    parser = build_parser()
+    args, unknown = parse_cli_args(parser, ["login", "alpine", "--entrypoint", "/bin/echo"])
+    assert not hasattr(args, "entrypoint")
+    assert "--entrypoint" in unknown

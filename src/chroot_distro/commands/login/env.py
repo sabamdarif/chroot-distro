@@ -124,6 +124,28 @@ def _read_manifest_config(container_dir: str) -> dict:
         return {}
 
 
+def resolve_override(flag_value: str | None, env_var_name: str) -> str | None:
+    """Return the effective override: CLI flag wins, else the CD_* env var, else None.
+
+    Implements the shared precedence ``CLI flag > CD_* env > (caller's image
+    default)`` for the run/login override surface.
+    """
+    if flag_value:
+        return flag_value
+    val = os.environ.get(env_var_name, "").strip()
+    return val or None
+
+
+def read_cd_env() -> list[str]:
+    """Return ``CD_ENV`` as a list of ``VAR=VALUE`` entries.
+
+    Entries are newline-separated; lines without a ``=`` are ignored. These are
+    layered *before* any ``--env`` overrides so a matching ``--env`` wins.
+    """
+    raw = os.environ.get("CD_ENV", "")
+    return [line.strip() for line in raw.splitlines() if "=" in line]
+
+
 def read_manifest_env(container_dir: str) -> list:
     """Return image Env entries from manifest.json, or [] if absent/invalid."""
     cfg = _read_manifest_config(container_dir)

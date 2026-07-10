@@ -9,7 +9,7 @@ from chroot_distro.commands.login import (
 )
 from chroot_distro.commands.login import _safe_hostname
 from chroot_distro.commands.login.chroot_cmd import build_chroot_args
-from chroot_distro.commands.login.env import resolve_term
+from chroot_distro.commands.login.env import read_cd_env, resolve_override, resolve_term
 
 
 def test_safe_hostname_valid_tokens():
@@ -1167,3 +1167,33 @@ def test_translate_host_path_to_guest():
     assert _translate_host_path_to_guest(
         "/home/sabamdarif", rootfs, resolved_binds
     ) == "/home/saba"
+
+
+def test_resolve_override_flag_wins(monkeypatch):
+    monkeypatch.setenv("CD_USER", "envuser")
+    assert resolve_override("flaguser", "CD_USER") == "flaguser"
+
+
+def test_resolve_override_falls_back_to_env(monkeypatch):
+    monkeypatch.setenv("CD_USER", "envuser")
+    assert resolve_override(None, "CD_USER") == "envuser"
+
+
+def test_resolve_override_none_when_unset(monkeypatch):
+    monkeypatch.delenv("CD_USER", raising=False)
+    assert resolve_override(None, "CD_USER") is None
+
+
+def test_resolve_override_blank_env_is_none(monkeypatch):
+    monkeypatch.setenv("CD_WORKDIR", "   ")
+    assert resolve_override(None, "CD_WORKDIR") is None
+
+
+def test_read_cd_env_splits_lines_and_filters(monkeypatch):
+    monkeypatch.setenv("CD_ENV", "FOO=bar\nBAZ=qux\nnoequals\n  SPACED=1  ")
+    assert read_cd_env() == ["FOO=bar", "BAZ=qux", "SPACED=1"]
+
+
+def test_read_cd_env_empty_when_unset(monkeypatch):
+    monkeypatch.delenv("CD_ENV", raising=False)
+    assert read_cd_env() == []

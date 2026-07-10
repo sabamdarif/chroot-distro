@@ -17,12 +17,14 @@ from chroot_distro.commands.login.env import (
     ANDROID_HOST_ENV_VARS,
     IMAGE_ENV_BLOCKED,
     inject_termux_profile,
+    read_cd_env,
     read_manifest_env,
     read_manifest_exposed_ports,
     read_manifest_shell,
     read_manifest_user,
     read_manifest_volumes,
     read_manifest_workdir,
+    resolve_override,
     resolve_term,
 )
 from chroot_distro.commands.login.passwd import (
@@ -492,8 +494,16 @@ def _command_login_inner_once(container_name: str, args) -> None:
     # Warn early if the image architecture doesn't match the host CPU.
     _check_arch_mismatch(container_path)
 
-    # Resolve login user: explicit --user wins, then image manifest User,
-    # then fall back to "root".
+    # Fold the CD_* env-var overrides in before the image-config fallbacks so
+    # precedence stays CLI flag > CD_* env > image default. On the `run` path
+    # these are already resolved by command_run, so these are no-ops there.
+    if getattr(args, "user", None) is None:
+        args.user = resolve_override(None, "CD_USER")
+    if not getattr(args, "work_dir", None):
+        args.work_dir = resolve_override(None, "CD_WORKDIR")
+
+    # Resolve login user: explicit --user (or CD_USER) wins, then image
+    # manifest User, then fall back to "root".
     _explicit_user = getattr(args, "user", None)
     if _explicit_user is not None:
         login_user = _explicit_user
@@ -569,7 +579,8 @@ def _command_login_inner_once(container_name: str, args) -> None:
     # only understands host:guest specs.
     bind_options_map = bindings.parse_bind_options(raw_custom_binds)
     custom_binds = bindings.strip_bind_options(raw_custom_binds)
-    extra_env = getattr(args, "env", []) or []
+    # CD_ENV entries are layered first so a matching --env override wins.
+    extra_env = read_cd_env() + (getattr(args, "env", []) or [])
     login_cmd = getattr(args, "login_cmd", []) or []
     run_inner = getattr(args, "_run_inner", None)
 
