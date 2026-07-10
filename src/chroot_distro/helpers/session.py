@@ -51,6 +51,42 @@ def get_active_chroot_pids(name: str) -> list[int]:
     return pids
 
 
+def read_ppid(pid: int) -> int | None:
+    """Return the parent PID of *pid* from ``/proc/<pid>/stat``, or ``None``.
+
+    The process name in field 2 can contain spaces and parentheses, so we
+    split after the final ``)`` — everything past it is space-separated and
+    the second field there is the PPID.
+    """
+    try:
+        with open(f"/proc/{pid}/stat") as fh:
+            stat = fh.read()
+        rpar = stat.rfind(")")
+        if rpar == -1:
+            return None
+        fields = stat[rpar + 2 :].split()
+        return int(fields[1])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def has_tracked_ancestor(pid: int, tracked_pids: set[int]) -> bool:
+    """Return True if *pid* itself or any of its ancestors is in *tracked_pids*.
+
+    Walks the ``/proc`` parent chain up to init (PID 1), so descendants of a
+    tracked session (e.g. the browser helpers a login spawns) are recognised
+    as belonging to that session rather than mistaken for orphans.
+    """
+    seen: set[int] = set()
+    current: int | None = pid
+    while current and current > 1 and current not in seen:
+        if current in tracked_pids:
+            return True
+        seen.add(current)
+        current = read_ppid(current)
+    return False
+
+
 @contextlib.contextmanager
 def lock(name: str) -> typing.Iterator[typing.TextIO]:
     """Acquire the session lock for a container."""

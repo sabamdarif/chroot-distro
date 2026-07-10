@@ -264,6 +264,39 @@ def test_command_ps_table_with_detached_session(capsys):
         fd2.close()
 
 
+def test_command_ps_tracked_container_suppresses_untracked(capsys):
+    """A container with a live session must not also show 'untracked' rows for
+    its own child processes (e.g. a browser's reparented helpers)."""
+    fd = _make_live(385715, "ubuntu", kind="login", command=["/bin/bash"], user="saba")
+    try:
+        # /proc scan reports extra rootfs-sharing PIDs for the same container.
+        with patch(
+            "chroot_distro.commands.ps.containers_with_active_pids",
+            return_value={"ubuntu": [385715, 385800, 385801]},
+        ):
+            command_ps(SimpleNamespace(quiet=False))
+        err = capsys.readouterr().err
+        assert "untracked" not in err
+        assert "ubuntu" in err
+    finally:
+        fd.close()
+
+
+def test_command_ps_untracked_shown_when_container_not_tracked(capsys):
+    """With no live session for the container, genuine orphans still surface."""
+    with (
+        patch(
+            "chroot_distro.commands.ps.containers_with_active_pids",
+            return_value={"debian": [500100, 500101]},
+        ),
+        patch("chroot_distro.commands.ps.has_tracked_ancestor", return_value=False),
+    ):
+        command_ps(SimpleNamespace(quiet=False))
+    err = capsys.readouterr().err
+    assert "untracked" in err
+    assert "debian" in err
+
+
 def test_register_session_makedirs_fails():
     def mock_makedirs(*args, **kwargs):
         raise OSError("Permission denied")

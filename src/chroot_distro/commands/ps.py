@@ -16,6 +16,7 @@ import shlex
 import time
 
 from chroot_distro.constants import PROGRAM_NAME
+from chroot_distro.helpers.session import has_tracked_ancestor
 from chroot_distro.helpers.session_registry import active_sessions, containers_with_active_pids
 from chroot_distro.message import C, msg
 
@@ -31,6 +32,12 @@ def command_ps(args) -> None:
 
     # Collect PIDs already tracked by the registry so we can detect orphans.
     tracked_pids: set[int] = {sess.get("pid", -1) for sess in sessions}
+    # Containers that already have at least one live tracked session. Any
+    # extra processes sharing such a container's rootfs are that session's
+    # own children (e.g. a browser's helper processes, which double-fork and
+    # get reparented to init, breaking the /proc parent chain), not orphans —
+    # so we never report "untracked" rows for a container that is tracked.
+    tracked_containers: set[str] = {str(sess.get("container", "")) for sess in sessions}
 
     # Fallback: scan /proc/*/root for container processes not in the registry.
     # Group by container so the table shows one row per container, not per PID.
@@ -41,7 +48,13 @@ def command_ps(args) -> None:
     except Exception:
         untracked = {}
     for cname, pids in untracked.items():
-        orphan_pids = [p for p in pids if p not in tracked_pids]
+        # A container with a live tracked session owns all of its processes;
+        # skip it entirely. Only containers with no tracked session at all can
+        # have genuine orphans — and there we still drop any process that
+        # descends from a tracked PID via the /proc parent chain.
+        if cname in tracked_containers:
+            continue
+        orphan_pids = [p for p in pids if not has_tracked_ancestor(p, tracked_pids)]
         if orphan_pids:
             all_untracked_pids.extend(str(p) for p in orphan_pids)
             count = len(orphan_pids)
