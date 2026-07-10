@@ -73,3 +73,49 @@ def test_corrupt_cache_falls_back(tmp_path):
 
     m.assert_called_once()
     assert result == rebuilt
+
+
+def test_baseline_cache_is_valid_true_after_clear_cache(tmp_path):
+    """A matching cache is valid even when the raw layer tars are gone.
+
+    This is the 'diff after clear-cache' path: the layer blobs under the
+    shared cache dir may be wiped, but the baseline recorded next to the
+    container survives and is enough to diff.
+    """
+    cache = tmp_path / "diff_baseline.json"
+    digests = ["sha256:a", "sha256:b"]
+    cache.write_text(
+        json.dumps(
+            {
+                "version": layer_diff._BASELINE_CACHE_VERSION,
+                "digests": digests,
+                "baseline": {"usr/bin/foo": ["file", 10]},
+            }
+        )
+    )
+    assert layer_diff.baseline_cache_is_valid(str(cache), digests) is True
+
+
+def test_baseline_cache_is_valid_false_on_mismatch(tmp_path):
+    cache = tmp_path / "diff_baseline.json"
+    cache.write_text(
+        json.dumps(
+            {
+                "version": layer_diff._BASELINE_CACHE_VERSION,
+                "digests": ["sha256:old"],
+                "baseline": {"a": ["file", 1]},
+            }
+        )
+    )
+    assert layer_diff.baseline_cache_is_valid(str(cache), ["sha256:new"]) is False
+
+
+def test_baseline_cache_is_valid_false_when_missing(tmp_path):
+    cache = tmp_path / "diff_baseline.json"
+    assert layer_diff.baseline_cache_is_valid(str(cache), ["sha256:a"]) is False
+
+
+def test_baseline_cache_is_valid_false_on_corrupt(tmp_path):
+    cache = tmp_path / "diff_baseline.json"
+    cache.write_text("{ not json")
+    assert layer_diff.baseline_cache_is_valid(str(cache), ["sha256:a"]) is False

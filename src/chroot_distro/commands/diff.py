@@ -4,6 +4,7 @@ import sys
 
 from chroot_distro.helpers.docker import layer_cache_path
 from chroot_distro.helpers.layer_diff import (
+    baseline_cache_is_valid,
     cached_baseline_from_layers,
     diff_against_baseline,
     snapshot,
@@ -62,16 +63,22 @@ def command_diff(args) -> None:
             crit_error(f"container '{container_name}' manifest lists no image layers.")
             sys.exit(1)
 
-        layer_paths = [layer_cache_path(d) for d in digests]
-        missing = [d for d, p in zip(digests, layer_paths, strict=False) if not os.path.isfile(p)]
-        if missing:
-            crit_error(
-                f"cannot diff '{container_name}': {len(missing)} image layer(s) are no longer in the cache. "
-                f"Run a fresh install or avoid 'clear-cache' to keep diff available."
-            )
-            sys.exit(1)
-
         baseline_cache = os.path.join(container_dir(container_name), "diff_baseline.json")
+
+        # The cached baseline (kept under the container dir, which survives
+        # 'clear-cache') lets us reconstruct the image without the raw layer
+        # tars. Only require the layer blobs when no valid baseline exists —
+        # otherwise 'clear-cache' would needlessly break 'diff'.
+        layer_paths = [layer_cache_path(d) for d in digests]
+        if not baseline_cache_is_valid(baseline_cache, digests):
+            missing = [d for d, p in zip(digests, layer_paths, strict=False) if not os.path.isfile(p)]
+            if missing:
+                crit_error(
+                    f"cannot diff '{container_name}': {len(missing)} image layer(s) are no longer "
+                    f"in the cache and no baseline has been recorded yet. "
+                    f"Run 'chroot-distro diff' before 'clear-cache', or reinstall to rebuild the cache."
+                )
+                sys.exit(1)
         with loading_line("Reconstructing image baseline..."):
             baseline = cached_baseline_from_layers(layer_paths, digests, baseline_cache)
         with loading_line("Scanning container filesystem..."):

@@ -179,6 +179,22 @@ def _baseline_from_jsonable(data: dict[str, list]) -> dict[str, tuple[typing.Any
     return {path: tuple(fp) for path, fp in data.items()}
 
 
+def baseline_cache_is_valid(cache_path: str, digests: list[str]) -> bool:
+    """Return True if *cache_path* holds a baseline matching *digests*.
+
+    When valid, :func:`cached_baseline_from_layers` can return the baseline
+    without reading the layer tars at all, so the raw layer blobs are not
+    required (e.g. after ``clear-cache`` wiped them).
+    """
+    cached = _read_baseline_cache(cache_path)
+    return (
+        cached is not None
+        and cached.get("version") == _BASELINE_CACHE_VERSION
+        and cached.get("digests") == digests
+        and isinstance(cached.get("baseline"), dict)
+    )
+
+
 def cached_baseline_from_layers(
     layer_paths: list[str],
     digests: list[str],
