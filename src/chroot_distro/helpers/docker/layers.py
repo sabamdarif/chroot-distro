@@ -34,6 +34,7 @@ from chroot_distro.helpers.download import (
     retry_http,
 )
 from chroot_distro.helpers.tar_extract import extract_tar_to_rootfs
+from chroot_distro.message import log_info
 from chroot_distro.progress import REDRAW_THRESHOLD_BYTES, AggregateByteProgress, clear_bar, draw_bytes_bar
 
 log = logging.getLogger(__name__)
@@ -83,6 +84,7 @@ def download_blob(
     *,
     byte_progress: AggregateByteProgress | None = None,
     abort_event: threading.Event | None = None,
+    live_responses: "_LiveResponses | None" = None,
     connections: int = 1,
     insecure: bool = False,
 ) -> str:
@@ -195,11 +197,11 @@ def download_blob(
                         seg_headers["Authorization"] = f"Bearer {token}"
 
                     local_abort = abort_event or threading.Event()
-                    live_responses = _LiveResponses(lock=threading.Lock(), responses=set())
+                    live = live_responses or _LiveResponses(lock=threading.Lock(), responses=set())
 
                     def _on_sigint(_signum, _frame):
                         local_abort.set()
-                        live_responses.close_all()
+                        live.close_all()
                         raise KeyboardInterrupt
 
                     with contextlib.suppress(ValueError):
@@ -215,7 +217,7 @@ def download_blob(
                                 progress,
                                 local_abort,
                                 bucket,
-                                live_responses,
+                                live,
                                 insecure=insecure,
                             ): seg
                             for seg in segments
@@ -224,12 +226,12 @@ def download_blob(
                             future.result()
                     except KeyboardInterrupt:
                         local_abort.set()
-                        live_responses.close_all()
+                        live.close_all()
                         pool.shutdown(wait=False, cancel_futures=True)
                         raise
                     except Exception as exc:
                         local_abort.set()
-                        live_responses.close_all()
+                        live.close_all()
                         pool.shutdown(wait=False, cancel_futures=True)
                         raise _FallbackToSingleError from exc
                     else:
@@ -272,6 +274,11 @@ def download_blob(
                         progress.clear()
         except _FallbackToSingleError as exc:
             log.debug("Multi-connection download not supported or failed, falling back to single connection: %s", exc)
+            if connections > 1:
+                log_info(
+                    f"{expected_hex[:12]}: registry does not support ranged requests; "
+                    f"downloading this layer over a single connection."
+                )
         except Exception:
             raise
 
@@ -285,6 +292,8 @@ def download_blob(
         with atomic_replace(dest) as tmp:
             op = auth_opener() if not insecure else opener(insecure)
             with op.open(req, timeout=_SOCKET_TIMEOUT) as resp, open(tmp, "wb") as fh:
+                if live_responses is not None:
+                    live_responses.add(resp)
                 total = int(resp.headers.get("Content-Length", 0))
                 downloaded = 0
                 unsent = 0  # bytes not yet reported to aggregate
@@ -316,6 +325,8 @@ def download_blob(
                     fh.flush()
                     os.fsync(fh.fileno())
                 finally:
+                    if live_responses is not None:
+                        live_responses.discard(resp)
                     if byte_progress is None:
                         clear_bar()
             actual_hex = hasher.hexdigest()

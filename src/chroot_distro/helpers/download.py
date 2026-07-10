@@ -37,6 +37,7 @@ from chroot_distro.rate_limit import TokenBucket
 log = logging.getLogger(__name__)
 
 __all__ = (
+    "_LiveResponses",
     "certificate_error_msg",
     "download_file",
     "insecure_ssl_context",

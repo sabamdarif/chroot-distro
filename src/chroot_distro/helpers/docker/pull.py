@@ -1,5 +1,7 @@
+import contextlib
 import json
 import os
+import signal
 import ssl
 import threading
 import typing
@@ -30,7 +32,7 @@ from chroot_distro.helpers.docker.transport import (
     opener,
     registry_base_url,
 )
-from chroot_distro.helpers.download import retry_http
+from chroot_distro.helpers.download import _LiveResponses, retry_http
 from chroot_distro.message import log_error, log_info
 from chroot_distro.progress import AggregateByteProgress, fmt_size
 
@@ -87,9 +89,17 @@ def _download_layers_parallel(
     total_bytes = sum(layer.get("size", 0) or 0 for _, layer in pending) if parallel else 0
     aggregate = AggregateByteProgress(total_bytes, label="layers") if parallel else None
     abort_event = threading.Event()
+    # Shared registry of in-flight HTTP responses. On SIGINT we force-close
+    # every live socket so worker threads blocked in resp.read() unblock
+    # immediately, rather than hanging until the socket timeout expires.
+    live_responses = _LiveResponses(lock=threading.Lock(), responses=set())
 
     workers_limit = layer_download_workers()
-    connections_per_layer = workers_limit if len(pending) == 1 else max(1, workers_limit // 2)
+    # When a single layer is pending, give it every worker as segment
+    # connections. With several pending layers, split the workers between
+    # concurrent layers so the total connection count stays near the budget
+    # instead of multiplying workers_limit by the number of layers.
+    connections_per_layer = workers_limit if len(pending) == 1 else max(1, workers_limit // min(len(pending), workers_limit))
 
     def _download_one(item: tuple[int, dict[str, typing.Any]]) -> None:
         i, layer = item
@@ -106,6 +116,7 @@ def _download_layers_parallel(
                 base=base,
                 byte_progress=aggregate,
                 abort_event=abort_event,
+                live_responses=live_responses,
                 connections=connections_per_layer,
                 insecure=insecure,
             )
@@ -116,6 +127,15 @@ def _download_layers_parallel(
         except (ssl.SSLError, ConnectionError, OSError) as dl_err:
             raise RuntimeError(f"Network error downloading layer {i + 1}/{n_layers} ({short_id}): {dl_err}") from dl_err
 
+    def _on_sigint(_signum, _frame):
+        abort_event.set()
+        live_responses.close_all()
+        raise KeyboardInterrupt
+
+    prev_sigint = signal.getsignal(signal.SIGINT)
+    # signal.signal only works on the main thread; suppress if we're not on it.
+    with contextlib.suppress(ValueError):
+        signal.signal(signal.SIGINT, _on_sigint)
     try:
         if len(pending) == 1:
             _download_one(pending[0])
@@ -130,15 +150,19 @@ def _download_layers_parallel(
                 future.result()
         except KeyboardInterrupt:
             abort_event.set()
+            live_responses.close_all()
             executor.shutdown(wait=False, cancel_futures=True)
             raise
         except Exception:
             abort_event.set()
+            live_responses.close_all()
             executor.shutdown(wait=False, cancel_futures=True)
             raise
         else:
             executor.shutdown(wait=True)
     finally:
+        with contextlib.suppress(ValueError):
+            signal.signal(signal.SIGINT, prev_sigint)
         if aggregate is not None:
             aggregate.clear()
 
