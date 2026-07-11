@@ -112,8 +112,6 @@ def _exec_chroot(engine: typing.Any, stage: typing.Any, command: list[str], stdi
     """Invoke chroot against *stage*'s rootfs to execute *command*."""
     rootfs = stage.rootfs_dir
 
-    import chroot_distro.helpers.mount_manager as mount_manager
-    from chroot_distro.commands.login import bindings
     from chroot_distro.commands.login.chroot_cmd import build_chroot_args
     from chroot_distro.commands.login.passwd import find_user_groups
 
@@ -136,6 +134,41 @@ def _exec_chroot(engine: typing.Any, stage: typing.Any, command: list[str], stdi
 
     if not engine.quiet and not engine.verbose:
         log_info(f"Running step (user={stage.user or 'root'}, cwd={stage.workdir or '/'})...")
+
+    # Maximum-isolation build (CD_USE_ISOLATION): run the step inside a
+    # namespace holder chrooted into the rootfs so it cannot see host
+    # processes/mounts. Heredoc/stdin steps and kernels without mount-namespace
+    # support fall back to the plain host-namespace path below.
+    if engine.isolated and stdin_input is None:
+        from chroot_distro.helpers import isolation
+
+        container_key = f"build_{os.path.basename(engine.tmp_root)}_{stage.index}"
+        with isolation.max_isolation_session(container_key, rootfs, minimal=True) as holder:
+            if holder is not None:
+                return _run_in_holder(holder, chroot_args, child_env)
+            return _run_plain(rootfs, chroot_args, child_env, stdin_input)
+
+    return _run_plain(rootfs, chroot_args, child_env, stdin_input)
+
+
+def _run_in_holder(holder: typing.Any, chroot_args: list[str], child_env: dict[str, str]) -> int:
+    """Execute *chroot_args* inside the holder's namespaces; return the exit code.
+
+    The holder is already chrooted into the rootfs (maximum isolation); the
+    child enters its mount/PID/UTS/IPC namespaces via ``nsenter`` and inherits
+    the build's stdio so RUN output streams live.
+    """
+    try:
+        result = holder.run(chroot_args, env=child_env)
+    except FileNotFoundError as exc:
+        raise BuildError(f"chroot command execution failed: {exc}") from exc
+    return int(result.returncode)
+
+
+def _run_plain(rootfs: str, chroot_args: list[str], child_env: dict[str, str], stdin_input: str | None) -> int:
+    """Execute *chroot_args* with host-namespace bind mounts (no isolation)."""
+    import chroot_distro.helpers.mount_manager as mount_manager
+    from chroot_distro.commands.login import bindings
 
     resolved_binds, _ = bindings.get_bindings(rootfs=rootfs, minimal=True)
 

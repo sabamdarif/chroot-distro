@@ -51,6 +51,7 @@ class BuildEngine:
         quiet: bool,
         no_cache: bool,
         emulator: str | None,
+        isolated: bool = False,
     ):
         self.build_dir = os.path.abspath(build_dir)
         self.tmp_root = tmp_root
@@ -64,6 +65,9 @@ class BuildEngine:
         self.quiet = quiet
         self.no_cache = no_cache
         self.emulator = emulator
+        # When True, RUN steps execute inside a maximum-isolation namespace
+        # session (see helpers.isolation). Enabled via CD_USE_ISOLATION.
+        self.isolated = isolated
         self.stages: dict[str, Stage] = {}  # name -> Stage
         self.stages_by_idx: list[Stage] = []
         self.current: Stage | None = None

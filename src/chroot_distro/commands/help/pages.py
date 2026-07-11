@@ -113,6 +113,18 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
                 ),
             },
             {
+                "title": "ENVIRONMENT",
+                "intro": (
+                    "CD_USE_ISOLATION=1 runs each RUN step under maximum "
+                    "isolation: a Linux namespace holder chrooted into the "
+                    "in-progress rootfs (mount, PID, UTS, IPC via "
+                    "unshare/nsenter), binding no host paths. The container's "
+                    "/etc/resolv.conf is written so package installs keep DNS. "
+                    "Accepts 1/true/yes/on; build has no equivalent CLI flag. "
+                    "Forwarded across privilege elevation automatically."
+                ),
+            },
+            {
                 "title": "LIMITATIONS",
                 "intro": (
                     "RUN steps run under chroot, not a fully isolated container "
@@ -420,7 +432,10 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
                     "Android system/storage/$PREFIX (or Linux /tmp and display) "
                     "mounts: the goal is only namespace isolation, not a "
                     "reduced mount set. Accepts 1/true/yes/on. Use --isolated "
-                    "when you also want the reduced mount set."
+                    "when you also want the reduced mount set. "
+                    "CD_USE_ISOLATION=1 is the env-var equivalent of --isolated: "
+                    "it forces maximum isolation on (bind nothing) even without "
+                    "the flag. Both are forwarded across privilege elevation."
                 ),
             },
             {
@@ -601,7 +616,9 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
                     "every run, while still keeping all the default bind "
                     "mounts. Unlike --isolated, it does NOT skip the extra "
                     "Android system/storage/$PREFIX (or Linux /tmp and display) "
-                    "mounts. Accepts 1/true/yes/on."
+                    "mounts. Accepts 1/true/yes/on. CD_USE_ISOLATION=1 is the "
+                    "env-var equivalent of --isolated (maximum isolation, bind "
+                    "nothing), forced on even without the flag."
                 ),
             },
         ],

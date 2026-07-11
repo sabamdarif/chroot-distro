@@ -28,6 +28,7 @@ log = logging.getLogger(__name__)
 # not supported, '-E' is ignored").
 _FORWARDED_ENV_VARS = (
     "CD_USE_NS",
+    "CD_USE_ISOLATION",
     "CD_DOCKER_AUTH",
     "CD_DOWNLOAD_WORKERS",
     "CD_DOWNLOAD_MAX_RETRIES",

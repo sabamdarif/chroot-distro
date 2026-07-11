@@ -22,6 +22,7 @@ from chroot_distro.helpers.dockerfile import (
     DockerfileSyntaxError,
     parse_dockerfile,
 )
+from chroot_distro.helpers.isolation import use_isolation_env_enabled
 from chroot_distro.helpers.oci_writer import (
     build_manifest_and_config,
     store_in_cache,
@@ -187,6 +188,8 @@ def command_build(args: typing.Any) -> None:
             quiet=quiet,
             no_cache=no_cache,
             emulator=emulator,
+            # build has no --isolated flag; isolation is opt-in via the env var.
+            isolated=use_isolation_env_enabled(),
         )
 
         try:

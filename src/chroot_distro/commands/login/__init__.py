@@ -49,11 +49,13 @@ from chroot_distro.constants import (
     TERMUX_PREFIX,
 )
 from chroot_distro.helpers import gpu as gpu_helper
+from chroot_distro.helpers import isolation
 from chroot_distro.helpers.android import ensure_data_suid, termux_home_owner_ids
 from chroot_distro.helpers.display import (
     resolve_display_env,
     resolve_display_socket_binds,
 )
+from chroot_distro.helpers.isolation import resolve_isolated, safe_hostname
 from chroot_distro.helpers.namespace import NamespaceError
 from chroot_distro.helpers.nvidia import (
     detect_nvidia_gpu,
@@ -78,22 +80,9 @@ from chroot_distro.syscalls.nsenter import enter_and_run_with_pty
 log = logging.getLogger(__name__)
 
 
-def _safe_hostname(name: str) -> str:
-    """Return *name* if it is a safe hostname token, else "localhost".
-
-    Container names allow underscores (see names.is_valid_name), which are
-    not valid in hostnames and are rejected by some consuming tools. Accept
-    only alphanumerics, '-' and '.', with each dot-separated label at most
-    63 characters; otherwise fall back to a safe default.
-    """
-    if not name:
-        return "localhost"
-    for label in name.split("."):
-        if not label or len(label) > 63:
-            return "localhost"
-        if not all(ch.isalnum() or ch == "-" for ch in label):
-            return "localhost"
-    return name
+# Canonical hostname sanitiser now lives in helpers.isolation so login and the
+# isolated build path share one policy; keep the private name for local callers.
+_safe_hostname = safe_hostname
 
 
 def command_login(args) -> None:
@@ -511,7 +500,9 @@ def _command_login_inner_once(container_name: str, args) -> None:
         manifest_user = read_manifest_user(container_path)
         login_user = manifest_user if manifest_user else "root"
     login_wd = getattr(args, "work_dir", "") or ""
-    isolated = getattr(args, "isolated", False)
+    # `--isolated`/`--isolate` OR `CD_USE_ISOLATION=1` (env forces it on even
+    # without the flag). `CD_USE_NS` is handled separately (namespace-only).
+    isolated = resolve_isolated(args)
     minimal = getattr(args, "minimal", False)
     # `--isolated` skips the extra Android/host mounts AND uses namespaces.
     # `CD_USE_NS` only turns on namespace isolation, keeping every mount.
@@ -897,7 +888,10 @@ def _command_login_inner_once(container_name: str, args) -> None:
     use_namespaces = use_ns_requested and not minimal
     has_userns = False  # Track whether user namespace is active for cap drop.
     if use_namespaces:
-        probe_result = namespace.probe_and_report_namespaces()
+        # Probes and warns about missing recommended/enhancement namespaces
+        # (shared with build); the mandatory-mount-namespace fallback below is
+        # login-specific because its messaging differs for max isolation.
+        probe_result = isolation.probe_isolation()
         if probe_result.missing_mandatory:
             # Mount namespace is the minimum for any kind of isolation.
             if max_isolation:
@@ -915,11 +909,7 @@ def _command_login_inner_once(container_name: str, args) -> None:
                 )
             use_namespaces = False
         else:
-            # Mount namespace works — emit warnings for anything missing,
-            # but proceed with whatever we have.
             has_userns = probe_result.has_userns
-            if probe_result.missing_recommended or probe_result.missing_enhancements:
-                namespace.emit_isolation_warnings(probe_result)
 
     # 1. Resolve all bind mounts
     resolved_binds, rslave_targets = bindings.get_bindings(
@@ -979,8 +969,16 @@ def _command_login_inner_once(container_name: str, args) -> None:
                     # A detached run must use a plain holder and reach the
                     # command via nsenter; the synchronized foreground holder
                     # (which execs the command itself) cannot be backgrounded.
+                    #
+                    # A max-isolation run must ALSO use the plain holder: the
+                    # foreground holder execs `chroot <rootfs> ...` itself and
+                    # therefore can never chroot into the rootfs first, leaving
+                    # the `chroot /proc/1/root` escape open. The plain holder is
+                    # created chrooted (rootfs= below) and reached via nsenter,
+                    # so `run --isolated`/`CD_USE_ISOLATION` gets true maximum
+                    # isolation just like `login`.
                     _detach_run = getattr(args, "detach", False) and run_inner is not None
-                    if run_inner is not None and not _detach_run:
+                    if run_inner is not None and not _detach_run and not max_isolation:
                         chroot_args = build_chroot_args(
                             rootfs=rootfs,
                             login_uid=login_uid,
@@ -1009,17 +1007,9 @@ def _command_login_inner_once(container_name: str, args) -> None:
                             container_name,
                             rootfs=rootfs if (max_isolation and use_namespaces) else None,
                         )
-                    namespace.write_isolation_mode(container_name, namespace.ISOLATION_MODE_NAMESPACE)
-                    if not namespace.make_mount_private(holder):
-                        # Many Android kernels already provide an isolated
-                        # propagation in the new mount namespace, so failing to
-                        # set it explicitly is benign. Keep it out of the
-                        # user-facing output to avoid alarming warnings.
-                        log.debug("Could not set mount propagation to private in isolated namespace.")
-                    # Give the isolated UTS namespace its own hostname so
-                    # `uname -n` reflects the container name. Cosmetic only:
-                    # never fail the login if no hostname binary exists.
-                    namespace.set_namespace_hostname(holder, _safe_hostname(hostname_arg))
+                    # Record the mode, make mounts private, and give the UTS
+                    # namespace the container hostname (shared with build).
+                    isolation.finalize_holder(holder, container_name, hostname=hostname_arg)
                 except NamespaceError as exc:
                     if pipe_w is not None:
                         with contextlib.suppress(OSError):
@@ -1062,31 +1052,14 @@ def _command_login_inner_once(container_name: str, args) -> None:
             for src, dst in resolved_binds:
                 try:
                     dst_real = os.path.realpath(dst)
-                    # Recurse for /run and anything under it (e.g. the bound
-                    # /run/user/<uid> runtime dir) so nested socket submounts
-                    # come along.
-                    is_run = dst_real == run_root or dst_real.startswith(run_root + os.sep)
-                    is_wsl = src == "/usr/lib/wsl"
-                    # Android system partitions must be bound recursively:
-                    # /apex is a tmpfs whose entries (com.android.runtime, …)
-                    # are separate nested mounts, and /system/bin/linker64 is
-                    # a symlink into /apex/com.android.runtime. A plain bind
-                    # captures only empty mountpoint stubs, leaving the guest
-                    # without a bionic dynamic linker (execve -> ENOENT).
-                    is_android_sys = IS_TERMUX and src in (
-                        "/apex",
-                        "/system",
-                        "/vendor",
-                        "/odm",
-                        "/product",
-                        "/system_ext",
-                    )
                     mount_options = resolved_bind_options.get(os.path.realpath(dst), "")
                     mount_manager.safe_mount(
                         src,
                         dst,
                         holder=holder,
-                        recursive=(is_run or is_wsl or is_android_sys),
+                        # Recurse for /run subtrees, WSL, and Android system
+                        # partitions (nested mounts) — shared with build.
+                        recursive=isolation.bind_is_recursive(src, dst_real, run_root),
                         options=mount_options,
                         # A stale, unremovable (MNT_LOCKED) mount can shadow
                         # /dev without providing ptmx; detect and mount over.
@@ -1118,63 +1091,17 @@ def _command_login_inner_once(container_name: str, args) -> None:
                     with contextlib.suppress(OSError):
                         os.chmod(chroot_tmp, 0o1777)
 
-            # Phase 2: special filesystem mounts
+            # Phase 2: special filesystem mounts — /proc, /sys, and (under max
+            # isolation) a fresh private tmpfs /dev + device nodes + ptmx
+            # symlink. Shared with the isolated build path.
             try:
-                specials = bindings.get_special_mounts(
+                isolation.apply_special_mounts(
                     rootfs,
+                    holder,
                     isolated=use_namespaces,
                     max_isolation=max_isolation and use_namespaces,
-                    enable_usb=not minimal,
-                    enable_binfmt=not minimal,
-                    enable_shm=not minimal,
+                    minimal=minimal,
                 )
-                for sm in specials:
-                    is_maxiso_dev = max_isolation and use_namespaces and sm.fstype == "tmpfs" and sm.target == "/dev"
-                    if is_maxiso_dev:
-                        # The fresh /dev tmpfs is best-effort under max
-                        # isolation: if the kernel denies it (SELinux on some
-                        # Android kernels rejects mounting tmpfs and emits no
-                        # error), fall back to the container's own empty
-                        # on-disk /dev. That is still not a host bind, so the
-                        # session stays isolated; we just populate the device
-                        # nodes directly on the rootfs /dev directory.
-                        mounted = mount_manager.apply_special_mount(rootfs, sm, holder=holder, force_optional=True)
-                        if not mounted:
-                            warn(
-                                "Could not mount a fresh tmpfs /dev; using the "
-                                "container's own /dev directory (still isolated, "
-                                "no host bind)."
-                            )
-                        # Populate the minimal device nodes whether on tmpfs or
-                        # the on-disk dir (the host /dev is never bound).
-                        mount_manager.create_dev_nodes(
-                            rootfs,
-                            bindings.MAX_ISOLATION_DEV_NODES,
-                            holder=holder,
-                        )
-                    else:
-                        mount_manager.apply_special_mount(rootfs, sm, holder=holder)
-
-                # Under maximum isolation, `/dev/ptmx` must be a symlink to `pts/ptmx`
-                # pointing to the private `devpts` multiplexer inside the fresh `/dev` tmpfs.
-                # Only create it if it is missing or is not already a symbolic link.
-                if max_isolation and use_namespaces:
-                    ptmx_path = os.path.join(rootfs, "dev/ptmx")
-                    if holder is not None:
-                        is_link = holder.run(["test", "-L", ptmx_path]).returncode == 0
-                        if not is_link:
-                            if holder.run(["test", "-e", ptmx_path]).returncode == 0:
-                                holder.run(["rm", "-f", ptmx_path])
-                            cmd = ["ln", "-s", "pts/ptmx", ptmx_path]
-                            holder.run(cmd, capture_output=True, text=True)
-                    else:
-                        try:
-                            if not os.path.islink(ptmx_path):
-                                if os.path.exists(ptmx_path):
-                                    os.remove(ptmx_path)
-                                os.symlink("pts/ptmx", ptmx_path)
-                        except OSError as exc:
-                            log.debug("Failed to create ptmx symlink: %s", exc)
             except Exception as e:
                 if pipe_w is not None:
                     with contextlib.suppress(OSError):
