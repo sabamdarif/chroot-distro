@@ -175,7 +175,10 @@ def _bind_socket() -> socket.socket:
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     sock.bind(SOCKET_PATH)
     os.chown(SOCKET_PATH, 0, gid)
-    os.chmod(SOCKET_PATH, 0o660)
+    # Group-writable (0o660, root:chroot-distro) is the authorisation model:
+    # only root and chroot-distro group members may connect. Peer identity is
+    # further enforced via SO_PEERCRED in _peer_is_authorised.
+    os.chmod(SOCKET_PATH, 0o660)  # lgtm[py/overly-permissive-file]
     sock.listen(16)
     return sock
 

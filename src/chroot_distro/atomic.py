@@ -39,7 +39,9 @@ def atomic_replace(path: str, *, suffix: str = ".tmp", mode: int | None = None):
     try:
         yield tmp
         if mode is not None:
-            os.chmod(tmp, mode)
+            # mode is chosen by the caller for the destination file; this helper
+            # only applies it. mkstemp created the temp file as 0o600 already.
+            os.chmod(tmp, mode)  # lgtm[py/overly-permissive-file]
         os.replace(tmp, path)
         _fsync_directory(dest_dir)
     except BaseException:
@@ -76,7 +78,9 @@ def atomic_write(
             fh.flush()
             os.fsync(fh.fileno())
         if mode is not None:
-            os.chmod(tmp, mode)
+            # mode is chosen by the caller for the destination file; this helper
+            # only applies it. mkstemp created the temp file as 0o600 already.
+            os.chmod(tmp, mode)  # lgtm[py/overly-permissive-file]
         os.replace(tmp, path)
         _fsync_directory(dest_dir)
     except BaseException:

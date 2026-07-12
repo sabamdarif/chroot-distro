@@ -1089,7 +1089,10 @@ def _command_login_inner_once(container_name: str, args) -> None:
                 chroot_tmp = os.path.join(rootfs, "tmp")
                 if os.path.isdir(chroot_tmp):
                     with contextlib.suppress(OSError):
-                        os.chmod(chroot_tmp, 0o1777)
+                        # /tmp is world-writable with the sticky bit (0o1777) by
+                        # design — the sticky bit prevents users from removing
+                        # each other's files. This matches the host /tmp.
+                        os.chmod(chroot_tmp, 0o1777)  # lgtm[py/overly-permissive-file]
 
             # Phase 2: special filesystem mounts — /proc, /sys, and (under max
             # isolation) a fresh private tmpfs /dev + device nodes + ptmx

@@ -180,7 +180,9 @@ def _add_user_to_group(username: str) -> None:
     tmp_path = "/etc/group.chroot-distro.tmp"
     with open(tmp_path, "w", encoding="utf-8") as fh:
         fh.writelines(lines)
-    os.chmod(tmp_path, 0o644)
+    # /etc/group must be world-readable (0o644) — every process resolves group
+    # names/ids through it; a stricter mode would break normal system operation.
+    os.chmod(tmp_path, 0o644)  # lgtm[py/overly-permissive-file]
     os.replace(tmp_path, "/etc/group")
 
 
@@ -254,7 +256,10 @@ def _detect_init() -> str:
 def _write(path: str, content: str, mode: int = 0o644) -> None:
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(content)
-    os.chmod(path, mode)
+    # World-readable (0o644) is intentional and correct for init-system service
+    # and socket unit files, which the init daemon must read as an unprivileged
+    # process. Callers needing executables pass mode=0o755.
+    os.chmod(path, mode)  # lgtm[py/overly-permissive-file]
 
 
 def _run_quiet(argv: list[str]) -> bool:
