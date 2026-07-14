@@ -205,6 +205,7 @@ def get_special_mounts(
     *,
     isolated: bool = False,
     max_isolation: bool = False,
+    use_userns: bool = False,
     enable_usb: bool = True,
     enable_binfmt: bool = True,
     enable_shm: bool = True,
@@ -250,7 +251,14 @@ def get_special_mounts(
 
     # Maximum isolation: a fresh read-only sysfs replaces the host /sys bind
     # so the guest cannot reach host kernel objects under /sys.
-    if max_isolation:
+    #
+    # A fresh sysfs cannot be mounted inside a user namespace unless that userns
+    # also owns a network namespace (the kernel EPERMs it otherwise), and we do
+    # not create a netns because it would sever host networking. So when a user
+    # namespace is active we skip the fresh sysfs here and instead expose /sys
+    # via a recursive bind added in get_bindings() (see the max-isolation branch
+    # there). Under Tier B the id-mapping makes that bind effectively read-only.
+    if max_isolation and not use_userns:
         specials.append(
             SpecialMount(
                 fstype="sysfs",
@@ -437,6 +445,7 @@ def get_bindings(
     isolated: bool = False,
     max_isolation: bool = False,
     use_namespaces: bool | None = None,
+    use_userns: bool = False,
     shared_home: bool = False,
     shared_tmp: bool = False,
     shared_display: bool = False,
@@ -473,6 +482,18 @@ def get_bindings(
     # device nodes, devpts and tmpfs /dev/shm), so there is no host path the
     # guest can traverse to reach the real root filesystem.
     if max_isolation:
+        # A user namespace cannot mount a fresh sysfs without also owning a
+        # network namespace, so under a userns we expose /sys with a recursive
+        # bind of the host tree instead (the only /sys mount the kernel permits
+        # here — a non-recursive or read-only-remounted bind is rejected). It is
+        # marked rslave so host mount changes propagate in but ours do not leak
+        # out; under Tier B the id-mapping renders it effectively read-only.
+        if use_userns:
+            try:
+                sys_dst = resolve_rootfs_path(rootfs, "/sys")
+            except OSError:
+                sys_dst = os.path.join(rootfs, "sys")
+            return ([("/sys", sys_dst)], [sys_dst])
         return ([], [])
 
     # 1. Base Linux mounts (always needed for chroot to function correctly)

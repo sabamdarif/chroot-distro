@@ -48,9 +48,7 @@ _TRUTHY_ENV_VALUES = namespace._TRUTHY_ENV_VALUES
 # Android system partitions that must be bound recursively: /apex is a tmpfs
 # whose entries are separate nested mounts, and the bionic linker lives under
 # it, so a plain bind captures only empty stubs.
-_ANDROID_SYS_MOUNTS = frozenset(
-    {"/apex", "/system", "/vendor", "/odm", "/product", "/system_ext"}
-)
+_ANDROID_SYS_MOUNTS = frozenset({"/apex", "/system", "/vendor", "/odm", "/product", "/system_ext"})
 
 
 def use_isolation_env_enabled() -> bool:
@@ -85,17 +83,27 @@ def safe_hostname(name: str) -> str:
     return name
 
 
-def bind_is_recursive(src: str, dst_real: str, run_root: str) -> bool:
+# Host pseudo-filesystems that must be bound recursively when a user namespace
+# is active: a non-recursive bind of /sys or /dev is rejected by the kernel
+# inside a userns (their locked submounts cannot be split off), whereas a
+# recursive bind of the whole subtree is permitted.
+_USERNS_RECURSIVE_BINDS = frozenset({"/sys", "/dev"})
+
+
+def bind_is_recursive(src: str, dst_real: str, run_root: str, *, use_userns: bool = False) -> bool:
     """Whether a bind of *src* → *dst_real* must be recursive.
 
     Recurse for /run and anything under it (nested socket submounts), for the
     WSL lib dir, and for the Android system partitions (nested mounts under a
     tmpfs). *run_root* is ``realpath(rootfs/run)``, computed once by the caller.
+    When *use_userns* is set, also recurse for /sys and /dev — a plain bind of
+    those is rejected inside a user namespace.
     """
     is_run = dst_real == run_root or dst_real.startswith(run_root + os.sep)
     is_wsl = src == "/usr/lib/wsl"
     is_android_sys = IS_TERMUX and src in _ANDROID_SYS_MOUNTS
-    return is_run or is_wsl or is_android_sys
+    is_userns_pseudo = use_userns and src in _USERNS_RECURSIVE_BINDS
+    return is_run or is_wsl or is_android_sys or is_userns_pseudo
 
 
 def finalize_holder(holder: NamespaceHolder, container_key: str, *, hostname: str) -> None:
@@ -144,6 +152,7 @@ def apply_special_mounts(
     isolated: bool,
     max_isolation: bool,
     minimal: bool,
+    use_userns: bool = False,
 ) -> None:
     """Apply the special filesystem mounts (/proc, /sys, /dev, …) into *rootfs*.
 
@@ -158,6 +167,7 @@ def apply_special_mounts(
         rootfs,
         isolated=isolated,
         max_isolation=max_isolation,
+        use_userns=use_userns,
         enable_usb=not minimal,
         enable_binfmt=not minimal,
         enable_shm=not minimal,
@@ -174,7 +184,9 @@ def apply_special_mounts(
                     "Could not mount a fresh tmpfs /dev; using the "
                     "container's own /dev directory (still isolated, no host bind)."
                 )
-            mount_manager.create_dev_nodes(rootfs, bindings.MAX_ISOLATION_DEV_NODES, holder=holder)
+            mount_manager.create_dev_nodes(
+                rootfs, bindings.MAX_ISOLATION_DEV_NODES, holder=holder, use_userns=use_userns
+            )
         else:
             mount_manager.apply_special_mount(rootfs, sm, holder=holder)
 
@@ -191,9 +203,13 @@ def probe_isolation(*, warn_on_gaps: bool = True) -> NamespaceProbeResult:
     whether isolation can proceed at all.
     """
     result = namespace.probe_and_report_namespaces()
-    has_gaps = result.missing_recommended or result.missing_enhancements
-    if warn_on_gaps and not result.missing_mandatory and has_gaps:
-        namespace.emit_isolation_warnings(result)
+    if not result.missing_mandatory:
+        # Stay silent when everything is working; only speak up about gaps
+        # (missing recommended/enhancement namespaces, or a user namespace whose
+        # in-userns mounts were rejected). No "all good" banner in normal runs.
+        has_gaps = result.missing_recommended or result.missing_enhancements or not result.userns_mounts_ok
+        if warn_on_gaps and has_gaps:
+            namespace.emit_isolation_warnings(result)
     return result
 
 
@@ -228,6 +244,7 @@ def max_isolation_session(
         yield None
         return
 
+    use_userns = probe_result.has_userns
     holder: NamespaceHolder | None = None
     try:
         holder = namespace.acquire_holder(container_key, rootfs=rootfs)
@@ -243,6 +260,7 @@ def max_isolation_session(
             isolated=True,
             max_isolation=True,
             use_namespaces=True,
+            use_userns=use_userns,
             dist_type=dist_type,
         )
         with contextlib.suppress(Exception):
@@ -256,13 +274,13 @@ def max_isolation_session(
                 src,
                 dst,
                 holder=holder,
-                recursive=bind_is_recursive(src, dst_real, run_root),
+                recursive=bind_is_recursive(src, dst_real, run_root, use_userns=use_userns),
                 required_child="ptmx" if dst_real == dev_root else "",
             )
         for rslave_path in rslave_targets:
             mount_manager.make_rslave(rslave_path, holder=holder)
 
-        apply_special_mounts(rootfs, holder, isolated=True, max_isolation=True, minimal=minimal)
+        apply_special_mounts(rootfs, holder, isolated=True, max_isolation=True, minimal=minimal, use_userns=use_userns)
 
         yield holder
     except NamespaceError as exc:

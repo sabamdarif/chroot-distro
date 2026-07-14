@@ -172,36 +172,52 @@ def probe_namespace_support(flags: int) -> int:
 # ---------------------------------------------------------------------------
 
 
-def _write_id_mappings(child_pid: int) -> None:
+def _default_id_map() -> tuple[str, str]:
+    """Fallback uid/gid map: container uid/gid 0 → the caller's real uid/gid.
+
+    Single-id identity map used when no explicit map is supplied. Kept for
+    backward compatibility; the tiered maps are computed by
+    :func:`chroot_distro.helpers.namespace.resolve_userns_map`.
+    """
+    line = f"0 {os.getuid()} 1\n"
+    gline = f"0 {os.getgid()} 1\n"
+    return line, gline
+
+
+def _write_id_mappings(child_pid: int, id_map: tuple[str, str] | None = None) -> None:
     """Write uid/gid mappings for a new user namespace.
 
-    Maps container uid/gid 0 to the calling process's real uid/gid.
-    This means 'root' inside the container is actually the real host
-    user -- capabilities inside the container are namespace-scoped.
+    *id_map* is a ``(uid_map, gid_map)`` pair of newline-terminated map bodies
+    (e.g. ``("0 100000 65536\\n", "0 100000 65536\\n")``). When omitted, a
+    single-id identity map (container 0 → caller's real uid) is written.
 
     Must be called from the **parent** process after the child has called
     ``unshare(CLONE_NEWUSER)`` but before the child calls ``exec``.
 
-    The ordering is mandated by the kernel:
+    The ordering is mandated by the kernel: (setgroups) → uid_map → gid_map.
 
-    1. Write ``deny`` to ``/proc/<pid>/setgroups`` (required before gid_map).
-    2. Write ``uid_map``.
-    3. Write ``gid_map``.
+    ``setgroups`` handling: writing a gid_map requires ``setgroups`` to be
+    ``deny`` *unless* the writer has ``CAP_SETGID`` in the parent user
+    namespace. A privileged (root) parent has it, so we leave ``setgroups``
+    at ``allow`` — otherwise the container's own ``login``/``su`` cannot call
+    ``setgroups(2)`` to set supplementary groups (it fails with EPERM). An
+    unprivileged parent must write ``deny`` for the gid_map write to succeed.
     """
-    real_uid = os.getuid()
-    real_gid = os.getgid()
+    uid_map, gid_map = id_map if id_map is not None else _default_id_map()
 
-    try:
-        with open(f"/proc/{child_pid}/setgroups", "w") as fh:
-            fh.write("deny")
-    except OSError:
-        log.debug("Failed to write setgroups deny for pid %d (may not be required)", child_pid)
+    if os.getuid() != 0:
+        # Unprivileged: setgroups must be denied before gid_map can be written.
+        try:
+            with open(f"/proc/{child_pid}/setgroups", "w") as fh:
+                fh.write("deny")
+        except OSError:
+            log.debug("Failed to write setgroups deny for pid %d (may not be required)", child_pid)
 
     with open(f"/proc/{child_pid}/uid_map", "w") as fh:
-        fh.write(f"0 {real_uid} 1\n")
+        fh.write(uid_map)
 
     with open(f"/proc/{child_pid}/gid_map", "w") as fh:
-        fh.write(f"0 {real_gid} 1\n")
+        fh.write(gid_map)
 
 
 # ---------------------------------------------------------------------------
@@ -214,6 +230,7 @@ def create_holder_process(
     *,
     rootfs: str | None = None,
     ready_fd: int = -1,
+    id_map: tuple[str, str] | None = None,
 ) -> int:
     """Create a long-lived process that holds namespaces open.
 
@@ -299,7 +316,7 @@ def create_holder_process(
 
                 # Write uid/gid mappings for the child's user namespace.
                 try:
-                    _write_id_mappings(child_pid)
+                    _write_id_mappings(child_pid, id_map)
                 except OSError as exc:
                     log.warning("Failed to write id mappings for pid %d: %s", child_pid, exc)
 

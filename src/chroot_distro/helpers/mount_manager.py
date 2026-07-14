@@ -201,20 +201,55 @@ def create_dev_nodes(
     rootfs: str,
     nodes,
     holder: NamespaceHolder | None = None,
+    *,
+    use_userns: bool = False,
 ) -> None:
-    """Create minimal character device nodes inside the rootfs ``/dev``.
+    """Populate the fresh tmpfs ``/dev`` with the minimal device nodes.
 
     *nodes* is an iterable of ``(name, major, minor, mode)`` tuples. Used for
     the fresh tmpfs ``/dev`` mounted under maximum isolation, where the host
-    ``/dev`` is intentionally not bind-mounted. mknod is run inside the
-    holder's mount namespace (when given) so the nodes land on the new tmpfs;
-    failures are non-fatal and logged at debug level. ``/dev/ptmx``,
-    ``/dev/console`` and the ``std*`` symlinks are provided by the devpts
-    overmount and the login pty wrapper, so they are not created here.
+    ``/dev`` is intentionally not bind-mounted. ``/dev/ptmx``, ``/dev/console``
+    and the ``std*`` symlinks are provided by the devpts overmount and the login
+    pty wrapper, so they are not created here.
+
+    Two strategies:
+
+    * **mknod** (default) creates real device nodes on the new tmpfs. This is
+      how a privileged mount namespace without a user namespace works.
+    * **bind** (*use_userns*): inside a user namespace the kernel forbids
+      ``mknod`` of device nodes (EPERM) even for root, which would leave e.g.
+      ``/dev/null`` missing — a later shell redirect then creates a plain file
+      in its place, breaking it for non-root users. So when a user namespace is
+      active we instead **bind-mount the host's real device node** (``/dev/null``
+      etc.) onto a stub in the tmpfs ``/dev``; binding an existing device node
+      is permitted in a user namespace.
+
+    Failures are non-fatal and logged at debug level.
     """
     dev_dir = os.path.join(rootfs, "dev")
     for name, major, minor, mode in nodes:
         host_path = os.path.join(dev_dir, name)
+
+        if use_userns:
+            # Bind the host's real device node over a stub in the tmpfs /dev.
+            # The fresh tmpfs /dev lives inside the holder's mount namespace, so
+            # the stub target must be created there (not on the host view of the
+            # rootfs) before the bind — otherwise the mount target is missing.
+            source = os.path.join("/dev", name)
+            if not os.path.exists(source):
+                log.debug("Skipping /dev/%s bind: host node %s missing", name, source)
+                continue
+            if holder is not None:
+                touch = holder.run(["sh", "-c", f"touch {host_path}"], capture_output=True, text=True)
+                if touch.returncode != 0:
+                    log.debug("Could not create stub %s in holder: %s", host_path, (touch.stderr or "").strip())
+                    continue
+            try:
+                safe_mount(source, host_path, holder=holder)
+            except MountError as exc:
+                log.debug("Bind of device node %s -> %s failed: %s", source, host_path, exc)
+            continue
+
         if holder is not None:
             cmd = ["mknod", "-m", format(mode, "o"), host_path, "c", str(major), str(minor)]
             try:
@@ -290,13 +325,15 @@ def safe_unmount(target: str, holder: NamespaceHolder | None = None) -> None:
         return
 
     if holder is not None:
-        # Unmount inside the holder's mount namespace.
+        # Unmount inside the holder's mount namespace. do_umount already retries
+        # with a lazy unmount. If even that fails (e.g. a special submount such
+        # as sys/firmware/efi/efivars pulled in by a recursive /sys bind under a
+        # user namespace), it is non-fatal: the holder's mount namespace is torn
+        # down in full when the holder is killed, so nothing leaks.
         try:
             holder.do_umount(target)
-        except MountError:
-            raise
-        except Exception as e:
-            raise MountError(f"Failed to unmount {target}: {e}") from e
+        except (MountError, OSError) as e:
+            log.debug("Non-fatal: unmount of %s inside namespace failed: %s", target, e)
         return
 
     # Direct syscall path — no holder.

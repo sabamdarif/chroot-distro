@@ -47,3 +47,24 @@ def test_create_dev_nodes_via_holder():
         text=True,
     )
 
+
+def test_create_dev_nodes_under_userns_binds_instead_of_mknod():
+    # Inside a user namespace mknod is forbidden, so the host device node is
+    # bind-mounted onto a stub created inside the holder — no mknod is issued.
+    holder = MagicMock()
+    holder.run.return_value = MagicMock(returncode=0, stderr="")
+    rootfs = "/tmp/rootfs"
+    nodes = [("null", 1, 3, 0o666)]
+    with (
+        patch("os.path.exists", return_value=True),
+        patch("chroot_distro.helpers.mount_manager.safe_mount") as mock_safe,
+    ):
+        mm.create_dev_nodes(rootfs, nodes, holder=holder, use_userns=True)
+    # Stub is touched inside the holder, then the host node is bind-mounted.
+    holder.run.assert_called_once_with(
+        ["sh", "-c", "touch /tmp/rootfs/dev/null"], capture_output=True, text=True
+    )
+    mock_safe.assert_called_once_with("/dev/null", "/tmp/rootfs/dev/null", holder=holder)
+    # No mknod command was ever issued.
+    assert all("mknod" not in c.args[0] for c in holder.run.call_args_list)
+

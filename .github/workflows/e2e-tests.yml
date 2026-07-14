@@ -432,25 +432,108 @@ jobs:
               run: sudo chroot-distro unmount debian-sec || true
 
 
-            - name: "Security: Verify capability confinement"
+            - name: "Security: Verify user namespace uid mapping (finding #2)"
               run: |
-                  # Even without user namespace, dangerous caps should be dropped
-                  # from the bounding set
-                  output=$(sudo chroot-distro login debian-sec --isolated -- \
-                    sh -c 'cat /proc/self/status | grep CapBnd')
-                  echo "Container CapBnd: $output"
-                  cap_bnd=$(echo "$output" | awk '{print $2}')
-                  echo "Bounding set hex: $cap_bnd"
-                  # Full unrestricted bounding set is 000001ffffffffff
-                  # After our cap drop, it should be smaller
-                  if [ "$cap_bnd" = "000001ffffffffff" ]; then
-                    echo "WARNING: Full capability bounding set detected"
-                    echo "Capability drop may not be active (check CD_NO_CAP_DROP)"
+                  # Report finding #2: container root must live in a real, bounded
+                  # user namespace (uid_map like "0 0 65536"), NOT the host's
+                  # initial user namespace (identity map "0 0 4294967295").
+                  host_userns=$(readlink /proc/self/ns/user)
+                  out=$(sudo chroot-distro login debian-sec --isolated -- sh -c \
+                    'printf "NS=%s\n" "$(readlink /proc/self/ns/user)"; \
+                     printf "MAP=%s\n" "$(tr -s " " < /proc/self/uid_map | sed "s/^ *//")"')
+                  echo "$out"
+                  cont_userns=$(echo "$out" | sed -n 's/^NS=//p')
+                  uid_map=$(echo "$out" | sed -n 's/^MAP=//p')
+                  count=$(echo "$uid_map" | awk '{print $3}')
+                  echo "Host  user ns: $host_userns"
+                  echo "Cont  user ns: $cont_userns"
+                  echo "Cont  uid_map: '$uid_map'"
+                  if [ -z "$count" ] || [ "$count" = "4294967295" ]; then
+                    # No user namespace on this kernel — graceful degradation
+                    # (capability-drop tier) is by design, so this is not a failure.
+                    echo "NOTE: user namespace unavailable here (Tier C fallback); uid-map check skipped."
                   else
-                    echo "PASS: Capability bounding set is restricted"
+                    if [ "$host_userns" = "$cont_userns" ]; then
+                      echo "FAIL: container shares the host user namespace (no uid isolation)"; exit 1
+                    fi
+                    echo "PASS: real user namespace active with a bounded uid_map ($uid_map)"
+                  fi
+
+            - name: "Unmount: debian-sec after uid-map test"
+              run: sudo chroot-distro unmount debian-sec || true
+
+            - name: "Security: Verify capability confinement under sudo (finding #3)"
+              run: |
+                  # Report finding #3: container root must NOT wield host-level
+                  # capabilities. Determine the active tier from uid_map, then
+                  # assert the appropriate confinement.
+                  uid_map=$(sudo chroot-distro login debian-sec --isolated -- \
+                    sh -c 'tr -s " " < /proc/self/uid_map | sed "s/^ *//"')
+                  count=$(echo "$uid_map" | awk '{print $3}')
+                  echo "uid_map: '$uid_map'"
+                  if [ -n "$count" ] && [ "$count" != "4294967295" ]; then
+                    # User namespace active: capabilities are namespace-scoped.
+                    # A privileged op that needs real (init-userns) CAP_SYS_ADMIN
+                    # — mounting a fresh sysfs — must be denied even though the
+                    # in-namespace CapEff looks full.
+                    res=$(sudo chroot-distro login debian-sec --isolated -- sh -c \
+                      'mkdir -p /tmp/capchk; if mount -t sysfs sysfs /tmp/capchk 2>/dev/null; then \
+                         umount /tmp/capchk 2>/dev/null; echo RESULT=ALLOWED; else echo RESULT=DENIED; fi')
+                    echo "$res"
+                    if echo "$res" | grep -q "RESULT=ALLOWED"; then
+                      echo "FAIL: init-privileged mount succeeded — capabilities NOT confined"; exit 1
+                    fi
+                    echo "PASS: host-level capability denied — capabilities are namespace-scoped"
+                  else
+                    # No user namespace: the cap-drop fallback must have removed
+                    # the dangerous caps from the bounding set (not the full set).
+                    out=$(sudo chroot-distro login debian-sec --isolated -- \
+                      sh -c 'grep CapBnd /proc/self/status')
+                    echo "$out"
+                    cap_bnd=$(echo "$out" | awk '{print $2}')
+                    if [ "$cap_bnd" = "000001ffffffffff" ]; then
+                      echo "FAIL: full capability bounding set — neither user namespace nor cap-drop active"; exit 1
+                    fi
+                    echo "PASS: capability bounding set restricted (cap-drop fallback)"
                   fi
 
             - name: "Unmount: debian-sec after cap test"
+              run: sudo chroot-distro unmount debian-sec || true
+
+            - name: "Security: Verify ownership of sudo-created files (finding #7)"
+              run: |
+                  # Report finding #7: a file created by container-root should not
+                  # grant host root. Create one, then inspect it from the host.
+                  data=$(sudo chroot-distro info 2>&1 | grep -m1 "Data location:" \
+                    | sed 's/.*Data location:[[:space:]]*//')
+                  rootfs="$data/containers/debian-sec/rootfs"
+                  echo "Container rootfs: $rootfs"
+                  sudo chroot-distro login debian-sec --isolated -- sh -c 'touch /root/uidtest_ci'
+                  owner=$(sudo stat -c '%u' "$rootfs/root/uidtest_ci")
+                  echo "Host-side owner uid of the container-root-created file: $owner"
+                  uid_map=$(sudo chroot-distro login debian-sec --isolated -- \
+                    sh -c 'tr -s " " < /proc/self/uid_map | sed "s/^ *//"')
+                  base=$(echo "$uid_map" | awk '{print $2}')
+                  count=$(echo "$uid_map" | awk '{print $3}')
+                  echo "uid_map: '$uid_map'"
+                  if [ -n "$count" ] && [ "$count" != "4294967295" ] && [ "$base" != "0" ]; then
+                    # Tier B (subordinate remap active): the file must be owned by
+                    # an unprivileged host uid, never real root.
+                    if [ "$owner" = "0" ]; then
+                      echo "FAIL: uid remap active but file still owned by host root (uid 0)"; exit 1
+                    fi
+                    echo "PASS: sudo-created file owned by unprivileged host uid $owner (finding #7 fixed)"
+                  else
+                    # Tier A (identity userns) or Tier C: uid remap not active, so
+                    # the file is owned by host root. This is the documented state
+                    # until the Tier B idmapped-rootfs integration is enabled
+                    # (namespace._TIER_B_ROOTFS_IDMAP_READY). Capability scoping
+                    # (finding #3) is the active mitigation in this mode.
+                    echo "NOTE: uid remap not active (Tier A/C); file owned by uid $owner (expected)."
+                    echo "      Finding #7 is fully closed only under Tier B (idmapped rootfs)."
+                  fi
+
+            - name: "Unmount: debian-sec after file-ownership test"
               run: sudo chroot-distro unmount debian-sec || true
 
             - name: "Security: Verify cross-signal blocking"

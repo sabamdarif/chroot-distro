@@ -918,6 +918,7 @@ def _command_login_inner_once(container_name: str, args) -> None:
         isolated=skip_extra_mounts,
         max_isolation=max_isolation and use_namespaces,
         use_namespaces=use_namespaces,
+        use_userns=has_userns,
         shared_home=use_shared_home,
         shared_tmp=shared_tmp,
         shared_display=shared_display,
@@ -1059,7 +1060,7 @@ def _command_login_inner_once(container_name: str, args) -> None:
                         holder=holder,
                         # Recurse for /run subtrees, WSL, and Android system
                         # partitions (nested mounts) — shared with build.
-                        recursive=isolation.bind_is_recursive(src, dst_real, run_root),
+                        recursive=isolation.bind_is_recursive(src, dst_real, run_root, use_userns=has_userns),
                         options=mount_options,
                         # A stale, unremovable (MNT_LOCKED) mount can shadow
                         # /dev without providing ptmx; detect and mount over.
@@ -1104,6 +1105,7 @@ def _command_login_inner_once(container_name: str, args) -> None:
                     isolated=use_namespaces,
                     max_isolation=max_isolation and use_namespaces,
                     minimal=minimal,
+                    use_userns=has_userns,
                 )
             except Exception as e:
                 if pipe_w is not None:

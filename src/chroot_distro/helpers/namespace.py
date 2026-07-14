@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import functools
 import logging
 import os
 import signal
@@ -74,6 +75,67 @@ ISOLATION_MODE_NAMESPACE = "namespace"
 ISOLATION_MODE_HOST = "host"
 
 _TRUTHY_ENV_VALUES = frozenset({"1", "true", "yes", "on"})
+
+# ── User-namespace isolation tiers ───────────────────────────────────────────
+# See plans/02-isolation-namespace-security.md. Selected at runtime by probing.
+#   A: identity-mapped user namespace — scopes capabilities (fixes report #3).
+#   B: subordinate range + idmapped rootfs — also remaps uids (fixes #2, #7).
+#   C: no user namespace — capability-bounding-set drop only (legacy fallback).
+ISOLATION_TIER_REMAP = "B"
+ISOLATION_TIER_USERNS = "A"
+ISOLATION_TIER_CAPDROP = "C"
+
+# Whether the idmapped-rootfs integration (Tier B) is wired into the holder's
+# chroot flow. The idmap syscalls, direction and support probe are all in place
+# and validated, but mounting the rootfs idmapped inside the holder requires a
+# chroot-ordering handshake that is not yet implemented. Until then we detect
+# and *report* idmapped-mount availability but keep the applied map at the
+# identity Tier A — selecting the subordinate Tier B range without idmapping the
+# rootfs would make the (host-uid-0) rootfs appear as nobody inside the userns
+# and break the container (EOVERFLOW on every path).
+_TIER_B_ROOTFS_IDMAP_READY = False
+
+# Number of contiguous uids/gids mapped into the container's user namespace.
+# 65536 covers every uid a normal distro rootfs uses (root..nobody).
+_USERNS_MAP_SIZE = 65536
+# Default first host subordinate uid/gid for Tier B (overridable via env).
+_DEFAULT_SUBID_BASE = 100000
+
+
+def _subid_base() -> int:
+    """First host subordinate uid/gid for Tier B remapping.
+
+    Overridable via ``CD_SUBID_BASE`` for hosts that reserve a different
+    subordinate range. Falls back to the default on any bad value.
+    """
+    raw = os.environ.get("CD_SUBID_BASE", "").strip()
+    if raw:
+        try:
+            value = int(raw)
+            if value > 0:
+                return value
+        except ValueError:
+            log.debug("Ignoring invalid CD_SUBID_BASE=%r", raw)
+    return _DEFAULT_SUBID_BASE
+
+
+def resolve_userns_map(tier: str) -> tuple[str, str]:
+    """Return the ``(uid_map, gid_map)`` bodies to write for *tier*.
+
+    Tier A uses an identity range (container uid 0..N ⇒ host uid 0..N) so the
+    root-owned rootfs stays usable while capabilities become namespace-scoped.
+    Tier B maps container uid 0 to a subordinate host base (e.g. 100000) so a
+    file created by container-root is owned by an unprivileged host uid; the
+    rootfs is kept usable via an idmapped mount (Phase 2), not a chown.
+    """
+    size = _USERNS_MAP_SIZE
+    if tier == ISOLATION_TIER_REMAP:
+        base = _subid_base()
+        line = f"0 {base} {size}\n"
+        return line, line
+    identity = f"0 0 {size}\n"
+    return identity, identity
+
 
 # Android's toybox sleep rejects "infinity"; use a large finite value.
 HOLDER_SLEEP_SECONDS = "2147483647"
@@ -147,10 +209,33 @@ class NamespaceProbeResult:
     warnings: list[str]
     """Human-readable warning messages for missing namespaces."""
 
+    userns_mounts_ok: bool = True
+    """False when ``unshare(CLONE_NEWUSER)`` works but mounts inside it are
+    rejected (kernel EPERMs proc/bind under a userns). In that case
+    ``CLONE_NEWUSER`` is dropped from :attr:`supported` and we fall back to
+    the capability-drop tier — this flag lets the caller explain why."""
+
+    idmapped_mounts: bool = False
+    """True when the kernel supports idmapped mounts (Linux 5.12+), enabling
+    Tier B (subordinate uid remap with a usable rootfs)."""
+
     @property
     def has_userns(self) -> bool:
-        """Return True if user namespace isolation is available."""
+        """Return True if user namespace isolation is available *and* usable."""
         return bool(self.supported & CLONE_NEWUSER)
+
+    @property
+    def isolation_tier(self) -> str:
+        """Which isolation tier (A/B/C) this host will actually run."""
+        if not self.has_userns:
+            return ISOLATION_TIER_CAPDROP
+        if self.idmapped_mounts and _TIER_B_ROOTFS_IDMAP_READY:
+            return ISOLATION_TIER_REMAP
+        return ISOLATION_TIER_USERNS
+
+    def id_map(self) -> tuple[str, str]:
+        """The ``(uid_map, gid_map)`` bodies for this host's tier."""
+        return resolve_userns_map(self.isolation_tier)
 
 
 def probe_and_report_namespaces() -> NamespaceProbeResult:
@@ -162,26 +247,27 @@ def probe_and_report_namespaces() -> NamespaceProbeResult:
     """
     from chroot_distro.helpers.isolation_warnings import format_isolation_warnings
 
-    # When running as real root (uid 0), skip CLONE_NEWUSER entirely:
-    #   1. Mapping uid 0 → 0 provides no uid isolation
-    #   2. The kernel restricts mount operations inside user namespaces
-    #      (devpts, sysfs, etc. fail with EPERM), breaking container setup
-    #   3. The capability bounding set drop (Component 3) is the proper
-    #      defense-in-depth for the root case
-    # CLONE_NEWUSER is valuable for unprivileged users who need namespace-
-    # scoped capabilities without being real root.
-    real_uid = os.getuid()
-    if real_uid == 0:
-        probe_flags = _ALL_PROBE_FLAGS & ~CLONE_NEWUSER
-        enhancement_flags = _ENHANCEMENT_NS_FLAGS & ~CLONE_NEWUSER
-    else:
-        probe_flags = _ALL_PROBE_FLAGS
-        enhancement_flags = _ENHANCEMENT_NS_FLAGS
+    # Even as real root, an identity-mapped *child* user namespace still scopes
+    # capabilities (a cap held there cannot act on host/init-userns resources),
+    # so we always probe CLONE_NEWUSER. It is only usable, though, if the kernel
+    # also permits the container's mounts inside a userns — historically it does
+    # not (proc/sysfs EPERM), which is exactly what broke --isolated before. We
+    # therefore gate CLONE_NEWUSER on a mount smoke test and, when it fails, drop
+    # to the capability-drop tier while recording why.
+    supported = _probe_ns_support(_ALL_PROBE_FLAGS)
 
-    supported = _probe_ns_support(probe_flags)
+    userns_mounts_ok = True
+    if supported & CLONE_NEWUSER:
+        userns_mounts_ok = _userns_mounts_ok_cached()
+        if not userns_mounts_ok:
+            log.debug("user namespace present but mounts rejected inside it; dropping CLONE_NEWUSER")
+            supported &= ~CLONE_NEWUSER
+
+    idmapped = bool(supported & CLONE_NEWUSER) and _idmapped_mounts_supported()
+
     missing_mandatory = _MANDATORY_NS_FLAGS & ~supported
     missing_recommended = _RECOMMENDED_NS_FLAGS & ~supported
-    missing_enhancements = enhancement_flags & ~supported
+    missing_enhancements = _ENHANCEMENT_NS_FLAGS & ~supported
 
     warnings = format_isolation_warnings(missing_recommended, missing_enhancements)
     return NamespaceProbeResult(
@@ -190,6 +276,8 @@ def probe_and_report_namespaces() -> NamespaceProbeResult:
         missing_recommended=missing_recommended,
         missing_enhancements=missing_enhancements,
         warnings=warnings,
+        userns_mounts_ok=userns_mounts_ok,
+        idmapped_mounts=idmapped,
     )
 
 
@@ -201,22 +289,117 @@ def emit_isolation_warnings(probe_result: NamespaceProbeResult) -> None:
         probe_result.missing_recommended,
         probe_result.missing_enhancements,
         probe_result.supported,
+        userns_mounts_ok=probe_result.userns_mounts_ok,
     )
+
+
+def _userns_mount_probe_inner() -> bool:
+    """Create a disposable userns holder and run the real mounts through it."""
+    import tempfile
+
+    flags = CLONE_NEWUSER | CLONE_NEWNS | CLONE_NEWPID
+    id_map = resolve_userns_map(ISOLATION_TIER_USERNS)  # identity range
+    try:
+        holder_pid = create_holder_process(flags, id_map=id_map)
+    except (OSError, RuntimeError):
+        log.debug("userns smoke test: holder creation failed", exc_info=True)
+        return False
+    try:
+        if not _pid_alive(holder_pid):
+            return False
+        live = filter_accessible_namespaces(holder_pid, flags)
+        if not (live & CLONE_NEWUSER):
+            return False
+        holder = NamespaceHolder(pid=holder_pid, ns_flags=live, container_name="__userns_probe__")
+        holder.do_mount_filesystem("proc", tempfile.mkdtemp(), "proc")
+        holder.do_bind_mount(tempfile.mkdtemp(), tempfile.mkdtemp())
+        return True
+    except (OSError, MountError):
+        log.debug("userns smoke test: mount rejected inside user namespace", exc_info=True)
+        return False
+    finally:
+        with contextlib.suppress(OSError):
+            os.kill(holder_pid, signal.SIGKILL)
+
+
+def _probe_userns_mounts_real() -> bool:
+    """Accurately test the production mount path under a user namespace.
+
+    Some kernels allow ``unshare(CLONE_NEWUSER)`` but then reject the
+    container's ``proc``/bind mounts inside it (notably SELinux-restricted
+    Android) — the failure that makes ``--isolated`` "mount nothing" once user
+    namespaces are on. This reproduces the *exact* production flow: a disposable
+    holder from :func:`create_holder_process` (proper PID 1 + identity uid/gid
+    map), then a fresh-proc mount and a bind mount through
+    :class:`NamespaceHolder` (the real setns-join path). Returns True only when
+    both succeed.
+
+    The whole probe runs inside a single disposable child so that the holder's
+    launcher/grandchild processes are reaped by it and never leak into the
+    caller; the caller reaps only that one child.
+    """
+    r, w = os.pipe()
+    pid = os.fork()
+    if pid == 0:
+        os.close(r)
+        result = b"0"
+        try:
+            result = b"1" if _userns_mount_probe_inner() else b"0"
+        except Exception:
+            result = b"0"
+        with contextlib.suppress(OSError):
+            os.write(w, result)
+        os._exit(0)
+
+    os.close(w)
+    try:
+        data = os.read(r, 1)
+    except OSError:
+        data = b""
+    finally:
+        os.close(r)
+    with contextlib.suppress(OSError, ChildProcessError):
+        os.waitpid(pid, 0)
+    return data == b"1"
+
+
+@functools.lru_cache(maxsize=1)
+def _userns_mounts_ok_cached() -> bool:
+    """Cached: can the production mount path run inside a user namespace?"""
+    return _probe_userns_mounts_real()
+
+
+@functools.lru_cache(maxsize=1)
+def _idmapped_mounts_supported() -> bool:
+    """Return True if the kernel supports idmapped mounts (Linux 5.12+).
+
+    Gate for Tier B (subordinate uid remap with a usable rootfs). Implemented
+    via a ``mount_setattr(MOUNT_ATTR_IDMAP)`` probe in Phase 2; until then this
+    reports False so hosts fall back to the identity-mapped Tier A.
+    """
+    try:
+        from chroot_distro.syscalls.idmap import idmapped_mounts_supported
+    except ImportError:
+        return False
+    try:
+        return idmapped_mounts_supported()
+    except Exception:
+        log.debug("idmapped-mount probe raised; assuming unsupported", exc_info=True)
+        return False
 
 
 def probe_unshare_flags() -> int:
     """Return a bitmask of supported namespace flags; mount NS is required.
 
     Replaces the old string-list based probe_unshare_flags() that shelled
-    out to the ``unshare`` binary.
+    out to the ``unshare`` binary. ``CLONE_NEWUSER`` is included only when the
+    kernel both supports it and permits mounts inside a user namespace (see
+    :func:`probe_and_report_namespaces`).
     """
-    # Exclude CLONE_NEWUSER when running as root — see
-    # probe_and_report_namespaces() for the rationale.
-    probe_flags = _ALL_PROBE_FLAGS
-    if os.getuid() == 0:
-        probe_flags &= ~CLONE_NEWUSER
+    supported = _probe_ns_support(_ALL_PROBE_FLAGS)
 
-    supported = _probe_ns_support(probe_flags)
+    if (supported & CLONE_NEWUSER) and not _userns_mounts_ok_cached():
+        supported &= ~CLONE_NEWUSER
 
     if not (supported & CLONE_NEWNS):
         raise NamespaceError("Mount namespace not supported by this kernel (unshare CLONE_NEWNS failed).")
@@ -748,6 +931,7 @@ def _create_holder(
     pipe_r: int | None = None,
     env: dict | None = None,
     rootfs: str | None = None,
+    id_map: tuple[str, str] | None = None,
 ) -> NamespaceHolder:
     """Create a new namespace holder process.
 
@@ -756,6 +940,9 @@ def _create_holder(
     preserve the pipe-sync protocol. For the normal (sleep-based) and
     max-isolation (chrooted) holders, we use the native
     create_holder_process() via ctypes.
+
+    *id_map* is the ``(uid_map, gid_map)`` to write when *flags* include
+    ``CLONE_NEWUSER``; when omitted it defaults to this host's tier map.
     """
     pid_file = _holder_pid_file(container_name)
     _remove_holder_state(container_name)
@@ -770,11 +957,17 @@ def _create_holder(
     # ── Native holder path (no subprocess) ──
     self_chroot_holder = bool(rootfs)
 
+    if id_map is None and (flags & CLONE_NEWUSER):
+        use_remap = _TIER_B_ROOTFS_IDMAP_READY and _idmapped_mounts_supported()
+        tier = ISOLATION_TIER_REMAP if use_remap else ISOLATION_TIER_USERNS
+        id_map = resolve_userns_map(tier)
+
     try:
         # Use the native create_holder_process which forks+unshares directly.
         holder_pid = create_holder_process(
             flags,
             rootfs=rootfs,
+            id_map=id_map,
         )
     except (OSError, RuntimeError) as exc:
         raise NamespaceError(
@@ -853,6 +1046,10 @@ def _create_holder_subprocess(
 
     unshare = _resolve_unshare()
     pid_file = _holder_pid_file(container_name)
+    # This path execs the `unshare` binary and cannot run our uid/gid-map
+    # handshake, so a userns here would leave the process unmapped (nobody).
+    # Keep it at the capability-drop tier by dropping CLONE_NEWUSER.
+    flags &= ~CLONE_NEWUSER
     cli_flags = bitmask_to_cli_flags(flags)
 
     master_fd = slave_fd = -1
@@ -970,13 +1167,16 @@ def acquire_holder(
     pipe_r: int | None = None,
     env: dict | None = None,
     rootfs: str | None = None,
+    id_map: tuple[str, str] | None = None,
 ) -> NamespaceHolder:
     """Reuse or create a namespace holder for the container."""
     existing = get_live_holder(container_name)
     if existing is not None:
         return existing
     flags = probe_unshare_flags()
-    return _create_holder(container_name, flags, holder_cmd=holder_cmd, pipe_r=pipe_r, env=env, rootfs=rootfs)
+    return _create_holder(
+        container_name, flags, holder_cmd=holder_cmd, pipe_r=pipe_r, env=env, rootfs=rootfs, id_map=id_map
+    )
 
 
 def release_holder(container_name: str) -> None:

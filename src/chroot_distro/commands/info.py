@@ -277,6 +277,68 @@ def _namespace_status() -> tuple[str, str]:
     return f"{'+'.join(tools)} present, user namespaces enabled", "ok"
 
 
+def _read_sysctl_int(path: str) -> int | None:
+    """Return the integer value of a sysctl file, or None if unreadable."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return int(fh.read().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def _userns_knob_caps() -> list["_Capability"]:
+    """Report the runtime knobs that gate CLONE_NEWUSER (user namespaces)."""
+    caps: list[_Capability] = []
+    max_userns = _read_sysctl_int("/proc/sys/user/max_user_namespaces")
+    if max_userns is not None:
+        if max_userns == 0:
+            caps.append(_Capability("max_user_namespaces", "0 (user namespaces disabled)", "warn"))
+        else:
+            caps.append(_Capability("max_user_namespaces", str(max_userns), "ok"))
+    # Present mainly on Debian/Ubuntu/Arch-hardened kernels; absent elsewhere.
+    unpriv = _read_sysctl_int("/proc/sys/kernel/unprivileged_userns_clone")
+    if unpriv is not None:
+        if unpriv == 1:
+            caps.append(_Capability("unprivileged_userns_clone", "1 (rootless userns allowed)", "ok"))
+        else:
+            caps.append(
+                _Capability("unprivileged_userns_clone", "0 (rootless userns blocked; root still works)", "info")
+            )
+    return caps
+
+
+def _isolation_tier_status() -> tuple[str, str] | None:
+    """Return (value, level) describing which --isolated tier will be used.
+
+    Uses the same probe as ``login`` so the report and the real run agree. May
+    fork a short-lived holder to test mounts inside a user namespace; failures
+    degrade gracefully to an informational note.
+    """
+    try:
+        from chroot_distro.helpers import namespace
+
+        result = namespace.probe_and_report_namespaces()
+    except Exception:
+        return None
+    if result.missing_mandatory:
+        return "unavailable (no mount namespace on this kernel)", "warn"
+    descriptions = {
+        "B": "B — full user-namespace remap (container uids remapped, capabilities scoped)",
+        "A": "A — user namespace active (capabilities scoped; uids not remapped)",
+        "C": "C — capability-drop only (no user namespace; container root == host root)",
+    }
+    levels = {"B": "ok", "A": "ok", "C": "warn"}
+    tier = result.isolation_tier
+    value = descriptions.get(tier, tier)
+    if tier == "A" and result.idmapped_mounts:
+        value += "; idmapped mounts available (uid-remap not yet enabled)"
+    elif tier != "C" and not result.idmapped_mounts:
+        value += "; idmapped mounts unavailable"
+    if not result.userns_mounts_ok:
+        value += "; userns present but mounts rejected inside it"
+    return value, levels.get(tier, "info")
+
+
 def _free_disk(path: str) -> tuple[str, str]:
     """Return (value, level) for free space on the filesystem holding *path*."""
     probe = path
@@ -382,6 +444,12 @@ def _gather_capabilities(images: list["_ImageInfo"], host_arch: str) -> list[_Ca
 
     ns_value, ns_level = _namespace_status()
     caps.append(_Capability("Namespaces", ns_value, ns_level))
+
+    # User-namespace readiness knobs + the isolation tier --isolated will use.
+    caps.extend(_userns_knob_caps())
+    tier_status = _isolation_tier_status()
+    if tier_status is not None:
+        caps.append(_Capability("Isolation tier", tier_status[0], tier_status[1]))
 
     if not IS_TERMUX:
         lsm = _lsm_status()

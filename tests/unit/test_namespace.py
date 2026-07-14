@@ -1,6 +1,5 @@
 """Unit tests for native namespace isolation helpers."""
 
-import os
 import signal
 from unittest.mock import MagicMock, mock_open, patch
 
@@ -15,7 +14,6 @@ from chroot_distro.syscalls._constants import (
     CLONE_NEWUTS,
     MS_PRIVATE,
     MS_REC,
-    MS_SLAVE,
 )
 
 # ---------------------------------------------------------------------------
@@ -89,8 +87,10 @@ def test_probe_namespace_support_reports_missing(mock_probe):
     assert "--pid" not in missing
 
 
+@patch("chroot_distro.helpers.namespace._idmapped_mounts_supported", return_value=False)
+@patch("chroot_distro.helpers.namespace._userns_mounts_ok_cached", return_value=True)
 @patch("chroot_distro.helpers.namespace._probe_ns_support")
-def test_probe_and_report_namespaces_tiered(mock_probe):
+def test_probe_and_report_namespaces_tiered(mock_probe, mock_userns_ok, mock_idmap):
     # Simulate a kernel that supports mount, pid, uts, ipc but NOT user or cgroup.
     from chroot_distro.syscalls._constants import CLONE_NEWUSER
     mock_probe.return_value = CLONE_NEWNS | CLONE_NEWPID | CLONE_NEWUTS | CLONE_NEWIPC
@@ -100,8 +100,9 @@ def test_probe_and_report_namespaces_tiered(mock_probe):
     assert result.missing_enhancements & CLONE_NEWUSER
     assert result.missing_enhancements & CLONE_NEWCGROUP
     assert result.has_userns is False
+    assert result.isolation_tier == ns.ISOLATION_TIER_CAPDROP
 
-    # Simulate full support.
+    # Full flags, userns mounts work, no idmapped mounts -> Tier A (identity).
     mock_probe.return_value = (
         CLONE_NEWNS | CLONE_NEWPID | CLONE_NEWUTS | CLONE_NEWIPC
         | CLONE_NEWUSER | CLONE_NEWCGROUP
@@ -111,6 +112,34 @@ def test_probe_and_report_namespaces_tiered(mock_probe):
     assert result.missing_recommended == 0
     assert result.missing_enhancements == 0
     assert result.has_userns is True
+    assert result.userns_mounts_ok is True
+    assert result.isolation_tier == ns.ISOLATION_TIER_USERNS
+    assert result.id_map() == ("0 0 65536\n", "0 0 65536\n")
+
+    # userns supported by the kernel but mounts inside it are rejected ->
+    # CLONE_NEWUSER dropped, fall back to the capability-drop tier.
+    mock_userns_ok.return_value = False
+    result = ns.probe_and_report_namespaces()
+    assert result.has_userns is False
+    assert result.userns_mounts_ok is False
+    assert result.isolation_tier == ns.ISOLATION_TIER_CAPDROP
+
+    # Full flags + userns mounts ok + idmapped mounts available. Idmapped
+    # support is detected (reported by `info`), but until the rootfs-idmap
+    # integration is wired in (_TIER_B_ROOTFS_IDMAP_READY), the *active* tier
+    # stays A so we never apply a subordinate map without idmapping the rootfs.
+    mock_userns_ok.return_value = True
+    mock_idmap.return_value = True
+    result = ns.probe_and_report_namespaces()
+    assert result.has_userns is True
+    assert result.idmapped_mounts is True
+    assert result.isolation_tier == ns.ISOLATION_TIER_USERNS
+
+    # When the integration gate is on, the same host resolves to Tier B.
+    with patch.object(ns, "_TIER_B_ROOTFS_IDMAP_READY", True):
+        result = ns.probe_and_report_namespaces()
+        assert result.isolation_tier == ns.ISOLATION_TIER_REMAP
+        assert result.id_map() == ("0 100000 65536\n", "0 100000 65536\n")
 
 
 # ---------------------------------------------------------------------------
@@ -211,4 +240,4 @@ def test_create_holder_success(mock_alive, mock_remove, mock_filter, mock_create
 
     assert holder.pid == 555
     assert holder.ns_flags == CLONE_NEWNS | CLONE_NEWPID
-    mock_create.assert_called_once_with(CLONE_NEWNS | CLONE_NEWPID, rootfs="/tmp/rootfs")
+    mock_create.assert_called_once_with(CLONE_NEWNS | CLONE_NEWPID, rootfs="/tmp/rootfs", id_map=None)

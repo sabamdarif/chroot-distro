@@ -149,10 +149,56 @@ def emit_isolation_warnings(
     missing_recommended: int,
     missing_enhancements: int,
     supported: int,
+    *,
+    userns_mounts_ok: bool = True,
 ) -> None:
-    """Print isolation warnings and summary to stderr."""
-    lines = format_isolation_warnings(missing_recommended, missing_enhancements)
+    """Print isolation warnings and summary to stderr.
+
+    When *userns_mounts_ok* is False the kernel supports ``CLONE_NEWUSER`` but
+    rejects mounts inside a user namespace, so the generic "user namespace not
+    available" line would be misleading — it is replaced by a specific note.
+    """
+    enhancements = missing_enhancements
+    if not userns_mounts_ok:
+        # Suppress the generic "not available" line for the user namespace; the
+        # namespace exists, it is the in-userns mounts that fail.
+        enhancements &= ~CLONE_NEWUSER
+
+    lines = format_isolation_warnings(missing_recommended, enhancements)
     if lines:
         sys.stderr.write("\n".join(lines) + "\n")
+    if not userns_mounts_ok:
+        sys.stderr.write(USERNS_MOUNTS_REJECTED_WARNING + "\n")
     summary = format_isolation_summary(supported)
     sys.stderr.write(summary + "\n")
+
+
+# ── Isolation tier reporting ─────────────────────────────────────────────────
+
+# Tier codes mirror chroot_distro.helpers.namespace.ISOLATION_TIER_* so the
+# login and info paths describe the same thing. Kept as plain strings here to
+# avoid importing namespace (which imports this module).
+_TIER_DESCRIPTIONS: dict[str, str] = {
+    "B": "full user-namespace isolation — container uids are remapped to an "
+    "unprivileged host range and capabilities are namespace-scoped",
+    "A": "user-namespace isolation — capabilities are namespace-scoped; "
+    "container root still maps to host root (uids are not remapped)",
+    "C": "reduced isolation — no user namespace; dangerous capabilities are "
+    "dropped from the bounding set instead (container root == host root)",
+}
+
+USERNS_MOUNTS_REJECTED_WARNING = (
+    "⚠ WARNING: A user namespace is available but this kernel rejects "
+    "mounts inside it; continuing without user-namespace isolation "
+    "(capability-drop mode). Container root still maps to host root."
+)
+
+
+def format_isolation_tier_line(tier: str) -> str:
+    """Return a one-line description of isolation *tier* (A/B/C).
+
+    Used by ``info`` (a diagnostics command where the detail is wanted). It is
+    intentionally *not* printed during a normal login — a working run stays
+    silent; only genuine gaps emit anything.
+    """
+    return f"Isolation tier {tier}: {_TIER_DESCRIPTIONS.get(tier, 'unknown')}"
