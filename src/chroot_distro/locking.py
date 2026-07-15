@@ -39,12 +39,29 @@ def container_busy_status(name: str) -> str:
     return "idle"
 
 
+def _pid_state(pid: int) -> str:
+    """Return the single-letter process state from /proc/<pid>/stat, or ''.
+
+    'T' means stopped (job control, e.g. Ctrl+Z) — the process still holds
+    its flocks but will never release them until resumed or killed.
+    """
+    try:
+        with open(f"/proc/{pid}/stat") as fh:
+            stat = fh.read()
+        # Field 3 follows the parenthesised comm, which may contain spaces.
+        return stat.rpartition(")")[2].split()[0]
+    except (OSError, IndexError):
+        return ""
+
+
 def read_lock_info(lock_path: str) -> str:
     """Return a human-readable hint about who holds the lock, or ''.
 
     Reads the lock file's first line (PID + command name) and returns
     a parenthesised note suitable for appending to an error message.
     Returns '' when the file is missing, empty, or names a dead PID.
+    A stopped holder (Ctrl+Z) is called out explicitly with the commands
+    to resume or kill it, since it would otherwise hold the lock forever.
     """
     try:
         with open(lock_path) as fh:
@@ -57,6 +74,11 @@ def read_lock_info(lock_path: str) -> str:
         try:
             pid = int(pid_str)
             os.kill(pid, 0)
+            if _pid_state(pid) == "T":
+                return (
+                    f" (PID {pid}: {cmd} — suspended, e.g. by Ctrl+Z; "
+                    f"resume it with 'kill -CONT {pid}' or terminate it with 'kill {pid}')"
+                )
             return f" (PID {pid}: {cmd})"
         except (OSError, ValueError):
             return ""
@@ -105,7 +127,13 @@ class _FlockBase:
             return True  # Cannot create locks dir; proceed unlocked.
 
         try:
-            fd = open(self._lock_path, "w")  # noqa: SIM115
+            # O_CREAT without O_TRUNC: opening with "w" here would wipe the
+            # holder's "PID command" line *before* the flock attempt, so a
+            # conflicting acquire destroyed the very diagnostics that
+            # read_lock_info() needs to name the busy process. The file is
+            # truncated only after the lock is actually ours.
+            raw_fd = os.open(self._lock_path, os.O_CREAT | os.O_RDWR, 0o644)
+            fd = os.fdopen(raw_fd, "r+")
         except OSError as exc:
             log.warning("Could not open/create lock file '%s': %s. Proceeding unlocked.", self._lock_path, exc)
             return True  # Cannot open/create lock file; proceed unlocked.
@@ -123,6 +151,8 @@ class _FlockBase:
 
         # Record PID + command in the file for diagnostic purposes.
         try:
+            fd.truncate(0)
+            fd.seek(0)
             fd.write(f"{os.getpid()} {self._command}\n")
             fd.flush()
         except OSError as exc:

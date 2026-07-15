@@ -8,6 +8,7 @@ from chroot_distro.locking import (
     BuildLock,
     ContainerLock,
     _held_exclusive,
+    _pid_state,
     container_lock_path,
     read_lock_info,
 )
@@ -39,6 +40,77 @@ def test_lock_info_empty_or_missing(tmp_path):
     empty_file = tmp_path / "empty.lock"
     empty_file.write_text("")
     assert read_lock_info(str(empty_file)) == ""
+
+
+def test_lock_info_stopped_pid(tmp_path):
+    """A suspended (Ctrl+Z'd) holder is called out with resume/kill hints."""
+    lock_file = tmp_path / "stopped.lock"
+    pid = os.getpid()
+    lock_file.write_text(f"{pid} install\n")
+    with patch("chroot_distro.locking._pid_state", return_value="T"):
+        info = read_lock_info(str(lock_file))
+    assert f"PID {pid}: install" in info
+    assert "suspended" in info
+    assert f"kill -CONT {pid}" in info
+    assert f"kill {pid}" in info
+
+
+def test_pid_state_self_running():
+    # Our own process is running (R) or sleeping (S) — never stopped.
+    assert _pid_state(os.getpid()) in ("R", "S")
+
+
+def test_pid_state_dead_pid():
+    assert _pid_state(999999999) == ""
+
+
+def test_failed_acquire_preserves_holder_info(tmp_path):
+    """A conflicting acquire must NOT truncate the holder's PID line.
+
+    The old code opened the lock file with mode "w" (truncating) *before*
+    attempting the flock, so every conflict wiped the diagnostics and the
+    error degraded to a bare "container 'x' is busy." with no PID hint.
+    """
+    lock_path = tmp_path / "busy.lock"
+    pid = os.getpid()
+
+    with patch("chroot_distro.locking.container_lock_path", return_value=str(lock_path)):
+        _held_exclusive.clear()
+
+        holder = ContainerLock("busy", exclusive=True, command="install")
+        assert holder.acquire() is True
+        assert f"{pid} install" in lock_path.read_text()
+
+        # Simulate a second process: bypass the re-entrancy fast path.
+        with patch("chroot_distro.locking._held_exclusive", set()):
+            contender = ContainerLock("busy", exclusive=True, command="install")
+            assert contender.acquire() is False
+
+        # The holder's diagnostic line must have survived the conflict...
+        assert f"{pid} install" in lock_path.read_text()
+        # ...so the conflict error can actually name the busy process.
+        with (
+            patch("chroot_distro.locking._held_exclusive", set()),
+            pytest.raises(LockConflictError, match=rf"PID {pid}: install"),
+            ContainerLock("busy", exclusive=True, command="install"),
+        ):
+            pass
+
+        holder.release()
+
+
+def test_acquire_truncates_stale_content(tmp_path):
+    """A successful acquire replaces any stale line from a dead holder."""
+    lock_path = tmp_path / "stale.lock"
+    lock_path.write_text("999999 old-command-that-died\n")
+
+    with patch("chroot_distro.locking.container_lock_path", return_value=str(lock_path)):
+        _held_exclusive.clear()
+        lock = ContainerLock("stale", exclusive=True, command="remove")
+        assert lock.acquire() is True
+        content = lock_path.read_text()
+        assert content == f"{os.getpid()} remove\n"
+        lock.release()
 
 
 def test_container_lock_lifecycle(tmp_path):
