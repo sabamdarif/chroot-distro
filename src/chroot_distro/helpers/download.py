@@ -6,6 +6,7 @@ import logging
 import os
 import shutil
 import signal
+import socket
 import ssl
 import threading
 import time
@@ -140,7 +141,14 @@ def is_retryable_http_error(exc: BaseException) -> bool:
     return isinstance(exc, (OSError, ssl.SSLError, http.client.HTTPException))
 
 
-def retry_http(operation, *, what: str, max_retries: int = 5, retry_delay: float = 5):
+def retry_http(
+    operation,
+    *,
+    what: str,
+    max_retries: int = 5,
+    retry_delay: float = 5,
+    abort_event: "threading.Event | None" = None,
+):
     """Run *operation* (a zero-arg callable performing one HTTP request),
     retrying transient failures with a delay and a logged notice.
 
@@ -150,17 +158,29 @@ def retry_http(operation, *, what: str, max_retries: int = 5, retry_delay: float
     retrying or logging — so the caller can translate it into a meaningful
     message. The original exception is likewise re-raised once every attempt is
     spent. *what* is a short label for the retry log line.
+
+    When *abort_event* is given, an abort (Ctrl+C) is honoured between
+    attempts and during the retry delay: a force-closed socket surfaces as a
+    retryable OSError, and without this check the loop would sleep and then
+    open a brand-new connection after the user already cancelled.
     """
     for attempt in range(max_retries):
+        if abort_event is not None and abort_event.is_set():
+            raise KeyboardInterrupt
         try:
             return operation()
         except KeyboardInterrupt:
             raise
         except (urllib.error.URLError, OSError) as exc:
+            if abort_event is not None and abort_event.is_set():
+                raise KeyboardInterrupt from exc
             if not is_retryable_http_error(exc) or attempt >= max_retries - 1:
                 raise
             log_info(f"{what}: attempt {attempt + 1}/{max_retries} failed ({exc}); retrying in {retry_delay}s...")
-            time.sleep(retry_delay)
+            if abort_event is not None:
+                _interruptible_sleep(retry_delay, abort_event)
+            else:
+                time.sleep(retry_delay)
     return None
 
 
@@ -404,10 +424,37 @@ def _interruptible_sleep(seconds: float, abort_event: threading.Event) -> None:
         remaining -= step
 
 
+def _response_socket(resp) -> "socket.socket | None":
+    """Return the underlying socket of an ``http.client.HTTPResponse``.
+
+    ``resp.fp`` is a BufferedReader over ``socket.SocketIO``; the SocketIO
+    keeps the real socket in ``_sock``. Returns None when the response is
+    already closed or the private layout is unavailable.
+    """
+    try:
+        fp = resp.fp
+        if fp is None:
+            return None
+        raw = getattr(fp, "raw", None)
+        sock = getattr(raw, "_sock", None)
+        return sock if isinstance(sock, socket.socket) else None
+    except (AttributeError, ValueError):
+        return None
+
+
 @dataclass
 class _LiveResponses:
     """Lock-guarded registry of in-flight responses so an aborting thread can
-    force-close a socket that a worker is blocked reading from."""
+    force-close a socket that a worker is blocked reading from.
+
+    ``close_all()`` must be safe to call from a SIGINT handler on the main
+    thread while worker threads sit inside ``resp.read()``. Calling
+    ``resp.close()`` there deadlocks: HTTPResponse.close() closes its
+    BufferedReader, which needs the same internal buffer lock the blocked
+    reader thread is holding — uninterruptibly, at the C level. Instead we
+    ``shutdown(2)`` the underlying socket, which takes no Python-level lock
+    and makes the blocked ``recv()`` return immediately.
+    """
 
     lock: threading.Lock
     responses: set
@@ -423,8 +470,14 @@ class _LiveResponses:
     def close_all(self) -> None:
         with self.lock:
             for resp in list(self.responses):
-                with contextlib.suppress(Exception):
-                    resp.close()
+                sock = _response_socket(resp)
+                if sock is not None:
+                    with contextlib.suppress(Exception):
+                        sock.shutdown(socket.SHUT_RDWR)
+                else:
+                    # No live socket to shut down — close() cannot block.
+                    with contextlib.suppress(Exception):
+                        resp.close()
             self.responses.clear()
 
 
@@ -471,6 +524,11 @@ def _download_segment(
     while reconnections <= _MAX_RECONNECTIONS:
         for attempt in range(max_retries + 1):
             try:
+                # Never open a new connection after the user aborted — a
+                # force-closed socket surfaces as a retryable OSError, and
+                # this loop would otherwise reconnect right past the Ctrl+C.
+                if abort_event.is_set():
+                    raise KeyboardInterrupt
                 start_pos = seg.start + downloaded
                 headers = {
                     **ua_headers,
@@ -536,6 +594,8 @@ def _download_segment(
             except KeyboardInterrupt:
                 raise
             except BaseException as exc:
+                if abort_event.is_set():
+                    raise KeyboardInterrupt from exc
                 if _is_retriable(exc) and attempt < max_retries:
                     _interruptible_sleep(retry_delays[attempt], abort_event)
                     if os.path.isfile(seg.tmp_path):

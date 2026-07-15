@@ -288,6 +288,8 @@ def download_blob(
     req = urllib.request.Request(url, headers=headers)
 
     def _attempt():
+        if abort_event is not None and abort_event.is_set():
+            raise KeyboardInterrupt
         hasher = hashlib.sha256()
         with atomic_replace(dest) as tmp:
             op = auth_opener() if not insecure else opener(insecure)
@@ -340,6 +342,7 @@ def download_blob(
         what=f"Downloading layer {expected_hex[:12]}",
         max_retries=max_retries,
         retry_delay=5,
+        abort_event=abort_event,
     )
     return dest
 

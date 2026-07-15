@@ -249,7 +249,16 @@ def _run_install(
         clear_bar()
         log_error("Aborted by user.")
         _cleanup()
-        sys.exit(1)
+        if tmp_archive is not None:
+            with contextlib.suppress(OSError):
+                os.remove(tmp_archive)
+        # sys.exit() would run the concurrent.futures atexit hook, which
+        # joins every download worker thread — each possibly blocked in
+        # connect()/read() for up to the 30s socket timeout. The user asked
+        # to stop *now*; cleanup is done, so exit without joining them.
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(1)
     except (EOFError, OSError, tarfile.TarError, RuntimeError) as exc:
         clear_bar()
         log_error(f"Failed to install: {exc}")
