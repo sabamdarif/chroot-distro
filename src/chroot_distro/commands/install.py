@@ -35,6 +35,7 @@ from chroot_distro.message import C, crit_error, log_error, log_info, msg
 from chroot_distro.names import is_valid_name, require_valid_name
 from chroot_distro.paths import (
     container_dir,
+    container_incomplete_marker,
     container_manifest,
     container_rootfs,
 )
@@ -158,6 +159,20 @@ def _resolve_install_name(image_ref, local_path, url, custom_container_name):
     return derived
 
 
+def _write_incomplete_marker(marker_path: str) -> None:
+    """Create and fsync the install-in-progress marker.
+
+    Ordering matters: the marker must exist on disk before the rootfs does,
+    so no crash window can leave a rootfs without the marker. fsync so a
+    power loss can't reorder the two creations.
+    """
+    marker_fd = os.open(marker_path, os.O_CREAT | os.O_WRONLY, 0o644)
+    try:
+        os.fsync(marker_fd)
+    finally:
+        os.close(marker_fd)
+
+
 def _run_install(
     install_name: str,
     image_ref: str,
@@ -169,16 +184,31 @@ def _run_install(
     """Inner install logic — called with the container lock already held."""
     container_path = container_dir(install_name)
     rootfs_dir = container_rootfs(install_name)
+    incomplete_marker = container_incomplete_marker(install_name)
 
     if os.path.isdir(rootfs_dir):
-        msg()
-        crit_error(f"container '{install_name}' already exists. Specify a different name with '--name NAME'.")
-        msg()
-        msg(f"{C['CYAN']}Start shell: {C['GREEN']}{PROGRAM_NAME} login {install_name}{C['RST']}")
-        msg(f"{C['CYAN']}Reinstall:   {C['GREEN']}{PROGRAM_NAME} reset {install_name}{C['RST']}")
-        msg(f"{C['CYAN']}Uninstall:   {C['GREEN']}{PROGRAM_NAME} remove {install_name}{C['RST']}")
-        msg()
-        sys.exit(1)
+        if os.path.isfile(incomplete_marker):
+            # Leftover from an install that never finished (Ctrl+C, SIGKILL,
+            # power loss): the marker is created before any rootfs data is
+            # written and removed only after the install fully succeeds.
+            log_info(f"Found remnants of an interrupted install of '{install_name}'; removing and reinstalling...")
+            try:
+                shutil.rmtree(container_path)
+            except OSError as exc:
+                crit_error(
+                    f"cannot remove leftover data of the interrupted install at "
+                    f"'{container_path}': {exc}. Remove it manually, then retry."
+                )
+                sys.exit(1)
+        else:
+            msg()
+            crit_error(f"container '{install_name}' already exists. Specify a different name with '--name NAME'.")
+            msg()
+            msg(f"{C['CYAN']}Start shell: {C['GREEN']}{PROGRAM_NAME} login {install_name}{C['RST']}")
+            msg(f"{C['CYAN']}Reinstall:   {C['GREEN']}{PROGRAM_NAME} reset {install_name}{C['RST']}")
+            msg(f"{C['CYAN']}Uninstall:   {C['GREEN']}{PROGRAM_NAME} remove {install_name}{C['RST']}")
+            msg()
+            sys.exit(1)
 
     if local_path is not None:
         log_info(f"Installing from '{os.path.basename(local_path)}' as '{install_name}'...")
@@ -192,6 +222,9 @@ def _run_install(
         if workers != DEFAULT_LAYER_DOWNLOAD_WORKERS:
             log_info(f"Parallel download workers: {workers}")
 
+    # Marker first, rootfs second — see _write_incomplete_marker.
+    os.makedirs(container_path, exist_ok=True)
+    _write_incomplete_marker(incomplete_marker)
     os.makedirs(rootfs_dir, exist_ok=True)
 
     def _cleanup() -> None:
@@ -271,6 +304,10 @@ def _run_install(
         if tmp_archive is not None:
             with contextlib.suppress(OSError):
                 os.remove(tmp_archive)
+
+    # Success: clear the incomplete marker as the very last install step.
+    with contextlib.suppress(OSError):
+        os.remove(incomplete_marker)
 
     log_info("Finished installation.")
     msg()

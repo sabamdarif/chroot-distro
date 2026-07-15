@@ -106,7 +106,7 @@ def test_analyze_image_no_arch_flag_for_compatible_32bit():
 
 def test_command_info_runs_without_containers():
     with (
-        patch.object(info, "_iter_container_names", return_value=[]),
+        patch.object(info, "_iter_container_names", return_value=([], [])),
         patch.object(info, "get_device_cpu_arch", return_value="aarch64"),
         patch.object(info, "_gather_host_info", return_value=info._HostInfo("Linux", [("Kernel", "6.0")])),
         patch.object(info, "supports_32bit", return_value=True),

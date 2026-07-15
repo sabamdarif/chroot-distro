@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from chroot_distro.constants import CONTAINERS_DIR, PROGRAM_NAME
 from chroot_distro.locking import container_busy_status
 from chroot_distro.message import C, msg, warn
-from chroot_distro.paths import container_manifest, container_rootfs
+from chroot_distro.paths import container_manifest, container_rootfs, is_install_incomplete
 from chroot_distro.progress import fmt_size, loading_line
 
 
@@ -28,15 +28,24 @@ class _VerboseInfo:
     exposed_ports: str = ""
 
 
-def _iter_container_names() -> list[str]:
+def _iter_container_names() -> tuple[list[str], list[str]]:
+    """Return (installed, incomplete) container names, each sorted.
+
+    A directory carrying the .install-incomplete marker is a leftover from
+    an interrupted install — not an installed container. It is reported
+    separately so `list` can mention it without presenting it as usable.
+    """
     try:
-        return sorted(e for e in os.listdir(CONTAINERS_DIR) if os.path.isdir(container_rootfs(e)))
+        entries = sorted(e for e in os.listdir(CONTAINERS_DIR) if os.path.isdir(container_rootfs(e)))
     except OSError as exc:
         if exc.errno in (errno.EACCES, errno.EPERM):
             warn(f"Permission denied: cannot read containers directory '{CONTAINERS_DIR}'")
         else:
             warn(f"Failed to list containers directory '{CONTAINERS_DIR}': {exc}")
-        return []
+        return [], []
+    installed = [e for e in entries if not is_install_incomplete(e)]
+    incomplete = [e for e in entries if is_install_incomplete(e)]
+    return installed, incomplete
 
 
 def _same_device(path: str, dev: int) -> bool:
@@ -196,7 +205,7 @@ def command_list(args) -> None:
     """List every container directory that contains a rootfs/."""
     quiet = getattr(args, "quiet", False)
     verbose = getattr(args, "verbose", False)
-    entries = _iter_container_names()
+    entries, incomplete = _iter_container_names()
 
     if quiet:
         for name in entries:
@@ -252,4 +261,12 @@ def command_list(args) -> None:
                     msg(f"    {C['CYAN']}Ports:{C['RST']}   {info.exposed_ports}")
         msg()
         msg(f"{C['CYAN']}Log in with: {C['GREEN']}{PROGRAM_NAME} login <name>{C['RST']}")
+    if incomplete:
+        msg()
+        names = ", ".join(incomplete)
+        msg(f"{C['YELLOW']}Interrupted install(s) (not usable): {names}{C['RST']}")
+        msg(
+            f"{C['CYAN']}Re-run {C['GREEN']}{PROGRAM_NAME} install <ref> --name <name>{C['CYAN']} "
+            f"to redo, or {C['GREEN']}{PROGRAM_NAME} remove <name>{C['CYAN']} to clean up.{C['RST']}"
+        )
     msg()

@@ -4,11 +4,12 @@ from chroot_distro.commands.install import _run_install
 
 
 @patch("chroot_distro.commands.install.pull_image")
+@patch("chroot_distro.commands.install._write_incomplete_marker")
 @patch("chroot_distro.commands.install.os.makedirs")
 @patch("chroot_distro.commands.install.os.path.isdir", return_value=False)
 @patch("chroot_distro.commands.install.ContainerLock")
 @patch("chroot_distro.commands.install.log_info")
-def test_run_install_workers_log(mock_log, mock_lock, mock_isdir, mock_makedirs, mock_pull_image):
+def test_run_install_workers_log(mock_log, mock_lock, mock_isdir, mock_makedirs, mock_marker, mock_pull_image):
     # Case 1: Workers is default (4), should not print workers info
     with patch("chroot_distro.commands.install.layer_download_workers", return_value=4):
         _run_install("my-container", "alpine", None, None, "x86_64")

@@ -523,7 +523,9 @@ def _analyze_image(info: _ImageInfo, host_arch: str) -> None:
 
 
 def _gather_images(host_arch: str) -> list[_ImageInfo]:
-    names = _iter_container_names()
+    # Leftovers from interrupted installs carry no usable image data;
+    # only report actually installed containers.
+    names, _incomplete = _iter_container_names()
     images: list[_ImageInfo] = []
     total = len(names)
     with loading_line("Gathering image info...") as update:

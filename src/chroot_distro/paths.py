@@ -37,6 +37,24 @@ def container_manifest(name: str) -> str:
     return os.path.join(container_dir(name), "manifest.json")
 
 
+def container_incomplete_marker(name: str) -> str:
+    """Return the path of the marker that flags an in-progress install.
+
+    The marker is created before the first byte of rootfs data is written
+    and removed as the final step of a successful install. A rootfs that
+    coexists with this marker is a leftover from an interrupted install
+    (Ctrl+C, SIGKILL, power loss, ...) and is safe to wipe and redo —
+    without it, "already exists" checks cannot distinguish a finished
+    container from an aborted one.
+    """
+    return os.path.join(container_dir(name), ".install-incomplete")
+
+
+def is_install_incomplete(name: str) -> bool:
+    """Return True if *name* is a leftover from an interrupted install."""
+    return os.path.isfile(container_incomplete_marker(name))
+
+
 def container_from_spec(spec: str) -> str | None:
     """Return the container name in a `name:path` spec, or None."""
     return spec.split(":", 1)[0] if ":" in spec else None
@@ -82,11 +100,15 @@ def container_locks_for_spec_pair(src_spec: str, dst_spec: str, command: str) ->
 
 
 def installed_containers() -> list[str]:
-    """Return sorted names of all installed containers (those with a rootfs)."""
+    """Return sorted names of all installed containers (those with a rootfs).
+
+    Leftovers from interrupted installs (see container_incomplete_marker)
+    are not installed containers and are excluded.
+    """
     try:
         return sorted(
             e for e in os.listdir(CONTAINERS_DIR)
-            if os.path.isdir(container_rootfs(e))
+            if os.path.isdir(container_rootfs(e)) and not is_install_incomplete(e)
         )
     except OSError as exc:
         import errno
