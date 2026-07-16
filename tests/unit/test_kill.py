@@ -1,11 +1,9 @@
 import signal
-import sys
 from unittest.mock import MagicMock, call, patch
 
 import pytest
 
 from chroot_distro.commands.kill import command_kill
-from chroot_distro.exceptions import LockConflictError
 from chroot_distro.parser import build_parser
 
 

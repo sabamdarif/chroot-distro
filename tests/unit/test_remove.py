@@ -1,5 +1,5 @@
 import signal
-from unittest.mock import MagicMock, call, patch, ANY
+from unittest.mock import ANY, MagicMock, call, patch
 
 import pytest
 

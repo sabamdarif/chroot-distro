@@ -356,7 +356,7 @@ class TestDownloadFile:
             range_header = req.headers.get("Range", "")
             if range_header == "bytes=0-4194303":
                 return _FakeResp(status=206, body=b"X" * (4 * 1024 * 1024))
-            elif range_header == "bytes=4194304-8388607":
+            if range_header == "bytes=4194304-8388607":
 
                 class BrokenStream:
                     def __init__(self):
@@ -379,8 +379,7 @@ class TestDownloadFile:
                 resp = _FakeResp(status=206)
                 resp._body = BrokenStream()
                 return resp
-            else:
-                raise ConnectionResetError("Connection reset by peer")
+            raise ConnectionResetError("Connection reset by peer")
 
         mock_opener_first = mock.MagicMock()
         mock_opener_first.open.side_effect = mock_open_first
@@ -389,10 +388,9 @@ class TestDownloadFile:
             mock.patch("chroot_distro.constants.layer_download_workers", return_value=4),
             mock.patch("chroot_distro.helpers.download._probe_server", return_value=probe_result),
             mock.patch("urllib.request.build_opener", return_value=mock_opener_first),
-            mock.patch("chroot_distro.helpers.download._interruptible_sleep"),
+            mock.patch("chroot_distro.helpers.download._interruptible_sleep"),pytest.raises(Exception)
         ):
-            with pytest.raises(Exception):
-                download_file("http://example.com/output.tar", dest)
+            download_file("http://example.com/output.tar", dest)
 
         chunks_json = f"{dest}.chunks.json"
         assert os.path.isfile(chunks_json)
@@ -409,8 +407,7 @@ class TestDownloadFile:
             captured_ranges.append(range_header)
             if range_header == "bytes=5242880-8388607":
                 return _FakeResp(status=206, body=b"X" * (3 * 1024 * 1024))
-            else:
-                return _FakeResp(status=200)
+            return _FakeResp(status=200)
 
         mock_opener_second = mock.MagicMock()
         mock_opener_second.open.side_effect = mock_open_second

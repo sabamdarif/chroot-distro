@@ -120,6 +120,7 @@ def test_format_table_aligns_columns():
 
 def test_iter_container_names_permission_denied(monkeypatch):
     import errno
+
     import chroot_distro.commands.list_cmd as list_cmd
 
     def _deny_listdir(*_args, **_kwargs):

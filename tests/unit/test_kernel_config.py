@@ -1,5 +1,5 @@
 import gzip
-from unittest.mock import patch, mock_open
+from unittest.mock import mock_open, patch
 
 import chroot_distro.commands.info as info
 import chroot_distro.commands.kernel_config as kc

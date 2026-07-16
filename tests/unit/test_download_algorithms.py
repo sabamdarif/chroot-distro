@@ -160,24 +160,23 @@ class TestSegmentReconnection:
                     m = mock.MagicMock(status=206, read=stream.read)
                     m.__enter__.return_value = m
                     return m
-                else:
-                    # Second connection resumes from byte offset 5
-                    assert range_header == "bytes=5-9"
+                # Second connection resumes from byte offset 5
+                assert range_header == "bytes=5-9"
 
-                    class RestStream:
-                        def __init__(self):
-                            self.called = False
+                class RestStream:
+                    def __init__(self):
+                        self.called = False
 
-                        def read(self, size):
-                            if not self.called:
-                                self.called = True
-                                return b"FGHIJ"
-                            return b""
+                    def read(self, size):
+                        if not self.called:
+                            self.called = True
+                            return b"FGHIJ"
+                        return b""
 
-                    stream = RestStream()
-                    m = mock.MagicMock(status=206, read=stream.read)
-                    m.__enter__.return_value = m
-                    return m
+                stream = RestStream()
+                m = mock.MagicMock(status=206, read=stream.read)
+                m.__enter__.return_value = m
+                return m
 
         mock_opener = FakeOpener()
         abort_event = threading.Event()

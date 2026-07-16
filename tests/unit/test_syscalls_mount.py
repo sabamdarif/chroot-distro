@@ -1,14 +1,14 @@
 from unittest.mock import patch
-import pytest
 
 from chroot_distro.syscalls.mount import (
-    _parse_and_split_mount_options,
-    mount_filesystem,
-    MS_NOSUID,
     MS_NODEV,
     MS_NOEXEC,
+    MS_NOSUID,
     MS_RDONLY,
+    _parse_and_split_mount_options,
+    mount_filesystem,
 )
+
 
 def test_parse_and_split_mount_options():
     # Empty options

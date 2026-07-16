@@ -46,7 +46,7 @@ def test_marker_exists_while_install_runs(mock_log, mock_pull, containers):
 
     def _pull(image_ref, rootfs_dir, arch, insecure=False):
         seen["marker_during_pull"] = marker.exists()
-        return None
+        return
 
     mock_pull.side_effect = _pull
     _run_install("alpine", "alpine", None, None, "x86_64")

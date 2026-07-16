@@ -3,11 +3,11 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from chroot_distro.commands.login import (
-    _MaxIsolationFallback,
     _can_fall_back_to_old_isolated,
     _command_login_inner,
+    _MaxIsolationFallback,
+    _safe_hostname,
 )
-from chroot_distro.commands.login import _safe_hostname
 from chroot_distro.commands.login.chroot_cmd import build_chroot_args
 from chroot_distro.commands.login.env import read_cd_env, resolve_override, resolve_term
 
@@ -1050,7 +1050,7 @@ def test_holder_run_argv_drops_unopenable_ipc_at_call_time():
     """run_argv must drop a namespace whose ns file is unopenable right now,
     but always keep the essential mount namespace."""
     from chroot_distro.helpers import namespace as ns
-    from chroot_distro.syscalls._constants import CLONE_NEWNS, CLONE_NEWUTS, CLONE_NEWIPC, CLONE_NEWPID
+    from chroot_distro.syscalls._constants import CLONE_NEWIPC, CLONE_NEWNS, CLONE_NEWPID, CLONE_NEWUTS
 
     holder = ns.NamespaceHolder(
         pid=4321,

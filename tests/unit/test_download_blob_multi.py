@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import io
 import os
-import threading
 import urllib.error
 import urllib.parse
 from unittest import mock
@@ -16,9 +15,7 @@ from chroot_distro.helpers.docker.layers import (
     download_blob,
 )
 from chroot_distro.helpers.download import (
-    _FallbackToSingleError,
     _ProbeResult,
-    _Segment,
 )
 
 # ---------------------------------------------------------------------------
@@ -246,15 +243,14 @@ class TestDownloadBlobSegmented:
                 mock.patch("chroot_distro.helpers.docker.layers._probe_blob", return_value=probe_result),
                 mock.patch(
                     "chroot_distro.helpers.docker.layers._download_segment", side_effect=mock_download_segment_bad
-                ),
+                ),pytest.raises(RuntimeError, match="Layer integrity check failed")
             ):
-                with pytest.raises(RuntimeError, match="Layer integrity check failed"):
-                    download_blob(
-                        repo="library/nextcloud",
-                        digest=digest,
-                        token="test_token",
-                        connections=2,
-                    )
+                download_blob(
+                    repo="library/nextcloud",
+                    digest=digest,
+                    token="test_token",
+                    connections=2,
+                )
         # Ensure target file was not created due to atomic replace failure
         assert not os.path.isfile(path)
 
@@ -381,7 +377,7 @@ class TestDownloadBlobSegmented:
                 range_header = req.headers.get("Range", "")
                 if range_header == "bytes=0-4194303":
                     return _FakeResp(status=206, body=b"A" * (4 * 1024 * 1024))
-                elif range_header == "bytes=4194304-8388607":
+                if range_header == "bytes=4194304-8388607":
 
                     class BrokenStream:
                         def __init__(self):
@@ -404,8 +400,7 @@ class TestDownloadBlobSegmented:
                     resp = _FakeResp(status=206)
                     resp._body = BrokenStream()
                     return resp
-                else:
-                    raise ConnectionResetError("Connection reset by peer")
+                raise ConnectionResetError("Connection reset by peer")
 
             mock_opener_first = mock.MagicMock()
             mock_opener_first.open.side_effect = mock_open_first
@@ -413,15 +408,14 @@ class TestDownloadBlobSegmented:
             with (
                 mock.patch("chroot_distro.helpers.docker.layers._probe_blob", return_value=probe_result),
                 mock.patch("urllib.request.build_opener", return_value=mock_opener_first),
-                mock.patch("chroot_distro.helpers.download._interruptible_sleep"),
+                mock.patch("chroot_distro.helpers.download._interruptible_sleep"),pytest.raises(Exception)
             ):
-                with pytest.raises(Exception):
-                    download_blob(
-                        repo="library/nextcloud",
-                        digest=digest,
-                        token="test_token",
-                        connections=2,
-                    )
+                download_blob(
+                    repo="library/nextcloud",
+                    digest=digest,
+                    token="test_token",
+                    connections=2,
+                )
 
             # Ensure temp files and chunks.json exist
             chunks_json = f"{path}.chunks.json"
@@ -439,8 +433,7 @@ class TestDownloadBlobSegmented:
                 captured_ranges.append(range_header)
                 if range_header == "bytes=5242880-8388607":
                     return _FakeResp(status=206, body=b"A" * (3 * 1024 * 1024))
-                else:
-                    return _FakeResp(status=200)
+                return _FakeResp(status=200)
 
             mock_opener_second = mock.MagicMock()
             mock_opener_second.open.side_effect = mock_open_second

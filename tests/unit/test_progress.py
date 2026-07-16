@@ -1,7 +1,4 @@
-import sys
 from unittest.mock import MagicMock, patch
-
-import pytest
 
 from chroot_distro.progress import (
     ByteCounter,
@@ -165,18 +162,17 @@ def test_clear_bar(mock_write, mock_tty_safe, mock_active):
 @patch("chroot_distro.progress.tty_safe_for_writes", return_value=True)
 @patch("sys.stderr.write")
 def test_loading_line_non_tty(mock_write, mock_tty_safe, mock_active):
-    with patch("sys.stderr.isatty", return_value=False):
-        with loading_line("Testing status") as update:
-            # Should write initial message
-            assert mock_write.call_count == 1
-            assert "Testing status" in mock_write.call_args[0][0]
+    with patch("sys.stderr.isatty", return_value=False), loading_line("Testing status") as update:
+        # Should write initial message
+        assert mock_write.call_count == 1
+        assert "Testing status" in mock_write.call_args[0][0]
 
-            mock_write.reset_mock()
-            # Send same message, should be throttled/deduplicated
-            update("Testing status")
-            mock_write.assert_not_called()
+        mock_write.reset_mock()
+        # Send same message, should be throttled/deduplicated
+        update("Testing status")
+        mock_write.assert_not_called()
 
-            # Send different message, should print
-            update("New status")
-            assert mock_write.call_count == 1
-            assert "New status" in mock_write.call_args[0][0]
+        # Send different message, should print
+        update("New status")
+        assert mock_write.call_count == 1
+        assert "New status" in mock_write.call_args[0][0]

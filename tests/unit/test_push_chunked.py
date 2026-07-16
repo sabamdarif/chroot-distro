@@ -60,9 +60,8 @@ def test_with_retry_reraises_non_transient():
     def op():
         raise ValueError("fatal")
 
-    with patch.object(push, "_push_max_retries", return_value=3), patch("time.sleep"):
-        with pytest.raises(ValueError):
-            push._with_retry(op, "thing")
+    with patch.object(push, "_push_max_retries", return_value=3), patch("time.sleep"), pytest.raises(ValueError):
+        push._with_retry(op, "thing")
 
 
 def test_with_retry_gives_up_after_max():
@@ -72,7 +71,6 @@ def test_with_retry_gives_up_after_max():
         calls["n"] += 1
         raise TimeoutError()
 
-    with patch.object(push, "_push_max_retries", return_value=2), patch("time.sleep"):
-        with pytest.raises(TimeoutError):
-            push._with_retry(op, "thing")
+    with patch.object(push, "_push_max_retries", return_value=2), patch("time.sleep"), pytest.raises(TimeoutError):
+        push._with_retry(op, "thing")
     assert calls["n"] == 3  # initial + 2 retries

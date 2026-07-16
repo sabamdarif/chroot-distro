@@ -6,15 +6,14 @@ from __future__ import annotations
 import fcntl
 import json
 import os
-import time
 from types import SimpleNamespace
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 import pytest
 
 from chroot_distro import constants
+from chroot_distro.commands.ps import _fmt_command, _fmt_uptime, command_ps
 from chroot_distro.helpers import session_registry
-from chroot_distro.commands.ps import command_ps, _fmt_uptime, _fmt_command
 
 
 def _session_path(pid):
@@ -26,7 +25,7 @@ def mock_sessions_dir(tmp_path, monkeypatch):
     # Set the constants and registry module variables to use tmp_path
     monkeypatch.setattr("chroot_distro.constants.SESSIONS_DIR", str(tmp_path))
     monkeypatch.setattr("chroot_distro.helpers.session_registry.SESSIONS_DIR", str(tmp_path))
-    
+
     # Redefine _session_path to use the new tmp_path
     global _session_path
     def new_session_path(pid):

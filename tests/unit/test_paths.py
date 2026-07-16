@@ -104,7 +104,7 @@ def test_installed_containers_permission_denied(monkeypatch):
     monkeypatch.setattr("os.listdir", _deny_listdir)
 
     with patch("logging.Logger.warning") as mock_warn:
-        from chroot_distro.paths import installed_containers, CONTAINERS_DIR
+        from chroot_distro.paths import installed_containers
         assert installed_containers() == []
         mock_warn.assert_called_once()
         assert "Permission denied: cannot read containers directory" in mock_warn.call_args[0][0]

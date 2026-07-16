@@ -7,7 +7,6 @@ import pytest
 import chroot_distro.commands.run as run_mod
 from chroot_distro.commands.run import _normalize_argv, command_run
 
-
 # ---------------------------------------------------------------------------
 # _normalize_argv — shell-form guard
 # ---------------------------------------------------------------------------
