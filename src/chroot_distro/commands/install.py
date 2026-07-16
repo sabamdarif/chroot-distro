@@ -82,9 +82,22 @@ def _derive_local_name(path: str) -> str:
 
 
 def command_install(args) -> None:
-    """Install a container from a Docker image, URL, or local archive."""
-    image_ref = args.image_ref
+    """Install one or more containers from Docker images, URLs, or local archives."""
+    # Internal callers (reset, build) pass a single string; the CLI parser
+    # produces a list (nargs="*").
+    refs = args.image_ref if isinstance(args.image_ref, list) else [args.image_ref]
     custom_container_name = getattr(args, "custom_container_name", None)
+
+    if len(refs) > 1 and custom_container_name:
+        crit_error("'--name' cannot be used when installing multiple images.")
+        sys.exit(1)
+
+    for ref in refs:
+        _install_one(ref, args, custom_container_name)
+
+
+def _install_one(image_ref: str, args, custom_container_name) -> None:
+    """Install a single container from a Docker image, URL, or local archive."""
 
     if custom_container_name is not None and not custom_container_name:
         crit_error("container name can't be empty.")

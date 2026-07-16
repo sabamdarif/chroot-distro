@@ -176,7 +176,9 @@ def main() -> None:
         sys.exit(1)
 
     for arg_name, error_msg in REQUIRED_ARGS.get(canonical, []):
-        if getattr(args, arg_name, None) is None:
+        # `not` (rather than `is None`) also catches the empty list that
+        # nargs="*" positionals produce when no value is given.
+        if not getattr(args, arg_name, None):
             msg()
             crit_error(error_msg)
             if canonical in HELP_COMMANDS:

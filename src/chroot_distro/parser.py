@@ -173,7 +173,7 @@ def build_parser() -> _CdArgumentParser:
 def _install(sub):
     p = sub.add_parser("install", aliases=["add", "i", "in", "ins"], add_help=False)
     p._cd_command = "install"
-    p.add_argument("image_ref", nargs="?", default=None, metavar="IMAGE")
+    p.add_argument("image_ref", nargs="*", default=None, metavar="IMAGE")
     name_grp = p.add_mutually_exclusive_group()
     name_grp.add_argument("-n", "--name", dest="custom_container_name", metavar="ALIAS")
     name_grp.add_argument("--override-alias", dest="custom_container_name", metavar="ALIAS")
@@ -191,7 +191,7 @@ def _install(sub):
 def _remove(sub):
     p = sub.add_parser("remove", aliases=["rm"], add_help=False)
     p._cd_command = "remove"
-    p.add_argument("container_name", nargs="?", default=None)
+    p.add_argument("container_name", nargs="*", default=None)
     vq = p.add_mutually_exclusive_group()
     vq.add_argument("-v", "--verbose", action="store_true")
     vq.add_argument("-q", "--quiet", action="store_true")

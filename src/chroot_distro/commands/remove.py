@@ -84,10 +84,16 @@ def _count_files(path: str) -> int:
 
 
 def command_remove(args) -> None:
-    """Delete an installed container's directory tree after stopping running sessions and unmounting."""
-    container_name = args.container_name
+    """Delete one or more installed containers."""
+    # Internal callers pass a single string; the CLI parser produces a list.
+    names = args.container_name if isinstance(args.container_name, list) else [args.container_name]
     verbose = getattr(args, "verbose", False)
+    for name in names:
+        _remove_one(name, verbose)
 
+
+def _remove_one(container_name: str, verbose: bool) -> None:
+    """Delete an installed container's directory tree after stopping running sessions and unmounting."""
     require_valid_name(container_name)
 
     rootfs_dir = container_rootfs(container_name)

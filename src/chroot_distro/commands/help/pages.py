@@ -268,7 +268,7 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
         ],
     },
     "install": {
-        "usage": "install [OPTIONS] (IMAGE:TAG or URL or FILE)",
+        "usage": "install [OPTIONS] (IMAGE:TAG or URL or FILE)...",
         "aliases": ("add", "i", "in", "ins"),
         "summary": (
             "Create a chroot container from a given source: Docker image, "
@@ -466,7 +466,7 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
         ],
     },
     "remove": {
-        "usage": "remove [OPTIONS] CONTAINER",
+        "usage": "remove [OPTIONS] CONTAINER...",
         "aliases": ("rm",),
         "summary": ("Permanently delete the specified chroot container. No confirmation is requested, be careful."),
         "options": [

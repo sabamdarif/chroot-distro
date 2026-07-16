@@ -13,12 +13,16 @@ def test_parser_remove():
     # Test basic parsing of 'remove'
     args = parser.parse_args(["remove", "alpine"])
     assert args.command == "remove"
-    assert args.container_name == "alpine"
+    assert args.container_name == ["alpine"]
 
     # Test basic parsing of 'rm' alias
     args = parser.parse_args(["rm", "debian"])
     assert args.command == "rm"
-    assert args.container_name == "debian"
+    assert args.container_name == ["debian"]
+
+    # Multiple containers at once
+    args = parser.parse_args(["remove", "alpine", "debian", "ubuntu"])
+    assert args.container_name == ["alpine", "debian", "ubuntu"]
 
 
 @patch("chroot_distro.commands.remove.container_rootfs", return_value="/mock/containers/alpine/rootfs")

@@ -21,7 +21,7 @@ def test_parser_install():
     parser = build_parser()
     args = parser.parse_args(["install", "ubuntu:20.04", "--name", "myubuntu"])
     assert args.command == "install"
-    assert args.image_ref == "ubuntu:20.04"
+    assert args.image_ref == ["ubuntu:20.04"]
     assert args.custom_container_name == "myubuntu"
 
 
