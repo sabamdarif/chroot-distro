@@ -79,6 +79,28 @@ COPY --chmod="0755" file.sh /usr/bin/
     assert instructions[1]["value"] == "file.sh /usr/bin/"
 
 
+def test_parse_dockerfile_repeated_mount_flags_collected():
+    content = (
+        "RUN --mount=type=cache,target=/a --mount=type=tmpfs,target=/b "
+        "--network=host make\n"
+    )
+    _, instructions = parse_dockerfile(content)
+    (instr,) = instructions
+    assert instr["flags"]["mount"] == ["type=cache,target=/a", "type=tmpfs,target=/b"]
+    assert instr["flags"]["network"] == "host"
+    assert instr["value"] == "make"
+
+
+def test_parse_dockerfile_single_mount_flag_stays_string():
+    _, instructions = parse_dockerfile("RUN --mount=type=cache,target=/a make\n")
+    assert instructions[0]["flags"]["mount"] == "type=cache,target=/a"
+
+
+def test_parse_dockerfile_repeated_nonmount_flag_last_wins():
+    _, instructions = parse_dockerfile("COPY --chmod=644 --chmod=755 a /b\n")
+    assert instructions[0]["flags"]["chmod"] == "755"
+
+
 def test_parse_dockerfile_onbuild():
     content = "ONBUILD RUN echo nested"
     _, instructions = parse_dockerfile(content)

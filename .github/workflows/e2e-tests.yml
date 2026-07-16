@@ -100,6 +100,17 @@ jobs:
                   echo "$output"
                   echo "$output" | grep -q "hello123"
 
+            - name: "Login: exit code of inner command propagates"
+              run: |
+                  sudo chroot-distro login alpine -- true
+                  echo "PASS: exit 0 propagates"
+                  if sudo chroot-distro login alpine -- false; then
+                    echo "FAIL: 'login -- false' exited 0"; exit 1
+                  fi
+                  sudo chroot-distro login alpine -- sh -c 'exit 42' && rc=0 || rc=$?
+                  [ "$rc" -eq 42 ] || { echo "FAIL: expected exit 42, got $rc"; exit 1; }
+                  echo "PASS: non-zero exit codes propagate"
+
             # ── Phase 3: Isolation / Escape Prevention ─────────────────────
             - name: "Isolation: Debian --isolated login"
               run: |
@@ -384,6 +395,148 @@ jobs:
             - name: "Remove: test-build"
               run: sudo chroot-distro remove test-build
 
+            # ── Phase 8b: Advanced Build Test ──────────────────────────────
+            # A realistic multi-stage build exercising ARG, ENV, WORKDIR,
+            # USER, heredoc RUN, COPY --parents, COPY --from,
+            # RUN --mount=type=cache/tmpfs/secret, and --build-arg/--secret
+            # on the CLI. The result is verified by running commands inside
+            # the built container, and a rebuild checks layer caching plus
+            # cache-mount persistence across builds.
+            - name: "Build (advanced): create multi-stage build context"
+              run: |
+                  mkdir -p /tmp/adv-build/app/src/lib /tmp/adv-build/config
+                  cat > /tmp/adv-build/app/src/main.sh << 'SH'
+                  #!/bin/sh
+                  . /opt/app/bin/src/lib/util.sh
+                  greet
+                  SH
+                  cat > /tmp/adv-build/app/src/lib/util.sh << 'SH'
+                  greet() { echo "hello from util"; }
+                  SH
+                  echo "loglevel=debug" > /tmp/adv-build/config/app.conf
+                  echo "s3cr3t-api-key-do-not-bake" > /tmp/adv-secret.txt
+                  cat > /tmp/adv-build/Dockerfile << 'DOCKERFILE'
+                  ARG ALPINE_TAG=latest
+
+                  FROM alpine:${ALPINE_TAG} AS builder
+                  ARG APP_VERSION=unset
+                  ENV BUILD_DIR=/build
+                  WORKDIR ${BUILD_DIR}
+
+                  # keep src/ structure relative to the /./ pivot
+                  COPY --parents ./app/./src/main.sh ./app/./src/lib/util.sh /build/
+
+                  RUN --mount=type=cache,target=/var/cache/adv \
+                      --mount=type=tmpfs,target=/scratch <<'EOF'
+                  set -e
+                  echo probe > /scratch/probe
+                  test -f /scratch/probe
+                  if [ -f /var/cache/adv/marker ]; then
+                      echo "cache-hit" > /build/cachemount.txt
+                  else
+                      echo "cache-miss" > /build/cachemount.txt
+                      echo populated > /var/cache/adv/marker
+                  fi
+                  printf 'version=%s\n' "$APP_VERSION" > /build/version.txt
+                  chmod +x /build/src/main.sh
+                  EOF
+
+                  # secret is available during build but must not be baked in
+                  RUN --mount=type=secret,id=apikey \
+                      test -s /run/secrets/apikey && \
+                      sha256sum /run/secrets/apikey | cut -d' ' -f1 > /build/secret.sha
+
+                  FROM alpine:${ALPINE_TAG}
+                  LABEL org.test.suite="chroot-distro-e2e"
+                  ENV APP_HOME=/opt/app
+                  WORKDIR ${APP_HOME}
+
+                  COPY --from=builder /build/src/ ${APP_HOME}/bin/src/
+                  COPY --from=builder /build/version.txt /build/cachemount.txt /build/secret.sha ${APP_HOME}/
+                  COPY config/app.conf /etc/app/app.conf
+
+                  RUN adduser -D -u 1234 appuser && chown -R appuser:appuser ${APP_HOME}
+                  USER appuser
+                  RUN whoami > ${APP_HOME}/built-by.txt
+                  CMD ["/opt/app/bin/src/main.sh"]
+                  DOCKERFILE
+                  echo "--- Dockerfile ---"
+                  cat /tmp/adv-build/Dockerfile
+
+            - name: "Build (advanced): run chroot-distro build"
+              run: |
+                  sudo chroot-distro build /tmp/adv-build \
+                    -t test-build-adv:latest \
+                    --build-arg APP_VERSION=2.5.1 \
+                    --secret id=apikey,src=/tmp/adv-secret.txt \
+                    --progress plain \
+                    --install-as test-build-adv 2>&1 | tee /tmp/adv-build-1.log
+                  echo "PASS: Advanced build completed"
+
+            - name: "Verify (advanced): run built container"
+              run: |
+                  run() { sudo chroot-distro login test-build-adv -- "$@"; }
+
+                  out=$(run /opt/app/bin/src/main.sh)
+                  echo "main.sh output: $out"
+                  echo "$out" | grep -q "hello from util"
+                  echo "PASS: COPY --parents structure + heredoc chmod + COPY --from work"
+
+                  run cat /opt/app/version.txt | grep -qx "version=2.5.1"
+                  echo "PASS: --build-arg reached RUN env"
+
+                  run cat /opt/app/cachemount.txt | grep -qx "cache-miss"
+                  echo "PASS: first build saw an empty cache mount"
+
+                  run cat /etc/app/app.conf | grep -qx "loglevel=debug"
+                  echo "PASS: plain COPY from context works"
+
+                  run cat /opt/app/built-by.txt | grep -qx "appuser"
+                  echo "PASS: USER applied to subsequent RUN"
+
+                  want=$(sha256sum /tmp/adv-secret.txt | cut -d' ' -f1)
+                  got=$(run cat /opt/app/secret.sha)
+                  [ "$got" = "$want" ]
+                  echo "PASS: secret was mounted during build"
+
+                  if run test -e /run/secrets/apikey; then
+                    echo "FAIL: secret baked into image"; exit 1
+                  fi
+                  if run test -e /build; then
+                    echo "FAIL: builder stage leaked into final image"; exit 1
+                  fi
+                  echo "PASS: no secret or builder-stage files in final image"
+
+            - name: "Verify (advanced): rebuild uses cache + cache mount persists"
+              run: |
+                  sudo chroot-distro unmount test-build-adv || true
+                  sudo chroot-distro remove test-build-adv
+                  # Different APP_VERSION: early layers stay CACHED, the
+                  # cache-mount RUN re-executes and must see the marker
+                  # written by the first build.
+                  sudo chroot-distro build /tmp/adv-build \
+                    -t test-build-adv:latest \
+                    --build-arg APP_VERSION=2.5.2 \
+                    --secret id=apikey,src=/tmp/adv-secret.txt \
+                    --progress plain \
+                    --install-as test-build-adv 2>&1 | tee /tmp/adv-build-2.log
+                  grep -q "CACHED" /tmp/adv-build-2.log
+                  echo "PASS: rebuild reused cached layers"
+
+                  sudo chroot-distro login test-build-adv -- cat /opt/app/version.txt | grep -qx "version=2.5.2"
+                  echo "PASS: changed --build-arg invalidated dependent layer"
+
+                  sudo chroot-distro login test-build-adv -- cat /opt/app/cachemount.txt | grep -qx "cache-hit"
+                  echo "PASS: RUN --mount=type=cache persisted across builds"
+
+            - name: "Unmount: test-build-adv"
+              run: sudo chroot-distro unmount test-build-adv || true
+
+            - name: "Remove: test-build-adv"
+              run: |
+                  sudo chroot-distro remove test-build-adv
+                  rm -f /tmp/adv-secret.txt
+
             # ── Phase 10: Namespace Security Tests ──────────────────────────
             # Regression tests for the security report findings (Tests 2,3,7).
             # These verify that --isolated mode provides the expected isolation
@@ -597,11 +750,11 @@ jobs:
                   echo "=== Killing all sessions ==="
                   sudo chroot-distro kill httpd 2>/dev/null || true
                   echo "=== Unmounting all containers ==="
-                  for name in httpd debian alpine alpine-test test-build debian-sec; do
+                  for name in httpd debian alpine alpine-test test-build test-build-adv debian-sec; do
                     sudo chroot-distro unmount "$name" 2>/dev/null || true
                   done
                   echo "=== Removing all containers ==="
-                  for name in httpd debian alpine alpine-test test-build debian-sec; do
+                  for name in httpd debian alpine alpine-test test-build test-build-adv debian-sec; do
                     sudo chroot-distro remove "$name" 2>/dev/null || true
                   done
                   echo "=== Final state ==="

@@ -341,7 +341,29 @@ def _build(sub):
         dest="install_as",
         metavar="NAME",
     )
+    p.add_argument(
+        "--secret",
+        dest="secrets",
+        action="append",
+        default=[],
+        metavar="id=NAME[,src=PATH]",
+    )
+    p.add_argument(
+        "--ssh",
+        dest="ssh",
+        action="append",
+        nargs="?",
+        const="default",
+        default=[],
+        metavar="ID[=SOCK]",
+    )
     p.add_argument("--no-cache", dest="no_cache", action="store_true")
+    p.add_argument(
+        "--progress",
+        dest="progress",
+        choices=["auto", "plain", "tty", "rawjson"],
+        default="auto",
+    )
     vq = p.add_mutually_exclusive_group()
     vq.add_argument("-v", "--verbose", action="store_true")
     vq.add_argument("-q", "--quiet", action="store_true")

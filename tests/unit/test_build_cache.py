@@ -72,3 +72,27 @@ def test_compute_recipe_hash_folds_heredocs_and_flags(monkeypatch, tmp_path):
 def test_canonical_value_lists_are_json(monkeypatch, tmp_path):
     assert build_cache._canonical_value(["a", "b"]) == '["a","b"]'
     assert build_cache._canonical_value("plain") == "plain"
+
+
+def test_canonical_flags_handles_list_values():
+    flags = {"mount": ["type=cache,target=/a", "type=tmpfs,target=/b"], "network": "host"}
+    canon = build_cache._canonical_flags(flags)
+    assert canon == 'mount=["type=cache,target=/a","type=tmpfs,target=/b"]&network=host'
+
+
+def test_recipe_hash_perturbed_by_mount_flag():
+    plain = {"name": "RUN", "value": "pip install x"}
+    with_mount = {
+        "name": "RUN",
+        "value": "pip install x",
+        "flags": {"mount": "type=cache,target=/root/.cache"},
+    }
+    other_mount = {
+        "name": "RUN",
+        "value": "pip install x",
+        "flags": {"mount": "type=cache,target=/other"},
+    }
+    h_plain = build_cache.compute_recipe_hash(None, plain)
+    h_mount = build_cache.compute_recipe_hash(None, with_mount)
+    h_other = build_cache.compute_recipe_hash(None, other_mount)
+    assert len({h_plain, h_mount, h_other}) == 3

@@ -8,13 +8,15 @@ Two switches request isolation:
 
 * the ``--isolated``/``--isolate`` flag on ``login``/``run`` (→ ``args.isolated``);
 * the ``CD_USE_ISOLATION`` environment variable, which forces maximum isolation
-  on regardless of the flag and is the *only* way to enable isolation for
-  ``build`` (which has no CLI flag).
+  on regardless of the flag.
 
 ``CD_USE_ISOLATION`` is the env-var equivalent of ``--isolated`` (maximum
 isolation: bind nothing from the host, chroot the namespace holder). It is
 distinct from ``CD_USE_NS`` (see :func:`namespace.use_ns_env_enabled`), which
-only turns on namespaces while keeping the default mount set.
+only turns on namespaces while keeping the default mount set. ``build`` honours
+both env vars (it has no CLI flag): ``CD_USE_ISOLATION`` → maximum isolation via
+:func:`max_isolation_session`, ``CD_USE_NS`` → namespace-only mode via
+:func:`namespace_session`; ``CD_USE_ISOLATION`` wins when both are set.
 
 The building blocks below are shared by ``login`` (which composes them inline
 with its richer bind set, PTY handling and session bookkeeping) and by the
@@ -285,6 +287,86 @@ def max_isolation_session(
         yield holder
     except NamespaceError as exc:
         warn(f"Failed to set up isolation: {exc}. Running without isolation.")
+        if holder is not None:
+            _teardown(container_key, rootfs, holder)
+            holder = None
+        yield None
+    finally:
+        if holder is not None:
+            _teardown(container_key, rootfs, holder)
+
+
+@contextlib.contextmanager
+def namespace_session(
+    container_key: str,
+    rootfs: str,
+    *,
+    minimal: bool = True,
+    dist_type: str = "normal",
+    hostname: str | None = None,
+) -> Iterator[NamespaceHolder | None]:
+    """Set up a namespace-only (CD_USE_NS) holder around *rootfs* and yield it.
+
+    Sibling of :func:`max_isolation_session` with the *default* mount set:
+    the holder is NOT chrooted, the host binds stay (``isolated=False``),
+    and only the namespaces (mount/PID/UTS/IPC) separate the step from the
+    host. Yields ``None`` when the kernel lacks the mount namespace so the
+    caller can fall back to a plain run.
+    """
+    from chroot_distro.commands.login import bindings
+
+    probe_result = probe_isolation()
+    if probe_result.missing_mandatory:
+        warn(
+            "Mount namespace (CLONE_NEWNS) is unavailable on this kernel; "
+            "cannot namespace this step. Running without namespaces."
+        )
+        yield None
+        return
+
+    use_userns = probe_result.has_userns
+    holder: NamespaceHolder | None = None
+    try:
+        # No rootfs= : the namespace-only holder is not chrooted (matches
+        # login's non-max path).
+        holder = namespace.acquire_holder(container_key)
+        finalize_holder(holder, container_key, hostname=hostname or container_key)
+
+        write_resolv_conf(rootfs)
+
+        resolved_binds, rslave_targets = bindings.get_bindings(
+            rootfs=rootfs,
+            minimal=minimal,
+            isolated=False,
+            max_isolation=False,
+            use_namespaces=True,
+            use_userns=use_userns,
+            dist_type=dist_type,
+        )
+        with contextlib.suppress(Exception):
+            mount_manager.unmount_all(rootfs, holder=holder)
+
+        run_root = os.path.realpath(os.path.join(rootfs, "run"))
+        dev_root = os.path.realpath(os.path.join(rootfs, "dev"))
+        for src, dst in resolved_binds:
+            dst_real = os.path.realpath(dst)
+            mount_manager.safe_mount(
+                src,
+                dst,
+                holder=holder,
+                recursive=bind_is_recursive(src, dst_real, run_root, use_userns=use_userns),
+                required_child="ptmx" if dst_real == dev_root else "",
+            )
+        for rslave_path in rslave_targets:
+            mount_manager.make_rslave(rslave_path, holder=holder)
+
+        apply_special_mounts(
+            rootfs, holder, isolated=False, max_isolation=False, minimal=minimal, use_userns=use_userns
+        )
+
+        yield holder
+    except NamespaceError as exc:
+        warn(f"Failed to set up namespaces: {exc}. Running without namespaces.")
         if holder is not None:
             _teardown(container_key, rootfs, holder)
             holder = None

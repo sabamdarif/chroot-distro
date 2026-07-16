@@ -18,6 +18,11 @@ from chroot_distro.helpers.build_cache import (
 )
 from chroot_distro.helpers.build_engine.constants import PREDEFINED_ARGS
 from chroot_distro.helpers.build_engine.errors import BuildError
+from chroot_distro.helpers.build_engine.run_mounts import (
+    RunMount,
+    run_mount_session,
+    validate_and_parse_run_flags,
+)
 from chroot_distro.helpers.build_engine.users import resolve_user_for_chroot
 from chroot_distro.helpers.docker import apply_layer, layer_cache_path
 from chroot_distro.helpers.layer_diff import (
@@ -37,6 +42,10 @@ def do_run(engine: typing.Any, instr: dict[str, typing.Any]) -> None:
     OCI layer, and record the (recipe-hash → layer) entry.
     """
     stage = engine.current
+
+    # Validate flags before the cache lookup: unsupported flags must be
+    # rejected even when the layer is cached.
+    mounts = validate_and_parse_run_flags(instr)
 
     if instr["exec_form"]:
         command = list(instr["value"])
@@ -58,6 +67,7 @@ def do_run(engine: typing.Any, instr: dict[str, typing.Any]) -> None:
         if hit is not None:
             cached_path = layer_cache_path(hit["layer_digest"])
             if os.path.isfile(cached_path):
+                engine.report_cache_hit(instr)
                 apply_layer(cached_path, stage.rootfs_dir)
                 stage.layers.append(
                     {
@@ -71,7 +81,7 @@ def do_run(engine: typing.Any, instr: dict[str, typing.Any]) -> None:
 
     engine.log("Indexing rootfs state...")
     before = snapshot(stage.rootfs_dir)
-    exit_code = _exec_chroot(engine, stage, command, stdin_input)
+    exit_code = _exec_chroot(engine, stage, command, stdin_input, mounts)
     if exit_code != 0:
         raise BuildError(f"RUN command failed at line {instr['lineno']} with exit code {exit_code}.")
 
@@ -108,7 +118,13 @@ def _run_extra_inputs(engine: typing.Any) -> str:
     return "\n".join(f"{k}={v}" for k, v in items)
 
 
-def _exec_chroot(engine: typing.Any, stage: typing.Any, command: list[str], stdin_input: str | None) -> int:
+def _exec_chroot(
+    engine: typing.Any,
+    stage: typing.Any,
+    command: list[str],
+    stdin_input: str | None,
+    mounts: list[RunMount] | None = None,
+) -> int:
     """Invoke chroot against *stage*'s rootfs to execute *command*."""
     rootfs = stage.rootfs_dir
 
@@ -135,20 +151,27 @@ def _exec_chroot(engine: typing.Any, stage: typing.Any, command: list[str], stdi
     if not engine.quiet and not engine.verbose:
         log_info(f"Running step (user={stage.user or 'root'}, cwd={stage.workdir or '/'})...")
 
-    # Maximum-isolation build (CD_USE_ISOLATION): run the step inside a
-    # namespace holder chrooted into the rootfs so it cannot see host
-    # processes/mounts. Heredoc/stdin steps and kernels without mount-namespace
+    # Isolated builds (CD_USE_ISOLATION → max, CD_USE_NS → ns): run the step
+    # inside a namespace holder. "max" also chroots the holder into the
+    # rootfs so it cannot see host processes/mounts; "ns" keeps the default
+    # mount set. Heredoc/stdin steps and kernels without mount-namespace
     # support fall back to the plain host-namespace path below.
-    if engine.isolated and stdin_input is None:
+    if engine.isolation_mode in ("ns", "max") and stdin_input is None:
         from chroot_distro.helpers import isolation
 
         container_key = f"build_{os.path.basename(engine.tmp_root)}_{stage.index}"
-        with isolation.max_isolation_session(container_key, rootfs, minimal=True) as holder:
+        session = (
+            isolation.max_isolation_session
+            if engine.isolation_mode == "max"
+            else isolation.namespace_session
+        )
+        with session(container_key, rootfs, minimal=True) as holder:
             if holder is not None:
-                return _run_in_holder(holder, chroot_args, child_env)
-            return _run_plain(rootfs, chroot_args, child_env, stdin_input)
+                with run_mount_session(engine, stage, mounts or [], holder=holder) as extra_env:
+                    return _run_in_holder(holder, chroot_args, {**child_env, **extra_env})
+            return _run_plain(rootfs, chroot_args, child_env, stdin_input, engine, stage, mounts or [])
 
-    return _run_plain(rootfs, chroot_args, child_env, stdin_input)
+    return _run_plain(rootfs, chroot_args, child_env, stdin_input, engine, stage, mounts or [])
 
 
 def _run_in_holder(holder: typing.Any, chroot_args: list[str], child_env: dict[str, str]) -> int:
@@ -165,7 +188,15 @@ def _run_in_holder(holder: typing.Any, chroot_args: list[str], child_env: dict[s
     return int(result.returncode)
 
 
-def _run_plain(rootfs: str, chroot_args: list[str], child_env: dict[str, str], stdin_input: str | None) -> int:
+def _run_plain(
+    rootfs: str,
+    chroot_args: list[str],
+    child_env: dict[str, str],
+    stdin_input: str | None,
+    engine: typing.Any = None,
+    stage: typing.Any = None,
+    mounts: list[RunMount] | None = None,
+) -> int:
     """Execute *chroot_args* with host-namespace bind mounts (no isolation)."""
     import chroot_distro.helpers.mount_manager as mount_manager
     from chroot_distro.commands.login import bindings
@@ -181,24 +212,27 @@ def _run_plain(rootfs: str, chroot_args: list[str], child_env: dict[str, str], s
             is_run = os.path.realpath(dst) == os.path.realpath(os.path.join(rootfs, "run"))
             mount_manager.safe_mount(src, dst, recursive=is_run)
 
-        stdin_arg = subprocess.PIPE if stdin_input is not None else subprocess.DEVNULL
-        proc = subprocess.Popen(
-            chroot_args,
-            env=child_env,
-            stdin=stdin_arg,
-            start_new_session=True,
-        )
-        try:
-            if stdin_input is not None:
-                proc.communicate(input=stdin_input.encode())
-            else:
+        # RUN --mount targets go on top of the base binds (and are torn down
+        # before them when the `with` block exits).
+        with run_mount_session(engine, stage, mounts or []) as extra_env:
+            stdin_arg = subprocess.PIPE if stdin_input is not None else subprocess.DEVNULL
+            proc = subprocess.Popen(
+                chroot_args,
+                env={**child_env, **extra_env},
+                stdin=stdin_arg,
+                start_new_session=True,
+            )
+            try:
+                if stdin_input is not None:
+                    proc.communicate(input=stdin_input.encode())
+                else:
+                    proc.wait()
+            except KeyboardInterrupt:
+                with contextlib.suppress(OSError):
+                    os.killpg(proc.pid, signal.SIGTERM)
                 proc.wait()
-        except KeyboardInterrupt:
-            with contextlib.suppress(OSError):
-                os.killpg(proc.pid, signal.SIGTERM)
-            proc.wait()
-            raise
-        return proc.returncode
+                raise
+            return proc.returncode
     except FileNotFoundError as exc:
         raise BuildError(f"chroot command execution failed: {exc}") from exc
     finally:

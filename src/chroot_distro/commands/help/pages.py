@@ -81,7 +81,25 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
                 "(.oci.tar, .oci.tar.gz, .oci.tar.xz). Repeatable.",
             ),
             ("--install-as [NAME]", "Install the built image as a container named NAME after the build completes."),
+            (
+                "--secret [id=NAME[,src=PATH]]",
+                "Expose a secret to RUN --mount=type=secret steps. Without "
+                "src=, the value is read from the environment variable NAME. "
+                "Secret contents never enter image layers or the build cache "
+                "key. Repeatable.",
+            ),
+            (
+                "--ssh [ID[=SOCK]]",
+                "Expose an SSH agent socket to RUN --mount=type=ssh steps "
+                "(default id 'default', socket $SSH_AUTH_SOCK). Repeatable.",
+            ),
             ("--no-cache", "Disable build-step caching. Each instruction is executed fresh."),
+            (
+                "--progress [auto|plain|tty|rawjson]",
+                "Build output style: plain one-line-per-step, tty live "
+                "redraw, or rawjson (one JSON event per line on stdout). "
+                "Default 'auto' picks tty when stderr is a terminal.",
+            ),
             ("-v, --verbose", "Echo each instruction and stream RUN output to the terminal."),
             ("-q, --quiet", "Suppress non-error output. Mutually exclusive with --verbose."),
         ],
@@ -120,7 +138,10 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
                     "in-progress rootfs (mount, PID, UTS, IPC via "
                     "unshare/nsenter), binding no host paths. The container's "
                     "/etc/resolv.conf is written so package installs keep DNS. "
-                    "Accepts 1/true/yes/on; build has no equivalent CLI flag. "
+                    "CD_USE_NS=1 runs RUN steps with the same namespaces but "
+                    "the default mount set (holder not chrooted); "
+                    "CD_USE_ISOLATION wins when both are set. Both accept "
+                    "1/true/yes/on; build has no equivalent CLI flag. "
                     "Forwarded across privilege elevation automatically."
                 ),
             },

@@ -63,12 +63,23 @@ def _do_copy_or_add(
     sources = tokens[:-1]
     dest = tokens[-1]
 
-    # Reject BuildKit-only flags loudly.
+    # Whitelist flags; reject everything else loudly (never silently ignore).
+    allowed = {"chown", "chmod", "from"}
+    if instr["name"] == "COPY":
+        allowed.add("parents")
     for k in flags:
-        if k in ("link", "parents"):
+        if k == "link":
             raise BuildError(
-                f"{instr['name']} --{k} is a BuildKit-only flag and is not supported (line {instr['lineno']})."
+                f"{instr['name']} --link is a BuildKit-only flag and is not supported (line {instr['lineno']})."
             )
+        if k in ("checksum", "keep-git-dir"):
+            raise BuildError(f"{instr['name']} --{k} is not supported yet (line {instr['lineno']}).")
+        if k not in allowed:
+            raise BuildError(
+                f"{instr['name']} --{k} is not supported (line {instr['lineno']}); "
+                f"refusing to silently ignore it."
+            )
+    parents = "parents" in flags
 
     chown = flags.get("chown")
     chmod = flags.get("chmod")
@@ -111,6 +122,7 @@ def _do_copy_or_add(
                 gid,
                 mode_override,
                 auto_extract,
+                parents=parents,
             )
         elif kind == "rootfs":
             assert from_rootfs is not None
@@ -123,6 +135,7 @@ def _do_copy_or_add(
                 uid,
                 gid,
                 mode_override,
+                parents=parents,
             )
 
     if not file_map:
@@ -158,6 +171,30 @@ def _pull_throwaway_image(engine: typing.Any, image_ref: str) -> str:
     return rootfs
 
 
+def _split_parents_pivot(pattern: str) -> tuple[str, str]:
+    """Split a COPY --parents source on its ``/./`` pivot.
+
+    Returns (pattern_without_pivot, anchor). The anchor is the normalised
+    path before the first ``/./``; paths are preserved relative to it.
+    Without a pivot the anchor is '' (preserve relative to the root).
+    """
+    if "/./" not in pattern:
+        return pattern, ""
+    anchor, _, rest = pattern.partition("/./")
+    clean = os.path.normpath(anchor)
+    if clean in (".", ""):
+        clean = ""
+    return (f"{anchor}/{rest}" if anchor else rest), clean
+
+
+def _parents_dest(dest: str, rel: str, anchor: str) -> str:
+    """Destination for one --parents source: dest / (rel relative to anchor)."""
+    preserved = os.path.relpath(rel, anchor) if anchor else rel
+    if preserved.startswith(".."):
+        raise BuildError(f"COPY --parents source '{rel}' is outside its /./ pivot '{anchor}'.")
+    return dest.rstrip("/") + "/" + preserved
+
+
 def _copy_from_context(
     engine: typing.Any,
     src: str,
@@ -168,11 +205,15 @@ def _copy_from_context(
     gid: int,
     mode_override: int | None,
     auto_extract: bool,
+    parents: bool = False,
 ) -> None:
     # Per Docker semantics, a leading '/' on a COPY/ADD source is
     # equivalent to no leading slash: both forms resolve relative
     # to the build context root.
     src_rel_raw = src.lstrip("/")
+    anchor = ""
+    if parents:
+        src_rel_raw, anchor = _split_parents_pivot(src_rel_raw)
 
     full = os.path.normpath(os.path.join(engine.build_dir, src_rel_raw))
     if full != engine.build_dir and not full.startswith(engine.build_dir + os.sep):
@@ -186,8 +227,8 @@ def _copy_from_context(
             full_m = os.path.join(engine.build_dir, m)
             _add_to_file_map(
                 full_m,
-                dest,
-                is_dir_dest=True,
+                _parents_dest(dest, m, anchor) if parents else dest,
+                is_dir_dest=not parents,
                 file_map=file_map,
                 uid=uid,
                 gid=gid,
@@ -200,6 +241,9 @@ def _copy_from_context(
     rel = os.path.relpath(full, engine.build_dir)
     if is_ignored(rel, engine.ignore_patterns):
         return
+    if parents:
+        dest = _parents_dest(dest, rel, anchor)
+        is_dir_dest = False
     _add_to_file_map(
         full,
         dest,
@@ -223,13 +267,21 @@ def _copy_from_rootfs(
     uid: int,
     gid: int,
     mode_override: int | None,
+    parents: bool = False,
 ) -> None:
+    src_rel = src.lstrip("/")
+    anchor = ""
+    if parents:
+        src_rel, anchor = _split_parents_pivot(src_rel)
     abs_rootfs = os.path.abspath(from_rootfs)
-    full = os.path.normpath(os.path.join(abs_rootfs, src.lstrip("/")))
+    full = os.path.normpath(os.path.join(abs_rootfs, src_rel))
     if full != abs_rootfs and not full.startswith(abs_rootfs + os.sep):
         raise BuildError(f"COPY --from source '{src}' escapes the source rootfs.")
     if not os.path.lexists(full):
         raise BuildError(f"COPY --from source '{src}' not found in stage.")
+    if parents:
+        dest = _parents_dest(dest, os.path.relpath(full, abs_rootfs), anchor)
+        is_dir_dest = False
     _add_to_file_map(
         full,
         dest,

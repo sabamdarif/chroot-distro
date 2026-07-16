@@ -109,10 +109,12 @@ def _canonical_value(value: typing.Any) -> str:
     return str(value)
 
 
-def _canonical_flags(flags: dict[str, str] | None) -> str:
+def _canonical_flags(flags: dict[str, typing.Any] | None) -> str:
     if not flags:
         return ""
-    return "&".join(f"{k}={v}" for k, v in sorted(flags.items()))
+    # List values (repeated flags, e.g. RUN --mount) serialise as JSON so
+    # the hash is deterministic and distinct from a same-text string value.
+    return "&".join(f"{k}={_canonical_value(v)}" for k, v in sorted(flags.items()))
 
 
 def compute_recipe_hash(

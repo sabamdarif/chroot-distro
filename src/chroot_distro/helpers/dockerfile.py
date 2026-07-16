@@ -294,15 +294,32 @@ def _strip_trailing_escape(line: str, escape_char: str) -> str:
     return s.rstrip()
 
 
-def _parse_flags(text: str) -> tuple[dict[str, str], str]:
+# Flags that may legally repeat on one instruction (RUN --mount). Repeats
+# collect into a list; every other flag keeps last-writer-wins semantics.
+_REPEATABLE_FLAGS = frozenset({"mount"})
+
+
+def _record_flag(flags: dict[str, typing.Any], key: str, val: str) -> None:
+    if key in _REPEATABLE_FLAGS and key in flags:
+        existing = flags[key]
+        if isinstance(existing, list):
+            existing.append(val)
+        else:
+            flags[key] = [existing, val]
+    else:
+        flags[key] = val
+
+
+def _parse_flags(text: str) -> tuple[dict[str, typing.Any], str]:
     """Pull leading --key[=value] flags off `text`.
 
     Returns (flags_dict, remaining_text). Flag values that contain
     spaces must be quoted with shlex syntax (`--chown="user:group"`),
     and we use shlex's POSIX mode to strip the quotes; un-quoted flag
-    values stop at the next whitespace token.
+    values stop at the next whitespace token. Values are strings, except
+    repeatable flags (--mount) which become a list when repeated.
     """
-    flags = {}
+    flags: dict[str, typing.Any] = {}
     while True:
         m = _FLAG_RE.match(text)
         if not m:
@@ -324,12 +341,12 @@ def _parse_flags(text: str) -> tuple[dict[str, str], str]:
                     val = next(iter(lex))
                     # Skip past the consumed token in the source.
                     consumed = m.start() + m.group(0).index("=") + 1 + _shlex_consumed_len(rest_after, val)
-                    flags[key] = val
+                    _record_flag(flags, key, val)
                     text = text[consumed:]
                     continue
                 except (StopIteration, ValueError) as exc:
                     log.debug("Failed to parse flag with shlex: %s", exc)
-        flags[key] = val
+        _record_flag(flags, key, val)
         text = text[m.end() :]
     return flags, text
 

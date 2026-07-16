@@ -13,10 +13,12 @@ from chroot_distro.constants import (
     PROGRAM_NAME,
     RUNTIME_DIR,
 )
+from chroot_distro.helpers import namespace
 from chroot_distro.helpers.build_engine import (
     BuildEngine,
     BuildError,
 )
+from chroot_distro.helpers.build_engine.events import make_reporter
 from chroot_distro.helpers.docker import ARCH_TO_DOCKER
 from chroot_distro.helpers.dockerfile import (
     DockerfileSyntaxError,
@@ -178,21 +180,29 @@ def command_build(args: typing.Any) -> None:
             build_tmp = "/tmp"  # Fallback just in case
         tmp_root = tempfile.mkdtemp(prefix="cd-build-", dir=build_tmp)
 
-        engine = BuildEngine(
-            build_dir=build_dir,
-            tmp_root=tmp_root,
-            target_arch_pd=target_arch,
-            user_build_args=build_args,
-            target_stage=target_stage,
-            verbose=verbose,
-            quiet=quiet,
-            no_cache=no_cache,
-            emulator=emulator,
-            # build has no --isolated flag; isolation is opt-in via the env var.
-            isolated=use_isolation_env_enabled(),
-        )
-
         try:
+            secrets = _parse_secret_opts(getattr(args, "secrets", None) or [], tmp_root)
+            ssh_sockets = _parse_ssh_opts(getattr(args, "ssh", None) or [])
+
+            # build has no isolation CLI flag; both modes are env-var opt-in.
+            isolation_mode = _resolve_build_isolation_mode()
+
+            engine = BuildEngine(
+                build_dir=build_dir,
+                tmp_root=tmp_root,
+                target_arch_pd=target_arch,
+                user_build_args=build_args,
+                target_stage=target_stage,
+                verbose=verbose,
+                quiet=quiet,
+                no_cache=no_cache,
+                emulator=emulator,
+                isolation_mode=isolation_mode,
+                secrets=secrets,
+                ssh_sockets=ssh_sockets,
+                reporter=make_reporter(getattr(args, "progress", "auto") or "auto", quiet),
+            )
+
             try:
                 final_stage = engine.run(instructions)
             except BuildError as exc:
@@ -257,6 +267,67 @@ def command_build(args: typing.Any) -> None:
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
+
+
+_SECRET_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+def _resolve_build_isolation_mode() -> str:
+    """Isolation mode for RUN steps: CD_USE_ISOLATION (max) wins over CD_USE_NS (ns)."""
+    if use_isolation_env_enabled():
+        return "max"
+    if namespace.use_ns_env_enabled():
+        return "ns"
+    return "none"
+
+
+def _parse_secret_opts(raw: list[str], tmp_root: str) -> dict[str, str]:
+    """Parse --secret id=NAME[,src=PATH] items into {id: host_file_path}.
+
+    Without src=, the secret value is taken from the environment variable
+    named after the id and written to a 0400 file under tmp_root.
+    """
+    out: dict[str, str] = {}
+    for item in raw:
+        kv: dict[str, str] = {}
+        for part in item.split(","):
+            k, _, v = part.partition("=")
+            kv[k.strip()] = v
+        sid = kv.pop("id", "")
+        src = kv.pop("src", None) or kv.pop("source", None)
+        if not sid or kv or not _SECRET_ID_RE.match(sid):
+            crit_error(f"invalid --secret '{item}' (expected id=NAME[,src=PATH]).")
+            sys.exit(1)
+        if src:
+            path = os.path.abspath(os.path.expanduser(src))
+            if not os.path.isfile(path):
+                crit_error(f"--secret id={sid}: file '{src}' does not exist.")
+                sys.exit(1)
+        else:
+            value = os.environ.get(sid)
+            if value is None:
+                crit_error(f"--secret id={sid}: no src= given and environment variable '{sid}' is not set.")
+                sys.exit(1)
+            path = os.path.join(tmp_root, f"cli-secret-{sid}")
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o400)
+            with os.fdopen(fd, "w") as fh:
+                fh.write(value)
+        out[sid] = path
+    return out
+
+
+def _parse_ssh_opts(raw: list[str]) -> dict[str, str]:
+    """Parse --ssh [ID[=SOCK]] items into {id: socket_path}."""
+    out: dict[str, str] = {}
+    for item in raw:
+        sid, _, sock = (item or "default").partition("=")
+        sid = sid or "default"
+        sock = sock or os.environ.get("SSH_AUTH_SOCK", "")
+        if not sock:
+            crit_error(f"--ssh {sid}: no socket path given and SSH_AUTH_SOCK is not set.")
+            sys.exit(1)
+        out[sid] = os.path.abspath(os.path.expanduser(sock))
+    return out
 
 
 def _parse_build_args(raw: list[str]) -> dict[str, str]:

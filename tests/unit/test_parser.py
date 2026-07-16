@@ -125,3 +125,42 @@ def test_parser_login_has_no_entrypoint():
     args, unknown = parse_cli_args(parser, ["login", "alpine", "--entrypoint", "/bin/echo"])
     assert not hasattr(args, "entrypoint")
     assert "--entrypoint" in unknown
+
+
+def test_parser_build_secret_and_ssh():
+    parser = build_parser()
+    args = parser.parse_args(
+        ["build", ".", "--secret", "id=tok,src=/tmp/tok", "--secret", "id=other", "--ssh"]
+    )
+    assert args.command == "build"
+    assert args.secrets == ["id=tok,src=/tmp/tok", "id=other"]
+    assert args.ssh == ["default"]
+
+
+def test_parser_build_ssh_with_value():
+    parser = build_parser()
+    args = parser.parse_args(["build", ".", "--ssh", "deploy=/run/agent.sock"])
+    assert args.ssh == ["deploy=/run/agent.sock"]
+
+
+def test_parser_build_secret_ssh_default_empty():
+    parser = build_parser()
+    args = parser.parse_args(["build", "."])
+    assert args.secrets == []
+    assert args.ssh == []
+
+
+def test_parser_build_progress():
+    parser = build_parser()
+    for value in ("auto", "plain", "tty", "rawjson"):
+        args = parser.parse_args(["build", ".", "--progress", value])
+        assert args.progress == value
+    assert parser.parse_args(["build", "."]).progress == "auto"
+
+
+def test_parser_build_progress_invalid_rejected():
+    import pytest
+
+    parser = build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["build", ".", "--progress", "fancy"])

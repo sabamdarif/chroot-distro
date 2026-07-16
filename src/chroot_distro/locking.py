@@ -13,6 +13,7 @@ log = logging.getLogger(__name__)
 
 LOCKS_DIR = os.path.join(RUNTIME_DIR, "locks")
 _BUILD_LOCKS_DIR = os.path.join(LOCKS_DIR, "build")
+_RUN_CACHE_LOCKS_DIR = os.path.join(LOCKS_DIR, "run-cache")
 
 # Absolute lock-file paths for which this process currently holds an
 # exclusive flock. Used to make exclusive locking re-entrant within a
@@ -94,10 +95,12 @@ class _FlockBase:
         exclusive: bool,
         command: str,
         inheritable: bool,
+        blocking: bool = False,
     ) -> None:
         self._exclusive = exclusive
         self._command = command
         self._inheritable = inheritable
+        self._blocking = blocking
         self._fd: typing.TextIO | None = None
         self._reentrant = False
         # Subclasses populate these before acquire() is called.
@@ -142,7 +145,9 @@ class _FlockBase:
             with contextlib.suppress(OSError):
                 os.set_inheritable(fd.fileno(), True)
 
-        lock_op = (fcntl.LOCK_EX if self._exclusive else fcntl.LOCK_SH) | fcntl.LOCK_NB
+        lock_op = fcntl.LOCK_EX if self._exclusive else fcntl.LOCK_SH
+        if not self._blocking:
+            lock_op |= fcntl.LOCK_NB
         try:
             fcntl.flock(fd.fileno(), lock_op)
         except OSError as exc:
@@ -219,3 +224,16 @@ class BuildLock(_FlockBase):
         self._lock_path = _build_lock_path(image_ref, arch)
         self._label = "image"
         self._display = f"{image_ref} ({arch})"
+
+
+class RunCacheLock(_FlockBase):
+    """Exclusive lock for one RUN --mount=type=cache id (sharing=locked).
+
+    Blocking: BuildKit semantics are "wait for the other builder", not fail.
+    """
+
+    def __init__(self, cache_key: str, command: str = "build") -> None:
+        super().__init__(exclusive=True, command=command, inheritable=False, blocking=True)
+        self._lock_path = os.path.join(_RUN_CACHE_LOCKS_DIR, f"{cache_key}.lock")
+        self._label = "build cache"
+        self._display = cache_key

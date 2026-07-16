@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import re
+import time
 import typing
 
 from chroot_distro.arch import get_device_cpu_arch
@@ -11,6 +12,12 @@ from chroot_distro.helpers.build_engine.constants import (
 )
 from chroot_distro.helpers.build_engine.dockerignore import load_dockerignore
 from chroot_distro.helpers.build_engine.errors import BuildError
+from chroot_distro.helpers.build_engine.events import (
+    BuildEvent,
+    NullReporter,
+    PlainReporter,
+    Reporter,
+)
 from chroot_distro.helpers.build_engine.handlers import HANDLERS, do_onbuild
 from chroot_distro.helpers.build_engine.parsing import split_arg
 from chroot_distro.helpers.build_engine.stage import Stage
@@ -22,7 +29,7 @@ from chroot_distro.helpers.docker import (
 )
 from chroot_distro.helpers.dockerfile import expand_vars
 from chroot_distro.helpers.rootfs import write_hosts, write_resolv_conf
-from chroot_distro.message import C, log_info
+from chroot_distro.message import log_info
 
 log = logging.getLogger(__name__)
 
@@ -51,7 +58,10 @@ class BuildEngine:
         quiet: bool,
         no_cache: bool,
         emulator: str | None,
-        isolated: bool = False,
+        isolation_mode: str = "none",
+        secrets: dict[str, str] | None = None,
+        ssh_sockets: dict[str, str] | None = None,
+        reporter: Reporter | None = None,
     ):
         self.build_dir = os.path.abspath(build_dir)
         self.tmp_root = tmp_root
@@ -65,9 +75,19 @@ class BuildEngine:
         self.quiet = quiet
         self.no_cache = no_cache
         self.emulator = emulator
-        # When True, RUN steps execute inside a maximum-isolation namespace
-        # session (see helpers.isolation). Enabled via CD_USE_ISOLATION.
-        self.isolated = isolated
+        # How RUN steps are separated from the host: "none" (plain chroot),
+        # "ns" (namespaces + default mount set, CD_USE_NS), or "max"
+        # (maximum-isolation chrooted holder, CD_USE_ISOLATION).
+        if isolation_mode not in ("none", "ns", "max"):
+            raise ValueError(f"unknown isolation_mode {isolation_mode!r}")
+        self.isolation_mode = isolation_mode
+        # CLI-provided RUN --mount inputs: secret id -> host file path,
+        # ssh id -> agent socket path.
+        self.secrets = dict(secrets or {})
+        self.ssh_sockets = dict(ssh_sockets or {})
+        # Build-output renderer. Default preserves historic behaviour:
+        # plain step lines, nothing under --quiet.
+        self.reporter: Reporter = reporter or (NullReporter() if quiet else PlainReporter())
         self.stages: dict[str, Stage] = {}  # name -> Stage
         self.stages_by_idx: list[Stage] = []
         self.current: Stage | None = None
@@ -88,7 +108,11 @@ class BuildEngine:
         for instr in instructions:
             self._step_no += 1
             self._announce(instr)
+            t0 = time.monotonic()
             self._dispatch(instr)
+            self.reporter.emit(
+                self._event("step_finished", instr, duration=time.monotonic() - t0)
+            )
             if self._stop_after:
                 break
 
@@ -146,28 +170,42 @@ class BuildEngine:
         scope.setdefault("TARGETPLATFORM", f"linux/{self.target_arch_docker}")
         scope.setdefault("BUILDPLATFORM", f"linux/{self.host_arch_docker}")
 
-    # ----- step banner -----------------------------------------------------
+    # ----- step banner / events ---------------------------------------------
+
+    def _stage_label(self) -> str:
+        if self.current is None:
+            return ""
+        return self.current.name or str(self.current.index)
+
+    def _event(
+        self,
+        kind: str,
+        instr: dict[str, typing.Any],
+        *,
+        text: str = "",
+        duration: float | None = None,
+    ) -> BuildEvent:
+        return BuildEvent(
+            kind=kind,
+            step_no=self._step_no,
+            step_total=self._step_total,
+            stage_name=self._stage_label(),
+            instruction=instr.get("name", ""),
+            text=text,
+            duration=duration,
+            lineno=instr.get("lineno", 0),
+        )
 
     def _announce(self, instr: dict[str, typing.Any]) -> None:
-        if self.quiet:
-            return
-        raw = instr.get("raw", "")
-        if len(raw) > 120:
-            raw = raw[:117] + "..."
-        parts = raw.split(None, 1)
-        if len(parts) == 2:
-            rendered = f"{C['YELLOW']}{parts[0]}{C['RST']} {parts[1]}"
-        elif parts:
-            rendered = f"{C['YELLOW']}{parts[0]}{C['RST']}"
-        else:
-            rendered = ""
-        log_info(f"Step {self._step_no}/{self._step_total}: {C['RST']}{rendered}")
+        self.reporter.emit(self._event("step_started", instr, text=instr.get("raw", "")))
+
+    def report_cache_hit(self, instr: dict[str, typing.Any]) -> None:
+        """Emit a cache_hit event for *instr* (called by the RUN handler)."""
+        self.reporter.emit(self._event("cache_hit", instr))
 
     def log(self, text: str) -> None:
-        """Emit *text* via log_info() unless `--quiet` is in effect."""
-        if self.quiet:
-            return
-        log_info(text)
+        """Emit *text* as a log_line event (rendered via log_info by default)."""
+        self.reporter.emit(BuildEvent(kind="log_line", text=text))
 
     # ----- dispatcher + history -------------------------------------------
 
@@ -237,7 +275,14 @@ class BuildEngine:
         value = instr.get("value", "")
         if isinstance(value, str):
             new["value"] = expand_vars(value, env)
-        new["flags"] = {k: expand_vars(v, env) if isinstance(v, str) else v for k, v in instr.get("flags", {}).items()}
+        def _expand_flag(v: typing.Any) -> typing.Any:
+            if isinstance(v, str):
+                return expand_vars(v, env)
+            if isinstance(v, list):
+                return [expand_vars(x, env) if isinstance(x, str) else x for x in v]
+            return v
+
+        new["flags"] = {k: _expand_flag(v) for k, v in instr.get("flags", {}).items()}
         return new
 
     def expansion_scope(self) -> dict[str, str | None]:

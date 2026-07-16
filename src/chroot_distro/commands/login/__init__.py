@@ -1316,15 +1316,20 @@ def _command_login_inner_once(container_name: str, args) -> None:
         )
         return
 
+    # Exit code of the inner command, propagated to our own exit status so
+    # `login NAME -- cmd` is usable in shell conditionals (like ssh/docker).
+    exit_code = 0
+
     if holder is not None and holder.proc is not None:
         try:
             if getattr(holder, "master_fd", -1) >= 0:
                 from chroot_distro.syscalls.chroot import _pty_relay
 
-                _pty_relay(holder.master_fd, holder.proc.pid)
+                exit_code = _pty_relay(holder.master_fd, holder.proc.pid)
             else:
-                holder.proc.wait()
+                exit_code = holder.proc.wait()
         except KeyboardInterrupt:
+            exit_code = 130
             with contextlib.suppress(OSError):
                 holder.proc.send_signal(signal.SIGINT)
             try:
@@ -1349,7 +1354,7 @@ def _command_login_inner_once(container_name: str, args) -> None:
         try:
             if chroot_config is not None and holder is None:
                 # Native path: chroot + exec without spawning the chroot binary.
-                chroot_and_run(
+                exit_code = chroot_and_run(
                     chroot_config.rootfs,
                     chroot_config.command,
                     uid=chroot_config.uid,
@@ -1358,10 +1363,10 @@ def _command_login_inner_once(container_name: str, args) -> None:
                     workdir=chroot_config.workdir,
                     env=child_env,
                     drop_caps=not has_userns,
-                )
+                ).returncode
             elif holder is not None:
                 # Namespace path: enter namespaces via native setns(2) + PTY.
-                enter_and_run_with_pty(
+                exit_code = enter_and_run_with_pty(
                     holder.pid,
                     holder._live_ns_flags(),
                     chroot_args,
@@ -1372,7 +1377,7 @@ def _command_login_inner_once(container_name: str, args) -> None:
                 # Fallback: should not normally be reached.
                 import subprocess as _sp
 
-                _sp.run(chroot_args, env=child_env, check=False)
+                exit_code = _sp.run(chroot_args, env=child_env, check=False).returncode
         finally:
             if _sess_handle is not None:
                 _sess_handle.close()
@@ -1384,6 +1389,11 @@ def _command_login_inner_once(container_name: str, args) -> None:
                     if holder is not None:
                         namespace.release_holder(container_name)
                         namespace.clear_isolation_mode(container_name)
+
+    if exit_code:
+        # Popen.wait() reports signal death as a negative code; map it to
+        # the shell convention (128 + signal) before exiting.
+        sys.exit(128 - exit_code if exit_code < 0 else exit_code)
 
 
 def _run_detached(
