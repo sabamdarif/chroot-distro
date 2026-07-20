@@ -20,7 +20,7 @@ jobs:
               with:
                   ref: ${{ github.event.workflow_run.head_sha }}
 
-            - uses: actions/setup-python@v6
+            - uses: actions/setup-python@v7
               with:
                   python-version: "3.x"
 
@@ -124,7 +124,7 @@ jobs:
               with:
                   ref: ${{ needs.prepare.outputs.tag }}
 
-            - uses: actions/setup-python@v6
+            - uses: actions/setup-python@v7
               with:
                   python-version: "3.x"
 
