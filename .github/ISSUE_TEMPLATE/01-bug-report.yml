@@ -1,0 +1,40 @@
+name: "Bug report"
+description: "Tell us about issue with chroot-distro utility"
+title: "[Bug]: "
+labels: ["bug report"]
+body:
+    - type: markdown
+      attributes:
+          value: |
+              This is a bug tracker of the Chroot Distro - a helper script for chroot to manage distribution installations. Please use it accordingly to selected ticket type.
+
+              You acknowledge that false or incomplete information will make debugging impossible and you agree to collaborate with maintainers. We may request specific details or to run commands to get more information about the issue.
+    - type: textarea
+      attributes:
+          label: Problem description
+          description: |
+              A clear and concise description of what the problem is. Issue must be backed by proof: log, screenshot, video recording and everything else that will help us to understand the situation.
+      validations:
+          required: true
+    - type: textarea
+      attributes:
+          label: What steps will reproduce the bug?
+          description: |
+              Give step-by-step instructions to reproduce issue with 100% success rate.
+      validations:
+          required: true
+    - type: textarea
+      attributes:
+          label: What is the expected behavior?
+          description: |
+              A clear and concise description of what you expected to happen.
+      validations:
+          required: false
+    - type: textarea
+      attributes:
+          label: "chroot-distro info output"
+          description: |
+              Run the `chroot-distro info` command and paste everything it shows.
+          render: shell
+      validations:
+          required: true

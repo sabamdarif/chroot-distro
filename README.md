@@ -1338,7 +1338,7 @@ DJkMCnBAFG14TV3BqZKmbbjD8Pi1zKLLG6
 
 ### Acknowledgments
 
-- [proot-distro](https://github.com/termux/proot-distro) — architecture
+- [proot-distro](https://github.com/termux/proot-distro) — architecture and a lot more inspiration
   and CLI design inspiration.
 - [pyLoad](https://github.com/pyload/pyload) — sliding-window speed tracking, token-bucket rate limiting, and connection resilience algorithms.
 - [distrobox](https://github.com/89luca89/distrobox/) - shared-display option improvements 

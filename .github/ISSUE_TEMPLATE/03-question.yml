@@ -1,0 +1,12 @@
+name: "Question"
+description: "Have questions about Chroot-Distro? Ask us."
+title: "[General]: "
+labels: ["question"]
+body:
+    - type: textarea
+      attributes:
+          label: Question
+          description: |
+              Ask your question here.
+      validations:
+          required: true
