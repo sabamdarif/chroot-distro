@@ -25,18 +25,17 @@ def command_unmount(args) -> None:
         sys.exit(1)
 
     with ContainerLock(container_name, exclusive=True, command="unmount"):
-        # 1. Get active sessions/processes
+        # 1. Stop anything still running inside the container: SIGTERM, then
+        # SIGKILL whatever refuses to exit.
         active_pids = session.get_active_chroot_pids(container_name)
         if active_pids:
             log_info(f"Stopping active sessions/processes in container '{container_name}' (PIDs: {active_pids})...")
 
-            # Send SIGTERM to all active chroot processes
             for pid in active_pids:
                 log_info(f"Sending SIGTERM to process {pid}...")
                 with contextlib.suppress(OSError):
                     os.kill(pid, signal.SIGTERM)
 
-            # Wait up to 2 seconds for processes to terminate
             start_time = time.time()
             while time.time() - start_time < 2.0:
                 remaining_pids = session.get_active_chroot_pids(container_name)
@@ -44,7 +43,6 @@ def command_unmount(args) -> None:
                     break
                 time.sleep(0.1)
 
-            # Check if any remaining PIDs, send SIGKILL
             remaining_pids = session.get_active_chroot_pids(container_name)
             if remaining_pids:
                 log_info(f"Processes {remaining_pids} did not exit. Sending SIGKILL...")
@@ -52,7 +50,6 @@ def command_unmount(args) -> None:
                     with contextlib.suppress(OSError):
                         os.kill(pid, signal.SIGKILL)
 
-                # Wait up to 1 second for SIGKILL to take effect
                 start_time = time.time()
                 while time.time() - start_time < 1.0:
                     remaining_pids = session.get_active_chroot_pids(container_name)
@@ -64,14 +61,14 @@ def command_unmount(args) -> None:
                 if remaining_pids:
                     warn(f"Some processes could not be stopped: {remaining_pids}")
 
-        # 2. Reset session count to 0
+        # 2. Reset session bookkeeping
         log_info(f"Setting active sessions count for '{container_name}' to 0.")
         session.reset(container_name)
         session.clear_mount_options(container_name)
 
         holder = namespace.get_live_holder(container_name)
 
-        # 3. Unmount all nested mounts under rootfs
+        # 3. Unmount everything under rootfs
         log_info("Unmounting active mount points under rootfs...")
         try:
             mount_manager.unmount_all(rootfs_dir, holder=holder)
@@ -84,11 +81,9 @@ def command_unmount(args) -> None:
             namespace.clear_isolation_mode(container_name)
             holder = None
 
-        # 4. Termux: sweep stale mounts in the global (init) mount
-        # namespace. Mounts created there by earlier `su --mount-master`
-        # runs propagate into app namespaces as slave copies that cannot be
-        # unmounted locally; the origin must be removed at the source, which
-        # then propagates the removal everywhere.
+        # 4. Termux: mounts made by an earlier `su --mount-master` live in the
+        # global namespace and reach us as slave copies that cannot be
+        # unmounted locally — remove them at the source so it propagates.
         if IS_TERMUX:
             log_info("Cleaning stale container mounts in other mount namespaces...")
             mount_manager.deep_clean_container_mounts(container_name)

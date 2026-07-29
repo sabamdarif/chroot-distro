@@ -58,15 +58,11 @@ class _HostInfo:
 
 @dataclass
 class _Capability:
-    """A single host capability check result for the report.
-
-    ``level`` is one of "ok", "warn", "bad", or "info" and drives the glyph
-    and color used when rendering.
-    """
+    """One host capability check result for the report."""
 
     label: str
     value: str
-    level: str = "info"
+    level: str = "info"  # "ok" | "warn" | "bad" | "info" — picks glyph + color
 
 
 @dataclass
@@ -308,12 +304,8 @@ def _userns_knob_caps() -> list["_Capability"]:
 
 
 def _isolation_tier_status() -> tuple[str, str] | None:
-    """Return (value, level) describing which --isolated tier will be used.
-
-    Uses the same probe as ``login`` so the report and the real run agree. May
-    fork a short-lived holder to test mounts inside a user namespace; failures
-    degrade gracefully to an informational note.
-    """
+    """Return (value, level) for the --isolated tier, using the same probe
+    as ``login`` so the report and the real run agree."""
     try:
         from chroot_distro.helpers import namespace
 
@@ -506,11 +498,8 @@ def _analyze_image(info: _ImageInfo, host_arch: str) -> None:
     if info.size_bytes == 0:
         info.findings.append("rootfs is empty (install may be incomplete)")
     elif info.arch in (_NA, "") and not _has_rootfs_structure(rootfs):
-        # Only flag when nothing identifies this as a usable rootfs: arch
-        # detection found no ELF binary and none of the common top-level
-        # directories exist. Minimal/distroless images (e.g. termux-docker)
-        # legitimately lack /etc/os-release and /etc/passwd, so their presence
-        # is no longer required.
+        # Flag only when no ELF binary AND no common top-level dir was found;
+        # minimal/distroless images legitimately lack /etc files.
         info.findings.append("no recognizable rootfs layout (install may be incomplete)")
 
     if (
@@ -666,11 +655,8 @@ def _render_capabilities(caps: list[_Capability]) -> None:
 def _flag_status(flag, parsed: dict | None) -> tuple[str, str, str, bool]:
     """Resolve one kernel flag to (glyph, color, state_text, counts_as_missing).
 
-    Uses the static kernel config when available; otherwise falls back to a
-    live runtime probe (so Android, where /proc/config.gz is root-only and
-    `info` runs rootless, still gets a meaningful answer). *counts_as_missing*
-    is True only when the option is both required and confirmed absent, so the
-    summary line never flags a merely-unknown option as blocking.
+    Uses the static kernel config when readable, else a live runtime probe.
+    *counts_as_missing* is True only for required + confirmed-absent options.
     """
     if parsed is not None:
         status = lookup_flag(parsed, flag.name)
@@ -698,11 +684,8 @@ def _flag_status(flag, parsed: dict | None) -> tuple[str, str, str, bool]:
 def _render_kernel_config() -> None:
     """Show which CONFIG_* options chroot-distro relies on are enabled.
 
-    Prefers the static kernel build config (``/proc/config.gz`` and friends).
-    When that cannot be read (commonly on Android, where /proc/config.gz is
-    root-only and `info` runs rootless), it falls back to probing the running
-    kernel directly (namespace files, /proc/filesystems, /sys/fs/cgroup) so
-    the report stays useful instead of giving up.
+    Prefers the static kernel build config; falls back to probing the
+    running kernel when it isn't readable (common on Android).
     """
     _render_section("KERNEL CONFIG")
     path, text = find_kernel_config()
@@ -781,12 +764,8 @@ def _render_analysis(images: list[_ImageInfo]) -> None:
 def command_info(args) -> None:
     """Print a structured diagnostics report for bug reports and support.
 
-    Read-only: collects program, host (Linux distro or Termux/Android), and
-    per-image facts plus lightweight analysis. It runs with root privileges
-    if available (always elevates on regular Linux, and elevates on Termux if
-    root is available) so it can read root-only files like /proc/config.gz or
-    inspect root-owned data directories. If root is not available on Termux,
-    it runs rootlessly and falls back to runtime probing.
+    Read-only. Elevates to root when available (to read /proc/config.gz and
+    root-owned data dirs); otherwise falls back to runtime probing.
     """
     host_arch = get_device_cpu_arch()
     host = _gather_host_info()

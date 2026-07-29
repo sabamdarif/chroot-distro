@@ -14,13 +14,10 @@ log = logging.getLogger(__name__)
 
 @dataclass
 class ChrootConfig:
-    """Structured representation of a chroot invocation.
-
-    Unlike :func:`build_chroot_args` which returns a command-line ``list[str]``
-    for the GNU ``chroot`` binary, this dataclass carries the individual
-    parameters so that :func:`chroot_distro.syscalls.chroot.chroot_and_exec`
-    can be called directly without parsing them back out of a string.
-    """
+    """Chroot invocation parameters for the native
+    :func:`chroot_distro.syscalls.chroot.chroot_and_exec` path (vs the
+    ``list[str]`` argv that :func:`build_chroot_args` builds for the GNU
+    ``chroot`` binary)."""
 
     rootfs: str
     command: list[str] = field(default_factory=list)
@@ -32,16 +29,11 @@ class ChrootConfig:
 
 
 def _find_rootfs_shell(rootfs: str) -> str | None:
-    """Find a usable shell inside the container rootfs, returning its guest path.
+    """Find a usable shell in the rootfs, returning its guest path.
 
-    Uses chroot-aware symlink resolution so that absolute symlinks
-    (e.g. Alpine's ``/bin/sh → /bin/busybox``) are followed within the
-    rootfs namespace rather than escaping to the host filesystem.
-
-    A shell that is only visible because of a bind-mounted host ``$PREFIX``
-    (e.g. distroless / rootless images on Termux) is rejected, so the caller
-    falls back to running the command directly instead of exec'ing a host
-    binary that the chroot cannot resolve.
+    Symlinks are resolved within the rootfs namespace (Alpine's
+    ``/bin/sh → /bin/busybox``), and a shell only visible via a bind-mounted
+    host ``$PREFIX`` is rejected — the chroot could not exec it.
     """
     rootfs_real = os.path.realpath(rootfs)
     for guest_path in ("/bin/sh", f"{TERMUX_PREFIX}/bin/sh", f"{TERMUX_PREFIX}/bin/bash"):
@@ -49,14 +41,11 @@ def _find_rootfs_shell(rootfs: str) -> str | None:
         # Fast path: regular file, no symlink resolution needed.
         if os.path.isfile(sh_path) and not os.path.islink(sh_path):
             return guest_path
-        # Chroot-aware resolution: follows symlinks within the rootfs
-        # namespace so absolute targets (e.g. /bin/busybox) are resolved
-        # relative to rootfs, not the host root.
         try:
             resolved = resolve_rootfs_path(rootfs, guest_path)
         except OSError:
             continue
-        # Accept only when the resolved target is a real file inside rootfs.
+        # Accept only a real file inside the rootfs.
         if os.path.isfile(resolved) and os.path.commonpath([rootfs_real, resolved]) == rootfs_real:
             return guest_path
     return None
@@ -71,16 +60,12 @@ def build_chroot_args(
     inner_cmd: list[str] | None = None,
     is_run: bool = False,
 ) -> list[str]:
-    """Build the command line arguments for the GNU chroot command.
+    """Build the argv for the GNU chroot command.
 
-    GNU chroot's ``--skip-chdir`` is only valid when NEWROOT is ``/``,
-    so we cannot use it for our containers.  Instead, when *workdir* is
-    set we wrap the inner command with ``sh -c 'cd <dir> && exec …'``
-    so the directory change happens **inside** the chroot namespace.
-
-    For distroless / rootless images that lack ``/bin/sh``, the ``cd``
-    wrapper is skipped and the command is executed directly (with the
-    working directory defaulting to ``/``).
+    When *workdir* is set the inner command is wrapped with
+    ``sh -c 'cd <dir> && exec …'`` so the chdir happens inside the chroot
+    (GNU chroot's ``--skip-chdir`` only works for NEWROOT=/). Images without
+    a shell skip the wrapper and run from ``/``.
     """
     chroot_exe = None
     if IS_TERMUX:
@@ -105,29 +90,21 @@ def build_chroot_args(
 
     # 2. Handle supplementary groups
     if groups:
-        # Convert all to strings and join by commas
         group_str = ",".join(str(g) for g in groups)
         args.append(f"--groups={group_str}")
 
     # 3. Rootfs target directory
     args.append(rootfs)
 
-    # 4. Inner command — optionally prefixed with a cd into workdir.
-    #
-    # For `run` (executing an image's Entrypoint/Cmd), the command is run
-    # directly and must never be wrapped in a shell: rootless/distroless
-    # images have no usable in-rootfs shell, and on Termux the host
-    # $PREFIX/bin/sh is visible inside the rootfs via the bind-mounted
-    # /data, which would make chroot try to exec a shell that the chroot
-    # cannot resolve ('.../sh: No such file or directory').
+    # 4. Inner command — optionally prefixed with a cd into workdir. A `run`
+    # command (image Entrypoint/Cmd) is never shell-wrapped: the image may
+    # have no usable in-rootfs shell.
     cmd = list(inner_cmd) if inner_cmd else []
     if workdir and workdir != "/" and not is_run:
         shell_path = _find_rootfs_shell(rootfs)
         if shell_path:
-            # Wrap the inner command so 'cd' happens inside the chroot.
-            # If the directory doesn't exist or is inaccessible, we fall back to /
-            # to ensure the shell still starts successfully.
-            # exec replaces the shell process to keep the PID tree clean.
+            # cd inside the chroot, falling back to /; exec keeps the PID
+            # tree clean.
             quoted_workdir = shlex.quote(workdir)
             wrapped = (
                 f"cd {quoted_workdir} 2>/dev/null || cd /; exec {shlex.join(cmd)}"
@@ -136,9 +113,7 @@ def build_chroot_args(
             )
             args.extend([shell_path, "-c", wrapped])
         else:
-            # Distroless / rootless image without a shell — cannot wrap
-            # with a shell to change directory.  Run the command directly;
-            # the working directory will default to /.
+            # No shell to wrap with; run directly from /.
             log.debug(
                 "No usable shell in rootfs %s; skipping workdir cd to %s",
                 rootfs,
@@ -152,12 +127,10 @@ def build_chroot_args(
 
 
 def format_get_chroot_cmd(child_env: dict, exec_argv: list[str]) -> str:
-    """Format the argv for --get-chroot-cmd as a copy-pasteable shell command.
+    """Format the argv for --get-chroot-cmd as a copy-pasteable command.
 
-    The output is meant to be pasted into the user's normal (unprivileged)
-    shell, so it must carry its own root elevation: ``sudo`` everywhere it
-    exists, falling back on Termux to Android's raw
-    ``su``, which takes the whole command as a single ``-c`` string.
+    Carries its own root elevation: ``sudo`` where it exists, else Android's
+    raw ``su -c`` on Termux.
     """
     parts = ["env", "-i"]
     parts.extend(f"{k}={shlex.quote(v)}" for k, v in child_env.items())
@@ -179,13 +152,8 @@ def build_chroot_config(
     inner_cmd: list[str] | None = None,
     is_run: bool = False,
 ) -> ChrootConfig:
-    """Build a :class:`ChrootConfig` for native chroot execution.
-
-    The signature mirrors :func:`build_chroot_args` so callers can
-    construct both the legacy command-list and the structured config
-    from the same parameters.  The ``ChrootConfig`` is consumed by
-    :func:`chroot_distro.syscalls.chroot.chroot_and_exec`.
-    """
+    """Build a :class:`ChrootConfig` for native chroot execution; the
+    signature mirrors :func:`build_chroot_args`."""
     uid: int | None = None
     gid: int | None = None
     parsed_groups: list[int] | None = None
@@ -204,7 +172,7 @@ def build_chroot_config(
             with contextlib.suppress(ValueError, TypeError):
                 parsed_groups.append(int(g))
 
-    # Resolve inner command with workdir wrapping (same logic as build_chroot_args).
+    # Workdir wrapping, same logic as build_chroot_args.
     cmd = list(inner_cmd) if inner_cmd else []
     effective_wd = workdir if workdir else "/"
 

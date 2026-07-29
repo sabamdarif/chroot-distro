@@ -33,7 +33,6 @@ from chroot_distro.message import log_info, msg, warn
 
 _DAEMON_CMD = f"{sys.executable} -m chroot_distro daemon"
 
-# Supported init systems for the group-gated root daemon (real Linux only).
 _SUPPORTED_INITS = "systemd, OpenRC, runit, dinit, or sysvinit"
 
 _SYSTEMD_SOCKET_PATH = "/etc/systemd/system/chroot-distro.socket"
@@ -180,8 +179,7 @@ def _add_user_to_group(username: str) -> None:
     tmp_path = "/etc/group.chroot-distro.tmp"
     with open(tmp_path, "w", encoding="utf-8") as fh:
         fh.writelines(lines)
-    # /etc/group must be world-readable (0o644) — every process resolves group
-    # names/ids through it; a stricter mode would break normal system operation.
+    # /etc/group must stay world-readable; every process resolves groups here.
     os.chmod(tmp_path, 0o644)  # lgtm[py/overly-permissive-file]
     os.replace(tmp_path, "/etc/group")
 
@@ -194,11 +192,9 @@ def _package_dir() -> str:
 def _writable_by_non_root(path: str) -> str | None:
     """Return the first path component owned/writable by a non-root user.
 
-    The daemon re-executes ``{sys.executable} -m chroot_distro`` as root, so
-    if any directory along the package path is owned by (or group/other
-    writable for) an unprivileged user, that user can replace the code root
-    runs. Walk up from the package directory to the filesystem root and
-    report the first offending component.
+    The daemon re-executes this package as root, so a non-root owner (or
+    group/other write bit) anywhere along the path lets an unprivileged user
+    replace the code root runs.
     """
     current = path
     while True:
@@ -206,8 +202,6 @@ def _writable_by_non_root(path: str) -> str | None:
             st = os.stat(current)
         except OSError:
             break
-        # Non-root owner, or writable by group/others, means an unprivileged
-        # user could tamper with the code the root daemon executes.
         if st.st_uid != 0 or (st.st_mode & 0o022):
             return current
         parent = os.path.dirname(current)
@@ -256,9 +250,8 @@ def _detect_init() -> str:
 def _write(path: str, content: str, mode: int = 0o644) -> None:
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(content)
-    # World-readable (0o644) is intentional and correct for init-system service
-    # and socket unit files, which the init daemon must read as an unprivileged
-    # process. Callers needing executables pass mode=0o755.
+    # 0o644 is correct for unit files, which init must read unprivileged;
+    # callers needing an executable pass mode=0o755.
     os.chmod(path, mode)  # lgtm[py/overly-permissive-file]
 
 
@@ -350,9 +343,7 @@ def _uninstall_service() -> None:
 
 def command_setup(args: argparse.Namespace) -> None:
     if IS_TERMUX:
-        # The group-gated daemon needs a real Linux init system to run the
-        # root service; Termux has none and uses native su instead, so setup
-        # is neither possible nor needed here.
+        # No root init system to host the daemon; Termux elevates via su.
         raise ChrootDistroError(
             "'chroot-distro setup' is meant only for a real Linux host running "
             f"one of: {_SUPPORTED_INITS}.\n"
@@ -365,10 +356,8 @@ def command_setup(args: argparse.Namespace) -> None:
     if os.getuid() != 0:
         raise ChrootDistroError("setup must run as root (it elevates automatically).")
 
-    # A root daemon that imports chroot_distro from a user-writable location is
-    # a local privilege escalation, and a `pip install --user` install is not
-    # even importable by root's Python. Refuse and point at a root-owned
-    # install before we write a broken/unsafe service unit.
+    # Refuse before writing a service unit that would be a local privilege
+    # escalation (or simply unimportable, for a `pip install --user` install).
     offender = _writable_by_non_root(_package_dir())
     if offender is not None:
         raise ChrootDistroError(

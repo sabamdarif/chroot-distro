@@ -85,8 +85,7 @@ from chroot_distro.syscalls.nsenter import enter_and_run_with_pty
 log = logging.getLogger(__name__)
 
 
-# Canonical hostname sanitiser now lives in helpers.isolation so login and the
-# isolated build path share one policy; keep the private name for local callers.
+# Shared with the isolated build path; private alias for local callers.
 _safe_hostname = safe_hostname
 
 
@@ -95,7 +94,7 @@ def command_login(args) -> None:
     container_name = args.container_name
     require_valid_name(container_name)
 
-    # We use non-exclusive lock for concurrent login sessions
+    # Non-exclusive lock: concurrent login sessions are allowed.
     with ContainerLock(container_name, exclusive=False, command="login"):
         _command_login_inner(container_name, args)
 
@@ -104,13 +103,9 @@ def _detect_dist_type(rootfs: str) -> str:
     termux_usr = rootfs + TERMUX_PREFIX
     login_path = os.path.join(termux_usr, "bin", "login")
     if os.path.isfile(login_path):
-        # Guard against false positives caused by bind-mounted /data.
-        # When a prior session bind-mounts host /data into rootfs, the
-        # host Termux login binary appears at the checked path even for
-        # normal Linux distros (Ubuntu, Debian, etc.).
-        # Disambiguate: every normal distro ships /usr/bin as part of its
-        # own filesystem (FHS standard).  No bind mount creates /usr/bin,
-        # and Termux containers do not have it.
+        # A bind-mounted host /data makes the Termux login binary visible in
+        # normal distros too. Disambiguate via /usr/bin: normal distros ship
+        # it, Termux containers don't, and no bind mount creates it.
         if os.path.isdir(os.path.join(rootfs, "usr", "bin")):
             return "normal"
         return "termux"
@@ -207,12 +202,7 @@ def _resolve_login_user(rootfs: str, container_name: str, user_arg: str) -> dict
 
 
 def _merge_image_path(image_path: str, system_path: str) -> str:
-    """Merge image PATH with system PATH — image dirs win (prepended).
-
-    Directories from the image come first so that image-specific binaries
-    are found before system-wide defaults.  System dirs that are not already
-    present in the image PATH are appended so standard tools remain available.
-    """
+    """Merge image PATH with system PATH; image dirs come first."""
     image_dirs = [d for d in image_path.split(":") if d]
     system_dirs = [d for d in system_path.split(":") if d]
     seen: set[str] = set()
@@ -298,19 +288,11 @@ def _build_termux_env(rootfs, container_path, extra_env, minimal, isolated, cont
     host_colorterm = os.environ.get("COLORTERM", "")
     if host_colorterm:
         env["COLORTERM"] = host_colorterm
-    # Never carry the *host* Termux dynamic-linker preloads into the guest:
-    # a stale host libtermux-exec / LD_LIBRARY_PATH points at host paths that
-    # do not exist inside the chroot, making the Termux linker emit
-    # "This is <prog>, the helper program for dynamic executables" instead
-    # of executing the binary.
+    # Drop host Termux linker vars: they point at host paths that don't exist
+    # inside the chroot, making the guest linker print "This is <prog>, the
+    # helper program for dynamic executables" instead of running the binary.
+    # The guest's own $PREFIX/etc/profile rebuilds what it needs.
     env.pop("LD_LIBRARY_PATH", None)
-    # Never carry a libtermux-exec exec-shim into the guest via LD_PRELOAD.
-    # chroot with `env -i` and no
-    # preload, and the working manual recipe explicitly does `unset
-    # LD_PRELOAD`. A stale or host-prefixed LD_PRELOAD that the guest linker
-    # cannot resolve makes it print "This is <prog>, the helper program for
-    # dynamic executables" instead of running the binary. The guest's own
-    # $PREFIX/etc/profile (sourced via `login -l`) sets up the environment.
     env.pop("LD_PRELOAD", None)
     return env
 
@@ -411,19 +393,15 @@ def _check_shell_available(rootfs, container_path, login_shell, container_name):
 
 
 class _MaxIsolationFallback(Exception):  # noqa: N818
-    """Internal signal: max isolation failed mid-setup and the login should be
-    retried in the old isolated mode (host binds + host /proc, namespaces
-    where supported). Raised on Android where SELinux denies the fresh
-    pseudo-filesystems and kills the chrooted holder."""
+    """Max isolation failed mid-setup (Android SELinux); retry the login in
+    the old isolated mode."""
 
 
 def _can_fall_back_to_old_isolated(max_isolation: bool, args) -> bool:
-    """Return True if a failed max-isolation setup may degrade to old isolated.
+    """True if a failed max-isolation setup may degrade to old isolated.
 
-    Only on Android/Termux and only once: the retry sets
-    ``args._disable_max_isolation`` so a second failure is reported normally
-    instead of looping. On a real Linux host we keep refusing, since the user
-    explicitly asked for the strong, escape-proof mode and it should work.
+    Only on Android/Termux, and only once (the retry sets
+    ``args._disable_max_isolation``).
     """
     if not (max_isolation and IS_TERMUX):
         return False
@@ -488,16 +466,14 @@ def _command_login_inner_once(container_name: str, args) -> None:
     # Warn early if the image architecture doesn't match the host CPU.
     _check_arch_mismatch(container_path)
 
-    # Fold the CD_* env-var overrides in before the image-config fallbacks so
-    # precedence stays CLI flag > CD_* env > image default. On the `run` path
-    # these are already resolved by command_run, so these are no-ops there.
+    # Precedence: CLI flag > CD_* env > image default. Already resolved by
+    # command_run on the `run` path, so these are no-ops there.
     if getattr(args, "user", None) is None:
         args.user = resolve_override(None, "CD_USER")
     if not getattr(args, "work_dir", None):
         args.work_dir = resolve_override(None, "CD_WORKDIR")
 
-    # Resolve login user: explicit --user (or CD_USER) wins, then image
-    # manifest User, then fall back to "root".
+    # Login user: --user/CD_USER wins, then image User, then "root".
     _explicit_user = getattr(args, "user", None)
     if _explicit_user is not None:
         login_user = _explicit_user
@@ -505,29 +481,17 @@ def _command_login_inner_once(container_name: str, args) -> None:
         manifest_user = read_manifest_user(container_path)
         login_user = manifest_user if manifest_user else "root"
     login_wd = getattr(args, "work_dir", "") or ""
-    # `--isolated`/`--isolate` OR `CD_USE_ISOLATION=1` (env forces it on even
-    # without the flag). `CD_USE_NS` is handled separately (namespace-only).
+    # `--isolated` or CD_USE_ISOLATION=1; CD_USE_NS (namespace-only) is
+    # handled separately by should_use_namespaces().
     isolated = resolve_isolated(args)
     minimal = getattr(args, "minimal", False)
-    # `--isolated` skips the extra Android/host mounts AND uses namespaces.
-    # `CD_USE_NS` only turns on namespace isolation, keeping every mount.
-    # `skip_extra_mounts` therefore tracks only the real `--isolated` flag,
-    # while namespace setup is decided separately by should_use_namespaces().
+    # `--isolated` skips the extra host mounts AND uses namespaces; CD_USE_NS
+    # keeps every mount, so this tracks only the real flag.
     skip_extra_mounts = isolated
     use_ns_requested = namespace.should_use_namespaces(isolated)
-    # `--isolated` is the maximum-isolation tier: it binds NOTHING from the
-    # host (not even /dev or /sys), so the container cannot reach the host
-    # filesystem (e.g. via `chroot /proc/1/root`). Any flag that only works by
-    # exposing a host path is therefore inert and must be reported + disabled.
-    #
-    # `_disable_max_isolation` is an internal opt-out set when max isolation
-    # fails mid-setup on Android (SELinux denies the fresh tmpfs /dev and then
-    # kills the chrooted holder, so nsenter can no longer open its ns/mnt).
-    # In that case we re-enter with max isolation off, which keeps the old
-    # `--isolated` behaviour: fewer host mounts plus namespaces where the
-    # kernel supports them, but the host /dev, /sys and /proc are bound again
-    # so the session can actually come up. `--isolated` therefore degrades to
-    # the old isolated mode on Android instead of aborting.
+    # `--isolated` binds NOTHING from the host. `_disable_max_isolation` is
+    # set when max isolation fails mid-setup on Android (SELinux); the retry
+    # then runs the old isolated mode (host /dev, /sys, /proc bound again).
     max_isolation = isolated and not getattr(args, "_disable_max_isolation", False)
     use_shared_home = getattr(args, "shared_home", False)
     shared_tmp = getattr(args, "shared_tmp", False)
@@ -556,14 +520,11 @@ def _command_login_inner_once(container_name: str, args) -> None:
         shared_tmp = False
         shared_display = False
         args.bind = []
-    # Effective hostname is the container name.
-    # Sanitised to a valid hostname token by the env builders / UTS setter.
+    # Hostname is the container name (sanitised later).
     hostname_arg = container_name
 
-    # sudo and friends reverse-resolve the running hostname; ensure guest
-    # /etc/hosts maps both the effective container hostname (seen under
-    # --isolated) and the live kernel UTS name (seen without --isolated) to
-    # 127.0.0.1, so they do not fail with "unable to resolve host <name>".
+    # Map both the container hostname and the live UTS name to 127.0.0.1 in
+    # guest /etc/hosts so sudo doesn't fail with "unable to resolve host".
     if not minimal:
         try:
             live_nodename = os.uname().nodename
@@ -571,8 +532,7 @@ def _command_login_inner_once(container_name: str, args) -> None:
             live_nodename = ""
         ensure_hosts_entry(rootfs, _safe_hostname(hostname_arg), live_nodename)
     raw_custom_binds = getattr(args, "bind", []) or []
-    # The third ":options" field (e.g. ro) is parsed out here; get_bindings
-    # only understands host:guest specs.
+    # Split off the ":options" field; get_bindings only takes host:guest.
     bind_options_map = bindings.parse_bind_options(raw_custom_binds)
     custom_binds = bindings.strip_bind_options(raw_custom_binds)
     # CD_ENV entries are layered first so a matching --env override wins.
@@ -580,25 +540,19 @@ def _command_login_inner_once(container_name: str, args) -> None:
     login_cmd = getattr(args, "login_cmd", []) or []
     run_inner = getattr(args, "_run_inner", None)
 
-    # Auto-detect NVIDIA GPU on the host (not relevant for Termux). Skipped
-    # under --isolated: GPU integration binds host device nodes and libraries,
-    # which would defeat maximum isolation.
+    # NVIDIA auto-detect (host Linux only; --isolated would defeat it by
+    # binding host devices/libraries).
     has_nvidia = False
     if not IS_TERMUX and not minimal and not max_isolation:
         has_nvidia = detect_nvidia_gpu()
 
-    # AMD/Intel/Mesa GPUs work via the /dev bind, but the container needs the
-    # host's Vulkan/EGL/OpenCL ICD descriptors to enumerate the GPU. Bind
-    # those config dirs read-only, unless the user already bound the same
-    # guest path explicitly.
+    # AMD/Intel: bind the host's ICD/loader-config descriptors read-only so
+    # the container's own Mesa stack can enumerate /dev/dri. Driver .so files
+    # are NOT bound — shadowing the container's Mesa corrupts its loader.
     if not IS_TERMUX and not minimal and not max_isolation:
         existing_guest = {"/" + dst.strip("/") for dst in bind_options_map} | {
             "/" + bindings._split_bind_spec(spec)[1].strip("/") for spec in raw_custom_binds
         }
-        # AMD/Intel: bind only the host's ICD / loader-config descriptors so
-        # the container's own Mesa stack can enumerate /dev/dri. The driver
-        # .so files are intentionally NOT bound: shadowing a container's own
-        # apt/dpkg-managed Mesa libraries corrupts its loader.
         for src, dst in gpu_helper.find_gpu_icd_binds(rootfs):
             norm_dst = "/" + dst.strip("/")
             if norm_dst in existing_guest:
@@ -619,8 +573,7 @@ def _command_login_inner_once(container_name: str, args) -> None:
             container_name=hostname_arg,
         )
 
-        # A termux-type guest still needs its own cache dir to exist; create
-        # it inside the rootfs (never bound from the host).
+        # Create the guest's own cache dir (never bound from the host).
         if IS_TERMUX and not skip_extra_mounts:
             os.makedirs(
                 os.path.join(rootfs, "data", "data", TERMUX_APP_PACKAGE, "cache"),
@@ -633,10 +586,8 @@ def _command_login_inner_once(container_name: str, args) -> None:
             inner = [f"{TERMUX_PREFIX}/bin/login"]
             if login_cmd:
                 inner += ["-c", shlex.join(login_cmd)]
-        # Resolve user/group from the owner of the Termux home directory inside the rootfs.
-        # This ensures we match the ownership of the files in the container (e.g., UID 1000
-        # on standard Linux, or the Termux app UID on Android), which is required because
-        # Termux executables are often restricted to 700 permissions.
+        # Use the owner of the in-rootfs Termux home as the login user:
+        # Termux executables are often mode 700, so the UIDs must match.
         termux_home_path = os.path.join(rootfs, TERMUX_HOME.lstrip("/"))
         try:
             st = os.stat(termux_home_path)
@@ -648,7 +599,7 @@ def _command_login_inner_once(container_name: str, args) -> None:
 
         login_home = TERMUX_HOME
 
-        # Resolve supplementary groups from the invoking user to ensure proper group permissions
+        # Supplementary groups come from the invoking user.
         invoking_uid = resolve_invoking_uid()
         try:
             import pwd
@@ -777,21 +728,16 @@ def _command_login_inner_once(container_name: str, args) -> None:
             login_shell = _check_shell_available(rootfs, container_path, login_shell, container_name)
             inner = [login_shell, "-c", shlex.join(login_cmd)] if login_cmd else [login_shell, "-l"]
 
-    # Android paranoid-network: the kernel only allows socket() for processes
-    # that belong to AID_INET (3003) / AID_NET_RAW (3004). Without these in the
-    # guest's supplementary groups, DNS and all networking fail inside the
-    # chroot ("Temporary failure resolving"). Grant them on Termux unless the
-    # session is isolated or minimal.
+    # Android paranoid-network: socket() needs AID_INET (3003) / AID_NET_RAW
+    # (3004) in the supplementary groups, or all networking fails.
     if IS_TERMUX and not skip_extra_mounts and not minimal:
         groups = list(groups)
         for net_gid in ("3003", "3004"):
             if net_gid not in groups:
                 groups.append(net_gid)
 
-    # Strip the host Termux $PREFIX/bin from PATH for normal distros only:
-    # a termux-type container's own binaries live exactly at $PREFIX/bin
-    # inside its rootfs, so removing it would leave the guest with no
-    # usable PATH (chmod/mkdir/cp/ls/apt "command not found" at login).
+    # Strip the host Termux $PREFIX/bin from PATH for normal distros only;
+    # a termux-type container's own binaries live at that exact path.
     if IS_TERMUX and dist_type != "termux" and not skip_extra_mounts and not minimal:
         termux_bin = f"{TERMUX_PREFIX}/bin"
         components = [c for c in child_env.get("PATH", "").split(":") if c and c != termux_bin]
@@ -840,13 +786,9 @@ def _command_login_inner_once(container_name: str, args) -> None:
             if key not in user_env_keys:
                 child_env[key] = val
 
-        # The session D-Bus daemon authenticates the connecting peer by its
-        # SO_PEERCRED UID and refuses uid 0 (root) because it does not match
-        # the bus owner (the host user). The socket is bound and the env is
-        # forwarded correctly, but root still gets "Connection reset by peer"
-        # from notify-send and other session-bus clients. Warn and point at
-        # --user, which works because the UID then matches. The system bus is
-        # unaffected and continues to work for root.
+        # The session D-Bus daemon authenticates by SO_PEERCRED UID and
+        # refuses uid 0, so session-bus apps fail for root; warn and point at
+        # --user (the system bus still works).
         if login_user == "root" and child_env.get("DBUS_SESSION_BUS_ADDRESS"):
             invoking_uid = resolve_invoking_uid()
             if invoking_uid != 0:
@@ -858,7 +800,7 @@ def _command_login_inner_once(container_name: str, args) -> None:
                     "working session bus. The system bus still works for root."
                 )
 
-        # Only the specific runtime sockets are bound, not the whole host /run.
+        # Only specific runtime sockets are bound, not the whole host /run.
         display_socket_binds = resolve_display_socket_binds(child_env)
 
         x11_auth_binds = list(resolved_x11_binds)
@@ -886,19 +828,13 @@ def _command_login_inner_once(container_name: str, args) -> None:
                     f"'xhost +SI:localuser:{login_user}', or a UID-matched user."
                 )
 
-    # Decide the effective namespace state up front so it can gate both the
-    # bind set and the special mounts below.  We use a tiered approach:
-    # only mount namespace is truly mandatory; everything else warns and
-    # proceeds with whatever the kernel supports.
+    # Decide the effective namespace state up front: only the mount namespace
+    # is mandatory; everything else warns and proceeds.
     use_namespaces = use_ns_requested and not minimal
-    has_userns = False  # Track whether user namespace is active for cap drop.
+    has_userns = False  # userns active? decides cap drop later
     if use_namespaces:
-        # Probes and warns about missing recommended/enhancement namespaces
-        # (shared with build); the mandatory-mount-namespace fallback below is
-        # login-specific because its messaging differs for max isolation.
         probe_result = isolation.probe_isolation()
         if probe_result.missing_mandatory:
-            # Mount namespace is the minimum for any kind of isolation.
             if max_isolation:
                 warn(
                     "Mount namespace (CLONE_NEWNS) is not supported on this "
@@ -936,11 +872,11 @@ def _command_login_inner_once(container_name: str, args) -> None:
         nvidia_integration=has_nvidia,
     )
 
-    # Translate login_wd from host path to guest path if applicable
+    # Translate login_wd from host path to guest path if applicable.
     if login_wd:
         login_wd = _translate_host_path_to_guest(login_wd, rootfs, resolved_binds)
 
-    # Merge NVIDIA env vars into child_env (before user overrides)
+    # NVIDIA env vars; user-provided --env keys win.
     if has_nvidia:
         user_env_keys_all = {entry.partition("=")[0] for entry in extra_env if "=" in entry}
         for key, val in nvidia_env_vars().items():
@@ -972,17 +908,11 @@ def _command_login_inner_once(container_name: str, args) -> None:
             write_resolv_conf(rootfs)
             if use_namespaces:
                 try:
-                    # A detached run must use a plain holder and reach the
-                    # command via nsenter; the synchronized foreground holder
-                    # (which execs the command itself) cannot be backgrounded.
-                    #
-                    # A max-isolation run must ALSO use the plain holder: the
-                    # foreground holder execs `chroot <rootfs> ...` itself and
-                    # therefore can never chroot into the rootfs first, leaving
-                    # the `chroot /proc/1/root` escape open. The plain holder is
-                    # created chrooted (rootfs= below) and reached via nsenter,
-                    # so `run --isolated`/`CD_USE_ISOLATION` gets true maximum
-                    # isolation just like `login`.
+                    # Detached and max-isolation runs must use the plain
+                    # holder + nsenter: the synchronized foreground holder
+                    # execs the command itself, so it can't be backgrounded
+                    # and can't chroot first (leaving the /proc/1/root escape
+                    # open).
                     _detach_run = getattr(args, "detach", False) and run_inner is not None
                     if run_inner is not None and not _detach_run and not max_isolation:
                         chroot_args = build_chroot_args(
@@ -1005,16 +935,13 @@ def _command_login_inner_once(container_name: str, args) -> None:
                         finally:
                             os.close(pipe_r)
                     else:
-                        # Under maximum isolation the holder chroots into the
-                        # rootfs before sleeping, so PID 1 (and therefore every
-                        # namespace PID reachable via /proc/<pid>/root) has its
-                        # root inside the container and cannot reach the host.
+                        # Under max isolation the holder chroots before
+                        # sleeping, so /proc/<pid>/root cannot reach the host.
                         holder = namespace.acquire_holder(
                             container_name,
                             rootfs=rootfs if (max_isolation and use_namespaces) else None,
                         )
-                    # Record the mode, make mounts private, and give the UTS
-                    # namespace the container hostname (shared with build).
+                    # Record mode, make mounts private, set UTS hostname.
                     isolation.finalize_holder(holder, container_name, hostname=hostname_arg)
                 except NamespaceError as exc:
                     if pipe_w is not None:
@@ -1027,9 +954,8 @@ def _command_login_inner_once(container_name: str, args) -> None:
                             namespace.release_holder(container_name)
                         namespace.clear_isolation_mode(container_name)
                     session.decrement(container_name, lock_fh=lock_fh)
-                    # The chrooted max-isolation holder can die immediately on
-                    # Android (SELinux). Fall back to the old isolated mode
-                    # instead of failing outright.
+                    # The chrooted holder can die immediately on Android
+                    # (SELinux); degrade to the old isolated mode.
                     if _can_fall_back_to_old_isolated(max_isolation, args):
                         raise _MaxIsolationFallback(str(exc)) from exc
                     crit_error(str(exc))
@@ -1039,11 +965,10 @@ def _command_login_inner_once(container_name: str, args) -> None:
 
             if IS_TERMUX and not skip_extra_mounts and not minimal:
                 ensure_data_suid()
-            # Pre-clean stale mounts if any
+            # Pre-clean stale mounts if any.
             with contextlib.suppress(Exception):
                 mount_manager.unmount_all(rootfs, holder=holder)
-            # Resolve {guest_path: options} into {resolved_target: options}
-            # so per-bind mount options can be matched in the loop below.
+            # Resolve {guest_path: options} to {resolved_target: options}.
             resolved_bind_options: dict[str, str] = {}
             for guest_dst, opts in bind_options_map.items():
                 try:
@@ -1063,12 +988,11 @@ def _command_login_inner_once(container_name: str, args) -> None:
                         src,
                         dst,
                         holder=holder,
-                        # Recurse for /run subtrees, WSL, and Android system
-                        # partitions (nested mounts) — shared with build.
+                        # Recurse for /run subtrees, WSL, Android partitions.
                         recursive=isolation.bind_is_recursive(src, dst_real, run_root, use_userns=has_userns),
                         options=mount_options,
-                        # A stale, unremovable (MNT_LOCKED) mount can shadow
-                        # /dev without providing ptmx; detect and mount over.
+                        # A stale MNT_LOCKED mount can shadow /dev without
+                        # ptmx; detect and mount over.
                         required_child="ptmx" if dst_real == dev_root else "",
                     )
                 except Exception as e:
@@ -1087,22 +1011,17 @@ def _command_login_inner_once(container_name: str, args) -> None:
             for rslave_path in rslave_targets:
                 mount_manager.make_rslave(rslave_path, holder=holder)
 
-            # Phase 1b: fix /tmp permissions when shared from Termux
-            # Termux's $PREFIX/tmp is owned by the app UID with mode 700,
-            # which prevents guest users like _apt from creating temp files.
-            # apt's gpgv needs a world-writable /tmp to function correctly.
+            # Phase 1b: Termux's $PREFIX/tmp is mode 700, which breaks guest
+            # users like _apt; restore the standard world-writable sticky
+            # /tmp.
             if IS_TERMUX and shared_tmp and dist_type != "termux":
                 chroot_tmp = os.path.join(rootfs, "tmp")
                 if os.path.isdir(chroot_tmp):
                     with contextlib.suppress(OSError):
-                        # /tmp is world-writable with the sticky bit (0o1777) by
-                        # design — the sticky bit prevents users from removing
-                        # each other's files. This matches the host /tmp.
                         os.chmod(chroot_tmp, 0o1777)  # lgtm[py/overly-permissive-file]
 
-            # Phase 2: special filesystem mounts — /proc, /sys, and (under max
-            # isolation) a fresh private tmpfs /dev + device nodes + ptmx
-            # symlink. Shared with the isolated build path.
+            # Phase 2: special mounts — /proc, /sys, and under max isolation
+            # a fresh tmpfs /dev.
             try:
                 isolation.apply_special_mounts(
                     rootfs,
@@ -1121,12 +1040,8 @@ def _command_login_inner_once(container_name: str, args) -> None:
                     namespace.release_holder(container_name)
                     namespace.clear_isolation_mode(container_name)
                 session.decrement(container_name, lock_fh=lock_fh)
-                # On Android the fresh pseudo-filesystems (tmpfs /dev, proc,
-                # sysfs) are frequently denied by SELinux, which also kills the
-                # chrooted holder so nsenter can no longer open its ns/mnt.
-                # Rather than abort the whole login, degrade once to the old
-                # `--isolated` mode (host binds + host /proc, namespaces where
-                # supported) by re-entering with max isolation disabled.
+                # Android SELinux often denies the fresh pseudo-filesystems;
+                # degrade once to the old isolated mode instead of aborting.
                 if _can_fall_back_to_old_isolated(max_isolation, args):
                     raise _MaxIsolationFallback(str(e)) from e
                 crit_error(f"Failed to apply special mounts: {e}")
@@ -1168,7 +1083,7 @@ def _command_login_inner_once(container_name: str, args) -> None:
                 },
             )
 
-            # Trigger the holder to start execution by closing the pipe
+            # Trigger the holder to start execution.
             if pipe_w is not None:
                 try:
                     os.write(pipe_w, b"\n")
@@ -1177,9 +1092,8 @@ def _command_login_inner_once(container_name: str, args) -> None:
                 except OSError as exc:
                     log.warning("Failed to trigger mount namespace holder process: %s", exc)
         else:
-            # Not the first session: bind mounts are NOT re-applied.
-            # Compare the current mount options against the first session's
-            # options and only warn/error when they actually differ.
+            # Not the first session: mounts are NOT re-applied. Warn/error
+            # only when the requested options differ from the active ones.
             stored = session.load_mount_options(container_name)
             current_opts = {
                 "shared_display": shared_display,
@@ -1243,10 +1157,8 @@ def _command_login_inner_once(container_name: str, args) -> None:
                         f"Run '{PROGRAM_NAME} unmount {container_name}' and try again."
                     )
                     sys.exit(1)
-                # Under maximum isolation, never reuse a holder that was not
-                # created chrooted (e.g. a stale host-rooted holder left by an
-                # older version or a non-isolated session). Entering it would
-                # re-open the `chroot /proc/1/root` escape.
+                # Never reuse a non-chrooted holder under max isolation: it
+                # would re-open the `chroot /proc/1/root` escape.
                 if max_isolation and not namespace.holder_is_max_isolation(container_name):
                     session.decrement(container_name, lock_fh=lock_fh)
                     crit_error(
@@ -1294,9 +1206,8 @@ def _command_login_inner_once(container_name: str, args) -> None:
                     namespace.clear_isolation_mode(container_name)
         sys.exit(0)
 
-    # Record this session for `ps`. Best-effort; the returned handle holds
-    # an inheritable flock that tracks liveness. Keep the reference alive
-    # for the duration of the session so the lock is not released early.
+    # Record this session for `ps`; the handle's flock tracks liveness, so
+    # keep the reference alive for the whole session.
     _sess_handle = register_session(
         container=container_name,
         kind="run" if run_inner is not None else "login",
@@ -1317,8 +1228,7 @@ def _command_login_inner_once(container_name: str, args) -> None:
         )
         return
 
-    # Exit code of the inner command, propagated to our own exit status so
-    # `login NAME -- cmd` is usable in shell conditionals (like ssh/docker).
+    # Inner command's exit code, propagated to our own exit status.
     exit_code = 0
 
     if holder is not None and holder.proc is not None:
@@ -1392,8 +1302,7 @@ def _command_login_inner_once(container_name: str, args) -> None:
                         namespace.clear_isolation_mode(container_name)
 
     if exit_code:
-        # Popen.wait() reports signal death as a negative code; map it to
-        # the shell convention (128 + signal) before exiting.
+        # Map signal death (negative code) to the shell's 128+signal.
         sys.exit(128 - exit_code if exit_code < 0 else exit_code)
 
 
@@ -1407,16 +1316,10 @@ def _run_detached(
 ) -> None:
     """Launch the resolved command in the background and return immediately.
 
-    The command is started in a new session (detached from the controlling
-    terminal) with stdin from /dev/null and stdout/stderr appended to the
-    container's run log. The session counter is intentionally NOT decremented:
-    the container stays mounted while the detached process runs, and the
-    process is discoverable via /proc/<pid>/root so 'kill' and 'unmount' tear
-    it down like any other session.
-
-    When a namespace holder is present, the child enters namespaces via
-    native setns(2) before exec'ing the chroot command — no nsenter binary
-    is needed.
+    Runs in a new session with output appended to the container's run log.
+    The session counter is intentionally NOT decremented: the container stays
+    mounted while the detached process runs, and 'kill'/'unmount' tear it
+    down like any other session.
     """
     log_path = container_log_path(container_name)
     try:
@@ -1439,16 +1342,14 @@ def _run_detached(
         crit_error(f"cannot open {os.devnull}: {exc}")
         sys.exit(1)
 
-    # If a session handle exists, pass its fd to the child so the flock
-    # (and the session's liveness signal) is inherited by the detached
-    # process. The parent closes its copy after Popen returns.
+    # Pass the session flock fd to the child so it inherits the liveness
+    # signal; the parent closes its copy after Popen returns.
     extra_fds: tuple = ()
     if session_handle is not None:
         extra_fds = (session_handle.fileno(),)
 
-    # Build the actual argv to exec. When a namespace holder is present,
-    # enter namespaces via native setns(2) in a preexec_fn instead of
-    # trying to exec the nsenter binary.
+    # With a namespace holder, enter namespaces via native setns(2) in a
+    # preexec_fn instead of exec'ing the nsenter binary.
     exec_argv = chroot_args
     preexec: Callable[[], None] | None = None
     if holder is not None:
@@ -1492,8 +1393,6 @@ def _run_detached(
         # The child holds its own copies of these descriptors.
         log_fh.close()
         devnull.close()
-        # The child inherited the session flock fd via pass_fds; close the
-        # parent's copy so only the child keeps the lock alive.
         if session_handle is not None:
             session_handle.close()
 

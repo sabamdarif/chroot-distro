@@ -95,24 +95,21 @@ def _fs_supported(fstype: str) -> bool:
 
 
 def _usb_specials() -> list[SpecialMount]:
-    """On regular Linux: /dev/bus/usb already exists → comes in via /dev bind → nothing to do.
+    """On Android, mount usbfs at /dev/bus/usb if kernel + hardware support it.
 
-    On Android: mount usbfs at /dev/bus/usb if kernel + hardware support it.
+    On regular Linux /dev/bus/usb comes in via the /dev bind — nothing to do.
     """
-    # Regular Linux: /dev/bus/usb is a real directory created by udev
     if os.path.isdir("/dev/bus/usb"):
-        return []  # already covered by existing /dev bind
+        return []  # already covered by the /dev bind
 
     if not IS_TERMUX:
         return []
 
-    # Android path: check kernel support
     if not _fs_supported("usbfs"):
         log.debug("USB: kernel does not support usbfs, skipping")
         return []
 
-    # Check that at least one USB host controller is active (OTG host mode)
-    # Without a host controller there are no devices to enumerate anyway
+    # No active USB host controller -> nothing to enumerate anyway.
     usb_sys = "/sys/bus/usb/devices"
     try:
         has_controller = any(e.startswith("usb") for e in os.listdir(usb_sys))
@@ -123,7 +120,7 @@ def _usb_specials() -> list[SpecialMount]:
         log.debug("USB: no active USB host controller found in %s", usb_sys)
         return []
 
-    # gid=5 is the "tty" group on Android; devmode=0664 gives group rw
+    # gid=5 is the "tty" group on Android; devmode=0664 gives group rw.
     return [
         SpecialMount(
             fstype="usbfs",
@@ -138,19 +135,14 @@ def _usb_specials() -> list[SpecialMount]:
 
 
 def _binfmt_misc_special(*, fresh_proc: bool = True) -> SpecialMount | None:
-    """Mount binfmt_misc inside the chroot if the host hasn't already done it.
+    """Mount binfmt_misc inside the chroot when the kernel supports it.
 
-    The chroot's /proc is now always a fresh procfs (the host /proc is never
-    bind-mounted), so the host's binfmt_misc registrations are never inherited
-    and binfmt_misc must be mounted explicitly when the kernel supports it.
-
-    *fresh_proc* is kept for backward compatibility; when False the old
-    behaviour of skipping the mount if the host already has binfmt_misc is
-    preserved, but callers now pass True since /proc is always fresh.
+    The chroot's /proc is always a fresh procfs now, so the host's
+    registrations are never inherited. *fresh_proc*=False keeps the legacy
+    skip-if-host-has-it behaviour.
     """
-    # Already mounted? The 'register' file only appears when binfmt_misc is mounted.
     if not fresh_proc and os.path.exists("/proc/sys/fs/binfmt_misc/register"):
-        return None  # host already has it; will appear in chroot via /proc bind
+        return None  # host already has it; appears via the /proc bind
 
     if not _fs_supported("binfmt_misc"):
         log.debug("binfmt_misc: not in /proc/filesystems, skipping")
@@ -168,13 +160,9 @@ def _binfmt_misc_special(*, fresh_proc: bool = True) -> SpecialMount | None:
 
 
 def _max_isolation_dev_specials() -> list[SpecialMount]:
-    """Return mounts that synthesise a fresh /dev for maximum isolation.
+    """Fresh tmpfs /dev for --isolated (host /dev is never bound there).
 
-    Under --isolated the host /dev is never bind-mounted (that would expose
-    host block devices and an escape path). Instead a fresh tmpfs is mounted
-    at /dev and the handful of character devices a normal login needs
-    (null, zero, full, random, urandom, tty) are created inside it. The
-    devpts overmount and /dev/shm tmpfs are added separately below.
+    The minimal device nodes, devpts and /dev/shm are added separately.
     """
     return [
         SpecialMount(
@@ -188,8 +176,7 @@ def _max_isolation_dev_specials() -> list[SpecialMount]:
     ]
 
 
-# Minimal character devices created inside the fresh /dev tmpfs under
-# --isolated, as (relative path, major, minor, mode) tuples.
+# (relative path, major, minor, mode) nodes for the fresh --isolated /dev.
 MAX_ISOLATION_DEV_NODES: tuple[tuple[str, int, int, int], ...] = (
     ("null", 1, 3, 0o666),
     ("zero", 1, 5, 0o666),
@@ -210,32 +197,20 @@ def get_special_mounts(
     enable_binfmt: bool = True,
     enable_shm: bool = True,
 ) -> list[SpecialMount]:
-    """Return list of special filesystem mounts to apply after bind mounts.
+    """Return the special filesystem mounts to apply after bind mounts.
 
-    Caller is responsible for actually running them via apply_special_mount().
-
-    Note on /tmp and /run isolation: these are NOT bind-mounted from the
-    host by default (see get_bindings()), so the container falls back to its
-    own empty, writable /tmp and /run directories. No tmpfs overmount is
-    used here because it would mount on top of the display socket and
-    /tmp/.X11-unix binds applied earlier, hiding them.
-
-    When *max_isolation* is set (--isolated), the host /dev and /sys are
-    never bind-mounted, so a fresh tmpfs /dev (plus minimal device nodes)
-    and a fresh read-only sysfs are mounted here instead.
+    No tmpfs is overmounted on /tmp or /run here — it would hide the display
+    socket binds applied earlier. Under --isolated a fresh tmpfs /dev and a
+    read-only sysfs replace the host binds.
     """
     specials: list[SpecialMount] = []
 
-    # Maximum isolation synthesises a fresh /dev (host /dev is not bound).
     if max_isolation:
         specials.extend(_max_isolation_dev_specials())
 
-    # Fresh procfs. The host /proc is no longer bind-mounted in any mode (see
-    # get_bindings), so a fresh procfs is always mounted here. Under maximum
-    # isolation it is hardened with hidepid=2 (hides other processes'
-    # /proc/<pid> entries and their root/cwd links) plus nosuid/nodev/noexec.
-    # In the default and CD_USE_NS modes it is a plain procfs; note that
-    # without a PID namespace it still reflects the host's global PIDs.
+    # Fresh procfs in every mode (the host /proc is never bind-mounted);
+    # hardened with hidepid=2 under max isolation. Without a PID namespace it
+    # still shows the host's global PIDs.
     proc_options = "hidepid=2,nosuid,nodev,noexec" if max_isolation else ""
     specials.append(
         SpecialMount(
@@ -249,15 +224,9 @@ def get_special_mounts(
         )
     )
 
-    # Maximum isolation: a fresh read-only sysfs replaces the host /sys bind
-    # so the guest cannot reach host kernel objects under /sys.
-    #
-    # A fresh sysfs cannot be mounted inside a user namespace unless that userns
-    # also owns a network namespace (the kernel EPERMs it otherwise), and we do
-    # not create a netns because it would sever host networking. So when a user
-    # namespace is active we skip the fresh sysfs here and instead expose /sys
-    # via a recursive bind added in get_bindings() (see the max-isolation branch
-    # there). Under Tier B the id-mapping makes that bind effectively read-only.
+    # Max isolation: fresh read-only sysfs. Skipped under a user namespace —
+    # the kernel EPERMs a fresh sysfs without an owned netns, so /sys comes
+    # in as a recursive bind from get_bindings() instead.
     if max_isolation and not use_userns:
         specials.append(
             SpecialMount(
@@ -271,19 +240,10 @@ def get_special_mounts(
             )
         )
 
-    # Devpts handling.
-    #
-    # Termux/Android: the on-disk /dev/pts/N nodes carry device major 88 while
-    # the live ptys the kernel hands out use major 136. glibc's ttyname()
-    # matches fd 0's st_rdev against /dev/pts entries, so the inherited login
-    # pty never matches -> "tty: ttyname error: Inappropriate ioctl for
-    # device". Mount a *fresh* `newinstance` devpts so newly allocated ptys get
-    # the correct major and a matching /dev/pts/N node; the inner login is then
-    # run under a pty allocator (see login) so it acquires one of these new
-    # ptys as its controlling terminal. /dev/ptmx is pointed at this instance
-    # in login via bind_ptmx_to_pts().
-    #
-    # Devpts overmount to isolate chroot login session PTYs.
+    # Fresh `newinstance` devpts: on Android the on-disk /dev/pts nodes carry
+    # the wrong device major, so glibc's ttyname() fails on the inherited pty
+    # ("Inappropriate ioctl for device"). A fresh instance hands out ptys
+    # with matching nodes; /dev/ptmx is pointed at it via bind_ptmx_to_pts().
     specials.append(
         SpecialMount(
             fstype="devpts",
@@ -300,15 +260,12 @@ def get_special_mounts(
         specials.extend(_usb_specials())
 
     if enable_binfmt:
-        # /proc is always a fresh procfs now, so binfmt_misc is never inherited
-        # from the host and must be mounted explicitly when supported.
         sm = _binfmt_misc_special(fresh_proc=True)
         if sm:
             specials.append(sm)
 
-    # Under max isolation the host /dev is not bound, so the fresh tmpfs /dev
-    # has no /dev/shm: always mount one. Otherwise only add it when the host
-    # has no /dev/shm to come in via the /dev bind (some Android kernels).
+    # /dev/shm: always needed under max isolation (fresh /dev has none);
+    # otherwise only when the host lacks one (some Android kernels).
     if enable_shm and (max_isolation or not os.path.exists("/dev/shm")):
         specials.append(
             SpecialMount(
@@ -466,28 +423,17 @@ def get_bindings(
     binds = []
     rslave_targets: list[str] = []
 
-    # When namespaces are active, a fresh procfs is mounted in the PID
-    # namespace by get_special_mounts(). CD_USE_NS keeps every other mount
-    # (isolated=False) but still namespaces PIDs, so the /proc decision must
-    # follow namespace use, not the mount-skipping flag. Default to *isolated*
-    # for backward compatibility when the caller does not pass it explicitly.
+    # Default to *isolated* for backward compatibility when not passed.
     if use_namespaces is None:
         use_namespaces = isolated
 
-    # Maximum isolation: --isolated binds NOTHING from the host. Even /dev and
-    # /sys are escape vectors (host block devices, /sys kernel objects), and a
-    # bind-mounted host /dev/pts/ptmx can be used to reach host ptys. In this
-    # mode the container relies entirely on fresh pseudo-filesystems mounted by
-    # get_special_mounts() (proc, sysfs ro, a fresh tmpfs /dev with minimal
-    # device nodes, devpts and tmpfs /dev/shm), so there is no host path the
-    # guest can traverse to reach the real root filesystem.
+    # Maximum isolation binds NOTHING from the host — even /dev and /sys are
+    # escape vectors. The container relies entirely on the fresh
+    # pseudo-filesystems from get_special_mounts().
     if max_isolation:
-        # A user namespace cannot mount a fresh sysfs without also owning a
-        # network namespace, so under a userns we expose /sys with a recursive
-        # bind of the host tree instead (the only /sys mount the kernel permits
-        # here — a non-recursive or read-only-remounted bind is rejected). It is
-        # marked rslave so host mount changes propagate in but ours do not leak
-        # out; under Tier B the id-mapping renders it effectively read-only.
+        # Exception: under a userns the kernel refuses a fresh sysfs, so /sys
+        # is exposed as a recursive rslave bind of the host tree (the only
+        # /sys mount the kernel permits here).
         if use_userns:
             try:
                 sys_dst = resolve_rootfs_path(rootfs, "/sys")
@@ -496,38 +442,21 @@ def get_bindings(
             return ([("/sys", sys_dst)], [sys_dst])
         return ([], [])
 
-    # 1. Base Linux mounts (always needed for chroot to function correctly)
-    # Target paths are absolute guest paths (e.g. /dev) which we will mount nested under rootfs.
+    # 1. Base mounts. /proc is never bound — get_special_mounts() always
+    # mounts a fresh procfs. The host /run is never bound either; with
+    # --shared-display specific sockets are bound individually below.
     binds.append(("/dev", "/dev"))
-    # The host /proc is never bind-mounted any more: even in the default
-    # (no-flag) mode a fresh procfs is mounted by get_special_mounts() so the
-    # container gets its own /proc instance instead of sharing the host mount.
-    # NOTE: without a PID namespace this is NOT a security boundary (the fresh
-    # procfs still shows the same global PIDs, so e.g. `chroot /proc/1/root`
-    # can still reach the host); it only avoids leaking the host /proc mount
-    # into the container's mount table and gives a correct per-chroot
-    # /proc/self. Real process isolation requires CD_USE_NS=1 or --isolated.
     binds.append(("/sys", "/sys"))
 
-    # Check if host /dev/pts and /dev/shm exist and mount them. We bind the
-    # host /dev/pts (matching pre-v2.1.2 behaviour) but never the host
-    # /dev/ptmx: binding the host /dev/ptmx leaked devpts state and exhausted
-    # the host pty pool. The newinstance devpts overmount in
+    # Bind host /dev/pts but never /dev/ptmx (binding host ptmx leaked devpts
+    # state and exhausted the host pty pool); the newinstance devpts in
     # get_special_mounts() provides the chroot's pty nodes.
     if os.path.exists("/dev/pts"):
         binds.append(("/dev/pts", "/dev/pts"))
     if os.path.exists("/dev/shm"):
         binds.append(("/dev/shm", "/dev/shm"))
 
-    # /run handling.
-    #
-    # The host's /run is NEVER bound: the container uses its own (empty)
-    # /run directory, so it cannot see the host's runtime sockets
-    # (PulseAudio, D-Bus, systemd, NetworkManager, ...). With
-    # --shared-display the specific display/audio/D-Bus sockets are bound
-    # individually into /run/user/<uid>/ via display_socket_binds below.
-
-    # If minimal mode is enabled, we only bind the bare systems (/dev, /proc, /sys)
+    # Minimal mode: just the bare mounts.
     if minimal:
         return (
             [(src, os.path.join(rootfs, dst.lstrip("/"))) for src, dst in binds],
@@ -536,12 +465,9 @@ def get_bindings(
 
     # 2. Android-specific bindings (system and storage)
     if IS_TERMUX and not isolated:
-        # Parent directories (/data, TERMUX_PREFIX) MUST be bound before any
-        # child paths (dalvik caches, termux app dirs, etc.). If a child bind
-        # is applied first and the parent is bound afterwards, the parent mount
-        # shadows the child — the kernel still tracks the child mount in
-        # /proc/mounts but it becomes unreachable, so umount fails with
-        # "not mounted" on cleanup.
+        # Parents (/data, TERMUX_PREFIX) MUST be bound before child paths:
+        # a later parent mount shadows earlier children, making them
+        # unreachable and breaking umount on cleanup.
         if dist_type != "termux":
             if os.path.isdir("/data"):
                 binds.append(("/data", "/data"))
@@ -555,14 +481,10 @@ def get_bindings(
         for src, dst in storage_bindings():
             binds.append((src, dst))
 
-        # Android system directories (/apex, /system, /vendor, …). Bound for
-        # BOTH dist types. A termux-type guest ships fake /system stubs meant
-        # for non-Android hosts (including an old bundled bionic linker that
-        # cannot direct-exec programs and only prints "This is <prog>, the
-        # helper program for dynamic executables"). On a real Android host
-        # the guest must see the device's real /system — exactly like the
-        # host Termux app — so that termux-exec's system-linker-exec wrapping
-        # and getprop/property reads work.
+        # Android system dirs (/apex, /system, /vendor, …) for BOTH dist
+        # types: a termux-type guest ships fake /system stubs, but on a real
+        # Android host it must see the device's real /system so termux-exec
+        # and getprop work.
         for src, dst in system_bindings():
             binds.append((src, dst))
 
@@ -572,8 +494,7 @@ def get_bindings(
             for src, dst in termux_app_bindings():
                 binds.append((src, dst))
 
-    # 3. Shared Home Directory
-    # Only when --shared-home is set (matches proot-distro).
+    # 3. Shared home (--shared-home only, matches proot-distro).
     host_home = resolve_host_home(login_user)
 
     should_share = shared_home
@@ -608,12 +529,9 @@ def get_bindings(
             if os.path.exists(x11_path):
                 binds.append((x11_path, x11_path))
 
-    # 5a. Display runtime-dir bind (Linux + --shared-display): the host's
-    # broad /run is not bound, so bind the user's XDG_RUNTIME_DIR
-    # (/run/user/<uid>) whole. It is mounted recursively with rslave
-    # (see rslave_targets) so it keeps the host directory ownership and all
-    # session sockets (Wayland, PulseAudio, PipeWire, D-Bus), and new
-    # sockets created after mount stay visible.
+    # 5a. Display runtime-dir bind (Linux + --shared-display): bind the
+    # user's XDG_RUNTIME_DIR whole, recursively with rslave, so all session
+    # sockets — including ones created after mount — stay visible.
     if not IS_TERMUX and shared_display and display_socket_binds:
         bound_srcs = {src for src, _ in binds}
         for path in display_socket_binds:
@@ -623,9 +541,7 @@ def get_bindings(
                 if os.path.isdir(path):
                     rslave_targets.append(os.path.join(rootfs, path.lstrip("/")))
 
-    # 5b. Display auth file binds (Linux only). When /run is bound whole the
-    # runtime dir is already covered; when narrowed, socket binds above
-    # include the runtime dir, so auth files under it are covered too.
+    # 5b. Display auth file binds (Linux only).
     if not IS_TERMUX and shared_display and display_auth_binds:
         bound_srcs = {src for src, _ in binds}
         for path in display_auth_binds:
@@ -642,10 +558,8 @@ def get_bindings(
                 binds.append((src, dst))
                 bound_srcs.add(src)
 
-    # 7. Custom binds specified by the user
-    # Format: host_path:guest_path or host_path
-    # Custom binds override system binds when the destination conflicts
-    # (matches Docker/Podman --volume semantics).
+    # 7. User custom binds; they override system binds on destination
+    # conflict (Docker/Podman --volume semantics).
     _critical_guest_paths = frozenset({"/dev", "/proc", "/sys"})
 
     if custom_binds:
@@ -659,10 +573,9 @@ def get_bindings(
                 log.warning("Custom bind source does not exist: %s (skipping)", src)
                 continue
 
-            # Normalize destination for comparison
             norm_dst = "/" + dst.strip("/")
 
-            # Block overrides of critical pseudo-filesystem mounts
+            # Never override critical pseudo-filesystem mounts.
             if norm_dst in _critical_guest_paths or any(norm_dst.startswith(cp + "/") for cp in _critical_guest_paths):
                 log.warning(
                     "Custom bind destination '%s' conflicts with critical system mount — ignoring. Cannot override %s.",
@@ -671,7 +584,7 @@ def get_bindings(
                 )
                 continue
 
-            # Remove any system bind with the same destination or nested under it (user override wins)
+            # Drop system binds at or under the same destination.
             prev_len = len(binds)
             binds = [
                 (s, d)
@@ -688,7 +601,7 @@ def get_bindings(
 
             binds.append((src, dst))
 
-    # Map the guest target paths to be nested under rootfs absolute path
+    # Nest the guest target paths under the rootfs.
     resolved_binds = []
     for src, dst in binds:
         try:

@@ -9,8 +9,7 @@ from chroot_distro.message import warn
 
 log = logging.getLogger(__name__)
 
-# Conservative identifier syntax for env var names: a leading letter or
-# underscore followed by letters, digits, or underscores.
+# Conservative identifier syntax for env var names.
 _VALID_ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _SENSITIVE_ENV_KEY_RE = re.compile(
     r"(?i)(^|_)(password|passwd|secret|token|api[_-]?key|auth|credential|private[_-]?key)($|_)"
@@ -125,11 +124,7 @@ def _read_manifest_config(container_dir: str) -> dict:
 
 
 def resolve_override(flag_value: str | None, env_var_name: str) -> str | None:
-    """Return the effective override: CLI flag wins, else the CD_* env var, else None.
-
-    Implements the shared precedence ``CLI flag > CD_* env > (caller's image
-    default)`` for the run/login override surface.
-    """
+    """CLI flag wins, else the CD_* env var, else None."""
     if flag_value:
         return flag_value
     val = os.environ.get(env_var_name, "").strip()
@@ -137,11 +132,7 @@ def resolve_override(flag_value: str | None, env_var_name: str) -> str | None:
 
 
 def read_cd_env() -> list[str]:
-    """Return ``CD_ENV`` as a list of ``VAR=VALUE`` entries.
-
-    Entries are newline-separated; lines without a ``=`` are ignored. These are
-    layered *before* any ``--env`` overrides so a matching ``--env`` wins.
-    """
+    """Return newline-separated ``CD_ENV`` as ``VAR=VALUE`` entries."""
     raw = os.environ.get("CD_ENV", "")
     return [line.strip() for line in raw.splitlines() if "=" in line]
 
@@ -166,12 +157,7 @@ def read_manifest_workdir(container_dir: str) -> str | None:
 
 
 def read_manifest_shell(container_dir: str) -> str | None:
-    """Return the first element of the image's Shell list, or None.
-
-    Docker images may declare ``"Shell": ["sh", "-c"]``; returns ``"sh"``
-    (the interpreter path) so the caller can try it as a login shell
-    fallback when ``/etc/passwd``'s shell is missing.
-    """
+    """Return the image Shell's interpreter path (e.g. ``"sh"``), or None."""
     shell = _read_manifest_config(container_dir).get("Shell")
     if isinstance(shell, list) and shell and isinstance(shell[0], str):
         return shell[0]
@@ -204,12 +190,9 @@ def inject_termux_profile(
 ) -> None:
     """Write a profile.d snippet that re-applies the login-time environment.
 
-    When *include_termux_bin* is True the snippet also appends the host Termux
-    ``$PREFIX/bin`` to PATH. This is only appropriate for ``termux``-type
-    containers that genuinely run the host $PREFIX; for normal distros (Fedora,
-    Ubuntu, ...) adding it makes the guest shell resolve commands like ``clear``
-    to host Termux binaries that cannot execute inside the chroot, so it must
-    stay False.
+    *include_termux_bin* appends the host ``$PREFIX/bin`` to PATH — only for
+    termux-type containers; in normal distros host Termux binaries cannot
+    execute inside the chroot.
     """
     profile_d = os.path.join(rootfs, "etc", "profile.d")
     if not os.path.isdir(profile_d):
@@ -252,15 +235,12 @@ def inject_termux_profile(
 
 
 def resolve_term(rootfs: str, term: str | None) -> str:
-    """Verify if the terminal type term has a terminfo file inside the rootfs.
-
-    If not found, fallback to 'xterm-256color'.
-    """
+    """Return *term* if the rootfs has its terminfo, else 'xterm-256color'."""
     if not term:
         return "xterm-256color"
 
-    # Terminfo folder structure is typically based on the first character.
-    # Ncurses on case-insensitive filesystems or some systems may use hexadecimal ord.
+    # Terminfo dirs key on the first character, or its hex ord on some
+    # systems.
     first_char = term[0]
     if not first_char.isalnum() and first_char != "_":
         return "xterm-256color"

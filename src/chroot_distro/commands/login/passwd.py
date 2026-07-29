@@ -189,21 +189,17 @@ def align_user_to_termux_owner(
     uid: int,
     gid: int,
 ) -> bool:
-    """Map a container passwd user to the Termux app uid/gid for ``--shared-home``.
-
-    proot-distro keeps ``HOME`` as the distro path (e.g. ``/home/saba``) and bind-mounts
-    ``TERMUX_HOME`` onto it; the guest user must use the same numeric ids as the Termux
-    app that owns those files.
-    """
+    """Map a container passwd user to the Termux app uid/gid for
+    ``--shared-home``, so the guest user owns the bind-mounted home files."""
     return set_passwd_uid_gid(rootfs, username, uid, gid)
 
 
 def resolve_host_home(login_user: str | None = None) -> str | None:
     """Host path to bind for ``--shared-home``.
 
-    The guest ``--user`` name (e.g. ``saba``) often does not exist on the host
-    (e.g. ``sabamdarif``). Prefer the account that invoked the tool (``SUDO_USER``,
-    real uid, ``LOGNAME``). Only use ``$HOME`` for a root login.
+    The guest ``--user`` name often doesn't exist on the host, so prefer the
+    invoking account (``SUDO_USER``, real uid, ``LOGNAME``); ``$HOME`` only
+    for a root login.
     """
     import pwd
 
@@ -324,11 +320,8 @@ def sync_passwd_to_home_owner(
     username: str,
     home_guest_path: str,
 ) -> bool:
-    """Match passwd uid/gid to the on-disk home directory owner inside rootfs.
-
-    After ``--shared-home`` on Termux, passwd may still list the Termux app uid while the
-    container's real ``/home/user`` tree on disk is owned by the original distro ids.
-    """
+    """Match passwd uid/gid to the on-disk home directory owner inside
+    rootfs (a past ``--shared-home`` may have left them out of sync)."""
     if not home_guest_path or home_guest_path == "/":
         return False
     try:
