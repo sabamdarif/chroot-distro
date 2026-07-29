@@ -1,6 +1,6 @@
 [build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "chroot-distro"
@@ -9,35 +9,6 @@ description = "chroot-distro is a lightweight Linux container management utility
 readme = "README.md"
 requires-python = ">=3.10"
 license = "GPL-3.0-only"
-license-files = ["LICENSE"]
-authors = [{ name = "sabamdarif" }]
-keywords = [
-	"chroot",
-	"container",
-	"linux",
-	"android",
-	"termux",
-	"rootfs",
-	"distro",
-	"docker",
-	"oci",
-]
-classifiers = [
-	"Development Status :: 5 - Production/Stable",
-	"Environment :: Console",
-	"Intended Audience :: Developers",
-	"Intended Audience :: System Administrators",
-	"License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
-	"Operating System :: POSIX :: Linux",
-	"Programming Language :: Python :: 3",
-	"Programming Language :: Python :: 3.10",
-	"Programming Language :: Python :: 3.11",
-	"Programming Language :: Python :: 3.12",
-	"Programming Language :: Python :: 3.13",
-	"Programming Language :: Python :: 3.14",
-	"Topic :: System :: Systems Administration",
-	"Typing :: Typed",
-]
 dependencies = ["backports-zstd; python_version < '3.14'"]
 
 [project.scripts]
@@ -48,13 +19,23 @@ Homepage = "https://github.com/sabamdarif/chroot-distro"
 Repository = "https://github.com/sabamdarif/chroot-distro"
 "Bug Tracker" = "https://github.com/sabamdarif/chroot-distro/issues"
 
-[tool.hatch.build.targets.wheel]
-packages = ["src/chroot_distro"]
+[tool.setuptools.packages.find]
+where = ["src"]
 
-[tool.hatch.build.targets.wheel.shared-data]
-"src/chroot_distro/completions/chroot-distro.bash" = "share/bash-completion/completions/chroot-distro"
-"src/chroot_distro/completions/_chroot-distro" = "share/zsh/site-functions/_chroot-distro"
-"src/chroot_distro/completions/chroot-distro.fish" = "share/fish/vendor_completions.d/chroot-distro.fish"
+[tool.setuptools.package-data]
+"chroot_distro" = ["py.typed"]
+
+[tool.setuptools.exclude-package-data]
+"chroot_distro.completions" = ["*"]
+
+[tool.setuptools.data-files]
+"share/bash-completion/completions" = [
+	"src/chroot_distro/completions/chroot-distro.bash",
+]
+"share/zsh/site-functions" = ["src/chroot_distro/completions/_chroot-distro"]
+"share/fish/vendor_completions.d" = [
+	"src/chroot_distro/completions/chroot-distro.fish",
+]
 
 [tool.ruff]
 line-length = 120
