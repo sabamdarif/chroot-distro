@@ -40,6 +40,13 @@ def test_mounts_under_rootfs_none_match(monkeypatch):
     assert mm._mounts_under_rootfs_from_lines(["proc /proc proc rw 0 0"], "/root/rootfs") == []
 
 
+def test_mounts_under_rootfs_symlinked_rootfs_arg(monkeypatch):
+    # rootfs given via a symlink alias still matches canonical mount entries.
+    monkeypatch.setattr("os.path.realpath", lambda p: p.replace("/link", "/real"))
+    lines = ["tmpfs /real/rootfs/dev tmpfs rw 0 0"]
+    assert mm._mounts_under_rootfs_from_lines(lines, "/link/rootfs") == ["/real/rootfs/dev"]
+
+
 # ── _filter_bind_options ────────────────────────────────────────────────────────
 def test_filter_bind_options_drops_selinux():
     assert mm._filter_bind_options("ro,z,nosuid,Z") == "ro,nosuid"

@@ -26,12 +26,17 @@ def decode_mount_path(path: str) -> str:
 
 def _mounts_under_rootfs_from_lines(lines: list[str], rootfs: str) -> list[str]:
     rootfs_abs = os.path.realpath(rootfs)
+    # Kernel mount paths are canonical, so cheap prefix checks avoid a
+    # realpath per line (Android tables have hundreds of entries).
+    prefixes = {os.path.normpath(rootfs), rootfs_abs}
     active_mounts: list[str] = []
     for line in lines:
         parts = line.strip().split()
         if len(parts) < 2:
             continue
         mount_point = decode_mount_path(parts[1])
+        if not any(mount_point == p or mount_point.startswith(p + os.sep) for p in prefixes):
+            continue
         try:
             mount_point_abs = os.path.realpath(mount_point)
         except OSError:
@@ -66,6 +71,7 @@ def is_mounted(target: str, holder: NamespaceHolder | None = None) -> bool:
     if holder is not None:
         return holder.is_mounted(target)
 
+    # Kernel mount paths are canonical; realpath the target once, not per line.
     target_abs = os.path.realpath(target)
     if not os.path.exists("/proc/mounts"):
         return False
@@ -76,8 +82,7 @@ def is_mounted(target: str, holder: NamespaceHolder | None = None) -> bool:
                 parts = line.strip().split()
                 if len(parts) < 2:
                     continue
-                mount_point = decode_mount_path(parts[1])
-                if os.path.realpath(mount_point) == target_abs:
+                if decode_mount_path(parts[1]) == target_abs:
                     return True
     except OSError as exc:
         log.warning("Failed to check if %s is mounted: %s", target, exc)
@@ -321,10 +326,9 @@ def safe_unmount(target: str, holder: NamespaceHolder | None = None) -> None:
     targets the "target is busy" fallback is expected, so it is logged at
     debug level instead of warning the user.
     """
-    if not is_mounted(target, holder=holder):
-        return
-
     if holder is not None:
+        if not is_mounted(target, holder=holder):
+            return
         # Unmount inside the holder's mount namespace. do_umount already retries
         # with a lazy unmount. If even that fails (e.g. a special submount such
         # as sys/firmware/efi/efivars pulled in by a recursive /sys bind under a

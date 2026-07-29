@@ -20,13 +20,13 @@ def test_ensure_root_user():
 
 def test_main_help():
     # Running with no args or --help should trigger command_help and exit 0
-    with patch("sys.argv", ["chroot-distro"]), patch("chroot_distro.cli.command_help") as mock_help:
+    with patch("sys.argv", ["chroot-distro"]), patch("chroot_distro.commands.help.command_help") as mock_help:
         with pytest.raises(SystemExit) as exc_info:
             main()
         assert exc_info.value.code == 0
         mock_help.assert_called_once()
 
-    with patch("sys.argv", ["chroot-distro", "--help"]), patch("chroot_distro.cli.command_help") as mock_help:
+    with patch("sys.argv", ["chroot-distro", "--help"]), patch("chroot_distro.commands.help.command_help") as mock_help:
         with pytest.raises(SystemExit) as exc_info:
             main()
         assert exc_info.value.code == 0

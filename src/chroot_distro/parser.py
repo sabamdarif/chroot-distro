@@ -3,8 +3,20 @@ import sys
 from collections.abc import Sequence
 from typing import NoReturn
 
-from chroot_distro.constants import PROGRAM_NAME, PROGRAM_VERSION
+from chroot_distro.constants import PROGRAM_NAME
 from chroot_distro.message import crit_error, msg
+
+
+class _LazyVersionAction(argparse.Action):
+    """`-V/--version` that defers the importlib.metadata lookup to use time."""
+
+    def __init__(self, option_strings, dest, **kwargs):
+        super().__init__(option_strings, dest, nargs=0, **kwargs)
+
+    def __call__(self, parser, namespace, values, option_string=None) -> None:
+        from chroot_distro.constants import PROGRAM_VERSION
+
+        parser.exit(message=f"{PROGRAM_NAME} {PROGRAM_VERSION}\n")
 
 
 class _CdArgumentParser(argparse.ArgumentParser):
@@ -139,7 +151,7 @@ def build_parser() -> _CdArgumentParser:
         add_help=False,
     )
     parser.add_argument("-h", "--help", action="store_true")
-    parser.add_argument("-V", "--version", action="version", version=f"%(prog)s {PROGRAM_VERSION}")
+    parser.add_argument("-V", "--version", action=_LazyVersionAction)
     sub = parser.add_subparsers(dest="command")
 
     sub.add_parser("help", aliases=["hel", "he", "h"], add_help=False)

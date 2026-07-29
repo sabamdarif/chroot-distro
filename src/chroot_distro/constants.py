@@ -1,15 +1,23 @@
 import os
 import platform
-from importlib.metadata import PackageNotFoundError, version
 
 PROGRAM_AUTHOR = "sabamdarif"
 PROGRAM_NAME = "chroot-distro"
 CANONICAL_PROGRAM_NAME = "Chroot-Distro"
 
-try:
-    PROGRAM_VERSION = version(PROGRAM_NAME)
-except PackageNotFoundError:
-    PROGRAM_VERSION = "rolling"
+
+def __getattr__(name: str) -> str:
+    # keeps the slow importlib.metadata scan off the startup path.
+    if name != "PROGRAM_VERSION":
+        raise AttributeError(name)
+    from importlib.metadata import PackageNotFoundError, version
+
+    try:
+        value = version(PROGRAM_NAME)
+    except PackageNotFoundError:
+        value = "rolling"
+    globals()["PROGRAM_VERSION"] = value
+    return value
 
 os.umask(0o022)
 

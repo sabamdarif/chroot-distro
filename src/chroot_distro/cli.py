@@ -1,33 +1,12 @@
 import argparse
+import importlib
 import os
 import signal
 import sys
+from collections.abc import Callable
 from typing import Any
 
-from chroot_distro.commands.backup import command_backup
-from chroot_distro.commands.build import command_build
-from chroot_distro.commands.clear_cache import command_clear_cache
-from chroot_distro.commands.copy import command_copy
-from chroot_distro.commands.daemon_cmd import command_daemon
-from chroot_distro.commands.diff import command_diff
-from chroot_distro.commands.help import HELP_COMMANDS, command_help
-from chroot_distro.commands.info import command_info
-from chroot_distro.commands.install import command_install
-from chroot_distro.commands.kill import command_kill
-from chroot_distro.commands.list_cmd import command_list
-from chroot_distro.commands.login import command_login
-from chroot_distro.commands.ps import command_ps
-from chroot_distro.commands.push import command_push
-from chroot_distro.commands.remove import command_remove
-from chroot_distro.commands.rename import command_rename
-from chroot_distro.commands.reset import command_reset
-from chroot_distro.commands.restore import command_restore
-from chroot_distro.commands.run import command_run
-from chroot_distro.commands.search import command_search
-from chroot_distro.commands.setup import command_setup
-from chroot_distro.commands.sync import command_sync
-from chroot_distro.commands.unmount import command_unmount
-from chroot_distro.constants import IS_TERMUX, PROGRAM_NAME, PROGRAM_VERSION
+from chroot_distro.constants import IS_TERMUX, PROGRAM_NAME
 from chroot_distro.exceptions import ChrootDistroError, RootRequiredError
 from chroot_distro.message import crit_error, msg, set_quiet
 from chroot_distro.parser import (
@@ -42,31 +21,41 @@ def command_stub(args: argparse.Namespace) -> None:
     raise NotImplementedError(f"Command '{args.command}' is not yet implemented.")
 
 
-_COMMAND_HANDLERS = {
-    "install": command_install,
-    "remove": command_remove,
-    "rename": command_rename,
-    "reset": command_reset,
-    "login": command_login,
-    "list": command_list,
-    "backup": command_backup,
-    "restore": command_restore,
-    "clear-cache": command_clear_cache,
-    "copy": command_copy,
-    "sync": command_sync,
-    "run": command_run,
-    "unmount": command_unmount,
-    "build": command_build,
-    "push": command_push,
-    "kill": command_kill,
-    "ps": command_ps,
-    "diff": command_diff,
-    "search": command_search,
-    "setup": command_setup,
-    "daemon": command_daemon,
-    "info": command_info,
-    "help": command_help,
+# "module:function" refs; imported on dispatch (tests patch in callables).
+_COMMAND_HANDLERS: dict[str, str | Callable] = {
+    "install": "chroot_distro.commands.install:command_install",
+    "remove": "chroot_distro.commands.remove:command_remove",
+    "rename": "chroot_distro.commands.rename:command_rename",
+    "reset": "chroot_distro.commands.reset:command_reset",
+    "login": "chroot_distro.commands.login:command_login",
+    "list": "chroot_distro.commands.list_cmd:command_list",
+    "backup": "chroot_distro.commands.backup:command_backup",
+    "restore": "chroot_distro.commands.restore:command_restore",
+    "clear-cache": "chroot_distro.commands.clear_cache:command_clear_cache",
+    "copy": "chroot_distro.commands.copy:command_copy",
+    "sync": "chroot_distro.commands.sync:command_sync",
+    "run": "chroot_distro.commands.run:command_run",
+    "unmount": "chroot_distro.commands.unmount:command_unmount",
+    "build": "chroot_distro.commands.build:command_build",
+    "push": "chroot_distro.commands.push:command_push",
+    "kill": "chroot_distro.commands.kill:command_kill",
+    "ps": "chroot_distro.commands.ps:command_ps",
+    "diff": "chroot_distro.commands.diff:command_diff",
+    "search": "chroot_distro.commands.search:command_search",
+    "setup": "chroot_distro.commands.setup:command_setup",
+    "daemon": "chroot_distro.commands.daemon_cmd:command_daemon",
+    "info": "chroot_distro.commands.info:command_info",
+    "help": "chroot_distro.commands.help:command_help",
 }
+
+
+def _resolve_handler(canonical: str) -> Callable | None:
+    handler = _COMMAND_HANDLERS.get(canonical)
+    if handler is None or callable(handler):
+        return handler
+    module_name, _, func_name = handler.partition(":")
+    resolved: Callable = getattr(importlib.import_module(module_name), func_name)
+    return resolved
 
 
 def _sigquit_to_keyboard_interrupt(_signum: int, _frame: Any) -> None:
@@ -91,6 +80,8 @@ def _dispatch_help(raw_args: list[str]) -> bool:
     """Render per-command help when -h/--help/--usage is given."""
     if len(raw_args) < 2 or raw_args[1] not in ("-h", "--help", "--usage"):
         return False
+    from chroot_distro.commands.help import HELP_COMMANDS
+
     cmd = ALIAS_TO_CANONICAL.get(raw_args[0], raw_args[0])
     if cmd in HELP_COMMANDS:
         HELP_COMMANDS[cmd]()
@@ -104,6 +95,8 @@ def _reject_unknown_command(raw_args: list[str]) -> None:
         return
     first = raw_args[0]
     if not first.startswith("-") and first not in _COMMAND_HANDLERS and first not in ALIAS_TO_CANONICAL:
+        from chroot_distro.commands.help import command_help
+
         msg()
         crit_error(f"unknown command '{first}'.")
         command_help()
@@ -127,10 +120,14 @@ def main() -> None:
         ALIAS_TO_CANONICAL.get(sys.argv[1], sys.argv[1])
 
     if len(sys.argv) >= 2 and sys.argv[1] in ("--version", "-V"):
+        from chroot_distro.constants import PROGRAM_VERSION
+
         print(f"{PROGRAM_NAME} {PROGRAM_VERSION}")
         sys.exit(0)
 
     if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help", "help", "hel", "he", "h"):
+        from chroot_distro.commands.help import command_help
+
         command_help()
         sys.exit(0)
 
@@ -145,6 +142,8 @@ def main() -> None:
 
     command = args.command
     if command is None:
+        from chroot_distro.commands.help import command_help
+
         msg()
         crit_error(f"unknown command '{raw_args[0]}'.")
         command_help()
@@ -155,6 +154,8 @@ def main() -> None:
     canonical: str = ALIAS_TO_CANONICAL.get(command) or command
 
     if getattr(args, "help", False):
+        from chroot_distro.commands.help import HELP_COMMANDS, command_help
+
         if canonical in HELP_COMMANDS:
             HELP_COMMANDS[canonical]()
         else:
@@ -166,6 +167,8 @@ def main() -> None:
         sep_idx = raw_args.index("--")
         _, check_unknown = parse_cli_args(parser, raw_args[:sep_idx])
     if check_unknown:
+        from chroot_distro.commands.help import HELP_COMMANDS
+
         bad = check_unknown[0]
         kind = "unrecognized option" if bad.startswith("-") else "unexpected argument"
         msg()
@@ -179,6 +182,8 @@ def main() -> None:
         # `not` (rather than `is None`) also catches the empty list that
         # nargs="*" positionals produce when no value is given.
         if not getattr(args, arg_name, None):
+            from chroot_distro.commands.help import HELP_COMMANDS
+
             msg()
             crit_error(error_msg)
             if canonical in HELP_COMMANDS:
@@ -224,7 +229,7 @@ def main() -> None:
             msg()
             sys.exit(1)
 
-    handler = _COMMAND_HANDLERS.get(canonical)
+    handler = _resolve_handler(canonical)
     if handler is None:
         crit_error(f"unknown command '{command}'.")
         sys.exit(1)
