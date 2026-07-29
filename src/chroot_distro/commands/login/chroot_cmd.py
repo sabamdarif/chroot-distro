@@ -151,6 +151,25 @@ def build_chroot_args(
     return args
 
 
+def format_get_chroot_cmd(child_env: dict, exec_argv: list[str]) -> str:
+    """Format the argv for --get-chroot-cmd as a copy-pasteable shell command.
+
+    The output is meant to be pasted into the user's normal (unprivileged)
+    shell, so it must carry its own root elevation: ``sudo`` everywhere it
+    exists, falling back on Termux to Android's raw
+    ``su``, which takes the whole command as a single ``-c`` string.
+    """
+    parts = ["env", "-i"]
+    parts.extend(f"{k}={shlex.quote(v)}" for k, v in child_env.items())
+    parts.extend(shlex.quote(a) for a in exec_argv)
+    body = " \\\n  ".join(parts)
+    if IS_TERMUX and not shutil.which("sudo"):
+        from chroot_distro.elevate import _find_termux_su
+
+        return f"{_find_termux_su() or 'su'} -c {shlex.quote(body)}"
+    return f"sudo {body}"
+
+
 def build_chroot_config(
     rootfs: str,
     login_uid: str | None = None,

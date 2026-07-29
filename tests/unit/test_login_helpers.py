@@ -1197,3 +1197,49 @@ def test_read_cd_env_splits_lines_and_filters(monkeypatch):
 def test_read_cd_env_empty_when_unset(monkeypatch):
     monkeypatch.delenv("CD_ENV", raising=False)
     assert read_cd_env() == []
+
+
+def test_format_get_chroot_cmd_linux_is_copy_pasteable():
+    import shlex
+
+    from chroot_distro.commands.login import chroot_cmd
+
+    env = {"PATH": "/usr/bin", "HOME": "/root", "TERM": "xterm"}
+    argv = ["/usr/sbin/chroot", "--userspec=0:0", "/rootfs", "/bin/sh", "-c", "cd /root; exec bash -l"]
+    with patch.object(chroot_cmd, "IS_TERMUX", False):
+        out = chroot_cmd.format_get_chroot_cmd(env, argv)
+    # real values, not redacted, and elevated
+    assert "<redacted>" not in out
+    assert out.startswith("sudo env")
+    # backslash-newline continuations collapse back to the exact argv
+    assert shlex.split(out.replace("\\\n", "")) == ["sudo", "env", "-i", *[f"{k}={v}" for k, v in env.items()], *argv]
+
+
+def test_format_get_chroot_cmd_termux_su_wrapping():
+    import shlex
+
+    from chroot_distro.commands.login import chroot_cmd
+
+    env = {"PATH": "/usr/bin"}
+    argv = ["/usr/bin/chroot", "/rootfs", "/bin/sh", "-c", "cd '/my dir'; exec bash -l"]
+    with (
+        patch.object(chroot_cmd, "IS_TERMUX", True),
+        patch.object(chroot_cmd.shutil, "which", return_value=None),
+        patch("chroot_distro.elevate._find_termux_su", return_value="/system/bin/su"),
+    ):
+        out = chroot_cmd.format_get_chroot_cmd(env, argv)
+    su, dash_c, body = shlex.split(out)
+    assert [su, dash_c] == ["/system/bin/su", "-c"]
+    # the -c string itself must round-trip to the original argv
+    assert shlex.split(body.replace("\\\n", "")) == ["env", "-i", "PATH=/usr/bin", *argv]
+
+
+def test_format_get_chroot_cmd_termux_prefers_sudo_package():
+    from chroot_distro.commands.login import chroot_cmd
+
+    with (
+        patch.object(chroot_cmd, "IS_TERMUX", True),
+        patch.object(chroot_cmd.shutil, "which", return_value="/data/data/com.termux/files/usr/bin/sudo"),
+    ):
+        out = chroot_cmd.format_get_chroot_cmd({"PATH": "/usr/bin"}, ["/usr/bin/chroot", "/rootfs"])
+    assert out.startswith("sudo env")

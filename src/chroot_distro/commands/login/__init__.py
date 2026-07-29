@@ -12,7 +12,12 @@ import chroot_distro.helpers.mount_manager as mount_manager
 import chroot_distro.helpers.namespace as namespace
 import chroot_distro.helpers.session as session
 from chroot_distro.commands.login import bindings
-from chroot_distro.commands.login.chroot_cmd import ChrootConfig, build_chroot_args, build_chroot_config
+from chroot_distro.commands.login.chroot_cmd import (
+    ChrootConfig,
+    build_chroot_args,
+    build_chroot_config,
+    format_get_chroot_cmd,
+)
 from chroot_distro.commands.login.env import (
     ANDROID_HOST_ENV_VARS,
     IMAGE_ENV_BLOCKED,
@@ -1277,11 +1282,7 @@ def _command_login_inner_once(container_name: str, args) -> None:
         exec_argv = holder.run_argv(chroot_args)
 
     if getattr(args, "get_chroot_cmd", False):
-        parts = ["env", "-i"]
-        for k in child_env:
-            parts.append(f"{k}={shlex.quote('<redacted>')}")
-        parts.extend(shlex.quote(a) for a in exec_argv)
-        print(" \\\n  ".join(parts))
+        print(format_get_chroot_cmd(child_env, exec_argv))
 
         with session.lock(container_name) as lock_fh:
             sess_count = session.decrement(container_name, lock_fh=lock_fh)
