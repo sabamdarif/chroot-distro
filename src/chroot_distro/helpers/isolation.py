@@ -108,6 +108,47 @@ def bind_is_recursive(src: str, dst_real: str, run_root: str, *, use_userns: boo
     return is_run or is_wsl or is_android_sys or is_userns_pseudo
 
 
+def apply_bind_mounts(
+    rootfs: str,
+    resolved_binds: list[tuple[str, str]],
+    *,
+    holder: NamespaceHolder | None = None,
+    use_userns: bool = False,
+    bind_options: dict[str, str] | None = None,
+    best_effort_sources: frozenset[str] = frozenset(),
+) -> None:
+    """Mount every (source, resolved_target) bind, in order.
+
+    Shared by login and the isolation sessions: recursion rules, stale-/dev
+    detection and failure policy in one place. Failures re-raise unless the
+    source is in *best_effort_sources* (warn + skip).
+
+    *bind_options* maps realpath(resolved_target) -> mount option string.
+    """
+    opts_map = bind_options or {}
+    run_root = os.path.realpath(os.path.join(rootfs, "run"))
+    dev_root = os.path.realpath(os.path.join(rootfs, "dev"))
+    for src, dst in resolved_binds:
+        dst_real = os.path.realpath(dst)
+        try:
+            mount_manager.safe_mount(
+                src,
+                dst,
+                holder=holder,
+                # Recurse for /run subtrees, WSL, Android partitions.
+                recursive=bind_is_recursive(src, dst_real, run_root, use_userns=use_userns),
+                options=opts_map.get(dst_real, ""),
+                # A stale MNT_LOCKED mount can shadow /dev without ptmx;
+                # detect and mount over.
+                required_child="ptmx" if dst_real == dev_root else "",
+            )
+        except Exception as exc:
+            if src in best_effort_sources:
+                warn(f"Skipping optional bind {src} -> {dst}: {exc}")
+                continue
+            raise
+
+
 def finalize_holder(holder: NamespaceHolder, container_key: str, *, hostname: str) -> None:
     """Record the namespace mode, make mounts private, and set the hostname.
 
@@ -268,17 +309,7 @@ def max_isolation_session(
         with contextlib.suppress(Exception):
             mount_manager.unmount_all(rootfs, holder=holder)
 
-        run_root = os.path.realpath(os.path.join(rootfs, "run"))
-        dev_root = os.path.realpath(os.path.join(rootfs, "dev"))
-        for src, dst in resolved_binds:
-            dst_real = os.path.realpath(dst)
-            mount_manager.safe_mount(
-                src,
-                dst,
-                holder=holder,
-                recursive=bind_is_recursive(src, dst_real, run_root, use_userns=use_userns),
-                required_child="ptmx" if dst_real == dev_root else "",
-            )
+        apply_bind_mounts(rootfs, resolved_binds, holder=holder, use_userns=use_userns)
         for rslave_path in rslave_targets:
             mount_manager.make_rslave(rslave_path, holder=holder)
 
@@ -346,17 +377,13 @@ def namespace_session(
         with contextlib.suppress(Exception):
             mount_manager.unmount_all(rootfs, holder=holder)
 
-        run_root = os.path.realpath(os.path.join(rootfs, "run"))
-        dev_root = os.path.realpath(os.path.join(rootfs, "dev"))
-        for src, dst in resolved_binds:
-            dst_real = os.path.realpath(dst)
-            mount_manager.safe_mount(
-                src,
-                dst,
-                holder=holder,
-                recursive=bind_is_recursive(src, dst_real, run_root, use_userns=use_userns),
-                required_child="ptmx" if dst_real == dev_root else "",
-            )
+        apply_bind_mounts(
+            rootfs,
+            resolved_binds,
+            holder=holder,
+            use_userns=use_userns,
+            best_effort_sources=bindings.best_effort_bind_sources(),
+        )
         for rslave_path in rslave_targets:
             mount_manager.make_rslave(rslave_path, holder=holder)
 

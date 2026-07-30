@@ -395,6 +395,19 @@ def system_bindings() -> list[tuple[str, str]]:
     return binds
 
 
+def best_effort_bind_sources() -> frozenset[str]:
+    """Sources whose bind failure is non-fatal (warn + skip).
+
+    Android integration extras only: some vendor kernels reject single binds
+    (file bind -> EINVAL on 3.4), and losing these just degrades getprop,
+    /sdcard etc. inside the guest.
+    """
+    srcs: set[str] = set()
+    for fn in (dalvik_cache_bindings, storage_bindings, system_bindings, termux_app_bindings):
+        srcs.update(src for src, _ in fn())
+    return frozenset(srcs)
+
+
 def get_bindings(
     rootfs: str,
     *,

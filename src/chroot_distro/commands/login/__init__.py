@@ -977,35 +977,28 @@ def _command_login_inner_once(container_name: str, args) -> None:
                     resolved_target = os.path.join(rootfs, guest_dst.lstrip("/"))
                 resolved_bind_options[os.path.realpath(resolved_target)] = opts
 
-            # Phase 1: bind mounts
-            run_root = os.path.realpath(os.path.join(rootfs, "run"))
-            dev_root = os.path.realpath(os.path.join(rootfs, "dev"))
-            for src, dst in resolved_binds:
-                try:
-                    dst_real = os.path.realpath(dst)
-                    mount_options = resolved_bind_options.get(os.path.realpath(dst), "")
-                    mount_manager.safe_mount(
-                        src,
-                        dst,
-                        holder=holder,
-                        # Recurse for /run subtrees, WSL, Android partitions.
-                        recursive=isolation.bind_is_recursive(src, dst_real, run_root, use_userns=has_userns),
-                        options=mount_options,
-                        # A stale MNT_LOCKED mount can shadow /dev without
-                        # ptmx; detect and mount over.
-                        required_child="ptmx" if dst_real == dev_root else "",
-                    )
-                except Exception as e:
-                    if pipe_w is not None:
-                        with contextlib.suppress(OSError):
-                            os.close(pipe_w)
-                    mount_manager.unmount_all(rootfs, holder=holder)
-                    if holder is not None:
-                        namespace.release_holder(container_name)
-                        namespace.clear_isolation_mode(container_name)
-                    session.decrement(container_name, lock_fh=lock_fh)
-                    crit_error(f"Failed to mount bindings: {e}")
-                    sys.exit(1)
+            # Phase 1: bind mounts. best_effort_bind_sources() entries
+            # warn+skip on failure; anything else aborts.
+            try:
+                isolation.apply_bind_mounts(
+                    rootfs,
+                    resolved_binds,
+                    holder=holder,
+                    use_userns=has_userns,
+                    bind_options=resolved_bind_options,
+                    best_effort_sources=bindings.best_effort_bind_sources(),
+                )
+            except Exception as e:
+                if pipe_w is not None:
+                    with contextlib.suppress(OSError):
+                        os.close(pipe_w)
+                mount_manager.unmount_all(rootfs, holder=holder)
+                if holder is not None:
+                    namespace.release_holder(container_name)
+                    namespace.clear_isolation_mode(container_name)
+                session.decrement(container_name, lock_fh=lock_fh)
+                crit_error(f"Failed to mount bindings: {e}")
+                sys.exit(1)
 
             # Phase 1a: apply rslave propagation for display socket forwarding
             for rslave_path in rslave_targets:

@@ -305,11 +305,9 @@ def make_rslave(target: str, holder: NamespaceHolder | None = None) -> bool:
         return True
 
 
-# Busy-prone targets (/dev, /run, recursive Android binds, and pts/shm whose
-# ptys or segments stay open while guest background processes live) frequently
-# report EBUSY on logout. This is benign: the lazy umount below detaches the
-# mount and the kernel frees it when the last user exits. Suppress the
-# alarming warning for these and clean up quietly.
+# Targets that routinely EBUSY on logout (open ptys/segments, nested
+# submounts); the lazy-detach fallback handles them, so log at debug
+# instead of warning.
 _BUSY_PRONE_BASENAMES = frozenset(
     {"dev", "pts", "shm", "run", "proc", "sys", "apex", "system", "vendor", "odm", "product", "system_ext"}
 )
@@ -671,12 +669,9 @@ def apply_special_mount(rootfs: str, sm, holder: NamespaceHolder | None = None, 
                 log.debug("Mounted %s at %s (options=%r)", sm.fstype, sm.target, opts)
                 return True
             except OSError as e:
-                # Single-instance devpts (kernel < 4.7 without
-                # CONFIG_DEVPTS_MULTIPLE_INSTANCES): 'newinstance' is ignored
-                # and stacking the lone instance on its own bind at the same
-                # mountpoint returns EBUSY. The devpts already mounted at the
-                # target (the host /dev/pts bind) IS that lone instance, so
-                # it is exactly what the guest gets either way — use it.
+                # Kernel < 4.7 single-instance devpts: newinstance is a no-op
+                # and stacking the lone instance on its own bind EBUSYs; the
+                # devpts already at the target is that instance, reuse it.
                 if sm.fstype == "devpts" and e.errno == errno.EBUSY and _mount_fs_and_options(target)[0] == "devpts":
                     log.debug(
                         "devpts is single-instance on this kernel; reusing the instance already mounted at %s",

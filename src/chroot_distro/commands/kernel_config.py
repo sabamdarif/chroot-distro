@@ -168,18 +168,12 @@ def kernel_version_tuple() -> tuple[int, int]:
 
 
 def probe_devpts_multi_instance() -> str:
-    """Whether each devpts mount gets its own private pty namespace.
+    """Whether each devpts mount is its own instance.
 
-    Kernels >= 4.7 always do (CONFIG_DEVPTS_MULTIPLE_INSTANCES became the only
-    behaviour and was removed in 4.9, so it never appears in modern configs).
-    On older kernels the static config has been seen lying (a vendor
-    /proc/config.gz containing both '=y' and 'is not set' for this symbol), so
-    the honest answer comes from mounting a scratch devpts: a 'newinstance'
-    mount that starts empty proves per-mount instances, while one that exposes
-    the host's live ptys proves the single shared instance (login then reuses
-    the host /dev/pts bind instead of stacking — see mount_manager).
-
-    The mount probe needs root; returns PROBE_UNKNOWN without it.
+    >= 4.7 always is (symbol removed in 4.9). Older kernels: mount a scratch
+    'newinstance' devpts — empty means per-mount instances, host ptys visible
+    means the single shared instance. Vendor config.gz can contradict itself,
+    so the mount probe is authoritative. Needs root, else PROBE_UNKNOWN.
     """
     if kernel_version_tuple() >= (4, 7):
         return PROBE_PRESENT
