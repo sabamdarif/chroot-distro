@@ -62,7 +62,7 @@ def _mount(libc, source, target, fstype, flags, data=None) -> None:
     d = data.encode() if data else None
     if libc.mount(s, t, f, ctypes.c_ulong(flags), d) != 0:
         err = ctypes.get_errno()
-        raise OSError(err, f"mount {source} -> {target} ({fstype}): {os.strerror(err)}")
+        raise OSError(err, f"mount(2): {source} -> {target} ({fstype}): {os.strerror(err)}")
 
 
 def _make_node(path: str, major: int, minor: int, mode: int) -> None:

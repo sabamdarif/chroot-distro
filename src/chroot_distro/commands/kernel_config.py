@@ -20,10 +20,12 @@ The result is intentionally advisory: a missing *required* option explains why
 options only affect specific extras (e.g. Docker).
 """
 
+import contextlib
 import gzip
 import os
 import platform
 import re
+import tempfile
 from dataclasses import dataclass
 
 # Runtime-probe outcome, distinct from the static-config states above.
@@ -82,6 +84,11 @@ KERNEL_FLAG_GROUPS: tuple[KernelFlagGroup, ...] = (
             KernelFlag("PROC_FS", "procfs (/proc)", required=True),
             KernelFlag("SYSFS", "sysfs (/sys)", required=True),
             KernelFlag("UNIX98_PTYS", "devpts (/dev/pts login ptys)", required=True),
+            KernelFlag(
+                "DEVPTS_MULTIPLE_INSTANCES",
+                "private container ptys (built-in on kernels >= 4.7)",
+                required=False,
+            ),
             KernelFlag("DEVTMPFS", "devtmpfs (/dev population)", required=False),
             KernelFlag("TMPFS", "tmpfs (fresh /dev, /dev/shm)", required=False),
         ),
@@ -146,6 +153,57 @@ def find_kernel_config() -> tuple[str | None, str | None]:
         if text is not None:
             return path, text
     return None, None
+
+
+def kernel_version_tuple() -> tuple[int, int]:
+    """Return (major, minor) of the running kernel, or (0, 0) when unknown."""
+    try:
+        release = os.uname().release
+    except (OSError, AttributeError):
+        release = platform.release()
+    match = re.match(r"(\d+)\.(\d+)", release)
+    if not match:
+        return (0, 0)
+    return int(match.group(1)), int(match.group(2))
+
+
+def probe_devpts_multi_instance() -> str:
+    """Whether each devpts mount gets its own private pty namespace.
+
+    Kernels >= 4.7 always do (CONFIG_DEVPTS_MULTIPLE_INSTANCES became the only
+    behaviour and was removed in 4.9, so it never appears in modern configs).
+    On older kernels the static config has been seen lying (a vendor
+    /proc/config.gz containing both '=y' and 'is not set' for this symbol), so
+    the honest answer comes from mounting a scratch devpts: a 'newinstance'
+    mount that starts empty proves per-mount instances, while one that exposes
+    the host's live ptys proves the single shared instance (login then reuses
+    the host /dev/pts bind instead of stacking — see mount_manager).
+
+    The mount probe needs root; returns PROBE_UNKNOWN without it.
+    """
+    if kernel_version_tuple() >= (4, 7):
+        return PROBE_PRESENT
+    if os.getuid() != 0:
+        return PROBE_UNKNOWN
+
+    from chroot_distro.syscalls.mount import native_mount
+    from chroot_distro.syscalls.umount import native_umount
+
+    scratch = tempfile.mkdtemp(prefix="cd-devpts-probe-")
+    mounted = False
+    try:
+        native_mount("devpts", scratch, "devpts", 0, "newinstance,ptmxmode=0666")
+        mounted = True
+        entries = set(os.listdir(scratch)) - {"ptmx"}
+        return PROBE_ABSENT if entries else PROBE_PRESENT
+    except OSError:
+        return PROBE_UNKNOWN
+    finally:
+        if mounted:
+            with contextlib.suppress(OSError):
+                native_umount(scratch)
+        with contextlib.suppress(OSError):
+            os.rmdir(scratch)
 
 
 def _proc_filesystems() -> set[str] | None:
@@ -332,7 +390,9 @@ __all__ = (
     "KernelFlag",
     "KernelFlagGroup",
     "find_kernel_config",
+    "kernel_version_tuple",
     "lookup_flag",
     "parse_kernel_config",
+    "probe_devpts_multi_instance",
     "probe_flag_runtime",
 )

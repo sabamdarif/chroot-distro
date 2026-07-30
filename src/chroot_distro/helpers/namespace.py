@@ -809,9 +809,9 @@ class NamespaceHolder:
 
         _, status = os.waitpid(child_pid, 0)
         if os.WIFEXITED(status) and os.WEXITSTATUS(status) != 0:
-            raise OSError(f"mount -t {fstype} {source} {target} failed in namespace")
+            raise OSError(f"mount(2) of {fstype} ({source}) on {target} failed inside the namespace")
         if os.WIFSIGNALED(status):
-            raise OSError(f"mount -t {fstype} killed by signal {os.WTERMSIG(status)}")
+            raise OSError(f"mount(2) of {fstype} killed by signal {os.WTERMSIG(status)}")
 
     def do_set_propagation(self, target: str, propagation: int) -> None:
         """Set mount propagation inside this holder's namespaces."""

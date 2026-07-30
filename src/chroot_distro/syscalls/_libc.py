@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import ctypes
 import ctypes.util
+import errno as _errno_mod
 import os
 import sys
 import threading
@@ -52,10 +53,15 @@ def check_syscall(result: int, func_name: str) -> None:
     Conventional libc wrappers return ``-1`` on failure and set ``errno``.
     This helper reads the thread-local errno via ``ctypes.get_errno()``
     and raises a descriptive :class:`OSError`.
+
+    The message names the raw syscall (``mount(2)``, ``umount2(2)``, …) and
+    the symbolic errno so failures are never mistaken for output of the
+    corresponding command-line tools, which chroot-distro does not use.
     """
     if result == -1:
-        errno = ctypes.get_errno()
-        raise OSError(errno, f"{func_name}: {os.strerror(errno)}")
+        err = ctypes.get_errno()
+        code = _errno_mod.errorcode.get(err, f"errno {err}")
+        raise OSError(err, f"{func_name}(2): {os.strerror(err)} ({code})")
 
 
 # ---------------------------------------------------------------------------

@@ -17,6 +17,7 @@ from chroot_distro.commands.kernel_config import (
     find_kernel_config,
     lookup_flag,
     parse_kernel_config,
+    probe_devpts_multi_instance,
     probe_flag_runtime,
 )
 from chroot_distro.commands.list_cmd import (
@@ -658,6 +659,16 @@ def _flag_status(flag, parsed: dict | None) -> tuple[str, str, str, bool]:
     Uses the static kernel config when readable, else a live runtime probe.
     *counts_as_missing* is True only for required + confirmed-absent options.
     """
+    # DEVPTS_MULTIPLE_INSTANCES: absent from configs >= 4.9 (always-on since
+    # 4.7) and vendor configs have been seen lying about it, so the runtime
+    # probe outranks the static config. Falls through on PROBE_UNKNOWN.
+    if flag.name == "DEVPTS_MULTIPLE_INSTANCES":
+        probe = probe_devpts_multi_instance()
+        if probe == PROBE_PRESENT:
+            return _OK, "GREEN", "per-mount instances", False
+        if probe == PROBE_ABSENT:
+            return _WARN, "YELLOW", "single shared instance (host /dev/pts is reused)", False
+
     if parsed is not None:
         status = lookup_flag(parsed, flag.name)
         if status in (CONFIG_BUILTIN, CONFIG_MODULE):

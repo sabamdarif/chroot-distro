@@ -305,18 +305,19 @@ def make_rslave(target: str, holder: NamespaceHolder | None = None) -> bool:
         return True
 
 
-# Recursive bind targets (/dev, /run and friends) frequently report
-# "target is busy" on logout because nested submounts or short-lived handles
-# linger. This is benign: the lazy umount below always succeeds. Suppress the
+# Busy-prone targets (/dev, /run, recursive Android binds, and pts/shm whose
+# ptys or segments stay open while guest background processes live) frequently
+# report EBUSY on logout. This is benign: the lazy umount below detaches the
+# mount and the kernel frees it when the last user exits. Suppress the
 # alarming warning for these and clean up quietly.
-_RECURSIVE_BIND_BASENAMES = frozenset(
-    {"dev", "run", "proc", "sys", "apex", "system", "vendor", "odm", "product", "system_ext"}
+_BUSY_PRONE_BASENAMES = frozenset(
+    {"dev", "pts", "shm", "run", "proc", "sys", "apex", "system", "vendor", "odm", "product", "system_ext"}
 )
 
 
-def _is_recursive_bind_target(target: str) -> bool:
+def _is_busy_prone_target(target: str) -> bool:
     base = os.path.basename(os.path.realpath(target).rstrip(os.sep))
-    return base in _RECURSIVE_BIND_BASENAMES
+    return base in _BUSY_PRONE_BASENAMES
 
 
 def safe_unmount(target: str, holder: NamespaceHolder | None = None) -> None:
@@ -351,10 +352,10 @@ def safe_unmount(target: str, holder: NamespaceHolder | None = None) -> None:
             log.debug("umount reports '%s' is not mounted; treating as already unmounted.", target)
             return
         err_msg = str(e)
-        if _is_recursive_bind_target(target):
-            log.debug("Standard umount failed for %s (%s); using lazy umount.", target, err_msg)
+        if _is_busy_prone_target(target):
+            log.debug("umount of %s failed (%s); detaching lazily (MNT_DETACH).", target, err_msg)
         else:
-            warn(f"Standard umount failed for {target} ({err_msg}). Trying lazy umount...")
+            warn(f"Unmounting {target} failed ({err_msg}); detaching lazily (MNT_DETACH) instead.")
         try:
             native_umount(target, lazy=True)
         except OSError as e_lazy:
@@ -662,7 +663,7 @@ def apply_special_mount(rootfs: str, sm, holder: NamespaceHolder | None = None, 
                 return True
             except OSError as e:
                 last_err = str(e)
-                log.debug("mount -t %s opts=%r failed via holder: %s", sm.fstype, opts, last_err)
+                log.debug("mount(2) of %s opts=%r failed via holder: %s", sm.fstype, opts, last_err)
         else:
             # Direct syscall path.
             try:
@@ -670,11 +671,23 @@ def apply_special_mount(rootfs: str, sm, holder: NamespaceHolder | None = None, 
                 log.debug("Mounted %s at %s (options=%r)", sm.fstype, sm.target, opts)
                 return True
             except OSError as e:
+                # Single-instance devpts (kernel < 4.7 without
+                # CONFIG_DEVPTS_MULTIPLE_INSTANCES): 'newinstance' is ignored
+                # and stacking the lone instance on its own bind at the same
+                # mountpoint returns EBUSY. The devpts already mounted at the
+                # target (the host /dev/pts bind) IS that lone instance, so
+                # it is exactly what the guest gets either way — use it.
+                if sm.fstype == "devpts" and e.errno == errno.EBUSY and _mount_fs_and_options(target)[0] == "devpts":
+                    log.debug(
+                        "devpts is single-instance on this kernel; reusing the instance already mounted at %s",
+                        target,
+                    )
+                    return True
                 last_err = str(e)
-                log.debug("mount -t %s opts=%r failed (native): %s", sm.fstype, opts, last_err)
+                log.debug("mount(2) of %s opts=%r failed (native): %s", sm.fstype, opts, last_err)
 
     detail = last_err or "(no error output)"
-    msg = f"mount -t {sm.fstype} at {target} failed: {detail}"
+    msg = f"mounting {sm.fstype} on {target} failed: {detail}"
     if optional:
         log.debug(msg)
         return False

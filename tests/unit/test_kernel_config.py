@@ -246,3 +246,29 @@ def test_probe_flag_runtime_userns():
     ):
         assert kc.probe_flag_runtime("USER_NS") == kc.PROBE_ABSENT
 
+
+
+# ── kernel_version_tuple / probe_devpts_multi_instance ─────────────────────────
+def test_kernel_version_tuple_parses_release():
+    with patch.object(kc.os, "uname") as m:
+        m.return_value.release = "4.4.302-gfbd6a732a614"
+        assert kc.kernel_version_tuple() == (4, 4)
+
+
+def test_kernel_version_tuple_unparseable_is_zero():
+    with patch.object(kc.os, "uname") as m:
+        m.return_value.release = "weird"
+        assert kc.kernel_version_tuple() == (0, 0)
+
+
+def test_devpts_probe_modern_kernel_short_circuits():
+    # >= 4.7: per-mount instances are built in; no mount probe needed.
+    with patch.object(kc, "kernel_version_tuple", return_value=(4, 19)):
+        assert kc.probe_devpts_multi_instance() == kc.PROBE_PRESENT
+
+
+def test_devpts_probe_old_kernel_without_root_is_unknown():
+    with patch.object(kc, "kernel_version_tuple", return_value=(4, 4)), patch.object(
+        kc.os, "getuid", return_value=1000
+    ):
+        assert kc.probe_devpts_multi_instance() == kc.PROBE_UNKNOWN
