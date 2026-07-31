@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import errno
+import functools
 import logging
 import os
 import re
@@ -9,7 +10,7 @@ from typing import TYPE_CHECKING
 
 from chroot_distro.exceptions import MountError
 from chroot_distro.message import warn
-from chroot_distro.syscalls._constants import MS_REC, MS_SLAVE
+from chroot_distro.syscalls._constants import MS_PRIVATE, MS_REC, MS_SLAVE
 from chroot_distro.syscalls.mount import bind_mount, mount_filesystem, set_propagation
 from chroot_distro.syscalls.umount import native_umount
 
@@ -540,6 +541,14 @@ def _fs_supported(fstype: str) -> bool:
         return False
 
 
+@functools.lru_cache(maxsize=1)
+def _devpts_single_instance() -> bool:
+    """Whether the kernel has one global devpts superblock (cached)."""
+    from chroot_distro.commands.kernel_config import PROBE_ABSENT, probe_devpts_multi_instance
+
+    return probe_devpts_multi_instance() == PROBE_ABSENT
+
+
 def _mount_fs_and_options(target: str) -> tuple[str, str]:
     """Return (fstype, options) of the topmost mount at *target*.
 
@@ -618,6 +627,26 @@ def apply_special_mount(rootfs: str, sm, holder: NamespaceHolder | None = None, 
             log.debug(f"Mount target {target} does not exist and mkdir=False, skipping")
             return False
 
+    # On single-instance kernels a devpts mount(2) reconfigures the one global
+    # superblock, i.e. the host's /dev/pts, until reboot. Bind it instead.
+    if sm.fstype == "devpts" and _devpts_single_instance():
+        if is_mounted(target, holder=holder):
+            return True
+        if holder is None:
+            try:
+                bind_mount("/dev/pts", target)
+                return True
+            except OSError as e:
+                msg = f"binding host /dev/pts on {target} failed: {e}"
+                if optional:
+                    log.debug(msg)
+                    return False
+                raise RuntimeError(msg) from e
+        # No host /dev/pts to bind inside the namespace; skip rather than
+        # fail the login.
+        warn("Single-instance devpts kernel: container gets no private /dev/pts.")
+        return False
+
     if is_mounted(target, holder=holder):
         # Trust an existing mount only when it looks like the one we would
         # create. Stale mounts from dead namespaces are MNT_LOCKED (umount2
@@ -634,6 +663,10 @@ def apply_special_mount(rootfs: str, sm, holder: NamespaceHolder | None = None, 
         elif fstype == sm.fstype:
             return True
         # Fall through: stack the correct mount on top of the stale one.
+        # Make the covered mount private first, or the new mount propagates
+        # a copy onto the host original when they share a peer group.
+        with contextlib.suppress(OSError):
+            set_propagation(target, MS_PRIVATE)
 
     # Build the list of option strings to try, simplest-last. Android's toybox
     # `mount` and SELinux frequently reject tmpfs option strings (e.g. size=)

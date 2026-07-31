@@ -21,6 +21,7 @@ options only affect specific extras (e.g. Docker).
 """
 
 import contextlib
+import errno
 import gzip
 import os
 import platform
@@ -190,8 +191,9 @@ def probe_devpts_multi_instance() -> str:
         mounted = True
         entries = set(os.listdir(scratch)) - {"ptmx"}
         return PROBE_ABSENT if entries else PROBE_PRESENT
-    except OSError:
-        return PROBE_UNKNOWN
+    except OSError as exc:
+        # Single-instance kernels reject 'newinstance' with EINVAL.
+        return PROBE_ABSENT if exc.errno == errno.EINVAL else PROBE_UNKNOWN
     finally:
         if mounted:
             with contextlib.suppress(OSError):

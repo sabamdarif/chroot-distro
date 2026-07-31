@@ -147,6 +147,10 @@ def apply_bind_mounts(
                 warn(f"Skipping optional bind {src} -> {dst}: {exc}")
                 continue
             raise
+        # Stop send-propagation from the /dev bind, or mounts made inside it
+        # next (/dev/pts, devpts) propagate copies back onto the host /dev.
+        if holder is None and dst_real == dev_root:
+            mount_manager.make_rslave(dst)
 
 
 def finalize_holder(holder: NamespaceHolder, container_key: str, *, hostname: str) -> None:

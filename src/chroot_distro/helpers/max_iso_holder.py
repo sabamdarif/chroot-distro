@@ -76,6 +76,25 @@ def _make_node(path: str, major: int, minor: int, mode: int) -> None:
         log.debug("Failed to mknod %s (best-effort): %s", path, exc)
 
 
+def _devpts_single_instance() -> bool:
+    """Whether the kernel has one global devpts superblock.
+
+    Must run before chroot. When in doubt on an old kernel, assume single:
+    mounting devpts then would reconfigure the host /dev/pts until reboot."""
+    try:
+        parts = os.uname().release.split(".")
+        if (int(parts[0]), int(parts[1].split("-")[0])) >= (4, 7):
+            return False
+    except (ValueError, IndexError):
+        return False
+    try:
+        from chroot_distro.commands.kernel_config import PROBE_PRESENT, probe_devpts_multi_instance
+
+        return probe_devpts_multi_instance() != PROBE_PRESENT
+    except Exception:
+        return True
+
+
 def setup(config: dict) -> None:
     rootfs = config["rootfs"]
     dev_nodes = config.get("dev_nodes", [])
@@ -84,6 +103,8 @@ def setup(config: dict) -> None:
     # Detach our mount tree from the host so nothing we do propagates back.
     with contextlib.suppress(OSError):
         _mount(libc, "none", "/", "", MS_REC | MS_PRIVATE, None)
+
+    single_pts = _devpts_single_instance()
 
     os.chroot(rootfs)
     os.chdir("/")
@@ -110,21 +131,26 @@ def setup(config: dict) -> None:
         _make_node("/dev/" + name, major, minor, mode)
 
     # devpts for login ptys, plus the /dev/ptmx -> pts/ptmx symlink.
-    os.makedirs("/dev/pts", exist_ok=True)
-    _mount(
-        libc,
-        "devpts",
-        "/dev/pts",
-        "devpts",
-        MS_NOSUID | MS_NOEXEC,
-        "gid=5,mode=620,ptmxmode=0666,newinstance",
-    )
-    try:
-        if os.path.islink("/dev/ptmx") or os.path.exists("/dev/ptmx"):
-            os.remove("/dev/ptmx")
-        os.symlink("/dev/pts/ptmx", "/dev/ptmx")
-    except OSError as exc:
-        log.warning("Failed to create /dev/ptmx symlink: %s", exc)
+    if single_pts:
+        # A devpts mount would reconfigure the host's single instance; the
+        # session keeps working on its inherited tty.
+        log.warning("Single-instance devpts kernel: no /dev/pts under max isolation.")
+    else:
+        os.makedirs("/dev/pts", exist_ok=True)
+        _mount(
+            libc,
+            "devpts",
+            "/dev/pts",
+            "devpts",
+            MS_NOSUID | MS_NOEXEC,
+            "gid=5,mode=620,ptmxmode=0666,newinstance",
+        )
+        try:
+            if os.path.islink("/dev/ptmx") or os.path.exists("/dev/ptmx"):
+                os.remove("/dev/ptmx")
+            os.symlink("/dev/pts/ptmx", "/dev/ptmx")
+        except OSError as exc:
+            log.warning("Failed to create /dev/ptmx symlink: %s", exc)
 
     # Fresh /dev/shm.
     try:
