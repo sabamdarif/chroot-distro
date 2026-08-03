@@ -197,17 +197,15 @@ def align_user_to_termux_owner(
 def resolve_host_home(login_user: str | None = None) -> str | None:
     """Host path to bind for ``--shared-home``.
 
-    The guest ``--user`` name often doesn't exist on the host, so prefer the
-    invoking account (``SUDO_USER``, real uid, ``LOGNAME``); ``$HOME`` only
-    for a root login.
+    Prefer the invoking account (``SUDO_USER``, real uid, ``LOGNAME``) for
+    every login user, root included: chroot-distro self-elevates via sudo,
+    which resets ``$HOME`` to ``/root``, so ``$HOME`` is only a last-resort
+    fallback for root logins.
     """
     import pwd
 
-    if not login_user or login_user == "root":
-        return os.environ.get("HOME") or os.path.expanduser("~")
-
     sudo_user = os.environ.get("SUDO_USER")
-    if sudo_user:
+    if sudo_user and sudo_user != "root":
         try:
             return pwd.getpwnam(sudo_user).pw_dir
         except (KeyError, OSError) as exc:
@@ -227,11 +225,13 @@ def resolve_host_home(login_user: str | None = None) -> str | None:
             except (KeyError, OSError):
                 continue
 
-    if login_user:
-        try:
-            return pwd.getpwnam(login_user).pw_dir
-        except (KeyError, OSError) as exc:
-            log.debug("Failed to resolve home for login user '%s': %s", login_user, exc)
+    if not login_user or login_user == "root":
+        return os.environ.get("HOME") or os.path.expanduser("~")
+
+    try:
+        return pwd.getpwnam(login_user).pw_dir
+    except (KeyError, OSError) as exc:
+        log.debug("Failed to resolve home for login user '%s': %s", login_user, exc)
 
     return None
 

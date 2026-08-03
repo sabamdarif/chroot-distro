@@ -407,7 +407,9 @@ def test_resolve_host_home_uses_sudo_user_not_container_name():
         patch("pwd.getpwnam", side_effect=lambda n: type("pw", (), {"pw_dir": f"/host/home/{n}"})()),
     ):
         assert resolve_host_home("saba") == "/host/home/sabamdarif"
-        assert resolve_host_home("root") == "/root"
+        # Root logins share the invoking user's home too: sudo resets $HOME
+        # to /root, which is the host root's home, not the invoker's.
+        assert resolve_host_home("root") == "/host/home/sabamdarif"
 
 
 def test_resolve_host_home_returns_none_for_unknown_guest_user():
