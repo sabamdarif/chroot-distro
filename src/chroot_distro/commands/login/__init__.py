@@ -622,13 +622,22 @@ def _command_login_inner_once(container_name: str, args) -> None:
         if use_shared_home and not minimal:
             try:
                 if IS_TERMUX:
-                    termux_owner_uid, termux_owner_gid = termux_home_owner_ids()
-                    aligned = align_user_to_termux_owner(
-                        rootfs,
-                        login_user,
-                        termux_owner_uid,
-                        termux_owner_gid,
-                    )
+                    if login_user == "root":
+                        # Keep root at 0:0 — remapping it to the Termux app
+                        # uid made the session run unprivileged (apt/dpkg
+                        # EACCES). Root reads the app-owned home fine via
+                        # CAP_DAC_OVERRIDE; this also repairs entries left
+                        # stale by older versions.
+                        set_passwd_uid_gid(rootfs, "root", 0, 0)
+                        aligned = True
+                    else:
+                        termux_owner_uid, termux_owner_gid = termux_home_owner_ids()
+                        aligned = align_user_to_termux_owner(
+                            rootfs,
+                            login_user,
+                            termux_owner_uid,
+                            termux_owner_gid,
+                        )
                 else:
                     host_home = resolve_host_home(login_user)
                     if not host_home or not os.path.isdir(host_home):

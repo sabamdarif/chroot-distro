@@ -459,6 +459,44 @@ def test_sync_passwd_to_path_owner_skips_root(tmp_path):
     assert (etc / "passwd").read_text(encoding="utf-8") == ("root:x:0:0:root:/root:/bin/bash\n")
 
 
+def test_sync_passwd_to_path_owner_repairs_stale_root(tmp_path):
+    """Regression (Termux): a previous --shared-home bind left root's passwd
+    uid/gid remapped to the Termux app uid even though /root on disk is
+    root-owned. The next plain login must repair root back to 0:0 so the
+    guest can read its own $HOME."""
+    from chroot_distro.commands.login.passwd import sync_passwd_to_path_owner
+
+    rootfs = tmp_path / "rootfs"
+    etc = rootfs / "etc"
+    etc.mkdir(parents=True)
+    (etc / "passwd").write_text(
+        "root:x:10328:10328:root:/root:/bin/bash\n",
+        encoding="utf-8",
+    )
+    host_dir = tmp_path / "root_home"
+    host_dir.mkdir()
+    assert sync_passwd_to_path_owner(str(rootfs), "root", str(host_dir))
+    assert (etc / "passwd").read_text(encoding="utf-8") == ("root:x:0:0:root:/root:/bin/bash\n")
+
+
+def test_sync_passwd_to_home_owner_repairs_stale_root(tmp_path):
+    """End-to-end: resolve the in-rootfs /root and repair the stale root
+    passwd entry left behind by a Termux --shared-home session."""
+    from chroot_distro.commands.login.passwd import sync_passwd_to_home_owner
+
+    rootfs = tmp_path / "rootfs"
+    home = rootfs / "root"
+    home.mkdir(parents=True)
+    etc = rootfs / "etc"
+    etc.mkdir()
+    (etc / "passwd").write_text(
+        "root:x:10328:10328:root:/root:/bin/bash\n",
+        encoding="utf-8",
+    )
+    assert sync_passwd_to_home_owner(str(rootfs), "root", "/root")
+    assert (etc / "passwd").read_text(encoding="utf-8") == ("root:x:0:0:root:/root:/bin/bash\n")
+
+
 def test_release_passwd_uid_conflicts(tmp_path):
     from chroot_distro.commands.login.passwd import (
         release_passwd_uid_conflicts,

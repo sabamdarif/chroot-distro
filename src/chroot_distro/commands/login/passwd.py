@@ -294,11 +294,23 @@ def sync_passwd_to_path_owner(
     """Match passwd uid/gid to the owner of a host path (bind-mount source)."""
     if not host_path:
         return False
-    if username == "root":
-        return False
     try:
         st = os.stat(host_path)
     except OSError:
+        return False
+    if username == "root":
+        # Never reassign root's uid/gid to a bind-mount owner — but a past
+        # Termux --shared-home login may have left root with a non-zero uid
+        # (the guest runs as the Termux app uid while /root on disk stays
+        # root-owned, breaking the next plain login with EACCES on $HOME).
+        # Repair root back to 0:0 instead.
+        try:
+            cur_uid = read_passwd_field(rootfs, "root", 2)
+            cur_gid = read_passwd_field(rootfs, "root", 3)
+        except OSError:
+            return False
+        if cur_uid and cur_gid and (cur_uid != "0" or cur_gid != "0"):
+            return set_passwd_uid_gid(rootfs, "root", 0, 0)
         return False
     try:
         if os.path.realpath(host_path) == os.path.realpath("/root"):
