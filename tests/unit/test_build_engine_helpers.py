@@ -27,6 +27,11 @@ def test_split_arg_list_is_joined():
     assert parsing.split_arg(["FOO=a", "b"]) == ("FOO", "a b")
 
 
+def test_split_arg_quoted_value():
+    assert parsing.split_arg('FOO="https://example.com/file.zip"') == ("FOO", "https://example.com/file.zip")
+    assert parsing.split_arg("FOO='https://example.com/file.zip'") == ("FOO", "https://example.com/file.zip")
+
+
 # ── parsing.parse_kv_list ─────────────────────────────────────────────────────
 def test_parse_kv_list_equals_form():
     assert parsing.parse_kv_list("A=1 B=2") == [("A", "1"), ("B", "2")]

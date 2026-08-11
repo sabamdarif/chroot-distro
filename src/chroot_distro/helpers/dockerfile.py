@@ -438,8 +438,13 @@ def expand_vars(text: str, env: dict[str, str | None]) -> str:
     while i < n:
         c = text[i]
         if c == "\\" and i + 1 < n:
-            out.append(text[i + 1])
-            i += 2
+            next_char = text[i + 1]
+            if next_char in ("$", "\\"):
+                out.append(next_char)
+                i += 2
+                continue
+            out.append("\\")
+            i += 1
             continue
         if c != "$":
             out.append(c)

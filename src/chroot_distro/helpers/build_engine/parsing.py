@@ -13,6 +13,9 @@ def split_arg(value: typing.Any) -> tuple[str, str | None]:
         return ("", None)
     if "=" in s:
         k, _, v = s.partition("=")
+        v = v.strip()
+        if len(v) >= 2 and ((v.startswith('"') and v.endswith('"')) or (v.startswith("'") and v.endswith("'"))):
+            v = v[1:-1]
         return (k.strip(), v)
     return (s, None)
 

@@ -335,6 +335,9 @@ def _parse_build_args(raw: list[str]) -> dict[str, str]:
     for item in raw:
         if "=" in item:
             k, _, v = item.partition("=")
+            v = v.strip()
+            if len(v) >= 2 and ((v.startswith('"') and v.endswith('"')) or (v.startswith("'") and v.endswith("'"))):
+                v = v[1:-1]
         else:
             k, v = item, os.environ.get(item, "")
         if k:
