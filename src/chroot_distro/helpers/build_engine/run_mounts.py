@@ -203,8 +203,9 @@ def _resolve_bind(engine: typing.Any, m: RunMount, n: int, tmp_paths: list[str])
     else:
         base = engine.build_dir
     base_abs = os.path.abspath(base)
-    src = os.path.normpath(os.path.join(base_abs, m.source.lstrip("/")))
-    if src != base_abs and not src.startswith(base_abs + os.sep):
+    src_parts = [p for p in m.source.lstrip("/").split("/") if p not in ("", ".")]
+    src = _safe_resolve(base_abs, src_parts)
+    if src is None or not (src == base_abs or src.startswith(base_abs + os.sep)):
         raise BuildError(f"RUN --mount source '{m.source}' escapes the build context.")
     if not os.path.exists(src):
         raise BuildError(f"RUN --mount source '{m.source}' not found.")

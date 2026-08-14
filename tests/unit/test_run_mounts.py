@@ -185,9 +185,10 @@ def test_empty_mounts_is_noop(env):
 
 
 def test_bind_escape_rejected(env):
+    """.. components are clamped inside the context, so ../../etc is not found."""
     engine, stage = env
     m = _mount("type=bind,target=/x,source=../../etc")
-    with pytest.raises(BuildError, match="escapes the build context"), run_mount_session(engine, stage, [m]):
+    with pytest.raises(BuildError, match="not found"), run_mount_session(engine, stage, [m]):
         pass
 
 
@@ -195,6 +196,17 @@ def test_bind_missing_source_rejected(env):
     engine, stage = env
     m = _mount("type=bind,target=/x,source=nope")
     with pytest.raises(BuildError, match="not found"), run_mount_session(engine, stage, [m]):
+        pass
+
+
+def test_bind_symlink_to_host_path_rejected(env, tmp_path):
+    """A context symlink pointing at an absolute host path must not bind it (BUG-01)."""
+    engine, stage = env
+    victim = tmp_path / "host-secret.txt"
+    victim.write_text("TOP SECRET")
+    os.symlink(str(victim), os.path.join(engine.build_dir, "evil-link"))
+    m = _mount("type=bind,target=/x,source=evil-link")
+    with pytest.raises(BuildError, match="not found|escapes"), run_mount_session(engine, stage, [m]):
         pass
 
 
