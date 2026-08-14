@@ -289,18 +289,10 @@ def find_nvidia_configs() -> list[tuple[str, str]]:
     """
     binds: list[tuple[str, str]] = []
 
-    # 1. Generic nvidia config files in /etc/
-    try:
-        for root, _dirs, files in os.walk("/etc"):
-            for fname in files:
-                if "nvidia" in fname.lower():
-                    full = os.path.join(root, fname)
-                    if os.path.isfile(full):
-                        binds.append((full, full))
-    except OSError as exc:
-        log.debug("Failed to search /etc for NVIDIA configuration files: %s", exc)
-
-    # 2. Specific ICD/EGL/Vulkan config files
+    # Specific ICD/EGL/Vulkan config files. Only these known paths are
+    # bound — never a full /etc walk matching on the name "nvidia", which
+    # would leak unrelated host files (logs, backups, credentials) into
+    # the container.
     config_globs = (
         "/usr/share/glvnd/egl_vendor.d/10_nvidia.json",
         "/usr/share/egl/egl_external_platform.d/10_nvidia_wayland.json",
