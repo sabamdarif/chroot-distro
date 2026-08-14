@@ -1,4 +1,5 @@
 import os
+import tempfile
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -6,6 +7,8 @@ import pytest
 from chroot_distro.elevate import (
     _find_escalation_tool,
     _forwarded_env_assignments,
+    _load_secret_file,
+    _write_secret_file,
     elevate_or_die,
     get_reexec_argv,
     is_root,
@@ -181,13 +184,13 @@ def test_elevate_or_die_exec_su():
 def test_forwarded_env_assignments_only_present_vars():
     with patch.dict(
         "os.environ",
-        {"CD_USE_NS": "1", "CD_DOWNLOAD_WORKERS": "8", "UNRELATED": "x"},
+        {"CD_USE_NS": "1", "CD_DOWNLOAD_WORKERS": "8", "UNRELATED": "x", "CD_DOCKER_AUTH": "user:pass"},
         clear=True,
     ):
         assignments = _forwarded_env_assignments()
     assert "CD_USE_NS=1" in assignments
     assert "CD_DOWNLOAD_WORKERS=8" in assignments
-    # Variables that are not set must not appear.
+    # CD_DOCKER_AUTH is a secret — must never ride in plain argv assignments.
     assert all(not a.startswith("CD_DOCKER_AUTH=") for a in assignments)
     # Unrelated host vars are never forwarded.
     assert all(not a.startswith("UNRELATED=") for a in assignments)
@@ -361,3 +364,77 @@ def test_is_root_available_linux():
         patch("chroot_distro.elevate._find_escalation_tool", return_value=None),
     ):
         assert is_root_available() is False
+
+
+# ---------------------------------------------------------------------------
+# BUG-03: CD_DOCKER_AUTH must never appear in argv
+# ---------------------------------------------------------------------------
+
+
+def test_write_secret_file_none_when_no_secrets():
+    with patch.dict("os.environ", {}, clear=True):
+        assert _write_secret_file() is None
+
+
+def test_load_secret_file_reads_and_unlinks():
+    fd, path = tempfile.mkstemp(prefix=".cd-test-secret-")
+    with os.fdopen(fd, "w") as f:
+        f.write("CD_DOCKER_AUTH=alice:mytoken\n")
+    saved = os.environ.pop("CD_DOCKER_AUTH", None)
+    os.environ["CD_DOCKER_AUTH_FILE"] = path
+    try:
+        _load_secret_file()
+        assert os.environ.get("CD_DOCKER_AUTH") == "alice:mytoken"
+        assert not os.path.exists(path)
+    finally:
+        os.environ.pop("CD_DOCKER_AUTH", None)
+        os.environ.pop("CD_DOCKER_AUTH_FILE", None)
+        if saved is not None:
+            os.environ["CD_DOCKER_AUTH"] = saved
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
+def test_load_secret_file_noop_when_unset():
+    with patch.dict("os.environ", {}, clear=True):
+        _load_secret_file()  # must not raise
+
+
+def test_docker_auth_not_in_sudo_argv():
+    """CD_DOCKER_AUTH must travel via tempfile path, not raw value in argv."""
+    mock_exec = MagicMock()
+    with (
+        patch("chroot_distro.elevate.is_root", return_value=False),
+        patch("chroot_distro.elevate._find_escalation_tool", return_value=["sudo", "-E"]),
+        patch("chroot_distro.elevate.get_reexec_argv", return_value=["/usr/bin/chroot-distro", "install", "img"]),
+        patch("chroot_distro.elevate._write_secret_file", return_value="/tmp/.cd-secret-test"),
+        patch("os.execvp", mock_exec),
+        patch.dict("os.environ", {"CD_DOCKER_AUTH": "alice:s3cret"}, clear=True),
+    ):
+        elevate_or_die()
+
+    args, _ = mock_exec.call_args
+    full_argv = args[1]
+    assert not any("s3cret" in a for a in full_argv), "raw secret must not appear in argv"
+    assert "CD_DOCKER_AUTH_FILE=/tmp/.cd-secret-test" in full_argv
+
+
+def test_docker_auth_not_in_su_argv():
+    """Secret must not appear in su -c command string either."""
+    mock_exec = MagicMock()
+    with (
+        patch("chroot_distro.elevate.is_root", return_value=False),
+        patch("chroot_distro.elevate._find_escalation_tool", return_value=["su", "-c"]),
+        patch("chroot_distro.elevate.get_reexec_argv", return_value=["/usr/bin/chroot-distro", "install", "img"]),
+        patch("chroot_distro.elevate._write_secret_file", return_value="/tmp/.cd-secret-test"),
+        patch("os.execvp", mock_exec),
+        patch.dict("os.environ", {"CD_DOCKER_AUTH": "alice:s3cret"}, clear=True),
+    ):
+        elevate_or_die()
+
+    args, _ = mock_exec.call_args
+    cmd_str = args[1][2]  # su -c "<cmd_str>"
+    assert "s3cret" not in cmd_str, "raw secret must not appear in su -c command string"
+    assert "CD_DOCKER_AUTH_FILE=/tmp/.cd-secret-test" in cmd_str

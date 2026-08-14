@@ -1,9 +1,11 @@
+import contextlib
 import logging
 import os
 import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 
 from chroot_distro.constants import IS_TERMUX, TERMUX_HOME, TERMUX_PREFIX
 from chroot_distro.exceptions import RootRequiredError
@@ -29,11 +31,14 @@ log = logging.getLogger(__name__)
 _FORWARDED_ENV_VARS = (
     "CD_USE_NS",
     "CD_USE_ISOLATION",
-    "CD_DOCKER_AUTH",
     "CD_DOWNLOAD_WORKERS",
     "CD_DOWNLOAD_MAX_RETRIES",
     "CD_DOWNLOAD_RATE_LIMIT",
 )
+
+# Secrets forwarded via a 0600 tempfile rather than argv so they are never
+# visible in /proc/*/cmdline or kernel audit logs.
+_SECRET_ENV_VARS = ("CD_DOCKER_AUTH",)
 
 # Display/session/audio variables needed by --shared-display. These are
 # forwarded as a belt-and-suspenders complement to the get_invoking_env()
@@ -94,6 +99,41 @@ def _forwarded_env_assignments() -> list[str]:
         if value is not None:
             assignments.append(f"{name}={value}")
     return assignments
+
+
+def _write_secret_file() -> str | None:
+    """Write _SECRET_ENV_VARS to a 0600 tempfile; return its path, or None if none are set."""
+    secrets = [(k, os.environ[k]) for k in _SECRET_ENV_VARS if k in os.environ]
+    if not secrets:
+        return None
+    fd, path = tempfile.mkstemp(prefix=".cd-secret-")
+    try:
+        os.chmod(path, 0o600)
+        with os.fdopen(fd, "w") as fh:
+            for k, v in secrets:
+                fh.write(f"{k}={v}\n")
+    except Exception:
+        with contextlib.suppress(OSError):
+            os.unlink(path)
+        raise
+    return path
+
+
+def _load_secret_file() -> None:
+    """Read CD_DOCKER_AUTH_FILE if present, populate os.environ, then unlink the file."""
+    path = os.environ.pop("CD_DOCKER_AUTH_FILE", None)
+    if path is None:
+        return
+    try:
+        with open(path) as fh:
+            for line in fh:
+                k, _, v = line.rstrip("\n").partition("=")
+                if k:
+                    os.environ[k] = v
+    except OSError:
+        pass
+    with contextlib.suppress(OSError):
+        os.unlink(path)
 
 
 def get_reexec_argv() -> list[str]:
@@ -228,7 +268,7 @@ def _su_help_text(su: str) -> str:
     return (proc.stdout or "") + (proc.stderr or "")
 
 
-def _termux_root_env_exports() -> str:
+def _termux_root_env_exports(secret_file: str | None = None) -> str:
     """Shell prelude replicating what termux-sudo sets up for the root side.
 
     Plain Magisk/KernelSU ``su -c`` drops into a raw Android environment
@@ -240,6 +280,10 @@ def _termux_root_env_exports() -> str:
       shebangs are rewritten to Termux paths (Android has no /usr/bin)
     - a writable HOME inside the Termux rootfs (~/.suroot)
     - TMPDIR pointing at Termux's tmp
+
+    *secret_file*, if given, is the path of a 0600 tempfile holding
+    _SECRET_ENV_VARS; it is forwarded as CD_DOCKER_AUTH_FILE so the value
+    never appears in the shell command string (i.e. not in /proc/*/cmdline).
     """
     suroot = os.path.join(TERMUX_HOME, ".suroot")
     try:
@@ -266,6 +310,8 @@ def _termux_root_env_exports() -> str:
         value = os.environ.get(name)
         if value is not None:
             exports[name] = value
+    if secret_file:
+        exports["CD_DOCKER_AUTH_FILE"] = secret_file
     return "; ".join(f"export {key}={shlex.quote(value)}" for key, value in exports.items())
 
 
@@ -295,8 +341,9 @@ def _elevate_termux() -> None:
         cwd = os.getcwd()
     except OSError:
         cwd = "/"
+    secret_path = _write_secret_file()
     command = (
-        _termux_root_env_exports()
+        _termux_root_env_exports(secret_file=secret_path)
         + "; cd "
         + shlex.quote(cwd)
         + " 2>/dev/null || cd /"
@@ -336,6 +383,9 @@ def _elevate_termux() -> None:
     try:
         os.execvp(argv[0], argv)
     except OSError as e:
+        if secret_path:
+            with contextlib.suppress(OSError):
+                os.unlink(secret_path)
         raise RootRequiredError(f"Failed to execute '{su}': {e}") from e
 
 
@@ -373,6 +423,10 @@ def elevate_or_die() -> None:
 
     Raises RootRequiredError when elevation loops or no mechanism exists.
     """
+    # Hydrate secrets that the pre-elevation process wrote to a tempfile to
+    # avoid embedding them in argv (visible in /proc/*/cmdline).
+    _load_secret_file()
+
     if is_root():
         return
 
@@ -412,6 +466,13 @@ def elevate_or_die() -> None:
     # environment and still prevents an elevation loop.
     env_assignments = ["_CHROOT_DISTRO_ELEVATING=1", *_forwarded_env_assignments()]
 
+    # Secrets travel via a 0600 tempfile, not argv, to stay out of
+    # /proc/*/cmdline.  The root-side elevate_or_die() call reads and
+    # unlinks the file before is_root() returns.
+    secret_path = _write_secret_file()
+    if secret_path:
+        env_assignments.append(f"CD_DOCKER_AUTH_FILE={secret_path}")
+
     tool_name = tool_cmd[0]
 
     # Prefix the re-executed program with `env VAR=value ...` so the
@@ -433,4 +494,7 @@ def elevate_or_die() -> None:
     try:
         os.execvp(full_argv[0], full_argv)
     except OSError as e:
+        if secret_path:
+            with contextlib.suppress(OSError):
+                os.unlink(secret_path)
         raise RootRequiredError(f"Failed to execute privilege elevation tool '{tool_name}': {e}") from e
