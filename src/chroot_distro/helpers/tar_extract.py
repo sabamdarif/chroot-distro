@@ -107,8 +107,13 @@ def _process_member(member, tf, rootfs_dir, *, strip, handle_whiteouts, deferred
         return
     dest = os.path.join(parent, rel_parts[-1])
 
-    if handle_whiteouts and _apply_whiteout(rel_parts, parent):
-        return
+    # For whiteouts, use the non-symlink-resolved parent to avoid deleting
+    # through symlinks. Compute parent_no_follow by manually joining path
+    # components without resolving symlinks.
+    if handle_whiteouts:
+        parent_no_follow = os.path.join(rootfs_dir, *rel_parts[:-1]) if len(rel_parts) > 1 else rootfs_dir
+        if _apply_whiteout(rel_parts, parent_no_follow):
+            return
 
     os.makedirs(parent, exist_ok=True)
 
@@ -138,6 +143,15 @@ def _process_member(member, tf, rootfs_dir, *, strip, handle_whiteouts, deferred
 def _apply_whiteout(rel_parts, parent) -> bool:
     """Handle an OCI whiteout member. Returns True iff a whiteout was applied."""
     basename = rel_parts[-1]
+
+    # If parent is a symlink, don't follow it for whiteout operations.
+    # Whiteouts apply to the overlay layer, not to symlink targets.
+    # Use lexists to check existence without following symlinks.
+    if not os.path.lexists(parent):
+        return True
+    if os.path.islink(parent):
+        return True
+
     if basename == ".wh..wh..opq":
         # Opaque whiteout: clear everything inside the parent dir.
         if os.path.isdir(parent):
