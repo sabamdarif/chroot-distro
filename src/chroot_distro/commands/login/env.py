@@ -75,7 +75,8 @@ IMAGE_ENV_BLOCKED = frozenset(
 
 
 # Per-session vars (HOME, USER, TERM, COLORTERM) belong to the spawning
-# shell.
+# shell. Keys the caller set explicitly are passed as *force_keys* to
+# inject_env_profile() and bypass this list.
 _PROFILE_INJECT_SKIP = frozenset(
     {
         "HOME",
@@ -137,6 +138,23 @@ def read_cd_env() -> list[str]:
     return [line.strip() for line in raw.splitlines() if "=" in line]
 
 
+def user_env_keys(extra_env: list[str]) -> set[str]:
+    """Return the var names the caller set explicitly via ``--env``/``CD_ENV``."""
+    return {entry.partition("=")[0] for entry in extra_env if "=" in entry}
+
+
+def apply_user_env(env: dict, extra_env: list[str]) -> None:
+    """Layer ``--env``/``CD_ENV`` entries onto *env*, last so they win.
+
+    Every value chroot-distro derives itself (image Env, host vars, session
+    defaults) is computed first; an explicit request always overrides it.
+    """
+    for entry in extra_env:
+        key, _, val = entry.partition("=")
+        if key:
+            env[key] = val
+
+
 def read_manifest_env(container_dir: str) -> list:
     """Return image Env entries from manifest.json, or [] if absent/invalid."""
     cfg = _read_manifest_config(container_dir)
@@ -180,21 +198,29 @@ def read_manifest_volumes(container_dir: str) -> list[str]:
     return []
 
 
-def inject_termux_profile(
+def inject_env_profile(
     rootfs: str,
     env: dict,
     *,
+    force_keys: frozenset[str] | set[str] = frozenset(),
+    guest_prefix: str = "",
     owner_uid: int | None = None,
     owner_gid: int | None = None,
-    include_termux_bin: bool = False,
 ) -> None:
     """Write a profile.d snippet that re-applies the login-time environment.
 
-    *include_termux_bin* appends the host ``$PREFIX/bin`` to PATH — only for
-    termux-type containers; in normal distros host Termux binaries cannot
-    execute inside the chroot.
+    A login shell sources the guest's own ``/etc/profile``, which resets PATH
+    (and whatever else the distro pins) *after* the session env is handed to
+    ``exec``; profile.d runs later, so exporting there is what makes a value
+    stick. *force_keys* are exported even when listed in
+    _PROFILE_INJECT_SKIP — the caller asked for them explicitly.
+
+    *guest_prefix* locates ``etc/profile.d`` under a prefix inside the rootfs
+    (termux-type containers keep theirs in ``$PREFIX``). Nothing is written
+    when the directory is absent, and an earlier snippet is removed when
+    there is nothing left to export.
     """
-    profile_d = os.path.join(rootfs, "etc", "profile.d")
+    profile_d = os.path.join(rootfs, guest_prefix.strip("/"), "etc", "profile.d")
     if not os.path.isdir(profile_d):
         return
     snippet = os.path.join(profile_d, "chroot-profile.sh")
@@ -203,25 +229,23 @@ def inject_termux_profile(
     for ls in (legacy_snippet, legacy_snippet2):
         with contextlib.suppress(OSError):
             os.remove(ls)
-    termux_bin = f"{TERMUX_PREFIX}/bin"
 
     lines: list[str] = []
-    if include_termux_bin:
-        lines += [
-            'case ":${PATH}:" in',
-            f'  *":{termux_bin}:"*) ;;',
-            f'  *) export PATH="${{PATH}}:{termux_bin}" ;;',
-            "esac",
-        ]
-
     for key in sorted(env):
-        if key in _PROFILE_INJECT_SKIP or is_sensitive_env_key(key):
+        if key not in force_keys and key in _PROFILE_INJECT_SKIP:
+            continue
+        if is_sensitive_env_key(key):
             continue
         if not _VALID_ENV_KEY_RE.match(key):
             continue
         val = env[key]
         escaped = str(val).replace("'", "'\\''")
         lines.append(f"export {key}='{escaped}'")
+
+    if not lines:
+        with contextlib.suppress(OSError):
+            os.remove(snippet)
+        return
 
     content = "\n".join(lines) + "\n"
     try:

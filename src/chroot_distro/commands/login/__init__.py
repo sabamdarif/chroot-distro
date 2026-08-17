@@ -21,7 +21,8 @@ from chroot_distro.commands.login.chroot_cmd import (
 from chroot_distro.commands.login.env import (
     ANDROID_HOST_ENV_VARS,
     IMAGE_ENV_BLOCKED,
-    inject_termux_profile,
+    apply_user_env,
+    inject_env_profile,
     read_cd_env,
     read_manifest_env,
     read_manifest_exposed_ports,
@@ -31,6 +32,7 @@ from chroot_distro.commands.login.env import (
     read_manifest_workdir,
     resolve_override,
     resolve_term,
+    user_env_keys,
 )
 from chroot_distro.commands.login.passwd import (
     align_user_to_termux_owner,
@@ -279,15 +281,12 @@ def _build_termux_env(rootfs, container_path, extra_env, minimal, isolated, cont
             if val:
                 env[var] = val
 
-    for entry in extra_env:
-        key, _, val = entry.partition("=")
-        if key:
-            env[key] = val
     host_term = env.get("TERM") or os.environ.get("TERM", "")
     env["TERM"] = resolve_term(rootfs, host_term)
     host_colorterm = os.environ.get("COLORTERM", "")
     if host_colorterm:
         env["COLORTERM"] = host_colorterm
+    apply_user_env(env, extra_env)
     # Drop host Termux linker vars: they point at host paths that don't exist
     # inside the chroot, making the guest linker print "This is <prog>, the
     # helper program for dynamic executables" instead of running the binary.
@@ -324,11 +323,6 @@ def _build_normal_env(rootfs, container_path, login_user, login_home, extra_env,
             if val:
                 env[var] = val
 
-    for entry in extra_env:
-        key, _, val = entry.partition("=")
-        if key:
-            env[key] = val
-
     if not minimal:
         env["HOME"] = login_home
         env["USER"] = login_user
@@ -337,6 +331,7 @@ def _build_normal_env(rootfs, container_path, login_user, login_home, extra_env,
     host_colorterm = os.environ.get("COLORTERM", "")
     if host_colorterm:
         env["COLORTERM"] = host_colorterm
+    apply_user_env(env, extra_env)
     return env
 
 
@@ -537,6 +532,8 @@ def _command_login_inner_once(container_name: str, args) -> None:
     custom_binds = bindings.strip_bind_options(raw_custom_binds)
     # CD_ENV entries are layered first so a matching --env override wins.
     extra_env = read_cd_env() + (getattr(args, "env", []) or [])
+    # Keys the caller set explicitly: nothing derived below may overwrite them.
+    user_keys = user_env_keys(extra_env)
     login_cmd = getattr(args, "login_cmd", []) or []
     run_inner = getattr(args, "_run_inner", None)
 
@@ -747,17 +744,27 @@ def _command_login_inner_once(container_name: str, args) -> None:
 
     # Strip the host Termux $PREFIX/bin from PATH for normal distros only;
     # a termux-type container's own binaries live at that exact path.
-    if IS_TERMUX and dist_type != "termux" and not skip_extra_mounts and not minimal:
+    if IS_TERMUX and dist_type != "termux" and not skip_extra_mounts and not minimal and "PATH" not in user_keys:
         termux_bin = f"{TERMUX_PREFIX}/bin"
         components = [c for c in child_env.get("PATH", "").split(":") if c and c != termux_bin]
         child_env["PATH"] = ":".join(components)
 
-    if dist_type == "normal" and IS_TERMUX and not skip_extra_mounts and not minimal:
+    # A login shell sources the guest's /etc/profile, which pins PATH (and
+    # whatever else the distro sets) over the env handed to exec; re-export
+    # the caller's own values from profile.d, which runs last. Sessions that
+    # do not start a login shell keep today's behaviour so a `run` cannot
+    # leave its --env behind for later logins.
+    session_profile = IS_TERMUX and dist_type == "normal" and not skip_extra_mounts and not minimal
+    if session_profile or run_inner is None:
+        force_keys = user_keys if run_inner is None else set()
+        profile_env = child_env if session_profile else {k: v for k, v in child_env.items() if k in force_keys}
         profile_uid = int(login_uid) if login_uid is not None else 0
         profile_gid = int(login_gid) if login_gid is not None else profile_uid
-        inject_termux_profile(
+        inject_env_profile(
             rootfs,
-            child_env,
+            profile_env,
+            force_keys=force_keys,
+            guest_prefix=TERMUX_PREFIX if dist_type == "termux" else "",
             owner_uid=profile_uid,
             owner_gid=profile_gid,
         )
@@ -790,9 +797,8 @@ def _command_login_inner_once(container_name: str, args) -> None:
                             )
 
         x11_env, resolved_x11_binds = resolve_display_env()
-        user_env_keys = {entry.partition("=")[0] for entry in extra_env if "=" in entry}
         for key, val in x11_env.items():
-            if key not in user_env_keys:
+            if key not in user_keys:
                 child_env[key] = val
 
         # The session D-Bus daemon authenticates by SO_PEERCRED UID and
@@ -826,7 +832,7 @@ def _command_login_inner_once(container_name: str, args) -> None:
                 guest_uid=int(login_uid),
                 guest_gid=int(login_gid) if login_gid is not None else int(login_uid),
             )
-            if guest_xauth and "XAUTHORITY" not in user_env_keys:
+            if guest_xauth and "XAUTHORITY" not in user_keys:
                 child_env["XAUTHORITY"] = guest_xauth
                 x11_auth_binds = [p for p in x11_auth_binds if os.path.realpath(p) != os.path.realpath(xauth)]
             else:
@@ -887,9 +893,8 @@ def _command_login_inner_once(container_name: str, args) -> None:
 
     # NVIDIA env vars; user-provided --env keys win.
     if has_nvidia:
-        user_env_keys_all = {entry.partition("=")[0] for entry in extra_env if "=" in entry}
         for key, val in nvidia_env_vars().items():
-            if key not in user_env_keys_all:
+            if key not in user_keys:
                 child_env[key] = val
 
     holder = None

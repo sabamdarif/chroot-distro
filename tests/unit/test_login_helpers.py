@@ -1239,6 +1239,106 @@ def test_read_cd_env_empty_when_unset(monkeypatch):
     assert read_cd_env() == []
 
 
+def test_user_env_beats_every_derived_value(monkeypatch):
+    """--env / CD_ENV entries are layered last, so nothing computed wins."""
+    from chroot_distro.commands.login import _build_normal_env
+
+    monkeypatch.setenv("TERM", "xterm-256color")
+    monkeypatch.setenv("COLORTERM", "truecolor")
+    env = _build_normal_env(
+        "/fake/rootfs",
+        "/fake/container",
+        "root",
+        "/root",
+        ["PATH=/opt/bin:/usr/bin", "HOME=/srv", "USER=deploy", "TERM=foo-term", "COLORTERM=none"],
+        minimal=False,
+        isolated=False,
+    )
+    assert env["PATH"] == "/opt/bin:/usr/bin"
+    assert env["HOME"] == "/srv"
+    assert env["USER"] == "deploy"
+    assert env["TERM"] == "foo-term"
+    assert env["COLORTERM"] == "none"
+
+
+def test_user_env_beats_derived_values_in_termux_container(monkeypatch):
+    from chroot_distro.commands.login import _build_termux_env
+
+    monkeypatch.setenv("TERM", "xterm-256color")
+    env = _build_termux_env(
+        "/fake/rootfs",
+        "/fake/container",
+        ["PATH=/opt/bin", "HOME=/srv", "LANG=C"],
+        minimal=False,
+        isolated=False,
+    )
+    assert env["PATH"] == "/opt/bin"
+    assert env["HOME"] == "/srv"
+    assert env["LANG"] == "C"
+
+
+def test_inject_env_profile_reexports_requested_keys(tmp_path):
+    """A login shell sources /etc/profile, which resets PATH; profile.d wins."""
+    from chroot_distro.commands.login.env import inject_env_profile
+
+    rootfs = tmp_path / "rootfs"
+    (rootfs / "etc" / "profile.d").mkdir(parents=True)
+    inject_env_profile(
+        str(rootfs),
+        {"PATH": "/opt/bin", "HOME": "/srv", "HOSTNAME": "debian"},
+        force_keys={"PATH"},
+    )
+    content = (rootfs / "etc" / "profile.d" / "chroot-profile.sh").read_text()
+    assert "export PATH='/opt/bin'" in content
+    assert "export HOSTNAME='debian'" in content
+    # HOME was not requested by the caller: it stays the session's own value.
+    assert "HOME" not in content
+
+
+def test_inject_env_profile_skips_secret_values(tmp_path):
+    from chroot_distro.commands.login.env import inject_env_profile
+
+    rootfs = tmp_path / "rootfs"
+    (rootfs / "etc" / "profile.d").mkdir(parents=True)
+    inject_env_profile(
+        str(rootfs),
+        {"GITHUB_TOKEN": "s3cret", "PATH": "/opt/bin"},
+        force_keys={"GITHUB_TOKEN", "PATH"},
+    )
+    content = (rootfs / "etc" / "profile.d" / "chroot-profile.sh").read_text()
+    assert "s3cret" not in content
+    assert "export PATH='/opt/bin'" in content
+
+
+def test_inject_env_profile_clears_stale_snippet(tmp_path):
+    """A later session without --env must not inherit the previous one's."""
+    from chroot_distro.commands.login.env import inject_env_profile
+
+    rootfs = tmp_path / "rootfs"
+    profile_d = rootfs / "etc" / "profile.d"
+    profile_d.mkdir(parents=True)
+    snippet = profile_d / "chroot-profile.sh"
+    snippet.write_text("export PATH='/opt/bin'\n")
+    inject_env_profile(str(rootfs), {})
+    assert not snippet.exists()
+
+
+def test_inject_env_profile_uses_guest_prefix(tmp_path):
+    from chroot_distro.commands.login import TERMUX_PREFIX
+    from chroot_distro.commands.login.env import inject_env_profile
+
+    rootfs = tmp_path / "rootfs"
+    profile_d = rootfs / TERMUX_PREFIX.lstrip("/") / "etc" / "profile.d"
+    profile_d.mkdir(parents=True)
+    inject_env_profile(
+        str(rootfs),
+        {"PATH": "/opt/bin"},
+        force_keys={"PATH"},
+        guest_prefix=TERMUX_PREFIX,
+    )
+    assert "export PATH='/opt/bin'" in (profile_d / "chroot-profile.sh").read_text()
+
+
 def test_format_get_chroot_cmd_linux_is_copy_pasteable():
     import shlex
 
