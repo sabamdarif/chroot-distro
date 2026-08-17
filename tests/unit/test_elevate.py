@@ -1,3 +1,4 @@
+import json
 import os
 import tempfile
 from unittest.mock import MagicMock, patch
@@ -379,22 +380,34 @@ def test_write_secret_file_none_when_no_secrets():
 def test_load_secret_file_reads_and_unlinks():
     fd, path = tempfile.mkstemp(prefix=".cd-test-secret-")
     with os.fdopen(fd, "w") as f:
-        f.write("CD_DOCKER_AUTH=alice:mytoken\n")
+        json.dump({"CD_DOCKER_AUTH": "alice:mytoken"}, f)
     saved = os.environ.pop("CD_DOCKER_AUTH", None)
-    os.environ["CD_DOCKER_AUTH_FILE"] = path
+    os.environ["CD_SECRET_FILE"] = path
     try:
         _load_secret_file()
         assert os.environ.get("CD_DOCKER_AUTH") == "alice:mytoken"
         assert not os.path.exists(path)
     finally:
         os.environ.pop("CD_DOCKER_AUTH", None)
-        os.environ.pop("CD_DOCKER_AUTH_FILE", None)
+        os.environ.pop("CD_SECRET_FILE", None)
         if saved is not None:
             os.environ["CD_DOCKER_AUTH"] = saved
         try:
             os.unlink(path)
         except OSError:
             pass
+
+
+def test_secret_file_round_trips_multiline_cd_env():
+    """CD_ENV holds one VAR=VALUE per line; its newlines must survive."""
+    cd_env = "PATH=/opt/bin:/usr/bin\nGITHUB_TOKEN=s3cret"
+    with patch.dict("os.environ", {"CD_ENV": cd_env}, clear=True):
+        path = _write_secret_file()
+        assert path is not None
+        os.environ["CD_SECRET_FILE"] = path
+        _load_secret_file()
+        assert os.environ["CD_ENV"] == cd_env
+        assert not os.path.exists(path)
 
 
 def test_load_secret_file_noop_when_unset():
@@ -418,7 +431,7 @@ def test_docker_auth_not_in_sudo_argv():
     args, _ = mock_exec.call_args
     full_argv = args[1]
     assert not any("s3cret" in a for a in full_argv), "raw secret must not appear in argv"
-    assert "CD_DOCKER_AUTH_FILE=/tmp/.cd-secret-test" in full_argv
+    assert "CD_SECRET_FILE=/tmp/.cd-secret-test" in full_argv
 
 
 def test_docker_auth_not_in_su_argv():
@@ -437,4 +450,16 @@ def test_docker_auth_not_in_su_argv():
     args, _ = mock_exec.call_args
     cmd_str = args[1][2]  # su -c "<cmd_str>"
     assert "s3cret" not in cmd_str, "raw secret must not appear in su -c command string"
-    assert "CD_DOCKER_AUTH_FILE=/tmp/.cd-secret-test" in cmd_str
+    assert "CD_SECRET_FILE=/tmp/.cd-secret-test" in cmd_str
+
+
+def test_secret_file_ignores_unexpected_keys():
+    """The file path arrives as a client-forwarded CD_* var: only the vars this
+    channel exists for may be set on the root side."""
+    fd, path = tempfile.mkstemp(prefix=".cd-test-secret-")
+    with os.fdopen(fd, "w") as f:
+        json.dump({"LD_PRELOAD": "/tmp/evil.so", "CD_DOCKER_AUTH": "alice:tok"}, f)
+    with patch.dict("os.environ", {"CD_SECRET_FILE": path}, clear=True):
+        _load_secret_file()
+        assert "LD_PRELOAD" not in os.environ
+        assert os.environ["CD_DOCKER_AUTH"] == "alice:tok"

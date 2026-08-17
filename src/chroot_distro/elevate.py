@@ -34,11 +34,16 @@ _FORWARDED_ENV_VARS = (
     "CD_DOWNLOAD_WORKERS",
     "CD_DOWNLOAD_MAX_RETRIES",
     "CD_DOWNLOAD_RATE_LIMIT",
+    "CD_FORCE_NO_COLORS",
+    "CD_NO_CAP_DROP",
+    "CD_PUSH_CHUNK_SIZE",
+    "CD_SUBID_BASE",
 )
 
-# Secrets forwarded via a 0600 tempfile rather than argv so they are never
-# visible in /proc/*/cmdline or kernel audit logs.
-_SECRET_ENV_VARS = ("CD_DOCKER_AUTH",)
+# Vars whose values may hold secrets (guest env entries, registry
+# credentials). They travel in a 0600 tempfile rather than argv so they are
+# never visible in /proc/*/cmdline or kernel audit logs.
+_SECRET_ENV_VARS = ("CD_DOCKER_AUTH", "CD_ENV")
 
 # Display/session/audio variables needed by --shared-display. These are
 # forwarded as a belt-and-suspenders complement to the get_invoking_env()
@@ -102,16 +107,17 @@ def _forwarded_env_assignments() -> list[str]:
 
 
 def _write_secret_file() -> str | None:
-    """Write _SECRET_ENV_VARS to a 0600 tempfile; return its path, or None if none are set."""
-    secrets = [(k, os.environ[k]) for k in _SECRET_ENV_VARS if k in os.environ]
+    """Write _SECRET_ENV_VARS to a 0600 JSON tempfile; return its path, or None if none are set."""
+    secrets = {k: os.environ[k] for k in _SECRET_ENV_VARS if k in os.environ}
     if not secrets:
         return None
+    import json
+
     fd, path = tempfile.mkstemp(prefix=".cd-secret-")
     try:
         os.chmod(path, 0o600)
         with os.fdopen(fd, "w") as fh:
-            for k, v in secrets:
-                fh.write(f"{k}={v}\n")
+            json.dump(secrets, fh)
     except Exception:
         with contextlib.suppress(OSError):
             os.unlink(path)
@@ -120,18 +126,25 @@ def _write_secret_file() -> str | None:
 
 
 def _load_secret_file() -> None:
-    """Read CD_DOCKER_AUTH_FILE if present, populate os.environ, then unlink the file."""
-    path = os.environ.pop("CD_DOCKER_AUTH_FILE", None)
+    """Read CD_SECRET_FILE if present, populate os.environ, then unlink the file."""
+    path = os.environ.pop("CD_SECRET_FILE", None)
     if path is None:
         return
+    import json
+
     try:
         with open(path) as fh:
-            for line in fh:
-                k, _, v = line.rstrip("\n").partition("=")
-                if k:
-                    os.environ[k] = v
-    except OSError:
-        pass
+            values = json.load(fh)
+    except (OSError, ValueError):
+        values = {}
+    if isinstance(values, dict):
+        for key, val in values.items():
+            # Only the vars this channel exists for: the path arrives as a
+            # CD_* var, which the daemon forwards from the calling client,
+            # so an arbitrary key here would let a client set any root-side
+            # variable (PATH, LD_PRELOAD, ...).
+            if key in _SECRET_ENV_VARS and isinstance(val, str):
+                os.environ[key] = val
     with contextlib.suppress(OSError):
         os.unlink(path)
 
@@ -282,8 +295,8 @@ def _termux_root_env_exports(secret_file: str | None = None) -> str:
     - TMPDIR pointing at Termux's tmp
 
     *secret_file*, if given, is the path of a 0600 tempfile holding
-    _SECRET_ENV_VARS; it is forwarded as CD_DOCKER_AUTH_FILE so the value
-    never appears in the shell command string (i.e. not in /proc/*/cmdline).
+    _SECRET_ENV_VARS; it is forwarded as CD_SECRET_FILE so the values
+    never appear in the shell command string (i.e. not in /proc/*/cmdline).
     """
     suroot = os.path.join(TERMUX_HOME, ".suroot")
     try:
@@ -311,7 +324,7 @@ def _termux_root_env_exports(secret_file: str | None = None) -> str:
         if value is not None:
             exports[name] = value
     if secret_file:
-        exports["CD_DOCKER_AUTH_FILE"] = secret_file
+        exports["CD_SECRET_FILE"] = secret_file
     return "; ".join(f"export {key}={shlex.quote(value)}" for key, value in exports.items())
 
 
@@ -466,12 +479,12 @@ def elevate_or_die() -> None:
     # environment and still prevents an elevation loop.
     env_assignments = ["_CHROOT_DISTRO_ELEVATING=1", *_forwarded_env_assignments()]
 
-    # Secrets travel via a 0600 tempfile, not argv, to stay out of
-    # /proc/*/cmdline.  The root-side elevate_or_die() call reads and
-    # unlinks the file before is_root() returns.
+    # Secrets and guest env entries travel via a 0600 tempfile, not argv, to
+    # stay out of /proc/*/cmdline.  The root-side elevate_or_die() call reads
+    # and unlinks the file before is_root() returns.
     secret_path = _write_secret_file()
     if secret_path:
-        env_assignments.append(f"CD_DOCKER_AUTH_FILE={secret_path}")
+        env_assignments.append(f"CD_SECRET_FILE={secret_path}")
 
     tool_name = tool_cmd[0]
 
