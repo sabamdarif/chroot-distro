@@ -487,6 +487,13 @@ def get_bindings(
             if os.path.exists(TERMUX_PREFIX):
                 binds.append((TERMUX_PREFIX, TERMUX_PREFIX))
 
+        # binderfs: bind-mount Android binder IPC subsystem (used by
+        # termux-api binaries for clipboard, notifications, etc.).
+        # The host /dev/binder is a symlink into /dev/binderfs, which is a
+        # separate mount; the /dev bind above does not descend into it.
+        if os.path.isdir("/dev/binderfs"):
+            binds.append(("/dev/binderfs", "/dev/binderfs"))
+
         # Dalvik/ART caches and shared storage are host-domain Android
         # paths bound for both distro types in the default mode.
         for src, dst in dalvik_cache_bindings():
