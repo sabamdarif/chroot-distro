@@ -206,6 +206,7 @@ def inject_env_profile(
     guest_prefix: str = "",
     owner_uid: int | None = None,
     owner_gid: int | None = None,
+    append_termux_bin: bool = False,
 ) -> None:
     """Write a profile.d snippet that re-applies the login-time environment.
 
@@ -214,6 +215,11 @@ def inject_env_profile(
     ``exec``; profile.d runs later, so exporting there is what makes a value
     stick. *force_keys* are exported even when listed in
     _PROFILE_INJECT_SKIP — the caller asked for them explicitly.
+
+    *append_termux_bin* prepends a case-guarded PATH append of the host
+    ``TERMUX_PREFIX/bin`` so guest tools can invoke host Termux utilities
+    even after ``/etc/profile`` re-initialises PATH (skipped in isolated and
+    minimal modes, where TERMUX_PREFIX is not bound into the guest).
 
     *guest_prefix* locates ``etc/profile.d`` under a prefix inside the rootfs
     (termux-type containers keep theirs in ``$PREFIX``). Nothing is written
@@ -231,6 +237,12 @@ def inject_env_profile(
             os.remove(ls)
 
     lines: list[str] = []
+    if append_termux_bin:
+        termux_bin = f"{TERMUX_PREFIX}/bin"
+        lines.append('case ":${PATH}:" in')
+        lines.append(f'  *":{termux_bin}:"*) ;;')
+        lines.append(f'  *) export PATH="${{PATH}}:{termux_bin}" ;;')
+        lines.append("esac")
     for key in sorted(env):
         if key not in force_keys and key in _PROFILE_INJECT_SKIP:
             continue

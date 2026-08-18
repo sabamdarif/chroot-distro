@@ -742,11 +742,14 @@ def _command_login_inner_once(container_name: str, args) -> None:
             if net_gid not in groups:
                 groups.append(net_gid)
 
-    # Strip the host Termux $PREFIX/bin from PATH for normal distros only;
-    # a termux-type container's own binaries live at that exact path.
-    if IS_TERMUX and dist_type != "termux" and not skip_extra_mounts and not minimal and "PATH" not in user_keys:
+    # Ensure Termux bin is always last in PATH so guest tools can
+    # invoke host Termux utilities. Skipped in --isolated and --minimal
+    # modes where TERMUX_PREFIX is not bound into the guest. Dedupes any
+    # existing occurrence first.
+    if IS_TERMUX and not skip_extra_mounts and not minimal:
         termux_bin = f"{TERMUX_PREFIX}/bin"
         components = [c for c in child_env.get("PATH", "").split(":") if c and c != termux_bin]
+        components.append(termux_bin)
         child_env["PATH"] = ":".join(components)
 
     # A login shell sources the guest's /etc/profile, which pins PATH (and
@@ -767,6 +770,7 @@ def _command_login_inner_once(container_name: str, args) -> None:
             guest_prefix=TERMUX_PREFIX if dist_type == "termux" else "",
             owner_uid=profile_uid,
             owner_gid=profile_gid,
+            append_termux_bin=session_profile,
         )
 
     x11_auth_binds: list[str] = []
