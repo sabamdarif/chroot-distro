@@ -277,6 +277,7 @@ def _restore(sub):
 def _clear_cache(sub):
     p = sub.add_parser("clear-cache", aliases=["clear", "cl"], add_help=False)
     p._cd_command = "clear-cache"
+    p.add_argument("--build-cache", dest="build_cache", action="store_true")
     vq = p.add_mutually_exclusive_group()
     vq.add_argument("-v", "--verbose", action="store_true")
     vq.add_argument("-q", "--quiet", action="store_true")

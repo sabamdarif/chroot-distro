@@ -183,7 +183,7 @@ _chroot_distro() {
 
 	# -----------------------------------------------------------------------
 	clear-cache)
-		_chroot_distro_compgen_words "-v --verbose -q --quiet -h --help" "${cur}"
+		_chroot_distro_compgen_words "--build-cache -v --verbose -q --quiet -h --help" "${cur}"
 		;;
 
 	# -----------------------------------------------------------------------

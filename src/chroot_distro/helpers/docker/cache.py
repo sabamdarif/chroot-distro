@@ -58,6 +58,52 @@ def load_manifest_cache(image_ref: str, arch: str):
         return None, None, {}
 
 
+def referenced_blob_digests() -> tuple[set[str], list[str]]:
+    """Return (digests, unreadable) covering every cached image's blobs.
+
+    *digests* is every blob digest the manifest cache names -- the layers and
+    the config descriptor, so an entry stays covered if a config blob ever
+    reaches the layer cache as well. *unreadable* lists the entry paths that
+    could not be parsed.
+
+    A caller pruning the layer cache has to treat a non-empty *unreadable* as a
+    reason to stop rather than as an absence of references: one truncated
+    manifest would otherwise make every layer of an image the user still has
+    look collectable. Only '<key>.json' entries are read: `atomic_write`'s
+    in-flight temporaries carry a '.tmp' suffix and are half a file by
+    definition.
+    """
+    digests: set[str] = set()
+    unreadable: list[str] = []
+    try:
+        names = sorted(os.listdir(MANIFEST_CACHE_DIR))
+    except FileNotFoundError:
+        return digests, unreadable
+    except OSError:
+        return digests, [MANIFEST_CACHE_DIR]
+
+    for fname in names:
+        if not fname.endswith(".json"):
+            continue
+        path = os.path.join(MANIFEST_CACHE_DIR, fname)
+        try:
+            with open(path) as fh:
+                payload = json.load(fh)
+        except (OSError, json.JSONDecodeError):
+            unreadable.append(path)
+            continue
+        manifest = payload.get("manifest") if isinstance(payload, dict) else None
+        if not isinstance(manifest, dict):
+            unreadable.append(path)
+            continue
+        descriptors = list(manifest.get("layers") or [])
+        descriptors.append(manifest.get("config"))
+        for descriptor in descriptors:
+            if isinstance(descriptor, dict) and descriptor.get("digest"):
+                digests.add(descriptor["digest"])
+    return digests, unreadable
+
+
 def all_layers_cached(layers: list) -> bool:
     """Return True iff every layer's blob file is already on disk."""
     return all(os.path.isfile(layer_cache_path(layer["digest"])) for layer in layers)

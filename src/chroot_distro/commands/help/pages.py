@@ -250,13 +250,47 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
         ],
     },
     "clear-cache": {
-        "usage": "clear-cache",
+        "usage": "clear-cache [OPTIONS]",
         "aliases": ("clear", "cl"),
         "summary": ("Remove all files from downloads cache (e.g. Docker image layers)."),
         "options": [
             ("-h, --help", "Show this help."),
+            (
+                "--build-cache",
+                "Drop the build cache instead: the per-instruction index "
+                "and the layer blobs only it was holding on to. The "
+                "downloaded base images stay where they are.",
+            ),
             ("-v, --verbose", "Log each removed file."),
             ("-q, --quiet", "Suppress non-error output. Mutually exclusive with --verbose."),
+        ],
+        "examples": [
+            f"{PROGRAM_NAME} clear-cache --build-cache",
+        ],
+        "footer": [
+            {
+                "title": "BUILD CACHE",
+                "intro": (
+                    "Each RUN a build executes is recorded in "
+                    "build_cache_index.json against the layer it produced, "
+                    "so a later build with the same parent, instruction and "
+                    "inputs applies that layer instead of running the step "
+                    "again. Nothing ever evicts those entries, and every "
+                    "edit to a Dockerfile strands the ones before it, so "
+                    "the index and its layers are the part of the cache "
+                    "that only grows. --build-cache removes the index and "
+                    "then sweeps the layer cache with the index no longer "
+                    "counted as a reference: the layers of images you still "
+                    "have are kept, and the build's own intermediates go "
+                    "along with any blob nothing points at. The next build "
+                    "re-runs every step. It refuses to run while another "
+                    f"{PROGRAM_NAME} command holds a lock, since a build in "
+                    "progress has recorded steps whose layers this would "
+                    "unpin. To skip cache lookups for one build without "
+                    f"discarding anything, use '{PROGRAM_NAME} build "
+                    "--no-cache' instead."
+                ),
+            },
         ],
     },
     "copy": {

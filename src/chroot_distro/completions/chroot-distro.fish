@@ -305,6 +305,8 @@ complete -c chroot-distro -n '__fish_seen_subcommand_from restore' \
 # clear-cache (+ aliases clear, cl)
 # ---------------------------------------------------------------------------
 complete -c chroot-distro -f -n __chroot_distro_seen_clear_cache \
+    -l build-cache     -d 'Drop the build cache index and the layers only it pinned'
+complete -c chroot-distro -f -n __chroot_distro_seen_clear_cache \
     -s v -l verbose    -d 'List removed files'
 complete -c chroot-distro -f -n __chroot_distro_seen_clear_cache \
     -s q -l quiet      -d 'Suppress non-error output'

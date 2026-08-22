@@ -429,7 +429,7 @@ Set `CD_DOCKER_AUTH=username:password` before pushing to a private repository.
 ### clear-cache
 
 ```
-chroot-distro clear-cache
+chroot-distro clear-cache [OPTIONS]
 Aliases: clear, cl
 ```
 
@@ -437,8 +437,18 @@ Delete all cached downloads (image layers, manifests, build cache) and show how 
 
 | Option | Description |
 |---|---|
+| `--build-cache` | Drop the build cache index and the layer blobs only it was pinning. |
 | `-v`, `--verbose` | Show each deleted file. |
 | `-q`, `--quiet` | Only show errors. |
+
+Every `RUN` a build executes is recorded against the layer it produced, so a later build with the same parent, instruction and inputs reuses it. Nothing ever evicts those entries, and every edit to a Dockerfile strands the ones before it, so the build cache is the part that only grows.
+
+```sh
+# Reclaim the build cache, keep the downloaded images
+chroot-distro clear-cache --build-cache
+```
+
+This removes the index and then deletes the layers nothing else points at. The layers of images you still have are kept, so what goes is the build's own bookkeeping, the intermediates no image held on to, and any leftover blob from a killed download. The next `build` re-runs every step. It refuses to run while another `chroot-distro` command holds a lock, since a build in progress has recorded steps whose layers this would unpin. To skip cache lookups for a single build without deleting anything, use `build --no-cache` instead — note that it still records what it builds.
 
 ### remove
 

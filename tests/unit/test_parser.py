@@ -164,3 +164,11 @@ def test_parser_build_progress_invalid_rejected():
     parser = build_parser()
     with pytest.raises(SystemExit):
         parser.parse_args(["build", ".", "--progress", "fancy"])
+
+
+def test_parser_clear_cache_build_cache():
+    parser = build_parser()
+    assert parser.parse_args(["clear-cache"]).build_cache is False
+    args = parser.parse_args(["clear-cache", "--build-cache", "--verbose"])
+    assert args.build_cache is True
+    assert args.verbose is True

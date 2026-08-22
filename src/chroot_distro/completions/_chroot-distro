@@ -219,6 +219,7 @@ _chroot_distro() {
 		clear-cache)
 			_arguments \
 				'(-h --help)'{-h,--help}'[show help]' \
+				'--build-cache[drop the build cache index and the layers only it pinned]' \
 				'(-v --verbose -q --quiet)'{-v,--verbose}'[list removed files]' \
 				'(-v --verbose -q --quiet)'{-q,--quiet}'[suppress non-error output]'
 			;;
