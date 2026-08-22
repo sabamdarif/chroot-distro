@@ -271,11 +271,21 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
             ("-h, --help", "Show this help."),
             ("-m, --move", "Delete source file after a successful copy."),
             ("-r, --recursive", "Recursive mode for copying directories."),
+            (
+                "--chown USER[:GROUP]",
+                "Give every transferred entry this owner instead of the "
+                "source's numeric one. Names are resolved on the "
+                "destination side: in the container's /etc/passwd and "
+                "/etc/group for a 'container:path' destination, on the "
+                "host otherwise. Numbers are taken as they stand, and "
+                "':GROUP' changes only the group.",
+            ),
             ("-v, --verbose", "Log each copied file."),
             ("-q, --quiet", "Suppress non-error output. Mutually exclusive with --verbose."),
         ],
         "examples": [
             f"{PROGRAM_NAME} copy ./file.txt ubuntu:/root/file.txt",
+            f"{PROGRAM_NAME} copy -r ./project ubuntu:/home/user/ --chown user",
         ],
         "footer": [
             {
@@ -837,12 +847,22 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
                 "directories that have no counterpart in the source. "
                 "Only effective when source is a directory.",
             ),
+            (
+                "--chown USER[:GROUP]",
+                "Give every transferred entry this owner instead of the "
+                "source's numeric one. Names are resolved on the "
+                "destination side: in the container's /etc/passwd and "
+                "/etc/group for a 'container:path' destination, on the "
+                "host otherwise. Numbers are taken as they stand, and "
+                "':GROUP' changes only the group.",
+            ),
             ("-v, --verbose", "Log each synced or deleted entry."),
             ("-q, --quiet", "Suppress non-error output. Mutually exclusive with --verbose."),
         ],
         "examples": [
             f"{PROGRAM_NAME} sync ./dotfiles/ ubuntu:/root/",
             f"{PROGRAM_NAME} sync --delete ./app/ ubuntu:/opt/app/",
+            f"{PROGRAM_NAME} sync ./dotfiles/ ubuntu:/home/user/ --chown user:user",
         ],
         "footer": [
             {

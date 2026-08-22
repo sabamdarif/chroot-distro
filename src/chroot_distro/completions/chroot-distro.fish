@@ -325,6 +325,8 @@ complete -c chroot-distro -f -n __chroot_distro_seen_copy \
 complete -c chroot-distro -f -n __chroot_distro_seen_copy \
     -s r -l recursive  -d 'Copy directories recursively'
 complete -c chroot-distro -f -n __chroot_distro_seen_copy \
+    -l chown -r        -d 'Give every copied entry this owner (USER[:GROUP])'
+complete -c chroot-distro -f -n __chroot_distro_seen_copy \
     -s h -l help       -d 'Show help'
 
 # ---------------------------------------------------------------------------
@@ -340,6 +342,8 @@ complete -c chroot-distro -f -n '__fish_seen_subcommand_from sync' \
     -s c -l checksum      -d 'Use CRC32 checksum instead of size+mtime'
 complete -c chroot-distro -f -n '__fish_seen_subcommand_from sync' \
     -s d -l delete        -d 'Remove destination entries absent from source'
+complete -c chroot-distro -f -n '__fish_seen_subcommand_from sync' \
+    -l chown -r           -d 'Give every synced entry this owner (USER[:GROUP])'
 complete -c chroot-distro -f -n '__fish_seen_subcommand_from sync' \
     -s h -l help          -d 'Show help'
 

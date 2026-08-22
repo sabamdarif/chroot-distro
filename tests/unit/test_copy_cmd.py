@@ -7,6 +7,7 @@ cases the pinning exists for: a name that turned into a symlink, a hardlink
 planted where a write is about to land, endpoints that secretly overlap.
 """
 
+import contextlib
 import errno
 import os
 import stat
@@ -30,10 +31,10 @@ def rootfs(tmp_path, monkeypatch):
     return root
 
 
-def copy(src, dest, *, verbose=False, move=False, recursive=False):
+def copy(src, dest, *, verbose=False, move=False, recursive=False, chown=None):
     """Run the command, returning its exit status (0 when it did not exit)."""
     try:
-        _do_copy(str(src), str(dest), verbose, move, recursive)
+        _do_copy(str(src), str(dest), verbose, move, recursive, chown)
     except SystemExit as exc:
         return exc.code
     return 0
@@ -344,3 +345,89 @@ def test_command_copy_holds_the_container_lock_while_it_runs(rootfs, tmp_path, m
 
     assert (rootfs / "f.txt").read_text() == "data"
     assert os.listdir(locks) == ["distro.lock"]
+
+
+# ── --chown ───────────────────────────────────────────────────────────────────
+def _guest_passwd(rootfs):
+    """Give the container an `app` account, uid 1002 with primary group 1500."""
+    (rootfs / "etc").mkdir(parents=True, exist_ok=True)
+    (rootfs / "etc" / "passwd").write_text("root:x:0:0:root:/root:/bin/sh\napp:x:1002:1500:app:/home/app:/bin/sh\n")
+
+
+@contextlib.contextmanager
+def recorded_ownership(monkeypatch):
+    """Record every ownership change as (uid, gid), performing none of them.
+
+    A transfer runs as root; a test does not, so handing out ids for real would
+    need a second uid to hand them to.
+    """
+    calls = []
+    monkeypatch.setattr(os, "fchown", lambda fd, uid, gid: calls.append((uid, gid)))
+    monkeypatch.setattr(
+        os,
+        "chown",
+        lambda name, uid, gid, dir_fd=None, follow_symlinks=True: calls.append((uid, gid)),
+    )
+    yield calls
+
+
+def test_chown_resolves_the_name_in_the_container_and_uses_it_throughout(rootfs, tmp_path, monkeypatch):
+    _guest_passwd(rootfs)
+    src = tmp_path / "payload"
+    src.mkdir()
+    (src / "f.txt").write_text("data")
+    os.symlink("f.txt", src / "link")
+
+    with recorded_ownership(monkeypatch) as calls:
+        assert copy(src, "distro:/opt/payload", recursive=True, chown="app") == 0
+
+    # The directory, the file and the symlink all get the guest's numbers rather
+    # than the host ids the source carries.
+    assert (rootfs / "opt" / "payload" / "f.txt").read_text() == "data"
+    assert len(calls) >= 3
+    assert set(calls) == {(1002, 1500)}
+
+
+def test_chown_reaches_a_move_that_was_only_a_rename(rootfs, tmp_path, monkeypatch):
+    _guest_passwd(rootfs)
+    src = rootfs / "src"
+    (src / "sub").mkdir(parents=True)
+    (src / "sub" / "f.txt").write_text("data")
+
+    with recorded_ownership(monkeypatch) as calls:
+        assert copy("distro:/src", "distro:/dst", move=True, chown="app") == 0
+
+    # rename(2) writes nothing, so the only way the flag can reach the moved
+    # inodes is the walk afterwards: the root, sub, and the file inside it.
+    assert (rootfs / "dst" / "sub" / "f.txt").read_text() == "data"
+    assert calls == [(1002, 1500)] * 3
+
+
+def test_a_move_onto_a_filesystem_without_ownership_says_so_once(rootfs, tmp_path, monkeypatch, capsys):
+    _guest_passwd(rootfs)
+    src = rootfs / "src"
+    (src / "sub").mkdir(parents=True)
+    (src / "sub" / "f.txt").write_text("data")
+
+    def refuse(*_args, **_kwargs):
+        raise OSError(errno.EPERM, os.strerror(errno.EPERM))
+
+    monkeypatch.setattr(os, "chown", refuse)
+    assert copy("distro:/src", "distro:/dst", move=True, chown="app") == 0
+
+    # vfat holds no ownership, so every entry in the tree refuses; that is one
+    # thing worth saying, not one per file.
+    err = capsys.readouterr().err
+    assert err.count("would not take the requested owner") == 1
+    assert "3 entries" in err
+    assert (rootfs / "dst" / "sub" / "f.txt").read_text() == "data"
+
+
+def test_an_unknown_chown_name_is_refused_before_anything_is_copied(rootfs, tmp_path):
+    _guest_passwd(rootfs)
+    src = tmp_path / "f.txt"
+    src.write_text("data")
+
+    with pytest.raises(ChrootDistroError, match="unknown user 'ghost'"):
+        copy(src, "distro:/opt/f.txt", chown="ghost")
+    assert not (rootfs / "opt").exists()

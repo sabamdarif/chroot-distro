@@ -50,6 +50,7 @@ from contextlib import ExitStack
 from typing import Any
 
 from chroot_distro import dirfd
+from chroot_distro.helpers.owner import resolve_owner
 from chroot_distro.message import crit_error, log_error, log_info, quote_path, warn
 from chroot_distro.paths import (
     PinnedPath,
@@ -85,16 +86,28 @@ class _Ctx:
     than fatal — one entry must not abandon the rest of the tree — but the
     command still exits non-zero, as rsync does for the same.
 
+    `owner` is the pair `--chown` resolved on the destination side, or None to
+    carry the source's own ids across. It is threaded rather than kept module-wide
+    so that nothing outside one sync can see it.
+
     `root_unreadable` is set when the source root itself could not be listed,
     which leaves `src_rels` empty and every destination entry looking like an
     orphan. `--delete` must not run on that.
     """
 
-    def __init__(self, src_root: str, dest_spec: str, verbose: bool, use_checksum: bool) -> None:
+    def __init__(
+        self,
+        src_root: str,
+        dest_spec: str,
+        verbose: bool,
+        use_checksum: bool,
+        owner: tuple[int, int] | None = None,
+    ) -> None:
         self.src_root = src_root
         self.dest_spec = dest_spec
         self.verbose = verbose
         self.use_checksum = use_checksum
+        self.owner = owner
         self.total = 1
         self.done = 0
         self.src_rels: set[str] = set()
@@ -253,6 +266,7 @@ def _sync_symlink(
     dst_fd: int,
     dst_name: str,
     src_st: os.stat_result | None = None,
+    owner: tuple[int, int] | None = None,
 ) -> bool:
     """Copy a symlink as-is. Returns True when the destination changed.
 
@@ -279,12 +293,28 @@ def _sync_symlink(
         dirfd.make_writable(dst_fd)
         os.symlink(target, dst_name, dir_fd=dst_fd)
 
-    if src_st is not None:
-        dirfd.copy_link_metadata(dst_fd, dst_name, src_st)
+    dirfd.copy_link_metadata(dst_fd, dst_name, src_st, owner=owner)
     return True
 
 
-def _refresh_file_metadata(src_st: os.stat_result, dst_fd: int, dst_name: str) -> int:
+def _wanted_ids(
+    src_st: os.stat_result, dst_st: os.stat_result, owner: tuple[int, int] | None
+) -> tuple[int, int]:
+    """The (uid, gid) the destination entry should end up with.
+
+    `--chown :staff` names a group and no user, which reaches here as -1 for the
+    uid; the destination's own keeps its place so the comparison that decides
+    whether anything needs changing is not answered by a sentinel.
+    """
+    if owner is None:
+        return (src_st.st_uid, src_st.st_gid)
+    uid, gid = owner
+    return (dst_st.st_uid if uid == -1 else uid, dst_st.st_gid if gid == -1 else gid)
+
+
+def _refresh_file_metadata(
+    src_st: os.stat_result, dst_fd: int, dst_name: str, owner: tuple[int, int] | None = None
+) -> int:
     """Bring an up-to-date file's owner, mode and times into line with the source's.
 
     Returns _META_OK when there was nothing to do, _META_FIXED when the entry was
@@ -294,6 +324,10 @@ def _refresh_file_metadata(src_st: os.stat_result, dst_fd: int, dst_name: str) -
     — so a `chmod +x` or a `chown` with no other change would leave the
     destination on the old mode for good, and `--checksum` would leave the times
     behind in the same way.
+
+    With `--chown` the owner it names stands in for the source's, so a
+    destination already carrying it is left alone rather than corrected back and
+    forth on every run.
 
     Owner, mode and times are applied to a descriptor, so the entry cannot be
     swapped between the test and the change, and open_regular_at refuses anything
@@ -317,7 +351,8 @@ def _refresh_file_metadata(src_st: os.stat_result, dst_fd: int, dst_name: str) -
     try:
         want = stat.S_IMODE(src_st.st_mode)
         stale = int(dst_st.st_mtime) != int(src_st.st_mtime)
-        misowned = (dst_st.st_uid, dst_st.st_gid) != (src_st.st_uid, src_st.st_gid)
+        want_ids = _wanted_ids(src_st, dst_st, owner)
+        misowned = (dst_st.st_uid, dst_st.st_gid) != want_ids
         if stat.S_IMODE(dst_st.st_mode) == want and not stale and not misowned:
             return _META_OK
         if dst_st.st_nlink != 1:
@@ -325,7 +360,7 @@ def _refresh_file_metadata(src_st: os.stat_result, dst_fd: int, dst_name: str) -
         fixed = False
         if misowned:
             try:
-                os.fchown(fd, src_st.st_uid, src_st.st_gid)
+                os.fchown(fd, *want_ids)
                 fixed = True
             except OSError:
                 pass
@@ -403,7 +438,7 @@ def _sync_file(
                 tfd, _ = dirfd.open_new_at(dst_fd, tmp, mode)
             try:
                 dirfd.copy_data(sfd, tfd, sfd_st)
-                dirfd.copy_metadata(sfd, tfd, src_st)
+                dirfd.copy_metadata(sfd, tfd, src_st, owner=ctx.owner)
             finally:
                 os.close(tfd)
             os.replace(tmp, dst_name, src_dir_fd=dst_fd, dst_dir_fd=dst_fd)
@@ -551,7 +586,7 @@ def _mirror_entries(src_fd: int, dst_fd: int, rel: str, ctx: _Ctx) -> list[str]:
         elif stat.S_ISLNK(mode):
             op = "Modified" if dirfd.exists_at(dst_fd, name) else "New"
             try:
-                changed = _sync_symlink(src_fd, name, dst_fd, name, src_st)
+                changed = _sync_symlink(src_fd, name, dst_fd, name, src_st, ctx.owner)
             except OSError as exc:
                 warn(f"cannot copy symlink '{ctx.src_shown(child)}': {quote_path(str(exc))}")
                 ctx.note_failure(child)
@@ -562,7 +597,7 @@ def _mirror_entries(src_fd: int, dst_fd: int, rel: str, ctx: _Ctx) -> list[str]:
             outcome = (
                 _META_REWRITE
                 if _needs_update(src_fd, name, src_st, dst_fd, name, ctx.use_checksum)
-                else _refresh_file_metadata(src_st, dst_fd, name)
+                else _refresh_file_metadata(src_st, dst_fd, name, ctx.owner)
             )
             if outcome == _META_REWRITE:
                 op = "Modified" if dirfd.exists_at(dst_fd, name) else "New"
@@ -607,7 +642,7 @@ def _mirror_at(src_fd: int, dst_fd: int, rel: str, ctx: _Ctx) -> None:
                 levels.pop()
                 if owned:
                     try:
-                        dirfd.copy_metadata(sfd, dfd)
+                        dirfd.copy_metadata(sfd, dfd, owner=ctx.owner)
                     finally:
                         os.close(dfd)
                         os.close(sfd)
@@ -789,14 +824,17 @@ def command_sync(args) -> None:
     verbose = getattr(args, "verbose", False)
     use_checksum = getattr(args, "checksum", False)
     delete = getattr(args, "delete", False)
+    chown = getattr(args, "chown", None)
 
     with ExitStack() as stack:
         for lock in container_locks_for_spec_pair(src, dest, command="sync"):
             stack.enter_context(lock)
-        _do_sync(src, dest, verbose, use_checksum, delete)
+        _do_sync(src, dest, verbose, use_checksum, delete, chown)
 
 
-def _do_sync(src: str, dest: str, verbose: bool, use_checksum: bool, delete: bool) -> None:
+def _do_sync(
+    src: str, dest: str, verbose: bool, use_checksum: bool, delete: bool, chown: str | None = None
+) -> None:
     """Resolve and pin both roots, then mirror the source onto the destination.
 
     Both endpoints come back with their own final component resolved — the
@@ -825,6 +863,7 @@ def _do_sync(src: str, dest: str, verbose: bool, use_checksum: bool, delete: boo
     """
     src_path = resolve_container_path(src)
     dest_path = resolve_container_path(dest)
+    owner = resolve_owner(chown, dest) if chown else None
 
     try:
         src_st = os.lstat(src_path)
@@ -855,7 +894,7 @@ def _do_sync(src: str, dest: str, verbose: bool, use_checksum: bool, delete: boo
     log_info(f"Source: '{quote_path(src_path)}'")
     log_info(f"Destination: '{quote_path(dest_path)}'")
 
-    ctx = _Ctx(src_path, dest, verbose, use_checksum)
+    ctx = _Ctx(src_path, dest, verbose, use_checksum, owner)
 
     with ExitStack() as pins:
         src_pin = pins.enter_context(pin_path(src, src_path, inside=src_is_dir))
@@ -897,7 +936,7 @@ def _sync_single(src_pin: PinnedPath, dest_pin: PinnedPath, src_st: os.stat_resu
         return
     if stat.S_ISLNK(mode):
         try:
-            _sync_symlink(src_pin.dir_fd, src_pin.leaf, dest_pin.dir_fd, dest_pin.leaf, src_st)
+            _sync_symlink(src_pin.dir_fd, src_pin.leaf, dest_pin.dir_fd, dest_pin.leaf, src_st, ctx.owner)
         except OSError as exc:
             warn(f"cannot copy symlink '{ctx.shown('')}': {quote_path(str(exc))}")
             ctx.note_failure("")
@@ -905,7 +944,7 @@ def _sync_single(src_pin: PinnedPath, dest_pin: PinnedPath, src_st: os.stat_resu
     outcome = (
         _META_REWRITE
         if _needs_update(src_pin.dir_fd, src_pin.leaf, src_st, dest_pin.dir_fd, dest_pin.leaf, ctx.use_checksum)
-        else _refresh_file_metadata(src_st, dest_pin.dir_fd, dest_pin.leaf)
+        else _refresh_file_metadata(src_st, dest_pin.dir_fd, dest_pin.leaf, ctx.owner)
     )
     if outcome == _META_REWRITE:
         _sync_file(src_pin.dir_fd, src_pin.leaf, src_st, dest_pin.dir_fd, dest_pin.leaf, ctx, "")
@@ -928,7 +967,7 @@ def _sync_directory(src_pin: PinnedPath, dest_pin: PinnedPath, ctx: _Ctx, delete
 
             if delete:
                 _prune(dst_fd, ctx)
-            dirfd.copy_metadata(src_fd, dst_fd)
+            dirfd.copy_metadata(src_fd, dst_fd, owner=ctx.owner)
         finally:
             os.close(dst_fd)
     finally:

@@ -209,17 +209,19 @@ Aliases: cp
 
 Copy files between the host and a container, or between two containers. Container paths use the `name:path` form.
 
-Ownership (numeric uid/gid), permissions and timestamps are preserved. Symlinks are copied as symlinks; hardlinks become independent copies; device nodes, FIFOs and sockets are skipped with a warning.
+Ownership (numeric uid/gid), permissions and timestamps are preserved; `--chown` sets the owner by name on the destination side instead. Symlinks are copied as symlinks; hardlinks become independent copies; device nodes, FIFOs and sockets are skipped with a warning.
 
 | Option | Description |
 |---|---|
 | `-r`, `--recursive` | Copy folders with everything inside them. |
 | `-m`, `--move` | Move instead of copy (source is deleted after). |
+| `--chown USER[:GROUP]` | Give every transferred entry this owner instead of the source's ids. Names are looked up on the destination side — the container's `/etc/passwd` and `/etc/group` for a `name:path` destination, the host's otherwise — so `--chown arif` means whatever `arif` is over there. Numbers are used as they stand, and `:GROUP` changes only the group. |
 | `-v`, `--verbose` | Show each copied file. |
 | `-q`, `--quiet` | Only show errors. |
 
 ```sh
 chroot-distro copy ./file.txt ubuntu:/root/file.txt
+chroot-distro copy -r ./project ubuntu:/home/user/ --chown user
 ```
 
 ### sync
@@ -230,14 +232,19 @@ chroot-distro sync [OPTIONS] [CONTAINER:]SRC [CONTAINER:]DEST
 
 Like `copy`, but only transfers files that changed. Always recursive. Files are compared by size and modification time.
 
-Ownership, permissions and timestamps are preserved for directories as well as files, and a change to any of them alone is applied without rewriting the file.
+Ownership, permissions and timestamps are preserved for directories as well as files, and a change to any of them alone is applied without rewriting the file. With `--chown` the owner it names stands in for the source's, so a destination already carrying it is left alone.
 
 | Option | Description |
 |---|---|
 | `-c`, `--checksum` | Compare by checksum instead of modification time. Slower but more precise. |
 | `-d`, `--delete` | Also delete files at the destination that no longer exist at the source. |
+| `--chown USER[:GROUP]` | Give every transferred entry this owner instead of the source's ids. Names are looked up on the destination side — the container's `/etc/passwd` and `/etc/group` for a `name:path` destination, the host's otherwise — so `--chown arif` means whatever `arif` is over there. Numbers are used as they stand, and `:GROUP` changes only the group. |
 | `-v`, `--verbose` | Show each synced or deleted file. |
 | `-q`, `--quiet` | Only show errors. |
+
+```sh
+chroot-distro sync ./dotfiles/ ubuntu:/home/user/ --chown user:user
+```
 
 ### rename
 

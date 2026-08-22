@@ -29,6 +29,7 @@ import sys
 from contextlib import ExitStack
 
 from chroot_distro import dirfd
+from chroot_distro.helpers.owner import resolve_owner
 from chroot_distro.message import crit_error, log_error, log_info, quote_path, warn
 from chroot_distro.paths import (
     PinnedPath,
@@ -48,11 +49,12 @@ def command_copy(args) -> None:
     verbose = getattr(args, "verbose", False)
     move_mode = getattr(args, "move", False)
     recursive = getattr(args, "recursive", False)
+    chown = getattr(args, "chown", None)
 
     with ExitStack() as stack:
         for lock in container_locks_for_spec_pair(src, dest, command="copy"):
             stack.enter_context(lock)
-        _do_copy(src, dest, verbose, move_mode, recursive)
+        _do_copy(src, dest, verbose, move_mode, recursive, chown)
 
 
 def _copy_tree_pinned(
@@ -62,6 +64,7 @@ def _copy_tree_pinned(
     dest_display: str,
     *,
     merge: bool = False,
+    owner: tuple[int, int] | None = None,
 ) -> tuple[int, int]:
     """Recreate the source directory under the destination, fd by fd.
 
@@ -141,11 +144,12 @@ def _copy_tree_pinned(
                 src_fd,
                 dst_fd,
                 merge=merge,
+                owner=owner,
                 on_entry=on_entry,
                 on_skip=on_skip,
                 on_error=on_error,
             )
-            dirfd.copy_metadata(src_fd, dst_fd, src_st)
+            dirfd.copy_metadata(src_fd, dst_fd, src_st, owner=owner)
         finally:
             clear_bar()
             os.close(dst_fd)
@@ -154,7 +158,35 @@ def _copy_tree_pinned(
     return failures[0], skipped[0]
 
 
-def _move_pinned(src_pin: PinnedPath, dest_pin: PinnedPath, verbose: bool = False) -> int:
+def _apply_owner_after_rename(dest_pin: PinnedPath, owner: tuple[int, int]) -> None:
+    """Give the moved entry the requested owner, reporting a refusal once.
+
+    A rename keeps the inodes and the ids they came with, so `--chown` has to
+    walk the destination afterwards. A filesystem that holds no ownership (vfat,
+    and so /sdcard) refuses every entry in the tree, which is worth saying once
+    and not once per file.
+    """
+    refused: list[OSError] = []
+    dirfd.chown_tree_at(
+        dest_pin.dir_fd,
+        dest_pin.leaf,
+        owner,
+        on_error=lambda _rel, exc: refused.append(exc),
+    )
+    if refused:
+        plural = "entry" if len(refused) == 1 else "entries"
+        warn(
+            f"moved, but {len(refused)} {plural} under '{quote_path(str(dest_pin))}' "
+            f"would not take the requested owner: {quote_path(refused[0].strerror or str(refused[0]))}."
+        )
+
+
+def _move_pinned(
+    src_pin: PinnedPath,
+    dest_pin: PinnedPath,
+    verbose: bool = False,
+    owner: tuple[int, int] | None = None,
+) -> int:
     """Move via renameat, falling back to copy+remove across devices.
 
     rename(2) replaces a symlink sitting at the destination rather than
@@ -170,6 +202,10 @@ def _move_pinned(src_pin: PinnedPath, dest_pin: PinnedPath, verbose: bool = Fals
     source is left to _copy_tree_pinned, whose mkdir declines to overwrite
     anything, as rename(2) declines a non-empty or non-directory target.
 
+    `--chown` reaches the fast path through _apply_owner_after_rename, since a
+    rename writes nothing and so has no moment at which an owner could be set;
+    the fallback carries the pair into the copy calls like any other transfer.
+
     Returns the number of entries the fallback did not carry across. Nothing is
     removed from the source when that is non-zero: a move whose copy half
     skipped an entry would otherwise delete the only copy of it. Entries skipped
@@ -180,10 +216,13 @@ def _move_pinned(src_pin: PinnedPath, dest_pin: PinnedPath, verbose: bool = Fals
     """
     try:
         os.rename(src_pin.leaf, dest_pin.leaf, src_dir_fd=src_pin.dir_fd, dst_dir_fd=dest_pin.dir_fd)
-        return 0
     except OSError as exc:
         if exc.errno != errno.EXDEV:
             raise
+    else:
+        if owner is not None:
+            _apply_owner_after_rename(dest_pin, owner)
+        return 0
 
     src_st = dirfd.lstat_at(src_pin.dir_fd, src_pin.leaf)
 
@@ -191,21 +230,25 @@ def _move_pinned(src_pin: PinnedPath, dest_pin: PinnedPath, verbose: bool = Fals
         dirfd.unlink_quietly(dest_pin.dir_fd, dest_pin.leaf)
 
     if stat.S_ISLNK(src_st.st_mode):
-        dirfd.copy_symlink_at(src_pin.dir_fd, src_pin.leaf, dest_pin.dir_fd, dest_pin.leaf, src_st)
+        dirfd.copy_symlink_at(
+            src_pin.dir_fd, src_pin.leaf, dest_pin.dir_fd, dest_pin.leaf, src_st, owner=owner
+        )
         os.unlink(src_pin.leaf, dir_fd=src_pin.dir_fd)
     elif stat.S_ISDIR(src_st.st_mode):
-        failures, skipped = _copy_tree_pinned(src_pin, dest_pin, verbose, str(dest_pin))
+        failures, skipped = _copy_tree_pinned(src_pin, dest_pin, verbose, str(dest_pin), owner=owner)
         if failures or skipped:
             log_error("Source left in place: the copy did not complete.")
             return failures + skipped
         dirfd.rmtree_at(src_pin.dir_fd, src_pin.leaf, force=True)
     else:
-        dirfd.copy_file_at(src_pin.dir_fd, src_pin.leaf, dest_pin.dir_fd, dest_pin.leaf)
+        dirfd.copy_file_at(src_pin.dir_fd, src_pin.leaf, dest_pin.dir_fd, dest_pin.leaf, owner=owner)
         os.unlink(src_pin.leaf, dir_fd=src_pin.dir_fd)
     return 0
 
 
-def _do_copy(src: str, dest: str, verbose: bool, move_mode: bool, recursive: bool) -> None:
+def _do_copy(
+    src: str, dest: str, verbose: bool, move_mode: bool, recursive: bool, chown: str | None = None
+) -> None:
     """Resolve both endpoints, pin them, and run the copy or the move.
 
     A move acts on the entries themselves, so neither final component is
@@ -240,6 +283,7 @@ def _do_copy(src: str, dest: str, verbose: bool, move_mode: bool, recursive: boo
     """
     src_path = resolve_container_path(src, deref_leaf=not move_mode)
     dest_path = resolve_container_path(dest, deref_leaf=not move_mode)
+    owner = resolve_owner(chown, dest) if chown else None
 
     if not (os.path.lexists(src_path) if move_mode else os.path.exists(src_path)):
         crit_error(f"cannot copy '{src}' because the path does not exist.")
@@ -289,16 +333,18 @@ def _do_copy(src: str, dest: str, verbose: bool, move_mode: bool, recursive: boo
                 log_info("Moving files...")
                 if verbose:
                     log_info(f"Moving: '{quote_path(src_path)}' -> '{quote_path(dest_path)}'")
-                failures = _move_pinned(src_pin, dest_pin, verbose)
+                failures = _move_pinned(src_pin, dest_pin, verbose, owner)
             elif src_is_dir:
                 log_info("Copying files, this may take a while...")
-                failures, _ = _copy_tree_pinned(src_pin, dest_pin, verbose, dest_path, merge=True)
+                failures, _ = _copy_tree_pinned(
+                    src_pin, dest_pin, verbose, dest_path, merge=True, owner=owner
+                )
             else:
                 log_info("Copying files, this may take a while...")
                 if verbose:
                     log_info(f"Copying: '{quote_path(src_path)}' -> '{quote_path(dest_path)}'")
                 dirfd.copy_file_at(
-                    src_pin.dir_fd, src_pin.leaf, dest_pin.dir_fd, dest_pin.leaf, replace=True
+                    src_pin.dir_fd, src_pin.leaf, dest_pin.dir_fd, dest_pin.leaf, replace=True, owner=owner
                 )
     except KeyboardInterrupt:
         clear_bar()

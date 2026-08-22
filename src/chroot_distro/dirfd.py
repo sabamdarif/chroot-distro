@@ -169,7 +169,13 @@ def _copy_xattrs(src_fd: int, dst_fd: int) -> None:
             os.setxattr(dst_fd, name, os.getxattr(src_fd, name))
 
 
-def copy_metadata(src_fd: int, dst_fd: int, src_st: os.stat_result | None = None) -> None:
+def copy_metadata(
+    src_fd: int,
+    dst_fd: int,
+    src_st: os.stat_result | None = None,
+    *,
+    owner: tuple[int, int] | None = None,
+) -> None:
     """Apply src's owner, mode, timestamps and xattrs to the open dst fd.
 
     shutil.copystat() expressed against file descriptors, plus the ownership it
@@ -182,14 +188,19 @@ def copy_metadata(src_fd: int, dst_fd: int, src_st: os.stat_result | None = None
     caller lacks CAP_FSETID, which would silently disarm those bits on a
     destination the caller could not chmod back.
 
+    *owner* is the pair `--chown` resolved on the destination side, used in place
+    of the source's ids. Either half may be -1, which chown(2) reads as "leave
+    this one as it is".
+
     Each step is best effort on its own: a destination filesystem may have no
     ownership to set (vfat, and so /sdcard) or no xattrs to hold, neither of
     which is a reason to abandon a transfer that has already written the data.
     """
     if src_st is None:
         src_st = os.fstat(src_fd)
+    uid, gid = owner if owner is not None else (src_st.st_uid, src_st.st_gid)
     with contextlib.suppress(OSError):
-        os.fchown(dst_fd, src_st.st_uid, src_st.st_gid)
+        os.fchown(dst_fd, uid, gid)
     with contextlib.suppress(OSError):
         os.fchmod(dst_fd, stat.S_IMODE(src_st.st_mode))
     with contextlib.suppress(OSError):
@@ -197,21 +208,33 @@ def copy_metadata(src_fd: int, dst_fd: int, src_st: os.stat_result | None = None
     _copy_xattrs(src_fd, dst_fd)
 
 
-def copy_link_metadata(dir_fd: int, name: str, src_st: os.stat_result) -> None:
+def copy_link_metadata(
+    dir_fd: int,
+    name: str,
+    src_st: os.stat_result | None = None,
+    *,
+    owner: tuple[int, int] | None = None,
+) -> None:
     """Apply src_st's owner and timestamps to a symlink, never following it.
 
     A symlink has no mode of its own on Linux, so the two things worth carrying
-    are the ones lchown(2) and utimensat(2) can set on the link itself.
+    are the ones lchown(2) and utimensat(2) can set on the link itself. *owner*
+    replaces the source's ids as it does in copy_metadata; with no src_st there
+    are no timestamps to carry and only the owner is set.
     """
-    with contextlib.suppress(OSError, NotImplementedError):
-        os.chown(name, src_st.st_uid, src_st.st_gid, dir_fd=dir_fd, follow_symlinks=False)
-    with contextlib.suppress(OSError, NotImplementedError):
-        os.utime(
-            name,
-            ns=(src_st.st_atime_ns, src_st.st_mtime_ns),
-            dir_fd=dir_fd,
-            follow_symlinks=False,
-        )
+    if owner is None and src_st is not None:
+        owner = (src_st.st_uid, src_st.st_gid)
+    if owner is not None:
+        with contextlib.suppress(OSError, NotImplementedError):
+            os.chown(name, owner[0], owner[1], dir_fd=dir_fd, follow_symlinks=False)
+    if src_st is not None:
+        with contextlib.suppress(OSError, NotImplementedError):
+            os.utime(
+                name,
+                ns=(src_st.st_atime_ns, src_st.st_mtime_ns),
+                dir_fd=dir_fd,
+                follow_symlinks=False,
+            )
 
 
 def _chmod_fd(fd: int, mode: int) -> bool:
@@ -398,6 +421,7 @@ def copy_file_at(
     src_st: os.stat_result | None = None,
     *,
     replace: bool = False,
+    owner: tuple[int, int] | None = None,
 ) -> None:
     """Copy one regular file between two pinned directories.
 
@@ -437,7 +461,7 @@ def copy_file_at(
             dfd, _ = open_new_at(dst_dir_fd, name, stat.S_IMODE(src_st.st_mode))
             try:
                 copy_data(sfd, dfd, sfd_st)
-                copy_metadata(sfd, dfd, src_st)
+                copy_metadata(sfd, dfd, src_st, owner=owner)
             finally:
                 os.close(dfd)
             if replace:
@@ -458,6 +482,7 @@ def copy_symlink_at(
     src_st: os.stat_result | None = None,
     *,
     replace: bool = False,
+    owner: tuple[int, int] | None = None,
 ) -> None:
     """Recreate a symlink at the destination, target verbatim.
 
@@ -477,8 +502,7 @@ def copy_symlink_at(
             os.symlink(target, dst_name, dir_fd=dst_dir_fd)
     else:
         os.symlink(target, dst_name, dir_fd=dst_dir_fd)
-    if src_st is not None:
-        copy_link_metadata(dst_dir_fd, dst_name, src_st)
+    copy_link_metadata(dst_dir_fd, dst_name, src_st, owner=owner)
 
 
 def close_frames(stack: list[_Frame]) -> None:
@@ -688,6 +712,7 @@ def copy_tree_at(
     *,
     rel: str = "",
     merge: bool = False,
+    owner: tuple[int, int] | None = None,
     on_entry: _OnEntry | None = None,
     on_skip: _OnEntry | None = None,
     on_error: _OnError | None = None,
@@ -708,6 +733,9 @@ def copy_tree_at(
     refused and reported. Without merge every create is exclusive, which is what
     a move's cross-device fallback wants: rename(2) would not have overwritten a
     populated directory either.
+
+    *owner* is `--chown`'s resolved pair, applied to every entry written in place
+    of the ids the source carries.
 
     on_entry(rel_path) is called for each file and symlink written.
 
@@ -750,7 +778,7 @@ def copy_tree_at(
                 levels.pop()
                 if owned:
                     try:
-                        copy_metadata(src_fd, dst_fd, dir_st)
+                        copy_metadata(src_fd, dst_fd, dir_st, owner=owner)
                     finally:
                         os.close(dst_fd)
                         os.close(src_fd)
@@ -764,7 +792,7 @@ def copy_tree_at(
                 mode = src_st.st_mode
 
                 if stat.S_ISLNK(mode):
-                    copy_symlink_at(src_fd, name, dst_fd, name, src_st, replace=merge)
+                    copy_symlink_at(src_fd, name, dst_fd, name, src_st, replace=merge, owner=owner)
                     if on_entry:
                         on_entry(child)
                 elif stat.S_ISDIR(mode):
@@ -781,7 +809,7 @@ def copy_tree_at(
                     if not fresh:
                         make_writable(sub_dst)
                 elif stat.S_ISREG(mode):
-                    copy_file_at(src_fd, name, dst_fd, name, src_st, replace=merge)
+                    copy_file_at(src_fd, name, dst_fd, name, src_st, replace=merge, owner=owner)
                     if on_entry:
                         on_entry(child)
                 elif on_skip:
@@ -792,6 +820,92 @@ def copy_tree_at(
                 if len(stack) > depth:
                     levels.truncate(depth)
                 on_error(child, exc)
+    except BaseException:
+        close_frames(stack)
+        raise
+
+
+def _chown_reporting(dir_fd: int, name: str, rel: str, uid: int, gid: int, on_error: _OnError | None) -> None:
+    """lchown one entry, handing a refusal to *on_error* if there is one."""
+    try:
+        os.chown(name, uid, gid, dir_fd=dir_fd, follow_symlinks=False)
+    except OSError as exc:
+        if on_error is None:
+            raise
+        on_error(rel, exc)
+
+
+def chown_tree_at(
+    dir_fd: int,
+    name: str,
+    owner: tuple[int, int],
+    *,
+    on_error: _OnError | None = None,
+) -> None:
+    """Set *owner* on *name* and everything below it.
+
+    What `--chown` needs after a move rename(2) carried out by itself: the
+    entries keep their inodes, and with them the ids they had on the source side,
+    so the only way the flag can reach them is a walk of its own afterwards.
+
+    Every id is set with lchown(2), so a symlink is given the owner rather than
+    whatever it points at, and each level is descended through opendir_at, which
+    refuses a symlink outright — the walk cannot leave the tree it was handed.
+    The descent is an explicit stack for the reason copy_tree_at's is: how deep
+    the tree goes is not this code's decision.
+
+    on_error(rel, exc) is called for an entry that would not take the owner,
+    which is then stepped over; without one the exception stands. rel names the
+    entry relative to *name*, "" for the root itself.
+
+    Frame layout: [fd, None, rel, pending names, owned].
+    """
+    uid, gid = owner
+    _chown_reporting(dir_fd, name, "", uid, gid, on_error)
+    try:
+        if not stat.S_ISDIR(lstat_at(dir_fd, name).st_mode):
+            return
+        root_fd = opendir_at(dir_fd, name)
+    except OSError as exc:
+        if on_error is None:
+            raise
+        on_error("", exc)
+        return
+
+    stack: list[_Frame] = [[root_fd, None, "", None, True]]
+    levels = Levels(stack)
+    try:
+        while stack:
+            frame = stack[-1]
+            fd, _, cur, pending, owned = frame
+            if pending is None:
+                try:
+                    pending = frame[3] = listdir_at(fd)
+                except OSError as exc:
+                    if on_error is None:
+                        raise
+                    on_error(cur, exc)
+                    pending = frame[3] = []
+                pending.reverse()
+            if not pending:
+                levels.pop()
+                if owned:
+                    os.close(fd)
+                continue
+
+            child = pending.pop()
+            child_rel = f"{cur}/{child}" if cur else child
+            _chown_reporting(fd, child, child_rel, uid, gid, on_error)
+            try:
+                if not stat.S_ISDIR(lstat_at(fd, child).st_mode):
+                    continue
+                sub = opendir_at(fd, child)
+            except OSError as exc:
+                if on_error is None:
+                    raise
+                on_error(child_rel, exc)
+                continue
+            levels.push([sub, None, child_rel, None, True])
     except BaseException:
         close_frames(stack)
         raise

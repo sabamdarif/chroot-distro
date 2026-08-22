@@ -545,3 +545,121 @@ def test_copy_link_metadata_names_the_link_itself(tmp_path, monkeypatch):
     name, uid, gid, dir_fd, follow = calls[0]
     assert (name, uid, gid, follow) == ("link", src_st.st_uid, src_st.st_gid, False)
     assert dir_fd is not None
+
+
+# ── a requested owner ─────────────────────────────────────────────────────────
+@contextlib.contextmanager
+def recorded_chowns(monkeypatch, root):
+    """Record every lchown as a path relative to *root*, performing none of them.
+
+    Handing out real ids would need a second uid to hand them to, so the calls
+    are recorded; the dir_fd is read back through /proc so the path a call would
+    have landed on is visible, which is the part a symlink could change.
+    """
+    seen = []
+
+    def record(name, uid, gid, dir_fd=None, follow_symlinks=True):
+        base = os.readlink(f"/proc/self/fd/{dir_fd}") if dir_fd is not None else ""
+        seen.append((os.path.relpath(os.path.join(base, name), str(root)), uid, gid, follow_symlinks))
+
+    monkeypatch.setattr(os, "chown", record)
+    yield seen
+
+
+def test_copy_metadata_prefers_a_requested_owner_over_the_sources(tmp_path, monkeypatch):
+    (tmp_path / "src").write_text("payload")
+    (tmp_path / "dst").write_text("")
+    calls = []
+    monkeypatch.setattr(os, "fchown", lambda fd, uid, gid: calls.append((uid, gid)))
+
+    src_st = os.stat(tmp_path / "src")
+    sfd = os.open(str(tmp_path / "src"), os.O_RDONLY)
+    dfd = os.open(str(tmp_path / "dst"), os.O_WRONLY)
+    try:
+        dirfd.copy_metadata(sfd, dfd, src_st, owner=(1002, -1))
+    finally:
+        os.close(dfd)
+        os.close(sfd)
+
+    # -1 is chown(2)'s "leave this one alone", so `--chown user` with no group
+    # named on a host destination reaches here half-filled and stays that way.
+    assert calls == [(1002, -1)]
+
+
+def test_copy_link_metadata_can_set_an_owner_with_no_times_to_carry(tmp_path, monkeypatch):
+    # The move fast path has no source stat to hand over: the entry it renamed
+    # already carries its own times, and only the owner is being changed.
+    os.symlink("target", tmp_path / "link")
+    utimes = []
+    monkeypatch.setattr(os, "utime", lambda *a, **kw: utimes.append(a))
+
+    with recorded_chowns(monkeypatch, tmp_path) as seen, opened(tmp_path) as fd:
+        dirfd.copy_link_metadata(fd, "link", owner=(7, 9))
+
+    assert seen == [("link", 7, 9, False)]
+    assert utimes == []
+
+
+def test_chown_tree_at_reaches_the_root_and_everything_under_it(tmp_path, monkeypatch):
+    _tree(tmp_path / "tree")
+
+    with recorded_chowns(monkeypatch, tmp_path) as seen, opened(tmp_path) as fd:
+        dirfd.chown_tree_at(fd, "tree", (7, 9))
+
+    assert {rel for rel, _uid, _gid, _follow in seen} == {
+        "tree",
+        "tree/a.txt",
+        "tree/link",
+        "tree/sub",
+        "tree/sub/b.txt",
+    }
+    # lchown throughout: a rename carries symlinks across as symlinks, and
+    # following one here would give away whatever the guest aimed it at.
+    assert all((uid, gid, follow) == (7, 9, False) for _rel, uid, gid, follow in seen)
+
+
+def test_chown_tree_at_names_a_symlinked_directory_but_stays_out_of_it(tmp_path, monkeypatch):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("not yours")
+    tree = tmp_path / "tree"
+    tree.mkdir()
+    os.symlink(str(outside), tree / "link")
+
+    with recorded_chowns(monkeypatch, tmp_path) as seen, opened(tmp_path) as fd:
+        dirfd.chown_tree_at(fd, "tree", (7, 9))
+
+    assert {rel for rel, _uid, _gid, _follow in seen} == {"tree", "tree/link"}
+
+
+def test_chown_tree_at_reports_a_refusal_and_carries_on(tmp_path, monkeypatch):
+    _tree(tmp_path / "tree")
+    errors = []
+
+    def refuse(name, uid, gid, dir_fd=None, follow_symlinks=True):
+        if name == "a.txt":
+            raise OSError(errno.EPERM, os.strerror(errno.EPERM))
+
+    monkeypatch.setattr(os, "chown", refuse)
+    with opened(tmp_path) as fd:
+        dirfd.chown_tree_at(fd, "tree", (7, 9), on_error=lambda rel, exc: errors.append((rel, exc.errno)))
+
+    assert errors == [("a.txt", errno.EPERM)]
+
+    with opened(tmp_path) as fd, pytest.raises(PermissionError):
+        dirfd.chown_tree_at(fd, "tree", (7, 9))
+
+
+def test_chown_tree_at_survives_a_tree_deeper_than_its_fd_budget(tmp_path, monkeypatch):
+    monkeypatch.setattr(dirfd, "MAX_OPEN_LEVELS", 2)
+    deep = tmp_path / "tree"
+    for i in range(12):
+        deep = deep / f"level{i}"
+    deep.mkdir(parents=True)
+    (deep / "bottom.txt").write_text("floor")
+
+    with recorded_chowns(monkeypatch, tmp_path) as seen, opened(tmp_path) as fd:
+        dirfd.chown_tree_at(fd, "tree", (7, 9))
+
+    bottom = os.path.join("tree", *(f"level{i}" for i in range(12)), "bottom.txt")
+    assert bottom in {rel for rel, _uid, _gid, _follow in seen}

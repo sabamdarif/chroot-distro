@@ -189,7 +189,7 @@ _chroot_distro() {
 	# -----------------------------------------------------------------------
 	copy)
 		if [[ "${cur}" == -* ]]; then
-			_chroot_distro_compgen_words "-v --verbose -q --quiet -m --move -r --recursive -h --help" "${cur}"
+			_chroot_distro_compgen_words "-v --verbose -q --quiet -m --move -r --recursive --chown -h --help" "${cur}"
 		else
 			# Support container:path notation: complete container names
 			# (no colon yet) or paths (colon already present → filesystem)
@@ -210,7 +210,7 @@ _chroot_distro() {
 	# -----------------------------------------------------------------------
 	sync)
 		if [[ "${cur}" == -* ]]; then
-			_chroot_distro_compgen_words "-v --verbose -q --quiet -c --checksum -d --delete -h --help" "${cur}"
+			_chroot_distro_compgen_words "-v --verbose -q --quiet -c --checksum -d --delete --chown -h --help" "${cur}"
 		else
 			if [[ "${cur}" == *:* ]]; then
 				_filedir

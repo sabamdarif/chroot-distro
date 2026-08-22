@@ -231,6 +231,7 @@ _chroot_distro() {
 				'(-v --verbose -q --quiet)'{-q,--quiet}'[suppress non-error output]' \
 				'(-m --move)'{-m,--move}'[move instead of copy]' \
 				'(-r --recursive)'{-r,--recursive}'[copy directories recursively]' \
+				'--chown[give every transferred entry this owner]:user\:group' \
 				'1:source (host path or container\:path):_files' \
 				'2:destination (host path or container\:path):_files'
 			;;
@@ -243,6 +244,7 @@ _chroot_distro() {
 				'(-v --verbose -q --quiet)'{-q,--quiet}'[suppress non-error output]' \
 				'(-c --checksum)'{-c,--checksum}'[use CRC32 checksum instead of size+mtime]' \
 				'(-d --delete)'{-d,--delete}'[remove destination entries absent from source]' \
+				'--chown[give every transferred entry this owner]:user\:group' \
 				'1:source (host path or container\:path):_files' \
 				'2:destination (host path or container\:path):_files'
 			;;

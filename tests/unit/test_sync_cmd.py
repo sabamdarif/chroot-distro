@@ -46,10 +46,10 @@ def opened(path):
         os.close(fd)
 
 
-def sync(src, dest, *, verbose=False, checksum=False, delete=False):
+def sync(src, dest, *, verbose=False, checksum=False, delete=False, chown=None):
     """Run the command, returning its exit status (0 when it did not exit)."""
     try:
-        _do_sync(str(src), str(dest), verbose, checksum, delete)
+        _do_sync(str(src), str(dest), verbose, checksum, delete, chown)
     except SystemExit as exc:
         return exc.code
     return 0
@@ -426,3 +426,66 @@ def test_a_hardlinked_destination_is_not_chowned_either(tmp_path, monkeypatch):
     with opened(dest) as fd:
         assert _refresh_file_metadata(src_st, fd, "a.txt") == _META_REWRITE
     assert calls == []
+
+
+# ── --chown ───────────────────────────────────────────────────────────────────
+def test_chown_stands_in_for_the_sources_ids_on_every_entry(rootfs, tmp_path, monkeypatch):
+    (rootfs / "etc").mkdir()
+    (rootfs / "etc" / "passwd").write_text("app:x:1002:1500:app:/home/app:/bin/sh\n")
+    src = _tree(tmp_path / "src")
+    calls = []
+    monkeypatch.setattr(os, "fchown", lambda fd, uid, gid: calls.append((uid, gid)))
+    monkeypatch.setattr(
+        os,
+        "chown",
+        lambda name, uid, gid, dir_fd=None, follow_symlinks=True: calls.append((uid, gid)),
+    )
+
+    assert sync(src, "distro:/opt/dest", chown="app") == 0
+
+    assert (rootfs / "opt" / "dest" / "sub" / "b.txt").read_text() == "beta"
+    assert set(calls) == {(1002, 1500)}
+
+
+def test_a_group_alone_leaves_the_destinations_own_user_in_place(tmp_path, monkeypatch):
+    """`--chown :GROUP` reaches _refresh_file_metadata as -1 for the uid.
+
+    The sentinel must not be compared against the destination's own uid, or every
+    run would find the entry misowned and report it as modified for good.
+    """
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    (dest / "a.txt").write_text("alpha")
+    src_st = os.stat(dest / "a.txt")
+    calls = []
+    monkeypatch.setattr(os, "fchown", lambda fd, uid, gid: calls.append((uid, gid)))
+
+    with opened(dest) as fd:
+        assert _refresh_file_metadata(src_st, fd, "a.txt", (-1, 4243)) == _META_FIXED
+    assert calls == [(src_st.st_uid, 4243)]
+
+
+def test_a_destination_already_carrying_the_requested_owner_is_left_alone(tmp_path, monkeypatch):
+    # Without --chown the source's ids decide, and they differ from the
+    # destination's here; the flag is what makes the entry already correct.
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    (dest / "a.txt").write_text("alpha")
+    dst_st = os.stat(dest / "a.txt")
+    src_st = _with_owner(dst_st, 4242, 4243)
+    calls = []
+    monkeypatch.setattr(os, "fchown", lambda fd, uid, gid: calls.append((uid, gid)))
+
+    with opened(dest) as fd:
+        assert _refresh_file_metadata(src_st, fd, "a.txt", (dst_st.st_uid, dst_st.st_gid)) == _META_OK
+    assert calls == []
+
+
+def test_an_unknown_chown_name_is_refused_before_anything_is_synced(rootfs, tmp_path):
+    (rootfs / "etc").mkdir()
+    (rootfs / "etc" / "passwd").write_text("app:x:1002:1500:app:/home/app:/bin/sh\n")
+    src = _tree(tmp_path / "src")
+
+    with pytest.raises(ChrootDistroError, match="unknown user 'ghost'"):
+        sync(src, "distro:/opt/dest", chown="ghost")
+    assert not (rootfs / "opt").exists()

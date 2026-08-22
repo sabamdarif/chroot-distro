@@ -293,6 +293,7 @@ def _copy(sub):
     vq.add_argument("-q", "--quiet", action="store_true")
     p.add_argument("-m", "--move", action="store_true")
     p.add_argument("-r", "--recursive", action="store_true")
+    p.add_argument("--chown", default=None, metavar="USER[:GROUP]")
     p.add_argument("-h", "--help", action="store_true")
 
 
@@ -306,6 +307,7 @@ def _sync(sub):
     vq.add_argument("-q", "--quiet", action="store_true")
     p.add_argument("-c", "--checksum", action="store_true")
     p.add_argument("-d", "--delete", action="store_true")
+    p.add_argument("--chown", default=None, metavar="USER[:GROUP]")
     p.add_argument("-h", "--help", action="store_true")
 
 
