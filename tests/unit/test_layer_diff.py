@@ -161,6 +161,11 @@ def test_write_layer_tar(tmp_path):
         assert member.read() == b"hello layer"
 
 
+def _file_entry(path, mode):
+    """A file_map "file" entry: the tree it was found under, plus components."""
+    return {"kind": "file", "root": str(path.parent), "rel": (path.name,), "src": str(path), "mode": mode}
+
+
 def test_write_files_layer(tmp_path):
     out_tar = tmp_path / "layer.tar.gz"
 
@@ -171,8 +176,8 @@ def test_write_files_layer(tmp_path):
     conf_file.write_bytes(b'{"port": 80}')
 
     file_map = {
-        "etc/config.json": {"kind": "file", "src": str(conf_file), "mode": 0o600},
-        "usr/bin/sourced": {"kind": "file", "src": str(src_file), "mode": 0o755},
+        "etc/config.json": _file_entry(conf_file, 0o600),
+        "usr/bin/sourced": _file_entry(src_file, 0o755),
         "usr/bin/link": {"kind": "symlink", "target": "sourced"},
         "var/log": {"kind": "dir", "mode": 0o700},
     }
@@ -214,3 +219,21 @@ def test_write_files_layer(tmp_path):
         info_log = tf.getmember("var/log")
         assert info_log.type == tarfile.DIRTYPE
         assert info_log.mode == 0o700
+
+
+def test_a_file_entrys_recorded_size_does_not_decide_the_member(tmp_path):
+    # The size in an entry is the enumeration's measurement and feeds nothing but
+    # the progress denominator; the member is written from the descriptor the
+    # packer holds, so a file that grew after being recorded still packs whole.
+    src = tmp_path / "grown.txt"
+    src.write_bytes(b"the real content")
+    entry = _file_entry(src, 0o644)
+    entry["size"] = 3
+
+    out_tar = tmp_path / "layer.tar.gz"
+    write_files_layer({"opt/grown.txt": entry}, str(out_tar))
+
+    with gzip.open(out_tar, "rb") as gz, tarfile.open(fileobj=gz, mode="r:") as tf:
+        member = tf.getmember("opt/grown.txt")
+        assert member.size == len(b"the real content")
+        assert tf.extractfile(member).read() == b"the real content"

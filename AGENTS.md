@@ -158,6 +158,19 @@ entry belongs and `copy_step._materialise_entry` re-walks those components with
 `O_NOFOLLOW` to write it as `(dir_fd, name)`, while `layer_diff.snapshot` walks
 on descriptors and `_add_entry` takes its parent from `_ParentFds` and sizes a
 file from the fstat of the descriptor it reads.
+The *source* side is the same bargain: `copy_step._SourceTree` is the one way a
+`COPY`/`ADD` source is located, resolving the spec beneath the build context or
+the stage rootfs with `safe_resolve_parts` (so `..` is refused and a symlink out
+re-anchors at the tree root), and a `file` entry then carries the tree it was
+found under plus the components below it. Both consumers open it through
+`layer_diff.MapSources`, which re-walks those components with `O_NOFOLLOW`, so
+nothing reads a source by name a second time. `_add_directory_tree` walks an
+explicit stack of directory descriptors bounded by `dirfd.Levels` instead of
+`os.walk`, and `ADD`'s auto-extract sniffs and unpacks through one descriptor on
+the archive (`parsing.is_tar_header` takes the bytes, not a name). A directory is
+descended without a `.dockerignore` check on purpose: `dockerignore._match`
+prefix-matches, so a pattern on a directory already covers its children, and a
+`!` line re-including one of them only survives if the walk goes in.
 
 ### Cross-cutting
 - `atomic.py`: every state file write goes through `atomic_write` /

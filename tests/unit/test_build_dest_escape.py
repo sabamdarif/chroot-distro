@@ -174,7 +174,16 @@ def test_materialise_tar_dir_member_lands_inside_the_rootfs(tmp_path):
         str(rootfs),
         {
             "etc": {"kind": "dir", "mode": 0o755, "uid": 0, "gid": 0, "mtime": 0},
-            "etc/passwd": {"kind": "file", "src": str(spooled), "mode": 0o644, "uid": 0, "gid": 0, "mtime": 0},
+            "etc/passwd": {
+                "kind": "file",
+                "root": str(spooled.parent),
+                "rel": (spooled.name,),
+                "src": str(spooled),
+                "mode": 0o644,
+                "uid": 0,
+                "gid": 0,
+                "mtime": 0,
+            },
         },
     )
 

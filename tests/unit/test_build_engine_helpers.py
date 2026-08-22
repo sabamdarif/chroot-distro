@@ -87,40 +87,24 @@ def test_looks_like_url(value, expected):
     assert parsing.looks_like_url(value) is expected
 
 
-# ── parsing.is_tar_archive ────────────────────────────────────────────────────
-def _write(tmp_path, name, data):
-    p = tmp_path / name
-    p.write_bytes(data)
-    return str(p)
-
-
-def test_is_tar_archive_ustar(tmp_path):
-    head = b"\x00" * 257 + b"ustar\x00" + b"\x00" * 10
-    assert parsing.is_tar_archive(_write(tmp_path, "a.tar", head)) is True
-
-
-def test_is_tar_archive_gzip(tmp_path):
-    assert parsing.is_tar_archive(_write(tmp_path, "a.gz", b"\x1f\x8b\x08" + b"\x00" * 300)) is True
-
-
-def test_is_tar_archive_bzip2(tmp_path):
-    assert parsing.is_tar_archive(_write(tmp_path, "a.bz2", b"BZh" + b"\x00" * 300)) is True
-
-
-def test_is_tar_archive_xz(tmp_path):
-    assert parsing.is_tar_archive(_write(tmp_path, "a.xz", b"\xfd7zXZ\x00" + b"\x00" * 300)) is True
-
-
-def test_is_tar_archive_too_short(tmp_path):
-    assert parsing.is_tar_archive(_write(tmp_path, "a", b"short")) is False
-
-
-def test_is_tar_archive_not_tar(tmp_path):
-    assert parsing.is_tar_archive(_write(tmp_path, "a", b"\x00" * 300)) is False
-
-
-def test_is_tar_archive_missing_file(tmp_path):
-    assert parsing.is_tar_archive(str(tmp_path / "nope")) is False
+# ── parsing.is_tar_header ─────────────────────────────────────────────────────
+@pytest.mark.parametrize(
+    ("head", "expected"),
+    [
+        (b"\x00" * 257 + b"ustar\x00" + b"\x00" * 10, True),
+        (b"\x00" * 257 + b"ustar  \x00" + b"\x00" * 10, True),
+        (b"\x1f\x8b\x08" + b"\x00" * 300, True),
+        (b"BZh" + b"\x00" * 300, True),
+        (b"\xfd7zXZ\x00" + b"\x00" * 300, True),
+        (b"\x00" * 300, False),
+        # Shorter than the ustar magic's offset, so nothing can be concluded.
+        (b"short", False),
+        (b"\x1f\x8b\x08" + b"\x00" * 10, False),
+        (b"", False),
+    ],
+)
+def test_is_tar_header(head, expected):
+    assert parsing.is_tar_header(head) is expected
 
 
 # ── constants.needs_chroot ────────────────────────────────────────────────────

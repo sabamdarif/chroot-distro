@@ -53,6 +53,12 @@ def _make_tar(path, entries):
                 tf.addfile(info, io.BytesIO(payload))
 
 
+def _extract(path, dest, file_map, spool):
+    """Auto-extract *path* the way ADD does: by descriptor, off its own tree."""
+    tree = copy_step._SourceTree(os.path.dirname(path))
+    return copy_step._extract_archive(tree, [os.path.basename(path)], dest, file_map, 0, 0, spool)
+
+
 def _assert_no_bytes_held(file_map):
     for arcname, entry in file_map.items():
         assert "data" not in entry, f"{arcname} holds its content in memory"
@@ -73,7 +79,7 @@ def test_auto_extracted_members_are_spooled(tmp_path, spool):
         ],
     )
     file_map = {}
-    assert copy_step._extract_tar_into_dest(str(arc), "extracted", file_map, 0, 0, spool) == 4
+    assert _extract(str(arc), "extracted", file_map, spool) == 4
 
     _assert_no_bytes_held(file_map)
     with open(file_map["extracted/a"]["src"], "rb") as fh:
@@ -91,7 +97,7 @@ def test_member_mtime_survives_the_spool(tmp_path, spool):
     arc = tmp_path / "payload.tar"
     _make_tar(str(arc), [("a", "file", b"A", 1234567890)])
     file_map = {}
-    copy_step._extract_tar_into_dest(str(arc), "extracted", file_map, 0, 0, spool)
+    _extract(str(arc), "extracted", file_map, spool)
 
     assert int(os.stat(file_map["extracted/a"]["src"]).st_mtime) == 1234567890
 
@@ -102,7 +108,7 @@ def test_an_absurd_member_mtime_does_not_raise(tmp_path, spool):
     arc = tmp_path / "payload.tar"
     _make_tar(str(arc), [("a", "file", b"A", 2**63)])
     file_map = {}
-    copy_step._extract_tar_into_dest(str(arc), "extracted", file_map, 0, 0, spool)
+    _extract(str(arc), "extracted", file_map, spool)
 
     assert os.path.isfile(file_map["extracted/a"]["src"])
 
@@ -138,7 +144,7 @@ def test_a_gzip_that_is_not_a_tar_records_nothing(tmp_path, spool):
     src.write_bytes(gzip.compress(b"just some bytes, no tar headers here"))
     file_map = {}
 
-    assert copy_step._extract_tar_into_dest(str(src), "dest", file_map, 0, 0, spool) == 0
+    assert _extract(str(src), "dest", file_map, spool) == 0
     assert file_map == {}
 
 
@@ -150,7 +156,9 @@ def test_add_copies_a_non_archive_gzip_verbatim(tmp_path, spool):
     file_map = {}
 
     copy_step._add_to_file_map(
-        str(src),
+        copy_step._SourceTree(str(tmp_path)),
+        ["data.gz"],
+        os.lstat(src),
         "/opt/",
         is_dir_dest=True,
         file_map=file_map,
@@ -175,4 +183,4 @@ def test_a_truncated_archive_names_the_source(tmp_path, spool):
     file_map = {}
 
     with pytest.raises(BuildError, match="cannot extract"):
-        copy_step._extract_tar_into_dest(str(arc), "extracted", file_map, 0, 0, spool)
+        _extract(str(arc), "extracted", file_map, spool)

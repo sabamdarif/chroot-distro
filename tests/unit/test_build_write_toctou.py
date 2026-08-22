@@ -8,6 +8,7 @@
 # running is enough to exploit that, and on Termux the stage tree lives under the
 # $TERMUX_PREFIX that every non-isolated container has bound read-write.
 
+import errno
 import gzip
 import os
 import stat
@@ -37,7 +38,17 @@ def tree(tmp_path):
 
 
 def _file_entry(src, mode=0o644):
-    return {"kind": "file", "src": str(src), "mode": mode, "uid": 0, "gid": 0, "mtime": 0}
+    """A file_map "file" entry: the tree the source was found under, plus components."""
+    return {
+        "kind": "file",
+        "root": str(src.parent),
+        "rel": (src.name,),
+        "src": str(src),
+        "mode": mode,
+        "uid": 0,
+        "gid": 0,
+        "mtime": 0,
+    }
 
 
 # ── COPY/ADD materialisation ──────────────────────────────────────────────────
@@ -230,24 +241,49 @@ def test_layer_sizes_a_file_from_the_descriptor_it_reads(tree, tmp_path, monkeyp
     assert _members(str(out))["f"][1] == b"short\n"
 
 
+def _open_errno(sources, root, rel):
+    """The errno MapSources refused this entry with, or 0 if it opened."""
+    try:
+        fd, _st = sources.open({"root": str(root), "rel": rel})
+    except OSError as exc:
+        return exc.errno
+    os.close(fd)
+    return 0
+
+
 def test_a_file_map_source_is_opened_as_a_regular_file(tree, tmp_path):
     # A source spooled into the build's own tmp_root is reachable by anything
     # running with this user's rights, so what gets packed is the inode this
-    # descriptor holds or nothing.
+    # descriptor holds or nothing: MapSources re-walks the recorded components
+    # from the recorded tree with O_NOFOLLOW, so neither a link left in place of
+    # the source nor a FIFO under its name yields bytes.
     _rootfs, outside = tree
     os.symlink(str(outside / "secret"), str(tmp_path / "link"))
     os.mkfifo(str(tmp_path / "pipe"))
 
-    assert layer_diff._open_source(str(tmp_path / "link")) is None
-    assert layer_diff._open_source(str(tmp_path / "pipe")) is None
+    with layer_diff.MapSources() as sources:
+        for name in ("link", "pipe"):
+            assert _open_errno(sources, tmp_path, (name,)) in (errno.ELOOP, errno.ENOTDIR, errno.EINVAL)
 
-    opened = layer_diff._open_source(str(outside / "secret"))
-    assert opened is not None
-    fd, st = opened
-    try:
-        assert st.st_size == len(b"host secret\n")
-    finally:
-        os.close(fd)
+        fd, st = sources.open({"root": str(outside), "rel": ("secret",)})
+        try:
+            assert st.st_size == len(b"host secret\n")
+        finally:
+            os.close(fd)
+
+
+def test_a_file_map_source_is_not_reached_through_a_symlinked_parent(tmp_path):
+    # The parent components are re-walked too, so a directory that has become a
+    # link since the enumeration cannot redirect the read out of the tree.
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret").write_bytes(b"host secret\n")
+    root = tmp_path / "context"
+    root.mkdir()
+    os.symlink(str(outside), str(root / "sub"))
+
+    with layer_diff.MapSources() as sources:
+        assert _open_errno(sources, root, ("sub", "secret")) in (errno.ELOOP, errno.ENOTDIR)
 
 
 # ── the snapshot ──────────────────────────────────────────────────────────────
