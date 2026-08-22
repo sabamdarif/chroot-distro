@@ -144,7 +144,10 @@ silently ignored), `events.py` renders progress (`--progress plain|tty|rawjson`)
 `helpers/layer_diff.py` snapshots and diffs the rootfs into layer tars,
 `helpers/oci_writer.py` writes the manifest/config into the cache so `push` and
 `install` can consume the result, and `helpers/build_cache.py` caches steps by
-recipe hash.
+recipe hash (index and lock reached by an `O_NOFOLLOW` walk down to the cache
+directory, so a planted entry under either fixed name is refused rather than
+read, and a lock name that cannot be cleared records the step unlocked instead
+of failing the build).
 
 ### Cross-cutting
 - `atomic.py`: every state file write goes through `atomic_write` /

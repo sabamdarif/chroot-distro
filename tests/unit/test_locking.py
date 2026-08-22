@@ -201,7 +201,7 @@ def test_locking_oserror_warnings(lock_tree):
         assert "Could not create lock directory" in warn.call_args[0][0]
 
     with (
-        patch("chroot_distro.locking.open_lock_file_at", return_value=None),
+        patch("chroot_distro.locking._open_lock_file", return_value=None),
         patch("logging.Logger.warning") as warn,
     ):
         assert lock.acquire() is True

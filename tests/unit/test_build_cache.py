@@ -1,5 +1,11 @@
 import json
+import os
+import subprocess
+import sys
 
+import pytest
+
+from chroot_distro import atomic
 from chroot_distro.helpers import build_cache
 
 
@@ -96,3 +102,140 @@ def test_recipe_hash_perturbed_by_mount_flag():
     h_mount = build_cache.compute_recipe_hash(None, with_mount)
     h_other = build_cache.compute_recipe_hash(None, other_mount)
     assert len({h_plain, h_mount, h_other}) == 3
+
+
+# ── planted entries ───────────────────────────────────────────────────────────
+#
+# The index and its lock live in the download cache, which on Termux sits under
+# the $PREFIX bound read-write into every non-isolated container. Both names are
+# fixed, so a guest can leave something of its own standing under either one.
+# The index is read, so what matters there is that a plant is never followed and
+# never believed; the lock is created, so what matters there is that a plant is
+# replaced -- and that a plant which cannot be replaced still leaves the build
+# able to record its step.
+
+
+def test_a_planted_symlink_over_the_index_is_not_read(monkeypatch, tmp_path):
+    index = _redirect(monkeypatch, tmp_path)
+    outside = tmp_path / "outside.json"
+    outside.write_text(json.dumps({"version": 1, "entries": {"h": {"layer_digest": "sha256:evil"}}}))
+    index.symlink_to(outside)
+
+    assert build_cache.lookup("h") is None
+
+
+def test_a_planted_fifo_over_the_index_does_not_stall_the_build(tmp_path):
+    # O_NOFOLLOW says nothing about a FIFO, and opening one for reading waits
+    # for a writer a hostile guest never supplies.
+    index = tmp_path / "build_cache_index.json"
+    os.mkfifo(str(index))
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys;"
+            "sys.path.insert(0, 'src');"
+            "from chroot_distro.helpers import build_cache;"
+            f"build_cache._INDEX_PATH = {str(index)!r};"
+            "print(build_cache.lookup('h'))",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert completed.stdout.strip() == "None", completed.stderr
+
+
+def test_a_planted_symlink_over_the_lock_is_replaced(monkeypatch, tmp_path):
+    index = _redirect(monkeypatch, tmp_path)
+    outside = tmp_path / "outside"
+    outside.write_text("KEEP")
+    lock = tmp_path / (index.name + ".lock")
+    lock.symlink_to(outside)
+
+    build_cache.record("h", "sha256:layer", "sha256:diff", 1)
+
+    assert build_cache.lookup("h") is not None
+    assert not lock.is_symlink()
+    assert outside.read_text() == "KEEP"
+
+
+def test_a_lock_name_that_cannot_be_cleared_still_records_the_step(monkeypatch, tmp_path):
+    # Unlike a container lock, an unserialised record() risks a concurrent
+    # build's entry and nothing else, so it goes ahead without the flock.
+    index = _redirect(monkeypatch, tmp_path)
+    planted = tmp_path / (index.name + ".lock")
+    planted.mkdir()
+    (planted / "occupied").write_text("x")
+
+    build_cache.record("h", "sha256:layer", "sha256:diff", 1)
+
+    assert build_cache.lookup("h") is not None
+    assert (planted / "occupied").exists()
+
+
+def test_discard_index_drops_a_planted_symlink_without_following_it(monkeypatch, tmp_path):
+    index = _redirect(monkeypatch, tmp_path)
+    outside = tmp_path / "outside.json"
+    outside.write_text("{}")
+    index.symlink_to(outside)
+
+    removed, size = build_cache.discard_index()
+
+    assert removed is True
+    assert size == len(str(outside))
+    assert not index.exists() and not index.is_symlink()
+    assert outside.read_text() == "{}"
+
+
+# ── the walk down to the cache directory ──────────────────────────────────────
+#
+# On Termux the cache is nested inside RUNTIME_DIR, so `cache` is a component of
+# the walk rather than its root and a guest can plant that too. Off Termux it is
+# a root of its own and there is nothing below it to walk.
+
+
+def _nested(monkeypatch, tmp_path):
+    """The Termux geometry: the cache nested inside RUNTIME_DIR.
+
+    `atomic` decides what to walk from its own copy of the two roots, so the
+    write side has to be pointed at the same tree as the read side for the
+    nesting to be under test at all.
+    """
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    monkeypatch.setattr(build_cache, "RUNTIME_DIR", str(runtime))
+    monkeypatch.setattr(atomic, "_STATE_ROOTS", (str(runtime),))
+    index = runtime / "cache" / "build_cache_index.json"
+    monkeypatch.setattr(build_cache, "_INDEX_PATH", str(index))
+    monkeypatch.setattr(build_cache, "_INDEX_LOCK_PATH", str(index) + ".lock")
+    return index
+
+
+def test_a_nested_cache_directory_is_created_and_used(monkeypatch, tmp_path):
+    index = _nested(monkeypatch, tmp_path)
+
+    build_cache.record("h", "sha256:layer", "sha256:diff", 1)
+
+    assert index.is_file()
+    assert build_cache.lookup("h") is not None
+    assert build_cache.discard_index()[0] is True
+
+
+def test_a_symlinked_cache_directory_is_refused_not_followed(monkeypatch, tmp_path):
+    index = _nested(monkeypatch, tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    os.symlink(str(outside), str(index.parent))
+
+    with pytest.raises(OSError):
+        build_cache.record("h", "sha256:layer", "sha256:diff", 1)
+
+    assert os.listdir(str(outside)) == []
+    assert build_cache.lookup("h") is None
+    # Not (False, 0): `clear-cache --build-cache` reads that as "no index, carry
+    # on and collect the layers", and a directory it cannot walk is not proof
+    # that nothing is pinned. The refusal has to reach the caller.
+    with pytest.raises(OSError):
+        build_cache.discard_index()

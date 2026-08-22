@@ -6,11 +6,50 @@ import os
 import time
 import typing
 
+from chroot_distro import dirfd, locking
 from chroot_distro.atomic import atomic_write
-from chroot_distro.constants import BASE_CACHE_DIR
+from chroot_distro.constants import BASE_CACHE_DIR, RUNTIME_DIR
 
 _INDEX_PATH = os.path.join(BASE_CACHE_DIR, "build_cache_index.json")
 _INDEX_LOCK_PATH = _INDEX_PATH + ".lock"
+
+
+def _index_walk() -> tuple[str, tuple[str, ...]]:
+    """Return (trust root, components below it) for the index's directory.
+
+    The cache is a state directory of this program's own, but on Termux it is
+    nested inside RUNTIME_DIR while elsewhere it is a root of its own, so how
+    much of the path may be walked is not fixed. Taking RUNTIME_DIR as the root
+    whenever the index sits below it keeps `cache` itself inside the O_NOFOLLOW
+    walk there, and leaves the walk trivial where it is not.
+    """
+    parent = os.path.dirname(_INDEX_PATH)
+    prefix = RUNTIME_DIR.rstrip(os.sep) + os.sep
+    if parent.startswith(prefix):
+        return RUNTIME_DIR, tuple(part for part in parent[len(prefix) :].split(os.sep) if part)
+    return parent, ()
+
+
+def _index_dir_fd(*, create: bool = False) -> int:
+    """Open the directory holding the index. Descriptor, or raises.
+
+    The root is created by name when asked, since a first build on a machine
+    that has never cached one must not fail merely because the cache directory
+    does not exist yet. Everything below it is opened off the level above with
+    O_NOFOLLOW, so a component replaced by a symlink raises instead of sending
+    the index -- or the lock taken over it -- somewhere else. On Termux the
+    cache sits under the $PREFIX that is bound read-write into every
+    non-isolated container, which is what puts a guest in a position to try.
+    """
+    root, parts = _index_walk()
+    if create:
+        with contextlib.suppress(OSError):
+            os.makedirs(root, exist_ok=True)
+    root_fd = dirfd.opendir(root)
+    try:
+        return dirfd.descend_at(root_fd, parts, create=create)
+    finally:
+        os.close(root_fd)
 
 
 @contextlib.contextmanager
@@ -23,15 +62,24 @@ def _index_lock() -> typing.Iterator[None]:
     entry. The flock serialises updates; on filesystems that don't
     support flock the call proceeds unlocked (last-writer-wins, same
     behaviour as before).
+
+    The lock file is named to `locking`, which opens it under the descriptor
+    and replaces anything standing there that is not a plain file. A name it
+    cannot clear -- like a directory it cannot reach -- ends in the unlocked
+    path rather than a refusal: the worst an unserialised `record()` costs is
+    the other build's entry, and the file it publishes is written through
+    `atomic_write` either way.
     """
     try:
-        os.makedirs(os.path.dirname(_INDEX_LOCK_PATH), exist_ok=True)
+        dir_fd = _index_dir_fd(create=True)
     except OSError:
         yield
         return
     try:
-        fd = os.open(_INDEX_LOCK_PATH, os.O_RDWR | os.O_CREAT, 0o600)
-    except OSError:
+        fd = locking.open_lock_file_at(dir_fd, os.path.basename(_INDEX_LOCK_PATH), _INDEX_LOCK_PATH)
+    finally:
+        os.close(dir_fd)
+    if fd is None:
         yield
         return
     try:
@@ -44,10 +92,27 @@ def _index_lock() -> typing.Iterator[None]:
         os.close(fd)
 
 
+def _read_index() -> bytes:
+    """Return the index's bytes, read through the walked descriptor.
+
+    Raises what the open raises. FileNotFoundError means what it says -- no
+    index yet -- and stays apart from every other failure, which is an entry
+    that is there and is not an index: a symlink O_NOFOLLOW refused, a FIFO, a
+    directory. `_load_index` answers both with an empty index, but the read has
+    no business being the thing that decides that.
+    """
+    dir_fd = _index_dir_fd()
+    try:
+        fd, _st = dirfd.open_regular_at(dir_fd, os.path.basename(_INDEX_PATH), os.O_RDONLY)
+    finally:
+        os.close(dir_fd)
+    with os.fdopen(fd, "rb") as fh:
+        return fh.read()
+
+
 def _load_index() -> dict[str, typing.Any]:
     try:
-        with open(_INDEX_PATH) as fh:
-            data = json.load(fh)
+        data = json.loads(_read_index())
     except (OSError, ValueError):
         return {"version": 1, "entries": {}}
     if not isinstance(data, dict):
@@ -95,17 +160,30 @@ def discard_index() -> tuple[bool, int]:
     afterwards and starts a fresh index. Neither outcome is a torn file, the
     same reason `lookup()` reads unlocked. The `.lock` file is left where it
     is: it is empty and `_index_lock()` recreates it on demand.
+
+    The entry is stat'd and unlinked under the walked descriptor, and without
+    following a final symlink, so what goes is whatever is standing in the
+    index's place -- which is the outcome the caller wants either way, since a
+    planted entry pins nothing.
     """
+    name = os.path.basename(_INDEX_PATH)
     try:
-        size = os.stat(_INDEX_PATH).st_size
+        dir_fd = _index_dir_fd()
     except FileNotFoundError:
         return False, 0
-    except OSError:
-        size = 0
     try:
-        os.unlink(_INDEX_PATH)
-    except FileNotFoundError:
-        return False, 0
+        try:
+            size = dirfd.lstat_at(dir_fd, name).st_size
+        except FileNotFoundError:
+            return False, 0
+        except OSError:
+            size = 0
+        try:
+            os.unlink(name, dir_fd=dir_fd)
+        except FileNotFoundError:
+            return False, 0
+    finally:
+        os.close(dir_fd)
     return True, size
 
 

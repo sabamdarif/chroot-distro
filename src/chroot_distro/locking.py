@@ -165,6 +165,25 @@ def _locks_dir_fd(parts: tuple[str, ...], create: bool = False) -> int | None:
 
 
 def open_lock_file_at(dir_fd: int, name: str, path: str) -> int | None:
+    """Open (creating) a lock file under dir_fd. Descriptor, or None.
+
+    The public form of `_open_lock_file`, for a lock file this module does not
+    own: the build-cache index keeps its own next to the index, which lives in
+    the download cache rather than under RUNTIME_DIR/locks. The opening rules
+    are the same; the *policy* differs at one point. Here a name that cannot be
+    cleared comes back as None, "carry on without a lock", because that is
+    already what the caller does on a filesystem that ignores flock and what it
+    costs there is a concurrent `record()`'s entry, not a torn file -- the index
+    itself is published through `atomic_write`. A container lock is the other
+    way round and fails closed; see `acquire`.
+    """
+    try:
+        return _open_lock_file(dir_fd, name, path)
+    except _HostileLockError:
+        return None
+
+
+def _open_lock_file(dir_fd: int, name: str, path: str) -> int | None:
     """Open (creating) the lock file *name* under dir_fd. Descriptor, or None.
 
     O_NOFOLLOW plus open_regular_at()'s type check, so neither a symlink nor a
@@ -179,10 +198,6 @@ def open_lock_file_at(dir_fd: int, name: str, path: str) -> int | None:
 
     None is that ordinary case -- a read-only filesystem, no permission -- which
     has always meant "carry on without a lock" and still does.
-
-    Public for the build-cache index, whose lock sits next to the index in the
-    download cache rather than under RUNTIME_DIR/locks. The opening rules are
-    the same; the policy at the far end is not, and `build_cache` says so.
     """
     flags = os.O_RDWR | os.O_CREAT
     try:
@@ -376,7 +391,7 @@ class _FlockBase:
                 # conflicting acquire destroyed the very diagnostics that
                 # _lock_info_at() needs to name the busy process. The file is
                 # truncated only after the lock is actually ours.
-                raw_fd = open_lock_file_at(dir_fd, os.path.basename(self._lock_path), self._lock_path)
+                raw_fd = _open_lock_file(dir_fd, os.path.basename(self._lock_path), self._lock_path)
             finally:
                 os.close(dir_fd)
         except _HostileLockError as exc:
