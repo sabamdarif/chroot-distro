@@ -465,3 +465,83 @@ def test_rmtree_at_without_on_error_still_raises(tmp_path, monkeypatch):
 def test_rmtree_at_is_content_with_a_name_that_is_already_gone(tmp_path):
     with opened(tmp_path) as fd:
         assert dirfd.rmtree_at(fd, "never-existed") is True
+
+
+# ── ownership ─────────────────────────────────────────────────────────────────
+def test_copy_metadata_sets_the_owner_before_the_mode(tmp_path, monkeypatch):
+    """chown(2) drops setuid and setgid unless the caller holds CAP_FSETID.
+
+    A transfer runs as root, where the two calls are both permitted and the
+    order is the only thing deciding whether a setuid source arrives setuid.
+    Asserting on real ids would need a second uid to give them to, so the calls
+    are recorded instead.
+    """
+    (tmp_path / "src").write_text("payload")
+    (tmp_path / "dst").write_text("")
+    order = []
+    monkeypatch.setattr(os, "fchown", lambda fd, uid, gid: order.append(("chown", uid, gid)))
+    monkeypatch.setattr(os, "fchmod", lambda fd, mode: order.append(("chmod", mode)))
+
+    os.chmod(tmp_path / "src", 0o4755)
+    src_st = os.stat(tmp_path / "src")
+    sfd = os.open(str(tmp_path / "src"), os.O_RDONLY)
+    dfd = os.open(str(tmp_path / "dst"), os.O_WRONLY)
+    try:
+        dirfd.copy_metadata(sfd, dfd, src_st)
+    finally:
+        os.close(dfd)
+        os.close(sfd)
+
+    assert order == [("chown", src_st.st_uid, src_st.st_gid), ("chmod", 0o4755)]
+
+
+def test_copy_metadata_finishes_when_the_destination_holds_no_ownership(tmp_path, monkeypatch):
+    # /sdcard is vfat, so a Termux move off the rootfs cannot set an owner. The
+    # data is already written by this point; the mode and times still have to land.
+    (tmp_path / "src").write_text("payload")
+    os.chmod(tmp_path / "src", 0o640)
+    os.utime(tmp_path / "src", (1_000_000, 1_000_000))
+    (tmp_path / "dst").write_text("")
+
+    def refuse(*_args):
+        raise OSError(errno.EPERM, os.strerror(errno.EPERM))
+
+    monkeypatch.setattr(os, "fchown", refuse)
+    sfd = os.open(str(tmp_path / "src"), os.O_RDONLY)
+    dfd = os.open(str(tmp_path / "dst"), os.O_WRONLY)
+    try:
+        dirfd.copy_metadata(sfd, dfd, os.stat(tmp_path / "src"))
+    finally:
+        os.close(dfd)
+        os.close(sfd)
+
+    dst_st = os.stat(tmp_path / "dst")
+    assert stat.S_IMODE(dst_st.st_mode) == 0o640
+    assert int(dst_st.st_mtime) == 1_000_000
+
+
+def test_copy_link_metadata_names_the_link_itself(tmp_path, monkeypatch):
+    """lchown, not chown: the owner belongs to the link, not to its target.
+
+    A guest can point an entry at a host file, so following the link here would
+    hand that file away to whoever the source happens to be owned by.
+    """
+    (tmp_path / "target").write_text("target data")
+    os.symlink("target", tmp_path / "link")
+    calls = []
+    monkeypatch.setattr(
+        os,
+        "chown",
+        lambda name, uid, gid, dir_fd=None, follow_symlinks=True: calls.append(
+            (name, uid, gid, dir_fd, follow_symlinks)
+        ),
+    )
+
+    src_st = os.lstat(tmp_path / "link")
+    with opened(tmp_path) as fd:
+        dirfd.copy_link_metadata(fd, "link", src_st)
+
+    assert len(calls) == 1
+    name, uid, gid, dir_fd, follow = calls[0]
+    assert (name, uid, gid, follow) == ("link", src_st.st_uid, src_st.st_gid, False)
+    assert dir_fd is not None

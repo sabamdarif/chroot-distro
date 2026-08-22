@@ -170,13 +170,26 @@ def _copy_xattrs(src_fd: int, dst_fd: int) -> None:
 
 
 def copy_metadata(src_fd: int, dst_fd: int, src_st: os.stat_result | None = None) -> None:
-    """Apply src's mode, timestamps and xattrs to the open dst fd.
+    """Apply src's owner, mode, timestamps and xattrs to the open dst fd.
 
-    shutil.copystat() expressed against file descriptors, so no path — and
-    therefore no symlink — is involved.
+    shutil.copystat() expressed against file descriptors, plus the ownership it
+    does not carry, so no path — and therefore no symlink — is involved.
+
+    Ownership is numeric: a transfer runs as root and the two ends may name
+    different users for the same id anyway, so the uid and gid are carried
+    across as they stand rather than resolved through either side's passwd. It
+    goes on before the mode, since chown(2) drops setuid and setgid whenever the
+    caller lacks CAP_FSETID, which would silently disarm those bits on a
+    destination the caller could not chmod back.
+
+    Each step is best effort on its own: a destination filesystem may have no
+    ownership to set (vfat, and so /sdcard) or no xattrs to hold, neither of
+    which is a reason to abandon a transfer that has already written the data.
     """
     if src_st is None:
         src_st = os.fstat(src_fd)
+    with contextlib.suppress(OSError):
+        os.fchown(dst_fd, src_st.st_uid, src_st.st_gid)
     with contextlib.suppress(OSError):
         os.fchmod(dst_fd, stat.S_IMODE(src_st.st_mode))
     with contextlib.suppress(OSError):
@@ -184,8 +197,14 @@ def copy_metadata(src_fd: int, dst_fd: int, src_st: os.stat_result | None = None
     _copy_xattrs(src_fd, dst_fd)
 
 
-def set_times_at(dir_fd: int, name: str, src_st: os.stat_result) -> None:
-    """Apply src_st's timestamps to *name* without following a symlink."""
+def copy_link_metadata(dir_fd: int, name: str, src_st: os.stat_result) -> None:
+    """Apply src_st's owner and timestamps to a symlink, never following it.
+
+    A symlink has no mode of its own on Linux, so the two things worth carrying
+    are the ones lchown(2) and utimensat(2) can set on the link itself.
+    """
+    with contextlib.suppress(OSError, NotImplementedError):
+        os.chown(name, src_st.st_uid, src_st.st_gid, dir_fd=dir_fd, follow_symlinks=False)
     with contextlib.suppress(OSError, NotImplementedError):
         os.utime(
             name,
@@ -459,7 +478,7 @@ def copy_symlink_at(
     else:
         os.symlink(target, dst_name, dir_fd=dst_dir_fd)
     if src_st is not None:
-        set_times_at(dst_dir_fd, dst_name, src_st)
+        copy_link_metadata(dst_dir_fd, dst_name, src_st)
 
 
 def close_frames(stack: list[_Frame]) -> None:

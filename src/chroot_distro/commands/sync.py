@@ -5,11 +5,11 @@ with `--checksum`; neither is an integrity check. Both files and directories are
 accepted as the source: symlinks inside a tree are copied as-is while one named
 as the source itself is followed, hardlinks become independent copies, and
 special files (block, char, FIFO, socket) are skipped inside a tree with a
-warning and refused as the whole source. Ownership is never changed. Modes and
-timestamps are preserved for directories as well as files, and one that changed
-on its own is applied without rewriting the content — unless the destination
-carries a second link, the one case where that would touch an inode this command
-did not create (see `_refresh_file_metadata`). A sparsely stored source is
+warning and refused as the whole source. Numeric ownership, modes and timestamps
+are preserved for directories as well as files, and one that changed on its own
+is applied without rewriting the content — unless the destination carries a
+second link, the one case where that would touch an inode this command did not
+create (see `_refresh_file_metadata`). A sparsely stored source is
 written back sparsely. With `--delete`, destination entries the source has no
 counterpart for are removed after the mirror pass; a source sitting *inside* the
 destination is refused rather than pruned as one of them, and nothing is pruned
@@ -280,31 +280,35 @@ def _sync_symlink(
         os.symlink(target, dst_name, dir_fd=dst_fd)
 
     if src_st is not None:
-        dirfd.set_times_at(dst_fd, dst_name, src_st)
+        dirfd.copy_link_metadata(dst_fd, dst_name, src_st)
     return True
 
 
 def _refresh_file_metadata(src_st: os.stat_result, dst_fd: int, dst_name: str) -> int:
-    """Bring an up-to-date file's mode and times into line with the source's.
+    """Bring an up-to-date file's owner, mode and times into line with the source's.
 
     Returns _META_OK when there was nothing to do, _META_FIXED when the entry was
     corrected in place, or _META_REWRITE to ask the caller for a full rewrite.
 
-    _needs_update compares type, size and mtime — never permissions — so a
-    `chmod +x` with no other change would leave the destination on the old mode
-    for good, and `--checksum` would leave the times behind in the same way.
+    _needs_update compares type, size and mtime — never permissions or ownership
+    — so a `chmod +x` or a `chown` with no other change would leave the
+    destination on the old mode for good, and `--checksum` would leave the times
+    behind in the same way.
 
-    Mode and times are applied to a descriptor, so the entry cannot be swapped
-    between the test and the change, and open_regular_at refuses anything but a
-    regular file.
+    Owner, mode and times are applied to a descriptor, so the entry cannot be
+    swapped between the test and the change, and open_regular_at refuses anything
+    but a regular file. The chown goes first for the reason dirfd.copy_metadata
+    gives: it drops setuid and setgid unless the caller holds CAP_FSETID. A
+    destination with no ownership to set (vfat, and so /sdcard) reports nothing
+    rather than the same correction on every run.
 
     A destination carrying more than one link is not touched at all. This is the
     one place a transfer would otherwise write to an inode it did not create, and
     a hardlink is precisely what that rule exists for: nothing distinguishes one
-    a guest made to a *host* file from an ordinary rootfs entry, so an fchmod here
-    would hand a container the mode of any file the host had put within its reach.
-    The rewrite goes through _sync_file, whose temp-and-rename leaves the other
-    name pointing at the old inode.
+    a guest made to a *host* file from an ordinary rootfs entry, so an fchmod or
+    an fchown here would hand a container the mode or the ownership of any file
+    the host had put within its reach. The rewrite goes through _sync_file, whose
+    temp-and-rename leaves the other name pointing at the old inode.
     """
     try:
         fd, dst_st = dirfd.open_regular_at(dst_fd, dst_name, os.O_RDONLY)
@@ -313,15 +317,25 @@ def _refresh_file_metadata(src_st: os.stat_result, dst_fd: int, dst_name: str) -
     try:
         want = stat.S_IMODE(src_st.st_mode)
         stale = int(dst_st.st_mtime) != int(src_st.st_mtime)
-        if stat.S_IMODE(dst_st.st_mode) == want and not stale:
+        misowned = (dst_st.st_uid, dst_st.st_gid) != (src_st.st_uid, src_st.st_gid)
+        if stat.S_IMODE(dst_st.st_mode) == want and not stale and not misowned:
             return _META_OK
         if dst_st.st_nlink != 1:
             return _META_REWRITE
+        fixed = False
+        if misowned:
+            try:
+                os.fchown(fd, src_st.st_uid, src_st.st_gid)
+                fixed = True
+            except OSError:
+                pass
         if stat.S_IMODE(dst_st.st_mode) != want:
             os.fchmod(fd, want)
+            fixed = True
         if stale:
             os.utime(fd, ns=(src_st.st_atime_ns, src_st.st_mtime_ns))
-        return _META_FIXED
+            fixed = True
+        return _META_FIXED if fixed else _META_OK
     except OSError:
         return _META_OK
     finally:
@@ -337,7 +351,7 @@ def _sync_file(
     ctx: _Ctx,
     rel: str,
 ) -> bool:
-    """Copy a regular file, preserving mode and mtime.
+    """Copy a regular file, preserving its owner, mode and mtime.
 
     Returns True when the destination now matches the source, False when the entry
     was left as it was — which is what tells `--delete` to keep its hands off the

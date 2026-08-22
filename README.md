@@ -209,6 +209,8 @@ Aliases: cp
 
 Copy files between the host and a container, or between two containers. Container paths use the `name:path` form.
 
+Ownership (numeric uid/gid), permissions and timestamps are preserved. Symlinks are copied as symlinks; hardlinks become independent copies; device nodes, FIFOs and sockets are skipped with a warning.
+
 | Option | Description |
 |---|---|
 | `-r`, `--recursive` | Copy folders with everything inside them. |
@@ -227,6 +229,8 @@ chroot-distro sync [OPTIONS] [CONTAINER:]SRC [CONTAINER:]DEST
 ```
 
 Like `copy`, but only transfers files that changed. Always recursive. Files are compared by size and modification time.
+
+Ownership, permissions and timestamps are preserved for directories as well as files, and a change to any of them alone is applied without rewriting the file.
 
 | Option | Description |
 |---|---|

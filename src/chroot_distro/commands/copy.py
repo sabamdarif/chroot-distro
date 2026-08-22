@@ -1,8 +1,9 @@
 """Copy and move files between host paths and installed containers.
 
 Endpoints are `[container:]path` specs. A recursive copy recreates a directory
-tree the way `cp -a` does — symlinks preserved as symlinks, a sparsely stored
-file written back sparsely, hardlinks turned into independent copies — and
+tree the way `cp -a` does — numeric ownership, modes and timestamps carried
+across, symlinks preserved as symlinks, a sparsely stored file written back
+sparsely, hardlinks turned into independent copies — and
 merges into a destination tree that is already there, so running the same copy
 twice updates it instead of stopping on the first mkdir's EEXIST. `--move` keeps
 rename(2)'s rule instead and refuses a populated destination directory.

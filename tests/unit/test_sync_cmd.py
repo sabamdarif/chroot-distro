@@ -5,6 +5,7 @@ rules that are easy to get wrong on a second pass: what counts as up to date,
 what may be written in place, and what `--delete` is allowed to call an orphan.
 """
 
+import contextlib
 import errno
 import os
 import stat
@@ -13,7 +14,13 @@ import sys
 import pytest
 
 from chroot_distro import dirfd
-from chroot_distro.commands.sync import _do_sync
+from chroot_distro.commands.sync import (
+    _META_FIXED,
+    _META_OK,
+    _META_REWRITE,
+    _do_sync,
+    _refresh_file_metadata,
+)
 from chroot_distro.exceptions import ChrootDistroError
 
 pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="needs openat(2) semantics")
@@ -27,6 +34,16 @@ def rootfs(tmp_path, monkeypatch):
     root.mkdir(parents=True)
     monkeypatch.setattr("chroot_distro.paths.CONTAINERS_DIR", str(containers))
     return root
+
+
+@contextlib.contextmanager
+def opened(path):
+    """A readable directory fd for *path*, closed on the way out."""
+    fd = os.open(str(path), os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        yield fd
+    finally:
+        os.close(fd)
 
 
 def sync(src, dest, *, verbose=False, checksum=False, delete=False):
@@ -345,3 +362,67 @@ def test_command_sync_holds_the_container_lock_while_it_runs(rootfs, tmp_path, m
 
     assert (rootfs / "mirror" / "sub" / "b.txt").read_text() == "beta"
     assert os.listdir(locks) == ["distro.lock"]
+
+
+# ── ownership ─────────────────────────────────────────────────────────────────
+def _with_owner(st, uid, gid):
+    """*st* with its uid and gid replaced, everything else as it stands."""
+    fields = list(st)
+    fields[4] = uid
+    fields[5] = gid
+    return os.stat_result(tuple(fields))
+
+
+def test_a_changed_owner_is_applied_without_rewriting_the_file(tmp_path, monkeypatch):
+    """Ownership is metadata, so it is fixed on the inode, not by re-copying.
+
+    Only root can hand a file to another user, and the unit suite does not run as
+    root, so the source's ids are faked and the fchown recorded.
+    """
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    (dest / "a.txt").write_text("alpha")
+    src_st = _with_owner(os.stat(dest / "a.txt"), 4242, 4243)
+    before = os.stat(dest / "a.txt").st_ino
+    calls = []
+    monkeypatch.setattr(os, "fchown", lambda fd, uid, gid: calls.append((uid, gid)))
+
+    with opened(dest) as fd:
+        assert _refresh_file_metadata(src_st, fd, "a.txt") == _META_FIXED
+
+    assert calls == [(4242, 4243)]
+    assert os.stat(dest / "a.txt").st_ino == before
+    assert (dest / "a.txt").read_text() == "alpha"
+
+
+def test_a_destination_that_cannot_hold_an_owner_is_not_reported_every_run(tmp_path, monkeypatch):
+    # A vfat destination (/sdcard) refuses every chown, and nothing else about the
+    # entry is out of date, so calling it modified would name the same file on
+    # every sync for good.
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    (dest / "a.txt").write_text("alpha")
+    src_st = _with_owner(os.stat(dest / "a.txt"), 4242, 4243)
+
+    def refuse(*_args):
+        raise OSError(errno.EPERM, os.strerror(errno.EPERM))
+
+    monkeypatch.setattr(os, "fchown", refuse)
+    with opened(dest) as fd:
+        assert _refresh_file_metadata(src_st, fd, "a.txt") == _META_OK
+
+
+def test_a_hardlinked_destination_is_not_chowned_either(tmp_path, monkeypatch):
+    # The nlink rule outranks the owner fix for the same reason it outranks the
+    # mode fix: the inode may be a host file the guest linked in.
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    (dest / "a.txt").write_text("alpha")
+    os.link(dest / "a.txt", tmp_path / "host-secret")
+    src_st = _with_owner(os.stat(dest / "a.txt"), 4242, 4243)
+    calls = []
+    monkeypatch.setattr(os, "fchown", lambda fd, uid, gid: calls.append((uid, gid)))
+
+    with opened(dest) as fd:
+        assert _refresh_file_metadata(src_st, fd, "a.txt") == _META_REWRITE
+    assert calls == []

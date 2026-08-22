@@ -281,9 +281,11 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
             {
                 "title": "NOTES",
                 "intro": (
-                    "Directories '.' or '..' are only accepted as "
-                    "source, not as destination. Glob patterns are "
-                    "not supported."
+                    "Numeric ownership, permissions and timestamps are "
+                    "preserved; symlinks are copied as symlinks and "
+                    "hardlinks become independent copies. Device nodes, "
+                    "FIFOs and sockets are skipped with a warning. Glob "
+                    "patterns are not supported."
                 ),
             },
         ],
@@ -841,6 +843,18 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
         "examples": [
             f"{PROGRAM_NAME} sync ./dotfiles/ ubuntu:/root/",
             f"{PROGRAM_NAME} sync --delete ./app/ ubuntu:/opt/app/",
+        ],
+        "footer": [
+            {
+                "title": "NOTES",
+                "intro": (
+                    "Numeric ownership, permissions and timestamps are "
+                    "preserved for directories as well as files, and a "
+                    "change to any of them alone is applied without "
+                    "rewriting the file. Device nodes, FIFOs and sockets "
+                    "are skipped with a warning."
+                ),
+            },
         ],
     },
 }
