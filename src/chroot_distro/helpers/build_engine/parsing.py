@@ -20,6 +20,22 @@ def split_arg(value: typing.Any) -> tuple[str, str | None]:
     return (s, None)
 
 
+def split_operands(value: typing.Any, instr: dict[str, typing.Any]) -> list[str]:
+    """shlex-split a shell-form instruction's operands, or raise BuildError.
+
+    COPY/ADD's source and destination list, EXPOSE's ports and VOLUME's
+    mount points are all written with shell quoting, and shlex answers an
+    unbalanced quote or a trailing backslash with a ValueError. The
+    Dockerfile is the user's own file, but `build` catches only BuildError
+    and OSError, so one mistyped line ended the build in a traceback
+    instead of naming the line that caused it.
+    """
+    try:
+        return shlex.split(str(value))
+    except ValueError as exc:
+        raise BuildError(f"Cannot parse {instr['name']} at line {instr['lineno']}: {exc}.") from exc
+
+
 def parse_kv_list(value: typing.Any) -> list[tuple[str, str]]:
     """Parse ENV/LABEL key=value pairs (with shell-like quoting)."""
     s = str(value).strip()

@@ -165,9 +165,11 @@ def test_write_files_layer(tmp_path):
     # Create some files on-disk to source
     src_file = tmp_path / "source.txt"
     src_file.write_text("sourced content")
+    conf_file = tmp_path / "config.json"
+    conf_file.write_bytes(b'{"port": 80}')
 
     file_map = {
-        "etc/config.json": {"kind": "content", "data": b'{"port": 80}', "mode": 0o600},
+        "etc/config.json": {"kind": "file", "src": str(conf_file), "mode": 0o600},
         "usr/bin/sourced": {"kind": "file", "src": str(src_file), "mode": 0o755},
         "usr/bin/link": {"kind": "symlink", "target": "sourced"},
         "var/log": {"kind": "dir", "mode": 0o700},

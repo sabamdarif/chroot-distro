@@ -2,7 +2,6 @@ import contextlib
 import json
 import logging
 import os
-import shlex
 import typing
 
 from chroot_distro.helpers.build_engine.constants import PREDEFINED_ARGS
@@ -11,6 +10,7 @@ from chroot_distro.helpers.build_engine.errors import BuildError
 from chroot_distro.helpers.build_engine.parsing import (
     parse_kv_list,
     split_arg,
+    split_operands,
     to_argv,
 )
 from chroot_distro.helpers.build_engine.run_step import do_run
@@ -180,7 +180,7 @@ def do_expose(engine: typing.Any, instr: dict[str, typing.Any]) -> None:
     """EXPOSE port[/proto]: record container ports in image config."""
     cfg = engine.current.image_config.setdefault("config", {})
     ports = dict(cfg.get("ExposedPorts") or {})
-    for tok in shlex.split(str(instr["value"])):
+    for tok in split_operands(instr["value"], instr):
         token = tok if "/" in tok else tok + "/tcp"
         ports[token] = {}
     cfg["ExposedPorts"] = ports
@@ -190,7 +190,7 @@ def do_volume(engine: typing.Any, instr: dict[str, typing.Any]) -> None:
     """VOLUME PATH [PATH...]: record volume mount points in image config."""
     cfg = engine.current.image_config.setdefault("config", {})
     vols = dict(cfg.get("Volumes") or {})
-    paths = list(instr["value"]) if instr["exec_form"] else shlex.split(str(instr["value"]))
+    paths = list(instr["value"]) if instr["exec_form"] else split_operands(instr["value"], instr)
     for p in paths:
         vols[p] = {}
     cfg["Volumes"] = vols

@@ -232,3 +232,23 @@ def test_resolve_user_for_chroot_empty():
 
 def test_resolve_user_for_chroot_user_group(rootfs):
     assert users.resolve_user_for_chroot(rootfs, "app:app") == (1000, 2000)
+
+
+# ── parsing.split_operands ────────────────────────────────────────────────────
+def test_split_operands_splits_with_shell_quoting():
+    instr = {"name": "COPY", "lineno": 3, "value": '"a b" c'}
+    assert parsing.split_operands(instr["value"], instr) == ["a b", "c"]
+
+
+def test_split_operands_names_the_line_it_could_not_parse():
+    # shlex answers an unbalanced quote with ValueError, which `build` does not
+    # catch — one mistyped line used to end it in a traceback.
+    instr = {"name": "COPY", "lineno": 7, "value": '"unterminated /app'}
+    with pytest.raises(BuildError, match="Cannot parse COPY at line 7"):
+        parsing.split_operands(instr["value"], instr)
+
+
+def test_split_operands_refuses_a_trailing_backslash():
+    instr = {"name": "VOLUME", "lineno": 2, "value": "/data\\"}
+    with pytest.raises(BuildError, match="Cannot parse VOLUME at line 2"):
+        parsing.split_operands(instr["value"], instr)
