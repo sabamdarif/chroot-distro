@@ -1,4 +1,7 @@
 
+import os
+import shutil
+
 import pytest
 
 from chroot_distro.helpers.build_engine import dockerignore, parsing, users
@@ -182,11 +185,12 @@ def test_simple_glob(tmp_path):
 # ── users ─────────────────────────────────────────────────────────────────────
 @pytest.fixture
 def rootfs(tmp_path):
-    etc = tmp_path / "etc"
-    etc.mkdir()
+    # Nested under tmp_path so a test can put something *outside* the rootfs.
+    etc = tmp_path / "rootfs" / "etc"
+    etc.mkdir(parents=True)
     (etc / "passwd").write_text("root:x:0:0:root:/root:/bin/sh\napp:x:1000:1000::/home/app:/bin/sh\n")
     (etc / "group").write_text("root:x:0:\napp:x:2000:\n")
-    return str(tmp_path)
+    return str(tmp_path / "rootfs")
 
 
 def test_resolve_id_numeric_passthrough(rootfs):
@@ -252,3 +256,89 @@ def test_split_operands_refuses_a_trailing_backslash():
     instr = {"name": "VOLUME", "lineno": 2, "value": "/data\\"}
     with pytest.raises(BuildError, match="Cannot parse VOLUME at line 2"):
         parsing.split_operands(instr["value"], instr)
+
+
+# ── users: /etc/passwd is image content, and so is the path to it ─────────────
+def test_etc_symlinked_out_of_the_rootfs_reads_nothing(rootfs, tmp_path):
+    outside = tmp_path / "outside"
+    (outside / "etc").mkdir(parents=True)
+    (outside / "etc" / "passwd").write_text("intruder:x:1337:1337::/:/bin/sh\n")
+
+    shutil.rmtree(os.path.join(rootfs, "etc"))
+    os.symlink(str(outside / "etc"), os.path.join(rootfs, "etc"))
+
+    assert users.resolve_id(rootfs, "intruder", is_group=False, default=7) == 7
+
+
+def test_passwd_symlinked_at_a_host_file_reads_nothing(rootfs, tmp_path):
+    victim = tmp_path / "host_passwd"
+    victim.write_text("intruder:x:1337:1337::/:/bin/sh\n")
+
+    passwd = os.path.join(rootfs, "etc", "passwd")
+    os.remove(passwd)
+    os.symlink(str(victim), passwd)
+
+    assert users.resolve_id(rootfs, "intruder", is_group=False, default=7) == 7
+
+
+def test_passwd_symlink_is_re_rooted_inside_the_rootfs(rootfs):
+    # The Nix case: /etc/passwd points at an absolute path that only exists
+    # inside the guest. The link is followed, just anchored at the rootfs.
+    store = os.path.join(rootfs, "nix", "store")
+    os.makedirs(store)
+    with open(os.path.join(store, "passwd"), "w") as fh:
+        fh.write("nixuser:x:2000:2000::/:/bin/sh\n")
+
+    passwd = os.path.join(rootfs, "etc", "passwd")
+    os.remove(passwd)
+    os.symlink("/nix/store/passwd", passwd)
+
+    assert users.resolve_id(rootfs, "nixuser", is_group=False, default=7) == 2000
+
+
+def test_dotdot_in_a_symlink_target_clamps_at_the_rootfs(rootfs, tmp_path):
+    victim = tmp_path / "host_passwd"
+    victim.write_text("intruder:x:1337:1337::/:/bin/sh\n")
+
+    passwd = os.path.join(rootfs, "etc", "passwd")
+    os.remove(passwd)
+    # <rootfs>/etc/../../host_passwd is the victim, as the host resolves it.
+    os.symlink("../../host_passwd", passwd)
+
+    assert users.resolve_id(rootfs, "intruder", is_group=False, default=7) == 7
+
+
+def test_symlink_loop_gives_up(rootfs):
+    passwd = os.path.join(rootfs, "etc", "passwd")
+    os.remove(passwd)
+    os.symlink("/etc/passwd2", passwd)
+    os.symlink("/etc/passwd", os.path.join(rootfs, "etc", "passwd2"))
+
+    assert users.resolve_id(rootfs, "root", is_group=False, default=7) == 7
+
+
+def test_a_fifo_named_passwd_does_not_block(rootfs):
+    passwd = os.path.join(rootfs, "etc", "passwd")
+    os.remove(passwd)
+    os.mkfifo(passwd)
+
+    assert users.resolve_id(rootfs, "root", is_group=False, default=7) == 7
+
+
+def test_an_enormous_passwd_is_read_only_up_to_the_cap(rootfs):
+    passwd = os.path.join(rootfs, "etc", "passwd")
+    with open(passwd, "w") as fh:
+        fh.write("root:x:0:0::/root:/bin/sh\n")
+        fh.write("x" * (users._MAX_ID_FILE_BYTES * 2))
+
+    # The entry before the padding still resolves; the padding never becomes a
+    # single multi-megabyte line in memory.
+    assert users.resolve_id(rootfs, "root", is_group=False, default=7) == 0
+
+
+def test_undecodable_passwd_does_not_raise(rootfs):
+    passwd = os.path.join(rootfs, "etc", "passwd")
+    with open(passwd, "wb") as fh:
+        fh.write(b"root:x:0:0::/root:/bin/sh\n\xff\xfe:x:1:1::/:/bin/sh\n")
+
+    assert users.resolve_id(rootfs, "root", is_group=False, default=7) == 0
