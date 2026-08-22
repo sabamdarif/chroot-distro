@@ -26,6 +26,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from chroot_distro.atomic import publish_file
 from chroot_distro.helpers.build_engine.dockerignore import (
     is_ignored,
     simple_glob,
@@ -214,9 +215,8 @@ def _do_copy_or_add(
         f"layer-{stage.index}-{len(stage.layers)}.tar.gz",
     )
     digest, size, diff_id = write_files_layer(file_map, tmp_layer_path)
-    final_path = layer_cache_path(digest)
-    os.makedirs(os.path.dirname(final_path), exist_ok=True)
-    os.replace(tmp_layer_path, final_path)
+    # See run_step: the layer cache is walked down to, not named.
+    publish_file(tmp_layer_path, layer_cache_path(digest))
     stage.layers.append({"digest": digest, "size": size, "diff_id": diff_id})
     stage.parent_layer_digest = digest
 

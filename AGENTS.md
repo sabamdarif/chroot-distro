@@ -147,7 +147,11 @@ silently ignored), `events.py` renders progress (`--progress plain|tty|rawjson`)
 recipe hash (index and lock reached by an `O_NOFOLLOW` walk down to the cache
 directory, so a planted entry under either fixed name is refused rather than
 read, and a lock name that cannot be cleared records the step unlocked instead
-of failing the build).
+of failing the build). A finished layer is renamed into the cache through
+`atomic.publish_file`, and the scratch root a build assembles its stages in is
+created with `mkdirat` off an `O_NOFOLLOW` walk down to `RUNTIME_DIR/build-tmp`
+(falling back to `/tmp`), then removed under that same descriptor, so neither a
+planted `oci_layers` nor a planted `build-tmp` can redirect a build's output.
 
 ### Cross-cutting
 - `atomic.py`: every state file write goes through `atomic_write` /

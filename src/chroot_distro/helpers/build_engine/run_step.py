@@ -20,6 +20,7 @@ import time
 import typing
 
 from chroot_distro import dirfd
+from chroot_distro.atomic import publish_file
 from chroot_distro.constants import (
     DEFAULT_PATH_ENV,
 )
@@ -119,9 +120,11 @@ def do_run(engine: typing.Any, instr: dict[str, typing.Any]) -> None:
         deleted,
         tmp_layer_path,
     )
-    final_path = layer_cache_path(digest)
-    os.makedirs(os.path.dirname(final_path), exist_ok=True)
-    os.replace(tmp_layer_path, final_path)
+    # Published through the same walk every other cache writer uses:
+    # os.makedirs(dirname) plus os.replace(tmp, final) resolved the layer cache
+    # by name, so a planted `oci_layers -> <host dir>` collected what a build
+    # produced.
+    publish_file(tmp_layer_path, layer_cache_path(digest))
 
     stage.layers.append({"digest": digest, "size": size, "diff_id": diff_id})
     stage.parent_layer_digest = digest

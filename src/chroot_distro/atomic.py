@@ -23,6 +23,12 @@ A path outside those roots is the user's own (`backup -o`, `build --output`) and
 keeps the plain behaviour: where the user points it is not this program's
 business.
 
+`publish_file` is the same ending without the beginning, for a writer whose
+final name cannot be known until its bytes exist -- a build's layer blob is named
+by the digest of its own content, so it is packed into the build's scratch
+directory and renamed into the cache afterwards. The destination directory is
+reached the same way.
+
 The temporary's *path* is still what `atomic_replace`'s caller writes through,
 since it opens the file itself. That name is unpredictable and was just created,
 so nothing can be waiting under it, and a directory re-pointed in the window
@@ -91,6 +97,33 @@ def _open_dest_dir(path: str) -> int | None:
     if dir_fd is None:
         raise OSError(errno.ENOTDIR, "not a directory inside the state tree", os.path.dirname(path))
     return dir_fd
+
+
+def publish_file(src_path: str, dest_path: str) -> None:
+    """Rename an already-written file onto *dest_path*.
+
+    For a writer that cannot name its destination up front: a layer blob is
+    named by the digest of its own bytes, so a build packs it into its scratch
+    directory and publishes it once the digest is known. Spelled by hand that was
+    `os.makedirs(os.path.dirname(dest))` followed by `os.replace(tmp, dest)`,
+    which resolved the destination directory by name twice, so a guest that left
+    `cache/oci_layers -> <host dir>` behind collected every layer a build
+    produced. The directory is walked down to instead and the rename runs
+    `dst_dir_fd` on the descriptor that walk validated. rename(2) follows no
+    symlink at the destination name either, so a link planted *as* the blob is
+    replaced rather than written through.
+
+    A destination outside the state tree is the user's own and keeps the plain
+    behaviour.
+    """
+    dir_fd = _open_dest_dir(dest_path)
+    if dir_fd is None:
+        os.replace(src_path, dest_path)
+        return
+    try:
+        os.replace(src_path, os.path.basename(dest_path), dst_dir_fd=dir_fd)
+    finally:
+        os.close(dir_fd)
 
 
 @contextlib.contextmanager

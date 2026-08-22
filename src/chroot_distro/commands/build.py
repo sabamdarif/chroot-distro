@@ -1,12 +1,12 @@
+import contextlib
 import os
 import re
-import shutil
 import sys
-import tempfile
 import typing
 from contextlib import ExitStack
 from types import SimpleNamespace
 
+from chroot_distro import dirfd
 from chroot_distro.arch import get_device_cpu_arch, normalize_arch
 from chroot_distro.commands.install import command_install
 from chroot_distro.constants import (
@@ -172,13 +172,7 @@ def command_build(args: typing.Any) -> None:
             lock_stack.enter_context(lock)
 
         # ----- run the build -----
-        build_tmp = os.path.join(RUNTIME_DIR, "build-tmp")
-        try:
-            os.makedirs(build_tmp, exist_ok=True)
-        except OSError as exc:
-            warn(f"Failed to create build temporary directory '{build_tmp}', falling back to '/tmp': {exc}")
-            build_tmp = "/tmp"  # Fallback just in case
-        tmp_root = tempfile.mkdtemp(prefix="cd-build-", dir=build_tmp)
+        tmp_root, tmp_parent_fd = _make_build_tmp()
 
         try:
             secrets = _parse_secret_opts(getattr(args, "secrets", None) or [], tmp_root)
@@ -261,12 +255,65 @@ def command_build(args: typing.Any) -> None:
             log_error("Aborted by user.")
             sys.exit(1)
         finally:
-            shutil.rmtree(tmp_root, ignore_errors=True)
+            _remove_build_tmp(tmp_root, tmp_parent_fd)
 
 
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
+
+
+def _make_build_tmp() -> tuple[str, int]:
+    """Create the scratch root a build assembles its stages in.
+
+    Returns (path, a descriptor on the directory holding it). `build-tmp` is a
+    predictable name inside the runtime tree, which on Termux sits under the
+    $TERMUX_PREFIX bound read-write into every non-isolated container, and
+    `tempfile.mkdtemp(dir=...)` resolved it: a guest that left
+    `build-tmp -> <host dir>` behind had every stage rootfs, every spooled ADD
+    and every packed layer assembled inside that host directory. The name is
+    walked down to with O_NOFOLLOW instead and this run's own root created with
+    mkdirat off the descriptor that walk validated. What is made *inside* that
+    root needs no walk of its own: the name is fresh and the mode is 0700.
+
+    The descriptor is kept for the length of the build so the removal at the end
+    names the directory this created the root in rather than resolving
+    `build-tmp` a second time.
+
+    A runtime tree that cannot hold the directory falls back to /tmp, as it
+    always did.
+    """
+    build_tmp = os.path.join(RUNTIME_DIR, "build-tmp")
+    with contextlib.suppress(OSError):
+        os.makedirs(RUNTIME_DIR, exist_ok=True)
+    dir_fd = dirfd.opendir_under(RUNTIME_DIR, ("build-tmp",), create=True)
+    if dir_fd is None:
+        warn(f"Failed to create build temporary directory '{build_tmp}', falling back to '/tmp'.")
+        build_tmp = "/tmp"
+        dir_fd = dirfd.opendir(build_tmp)
+    try:
+        name = f"cd-build-{os.getpid()}.{os.urandom(4).hex()}"
+        os.mkdir(name, 0o700, dir_fd=dir_fd)
+    except OSError:
+        os.close(dir_fd)
+        raise
+    return os.path.join(build_tmp, name), dir_fd
+
+
+def _remove_build_tmp(tmp_root: str, dir_fd: int) -> None:
+    """Remove the build's scratch root under the descriptor it was created in.
+
+    Going back to the name would resolve `build-tmp` again, and a guest that
+    replaces it while the build runs would have the removal delete whatever the
+    link points at. Removing under the descriptor also gets out a tree
+    `shutil.rmtree(ignore_errors=True)` could not: it swallowed an OSError but
+    not the RecursionError a deep one raised, and it could not chmod its way
+    into a directory a build left sealed.
+    """
+    try:
+        dirfd.rmtree_at(dir_fd, os.path.basename(tmp_root), force=True, on_error=lambda _rel, _exc: None)
+    finally:
+        os.close(dir_fd)
 
 
 _SECRET_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")

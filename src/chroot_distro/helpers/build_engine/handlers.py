@@ -5,6 +5,7 @@ import os
 import typing
 
 from chroot_distro import dirfd
+from chroot_distro.atomic import publish_file
 from chroot_distro.helpers.build_engine.constants import PREDEFINED_ARGS
 from chroot_distro.helpers.build_engine.copy_step import do_add, do_copy
 from chroot_distro.helpers.build_engine.errors import BuildError
@@ -190,9 +191,8 @@ def do_workdir(engine: typing.Any, instr: dict[str, typing.Any]) -> None:
         f"layer-{engine.current.index}-{len(engine.current.layers)}.tar.gz",
     )
     digest, size, diff_id = write_files_layer(file_map, tmp_layer_path)
-    final_path = layer_cache_path(digest)
-    os.makedirs(os.path.dirname(final_path), exist_ok=True)
-    os.replace(tmp_layer_path, final_path)
+    # See run_step: the layer cache is walked down to, not named.
+    publish_file(tmp_layer_path, layer_cache_path(digest))
     engine.current.layers.append({"digest": digest, "size": size, "diff_id": diff_id})
     engine.current.parent_layer_digest = digest
 
