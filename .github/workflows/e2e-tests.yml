@@ -303,6 +303,135 @@ jobs:
                   echo "$output" | grep -q "sync-test-content"
                   echo "PASS: Sync works correctly"
 
+            # ── Phase 7b: --chown on copy and sync ─────────────────────────
+            # The flag resolves a name on the side the files land on, so these
+            # steps need a real account that exists in the container and not on
+            # the host (and one the other way round). uid 1500 with primary
+            # group 1600 is deliberately mismatched: a resolver that used the
+            # uid as the gid would still pass a 1500:1500 check.
+            - name: "Chown: create a guest account with a distinct primary group"
+              run: |
+                  sudo chroot-distro login alpine-test -- addgroup -g 1600 appgrp
+                  sudo chroot-distro login alpine-test -- adduser -D -u 1500 -G appgrp appuser
+                  ids=$(sudo chroot-distro login alpine-test -- sh -c 'printf "%s:%s" "$(id -u appuser)" "$(id -g appuser)"')
+                  echo "appuser ids: $ids"
+                  [ "$ids" = "1500:1600" ] || { echo "FAIL: expected 1500:1600, got $ids"; exit 1; }
+                  echo "PASS: guest account ready"
+
+            - name: "Chown: copy resolves the name in the container"
+              run: |
+                  echo "chown-copy-content" > /tmp/chown-src.txt
+                  sudo chroot-distro copy /tmp/chown-src.txt alpine-test:/tmp/chown-copy.txt --chown appuser
+                  ids=$(sudo chroot-distro login alpine-test -- stat -c '%u:%g' /tmp/chown-copy.txt)
+                  echo "owner: $ids"
+                  [ "$ids" = "1500:1600" ] || { echo "FAIL: expected 1500:1600, got $ids"; exit 1; }
+                  echo "PASS: --chown appuser landed as 1500:1600 (primary group read from passwd)"
+
+            - name: "Chown: sync gives every entry the named owner"
+              run: |
+                  rm -rf /tmp/chown-tree
+                  mkdir -p /tmp/chown-tree/sub
+                  echo alpha > /tmp/chown-tree/a.txt
+                  echo beta > /tmp/chown-tree/sub/b.txt
+                  ln -sf a.txt /tmp/chown-tree/link
+                  sudo chroot-distro sync /tmp/chown-tree alpine-test:/tmp/chown-tree --chown appuser:appgrp
+
+                  # stat without -L, so the symlink reports its own owner rather
+                  # than its target's: the flag is applied with lchown.
+                  out=$(sudo chroot-distro login alpine-test -- sh -c \
+                    "stat -c '%n %u:%g' /tmp/chown-tree /tmp/chown-tree/a.txt \
+                       /tmp/chown-tree/sub /tmp/chown-tree/sub/b.txt /tmp/chown-tree/link")
+                  echo "$out"
+                  [ "$(echo "$out" | wc -l)" -eq 5 ] || { echo "FAIL: stat named fewer entries than were synced"; exit 1; }
+                  bad=$(echo "$out" | awk '$2 != "1500:1600"' | wc -l)
+                  [ "$bad" -eq 0 ] || { echo "FAIL: $bad entries not owned 1500:1600"; exit 1; }
+                  echo "PASS: file, nested file, directory and symlink all owned 1500:1600"
+
+            - name: "Chown: a second sync finds nothing to correct"
+              run: |
+                  out=$(sudo chroot-distro sync /tmp/chown-tree alpine-test:/tmp/chown-tree \
+                    --chown appuser:appgrp -v 2>&1)
+                  echo "$out"
+                  if echo "$out" | grep -qE "Metadata:|file:|symlink:"; then
+                    echo "FAIL: the destination already carries the requested owner, yet it was corrected again"
+                    exit 1
+                  fi
+                  echo "PASS: an already-correct owner is left alone"
+
+            - name: "Chown: ':GROUP' changes the group and keeps the user"
+              run: |
+                  sudo chroot-distro sync /tmp/chown-tree alpine-test:/tmp/chown-tree --chown :0
+                  ids=$(sudo chroot-distro login alpine-test -- stat -c '%u:%g' /tmp/chown-tree/a.txt)
+                  echo "owner: $ids"
+                  [ "$ids" = "1500:0" ] || { echo "FAIL: expected 1500:0, got $ids"; exit 1; }
+
+                  # The uid arrives as -1 ("leave this one alone"); comparing that
+                  # against the destination's own would make every run report the
+                  # entry as modified for good.
+                  out=$(sudo chroot-distro sync /tmp/chown-tree alpine-test:/tmp/chown-tree --chown :0 -v 2>&1)
+                  echo "$out"
+                  if echo "$out" | grep -qE "Metadata:|file:|symlink:"; then
+                    echo "FAIL: ':GROUP' re-corrected an entry that was already right"
+                    exit 1
+                  fi
+                  echo "PASS: only the group changed, and only once"
+
+            - name: "Chown: numeric ids are taken as they stand"
+              run: |
+                  sudo chroot-distro copy /tmp/chown-src.txt alpine-test:/tmp/chown-num.txt --chown 4242:4243
+                  ids=$(sudo chroot-distro login alpine-test -- stat -c '%u:%g' /tmp/chown-num.txt)
+                  echo "owner: $ids"
+                  [ "$ids" = "4242:4243" ] || { echo "FAIL: expected 4242:4243, got $ids"; exit 1; }
+                  echo "PASS: an id with no passwd entry is still reachable"
+
+            - name: "Chown: a move that was only a rename still reaches every entry"
+              run: |
+                  sudo chroot-distro login alpine-test -- sh -c \
+                    'rm -rf /tmp/mv-src /tmp/mv-dst && mkdir -p /tmp/mv-src/sub && echo data > /tmp/mv-src/sub/f.txt'
+                  sudo chroot-distro copy alpine-test:/tmp/mv-src alpine-test:/tmp/mv-dst --move --chown appuser
+                  out=$(sudo chroot-distro login alpine-test -- sh -c \
+                    "stat -c '%n %u:%g' /tmp/mv-dst /tmp/mv-dst/sub /tmp/mv-dst/sub/f.txt")
+                  echo "$out"
+                  [ "$(echo "$out" | wc -l)" -eq 3 ] || { echo "FAIL: stat named fewer entries than were moved"; exit 1; }
+                  bad=$(echo "$out" | awk '$2 != "1500:1600"' | wc -l)
+                  [ "$bad" -eq 0 ] || { echo "FAIL: rename(2) writes nothing, and the walk after it missed $bad entries"; exit 1; }
+                  if sudo chroot-distro login alpine-test -- test -e /tmp/mv-src; then
+                    echo "FAIL: the source survived the move"; exit 1
+                  fi
+                  echo "PASS: the moved tree was chowned after the rename"
+
+            - name: "Chown: the host side answers for a host destination"
+              run: |
+                  sudo useradd -u 4321 -M -s /usr/sbin/nologin hostonly
+                  # The container knows no 'hostonly', so a guest-side lookup
+                  # would fail here instead of succeeding with the host's id.
+                  if sudo chroot-distro login alpine-test -- id hostonly >/dev/null 2>&1; then
+                    echo "FAIL: the container knows 'hostonly', so this proves nothing"; exit 1
+                  fi
+                  sudo chroot-distro copy alpine-test:/etc/hostname /tmp/chown-host.txt --chown hostonly
+                  owner=$(stat -c '%u' /tmp/chown-host.txt)
+                  echo "host-side owner uid: $owner"
+                  [ "$owner" = "4321" ] || { echo "FAIL: expected 4321, got $owner"; exit 1; }
+                  echo "PASS: a host destination was resolved against the host passwd"
+
+            - name: "Chown: an unknown name is refused before anything is written"
+              run: |
+                  if sudo chroot-distro copy /tmp/chown-src.txt alpine-test:/tmp/chown-never.txt --chown ghost; then
+                    echo "FAIL: an unknown name was accepted"; exit 1
+                  fi
+                  if sudo chroot-distro login alpine-test -- test -e /tmp/chown-never.txt; then
+                    echo "FAIL: the destination was written despite the error"; exit 1
+                  fi
+                  echo "PASS: a typo fails the command instead of handing the files to root"
+
+            - name: "Chown: clean up the host account"
+              if: always()
+              run: |
+                  sudo userdel hostonly 2>/dev/null || true
+                  # /tmp is sticky, and chown-host.txt now belongs to uid 4321,
+                  # so the runner's own account can no longer unlink it.
+                  sudo rm -rf /tmp/chown-src.txt /tmp/chown-host.txt /tmp/chown-tree
+
             - name: "Unmount: alpine-test after sync"
               run: sudo chroot-distro unmount alpine-test || true
 
