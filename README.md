@@ -536,7 +536,10 @@ DJkMCnBAFG14TV3BqZKmbbjD8Pi1zKLLG6
 
 ### Acknowledgments
 
-- [proot-distro](https://github.com/termux/proot-distro) — cli design, inspiration and a lot more.
+- [proot-distro](https://github.com/termux/proot-distro) - cli design, inspiration, and a lot more. Commands and syntax are intentionally
+  kept close to proot-distro's so the experience feels familiar, and substantial
+  parts of the implementation are ported directly from it and adapted to fit
+  this project.
 - [pyLoad](https://github.com/pyload/pyload) — downloader improvements.
 - [distrobox](https://github.com/89luca89/distrobox/) - shared-display option improvements.
 - [Magisk-Modules-Alt-Repo/chroot-distro](https://github.com/Magisk-Modules-Alt-Repo/chroot-distro) - some info about chroot on android.

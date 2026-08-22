@@ -98,3 +98,18 @@ def test_logging(mock_msg):
         # log_error is still called when quiet is True
         log_error("error msg")
         mock_msg.assert_called_once()
+
+    # Quiet mode is process-wide, so leaving it on would silence every later test.
+    set_quiet(False)
+
+
+def test_quote_path():
+    from chroot_distro.message import quote_path
+
+    # Container entry names are chosen by the guest, so anything that could move
+    # the cursor or forge a line of output is escaped before it reaches a message.
+    assert quote_path("/etc/hosts") == "/etc/hosts"
+    assert quote_path("a\\b") == "a\\\\b"
+    assert quote_path("a\nb\rc\td") == "a\\nb\\rc\\td"
+    assert quote_path("\x1b[2K/fake") == "\\e[2K/fake"
+    assert quote_path("a\x01b\x7f") == "a\\x01b\\x7f"
