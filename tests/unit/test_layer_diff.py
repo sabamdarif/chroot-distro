@@ -1,5 +1,7 @@
 import gzip
+import os
 import sys
+import zlib
 
 if sys.version_info >= (3, 14):
     import tarfile
@@ -20,17 +22,17 @@ from chroot_distro.helpers.layer_diff import (
 
 
 def test_file_crc32_and_nonexistent(tmp_path):
-    test_file = tmp_path / "test.txt"
-    test_file.write_text("hello world")
+    (tmp_path / "test.txt").write_text("hello world")
+    dir_fd = os.open(str(tmp_path), os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        # Non-existent file should return 0xFFFFFFFF
+        assert _file_crc32(dir_fd, "does_not_exist") == 0xFFFFFFFF
 
-    # Non-existent file should return 0xFFFFFFFF
-    assert _file_crc32(str(tmp_path / "does_not_exist")) == 0xFFFFFFFF
-
-    # Valid file should return correct CRC32
-    import zlib
-
-    expected = zlib.crc32(b"hello world") & 0xFFFFFFFF
-    assert _file_crc32(str(test_file)) == expected
+        # Valid file should return correct CRC32
+        expected = zlib.crc32(b"hello world") & 0xFFFFFFFF
+        assert _file_crc32(dir_fd, "test.txt") == expected
+    finally:
+        os.close(dir_fd)
 
 
 def test_snapshot_basic(tmp_path):

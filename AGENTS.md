@@ -152,6 +152,12 @@ of failing the build). A finished layer is renamed into the cache through
 created with `mkdirat` off an `O_NOFOLLOW` walk down to `RUNTIME_DIR/build-tmp`
 (falling back to `/tmp`), then removed under that same descriptor, so neither a
 planted `oci_layers` nor a planted `build-tmp` can redirect a build's output.
+Both halves of a step address the stage rootfs by descriptor rather than by the
+name they resolved: `tar_extract.safe_resolve_parts` says where a `COPY`/`ADD`
+entry belongs and `copy_step._materialise_entry` re-walks those components with
+`O_NOFOLLOW` to write it as `(dir_fd, name)`, while `layer_diff.snapshot` walks
+on descriptors and `_add_entry` takes its parent from `_ParentFds` and sizes a
+file from the fstat of the descriptor it reads.
 
 ### Cross-cutting
 - `atomic.py`: every state file write goes through `atomic_write` /
