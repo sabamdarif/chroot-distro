@@ -149,6 +149,11 @@ recipe hash.
 ### Cross-cutting
 - `atomic.py`: every state file write goes through `atomic_write` /
   `atomic_replace` (tempfile, fsync, rename) so a crash never leaves half a file.
+  A destination inside `RUNTIME_DIR` or `BASE_CACHE_DIR` has the components below
+  that root walked one at a time with `O_NOFOLLOW` and its temporary created
+  `O_EXCL` off the descriptor, so a `cache/oci_layers -> <host dir>` a guest left
+  behind cannot redirect the write; a path the *user* named (`backup -o`,
+  `build --output`) keeps the plain behaviour.
 - `message.py` (colors, `--quiet`) and `progress.py` (byte/count bars, spinners)
   for all user-facing output. `build_engine/events.py` is the exception, since
   build output has its own reporters.
