@@ -1,7 +1,22 @@
+# A step is over when nothing of it is still running, not when the command it
+# started exits. Docker gets that from the pid namespace it tears down, and so
+# do the CD_USE_NS / CD_USE_ISOLATION paths here, where the holder is pid 1 of
+# a namespace that dies with the session. The default path has neither: a
+# `RUN cmd &` or a `RUN service x start` left a process writing into the stage
+# rootfs while the "after" snapshot was being taken -- which makes a layer that
+# differs from run to run -- kept the bind mounts busy so the teardown could not
+# unmount them, and left a daemon running long after the build. _stop_step()
+# closes both halves of that: the process group the step leads, and the
+# descendants that daemonise out of it, which land back on this process because
+# it makes itself a child subreaper first.
+
 import contextlib
+import ctypes
+import functools
 import os
 import signal
 import subprocess
+import time
 import typing
 
 from chroot_distro.constants import (
@@ -30,7 +45,7 @@ from chroot_distro.helpers.layer_diff import (
     snapshot,
     write_layer_tar,
 )
-from chroot_distro.message import log_info
+from chroot_distro.message import log_info, warn
 
 
 def do_run(engine: typing.Any, instr: dict[str, typing.Any]) -> None:
@@ -216,6 +231,10 @@ def _run_plain(
         # before them when the `with` block exits).
         with run_mount_session(engine, stage, mounts or []) as extra_env:
             stdin_arg = subprocess.PIPE if stdin_input is not None else subprocess.DEVNULL
+            # Before anything is spawned, so a descendant that outlives its own
+            # parent is reparented here rather than onto init.
+            _become_subreaper()
+            baseline = set(_adopted())
             proc = subprocess.Popen(
                 chroot_args,
                 env={**child_env, **extra_env},
@@ -231,13 +250,180 @@ def _run_plain(
                 with contextlib.suppress(OSError):
                     os.killpg(proc.pid, signal.SIGTERM)
                 proc.wait()
+                _stop_step(proc.pid, baseline, quiet=True)
                 raise
+            _stop_step(proc.pid, baseline, quiet=engine is not None and engine.quiet)
             return proc.returncode
     except FileNotFoundError as exc:
         raise BuildError(f"chroot command execution failed: {exc}") from exc
     finally:
         # Clean up mounts
         mount_manager.unmount_all(rootfs)
+
+
+# How often a leftover is looked at again, and how long it gets to take a
+# SIGTERM before the SIGKILL.
+_STEP_POLL_INTERVAL = 0.05
+_STRAY_GRACE_SECONDS = 2.0
+
+# prctl(2), Linux 3.4 and up, Android included.
+_PR_SET_CHILD_SUBREAPER = 36
+
+@functools.lru_cache(maxsize=1)
+def _become_subreaper() -> bool:
+    """Ask the kernel to reparent orphaned descendants onto this process.
+
+    This is what makes a step's leftovers findable at all. A backgrounded
+    command outlives the shell that started it and a daemon goes further --
+    fork, setsid, fork, which leaves the step's process group as well -- and
+    either way the process is then no relation of ours that any interface will
+    name. As a subreaper it is reparented here instead of onto init, so
+    /proc/self/task/<pid>/children lists it.
+
+    Asked once, best effort: a kernel (or a seccomp filter) that refuses leaves
+    _stop_step with nothing but the process group to look at.
+    """
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        return bool(libc.prctl(_PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) == 0)
+    except (OSError, AttributeError, ValueError):
+        return False
+
+
+def _children_of(pid: int) -> list[int]:
+    """The PIDs the kernel currently calls children of *pid*."""
+    try:
+        with open(f"/proc/{pid}/task/{pid}/children") as fh:
+            data = fh.read()
+    except OSError:
+        return []
+    return [int(tok) for tok in data.split() if tok.isdigit()]
+
+
+def _adopted(baseline: typing.Container[int] = (), skip_pid: int | None = None) -> list[int]:
+    """The step's descendants the kernel has reparented onto this process.
+
+    *baseline* is what was already there when the step started, which should be
+    nothing -- the previous step is stopped before the next one begins -- but a
+    straggler that would not die must not be counted against every step that
+    follows it.
+    """
+    return [pid for pid in _children_of(os.getpid()) if pid != skip_pid and pid not in baseline]
+
+
+def _group_members(pgid: int, skip: typing.Container[int] = ()) -> list[int]:
+    """The PIDs in process group *pgid*, minus *skip*.
+
+    Read out of /proc rather than signalled as a group, so the caller can leave
+    the step's own process out of it and report on what it found. The parse
+    takes the fields after the last ')', since a comm can hold anything at all,
+    including one.
+    """
+    try:
+        names = os.listdir("/proc")
+    except OSError:
+        return []
+    members = []
+    for name in names:
+        if not name.isdigit():
+            continue
+        pid = int(name)
+        if pid in skip:
+            continue
+        try:
+            with open(f"/proc/{pid}/stat") as fh:
+                data = fh.read()
+        except OSError:
+            continue
+        try:
+            fields = data[data.rindex(")") + 1 :].split()
+            if int(fields[2]) == pgid:
+                members.append(pid)
+        except (ValueError, IndexError):
+            continue
+    return members
+
+
+def _signal_leftovers(targets: list[int], sig: int) -> None:
+    """Deliver *sig* to each leftover, and to any group it leads.
+
+    A daemonised leftover called setsid, so it leads a group of its own and
+    that group goes too -- otherwise its children outlive it by a generation.
+    killpg(pid) can only ever reach a group led by that very process, a group id
+    being the pid of its leader, so this cannot reach anything the step did not
+    start.
+    """
+    for pid in targets:
+        with contextlib.suppress(OSError):
+            os.kill(pid, sig)
+        with contextlib.suppress(OSError):
+            os.killpg(pid, sig)
+
+
+def _reap(pids: list[int]) -> None:
+    """Collect the leftovers that have exited, so none linger as zombies.
+
+    Named one at a time rather than with waitpid(-1), which could take the
+    status of something this process is waiting on elsewhere. A leftover reaped
+    a moment too early to be a zombie is collected on the next round of the
+    sweep, or left to the next step, which knows what was already there and
+    does not count it again.
+    """
+    for pid in pids:
+        with contextlib.suppress(OSError, ChildProcessError):
+            os.waitpid(pid, os.WNOHANG)
+
+
+def _leftovers(pgid: int | None, baseline: typing.Container[int], skip_pid: int | None) -> list[int]:
+    """Every process the step still has running, most-derived first.
+
+    This process and the group it is in are never among them. A step runs in a
+    session of its own, so its group id can only be the step's; one that is
+    this program's own group means the caller got the pgid wrong, and the answer
+    to that must not be a SIGTERM to everything sharing a terminal with the
+    build.
+    """
+    found = list(_adopted(baseline, skip_pid=skip_pid))
+    skip = set(found)
+    skip.add(os.getpid())
+    if skip_pid is not None:
+        skip.add(skip_pid)
+    if pgid is not None and pgid != os.getpgrp():
+        found.extend(_group_members(pgid, skip=skip))
+    return found
+
+
+def _stop_step(pgid: int | None, baseline: typing.Container[int] = (), *, quiet: bool = False) -> int:
+    """Stop whatever the step still has running. Returns how many it found.
+
+    Costs one small /proc read when the step ended cleanly, which is the usual
+    case; only a step that left something behind pays for the /proc scan.
+    """
+    targets = _leftovers(pgid, baseline, None)
+    if not targets:
+        return 0
+
+    found = len(targets)
+    _signal_leftovers(targets, signal.SIGTERM)
+    deadline = time.monotonic() + _STRAY_GRACE_SECONDS
+    while time.monotonic() < deadline:
+        _reap(targets)
+        targets = _leftovers(pgid, baseline, None)
+        if not targets:
+            break
+        time.sleep(_STEP_POLL_INTERVAL)
+
+    targets = _leftovers(pgid, baseline, None)
+    if targets:
+        _signal_leftovers(targets, signal.SIGKILL)
+        _reap(targets)
+
+    if not quiet:
+        warn(
+            f"the step left {found} process(es) running after its command finished; "
+            "they were stopped, so the layer captures a settled rootfs."
+        )
+    return found
 
 
 def _build_child_env(stage: typing.Any) -> dict[str, str]:
