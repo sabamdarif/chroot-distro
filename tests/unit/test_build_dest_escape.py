@@ -15,7 +15,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from chroot_distro.helpers.build_engine import copy_step, handlers
+from chroot_distro.helpers.build_engine import copy_step, handlers, run_step
 from chroot_distro.helpers.build_engine.stage import Stage
 
 
@@ -180,3 +180,85 @@ def test_materialise_tar_dir_member_lands_inside_the_rootfs(tmp_path):
 
     assert (rootfs / "etc" / "passwd").read_bytes() == b"pwned\n"
     assert not (outside / "passwd").exists()
+
+
+# ── the RUN step's mount points ────────────────────────────────────────────────
+#
+# A bind target is a name too, and the step's binds go on in the host's mount
+# namespace: mount(2) resolves the name after every check here has run, and
+# safe_mount() makes the mountpoint with a named makedirs first, which accepts
+# a symlink to a directory.
+
+def test_mount_point_through_a_symlinked_leaf_stays_inside(tmp_path):
+    rootfs = tmp_path / "rootfs"
+    rootfs.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir(mode=0o700)
+    os.symlink(str(outside), str(rootfs / "dev"))
+
+    target = run_step._mount_point(str(rootfs), "/dev")
+
+    assert target is not None
+    assert target.startswith(str(rootfs) + os.sep)
+    assert os.path.isdir(target)
+    # Nothing was made on the host side of the link, so nothing is mounted
+    # there either.
+    assert os.listdir(str(outside)) == []
+
+
+def test_mount_point_dotdot_in_a_link_cannot_climb_out(tmp_path):
+    rootfs = tmp_path / "rootfs"
+    (rootfs / "dev").mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir(mode=0o700)
+    os.symlink("../../outside", str(rootfs / "dev" / "shm"))
+
+    target = run_step._mount_point(str(rootfs), "/dev/shm")
+
+    assert target == str(rootfs / "outside")
+    assert os.listdir(str(outside)) == []
+
+
+def test_mount_point_follows_a_link_the_image_legitimately_ships(tmp_path):
+    # `/dev/shm -> /run/shm` ships in real images; the bind must still land
+    # where the guest would see it.
+    rootfs = tmp_path / "rootfs"
+    (rootfs / "dev").mkdir(parents=True)
+    os.symlink("/run/shm", str(rootfs / "dev" / "shm"))
+
+    target = run_step._mount_point(str(rootfs), "/dev/shm")
+
+    assert target == str(rootfs / "run" / "shm")
+    assert os.path.isdir(target)
+
+
+def test_mount_point_reports_a_component_that_is_not_a_directory(tmp_path):
+    rootfs = tmp_path / "rootfs"
+    rootfs.mkdir()
+    (rootfs / "dev").write_text("not a directory")
+
+    assert run_step._mount_point(str(rootfs), "/dev/pts") is None
+
+
+def test_run_plain_leaves_off_a_bind_whose_target_will_not_validate(tmp_path, monkeypatch, capsys):
+    import chroot_distro.helpers.mount_manager as mount_manager
+    from chroot_distro.commands.login import bindings
+
+    rootfs = tmp_path / "rootfs"
+    rootfs.mkdir()
+    (rootfs / "dev").write_text("not a directory")
+
+    mounted = []
+    monkeypatch.setattr(
+        bindings,
+        "get_bindings",
+        lambda **kw: ([("/dev", str(rootfs / "dev")), ("/sys", str(rootfs / "sys"))], []),
+    )
+    monkeypatch.setattr(mount_manager, "safe_mount", lambda src, dst, **kw: mounted.append((src, dst)))
+    monkeypatch.setattr(mount_manager, "unmount_all", lambda *a, **kw: None)
+
+    rc = run_step._run_plain(str(rootfs), ["true"], {}, None)
+
+    assert rc == 0
+    assert mounted == [("/sys", str(rootfs / "sys"))]
+    assert "/dev is not a plain directory" in capsys.readouterr().err

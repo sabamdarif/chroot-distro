@@ -19,6 +19,7 @@ import subprocess
 import time
 import typing
 
+from chroot_distro import dirfd
 from chroot_distro.constants import (
     DEFAULT_PATH_ENV,
 )
@@ -45,6 +46,7 @@ from chroot_distro.helpers.layer_diff import (
     snapshot,
     write_layer_tar,
 )
+from chroot_distro.helpers.tar_extract import _safe_resolve
 from chroot_distro.message import log_info, warn
 
 
@@ -203,6 +205,31 @@ def _run_in_holder(holder: typing.Any, chroot_args: list[str], child_env: dict[s
     return int(result.returncode)
 
 
+def _mount_point(rootfs: str, guest_path: str) -> str | None:
+    """Make the directory *guest_path* names inside *rootfs*. Path, or None.
+
+    A bind target is a name, and os.makedirs(exist_ok=True) accepts a symlink
+    to a directory while mount(2) resolves the name all over again. Every
+    component of one of these is image content and the step's binds are applied
+    in the host's mount namespace, so an image shipping `dev -> <host dir>` had
+    the host's own /dev mounted onto that directory, `dev/pts` created inside
+    it, and the mount left behind afterwards -- unmount_all() sweeps what is
+    under the rootfs, and this is not.
+
+    The path is resolved the way the guest sees it, with an absolute link
+    target re-anchored at the rootfs and ".." unable to climb out of it, and
+    then made a level at a time off a descriptor. `/dev/shm -> /run/shm` is
+    still followed; nothing outside the rootfs can be created or mounted on.
+    None means the name would not validate, and the caller leaves the bind off.
+    """
+    parts = [p for p in guest_path.split("/") if p not in ("", os.curdir)]
+    resolved = _safe_resolve(rootfs, parts)
+    if resolved is None:
+        return None
+    rel = os.path.relpath(resolved, rootfs)
+    return dirfd.makedirs_under(rootfs, [] if rel == os.curdir else rel.split(os.sep))
+
+
 def _run_plain(
     rootfs: str,
     chroot_args: list[str],
@@ -224,8 +251,13 @@ def _run_plain(
 
     try:
         for src, dst in resolved_binds:
-            is_run = os.path.realpath(dst) == os.path.realpath(os.path.join(rootfs, "run"))
-            mount_manager.safe_mount(src, dst, recursive=is_run)
+            guest_path = "/" + os.path.relpath(dst, rootfs)
+            target = _mount_point(rootfs, guest_path)
+            if target is None:
+                warn(f"rootfs {guest_path} is not a plain directory; running this step without that bind.")
+                continue
+            is_run = os.path.realpath(target) == os.path.realpath(os.path.join(rootfs, "run"))
+            mount_manager.safe_mount(src, target, recursive=is_run)
 
         # RUN --mount targets go on top of the base binds (and are torn down
         # before them when the `with` block exits).

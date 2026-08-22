@@ -468,3 +468,52 @@ def test_bind_from_stage_rootfs(env, tmp_path):
         "chroot_distro.helpers.mount_manager.safe_unmount"
     ), run_mount_session(engine, stage, [m]):
         assert sm.call_args[0][0] == os.path.join(_Ref.rootfs_dir, "opt")
+
+
+# ── the target is a name the image can aim ────────────────────────────────────
+def test_target_through_a_symlinked_leaf_stays_inside_the_rootfs(env, tmp_path):
+    # safe_mount() makes the mountpoint with a named makedirs and mount(2)
+    # resolves the name again, so a link standing at the target sent the source
+    # wherever it pointed.
+    engine, stage = env
+    outside = tmp_path / "outside"
+    outside.mkdir(mode=0o700)
+    os.makedirs(os.path.join(engine.build_dir, "sub"))
+    os.symlink(str(outside), os.path.join(stage.rootfs_dir, "x"))
+    m = _mount("type=bind,target=/x,source=sub")
+
+    with patch("chroot_distro.helpers.mount_manager.safe_mount") as sm, patch(
+        "chroot_distro.helpers.mount_manager.safe_unmount"
+    ), run_mount_session(engine, stage, [m]):
+        target = sm.call_args[0][1]
+
+    assert target.startswith(stage.rootfs_dir + os.sep)
+    assert os.listdir(str(outside)) == []
+
+
+def test_target_follows_a_link_the_image_legitimately_ships(env):
+    # `/var/run -> /run` is in nearly every distro image.
+    engine, stage = env
+    os.makedirs(os.path.join(engine.build_dir, "sub"))
+    os.makedirs(os.path.join(stage.rootfs_dir, "var"))
+    os.symlink("/run", os.path.join(stage.rootfs_dir, "var", "run"))
+    m = _mount("type=bind,target=/var/run/x,source=sub")
+
+    with patch("chroot_distro.helpers.mount_manager.safe_mount") as sm, patch(
+        "chroot_distro.helpers.mount_manager.safe_unmount"
+    ), run_mount_session(engine, stage, [m]):
+        assert sm.call_args[0][1] == os.path.join(stage.rootfs_dir, "run/x")
+
+
+def test_tmpfs_target_is_the_resolved_path(env):
+    # apply_special_mount joins its target under the rootfs by name, so what it
+    # is handed has to be the resolved one.
+    engine, stage = env
+    os.makedirs(os.path.join(stage.rootfs_dir, "var"))
+    os.symlink("/run", os.path.join(stage.rootfs_dir, "var", "run"))
+    m = _mount("type=tmpfs,target=/var/run/scratch")
+
+    with patch("chroot_distro.helpers.mount_manager.apply_special_mount") as asm, patch(
+        "chroot_distro.helpers.mount_manager.safe_unmount"
+    ), run_mount_session(engine, stage, [m]):
+        assert asm.call_args[0][1].target == "/run/scratch"

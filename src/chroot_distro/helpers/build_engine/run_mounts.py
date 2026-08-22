@@ -158,14 +158,23 @@ def _parse_one_mount(spec: str, lineno: int) -> RunMount:
 
 
 def _host_target(rootfs: str, target_abs: str) -> str:
-    """Resolve a guest target path to a host path clamped inside rootfs."""
+    """Resolve a guest target path to a host path clamped inside rootfs.
+
+    The last component is resolved along with the rest of them. A mount point
+    is a name: safe_mount() creates it with a named makedirs and mount(2)
+    resolves it again, and both follow a symlink standing there, so
+    ``--mount=target=/var/tmp/x`` against an image shipping
+    ``var/tmp -> <host dir>`` put the source outside the rootfs. Following the
+    link re-anchored at the rootfs is what the guest's own view gives, so
+    ``/var/run/...`` still lands on ``/run/...``.
+    """
     parts = [p for p in target_abs.split("/") if p not in ("", ".")]
     if not parts or ".." in parts:
         raise BuildError(f"invalid RUN --mount target '{target_abs}'.")
-    parent = _safe_resolve(rootfs, parts[:-1])
-    if parent is None:
+    host = _safe_resolve(rootfs, parts)
+    if host is None:
         raise BuildError(f"RUN --mount target '{target_abs}' cannot be resolved inside the rootfs.")
-    return os.path.join(parent, parts[-1])
+    return host
 
 
 def _record_missing(rootfs: str, host_tgt: str, created: list[str]) -> None:
@@ -303,7 +312,7 @@ def run_mount_session(
                 sm = SpecialMount(
                     fstype="tmpfs",
                     source="tmpfs",
-                    target=target_abs,
+                    target="/" + os.path.relpath(host_tgt, rootfs),
                     options=f"mode={m.mode:o}" if m.mode is not None else "",
                     optional=False,
                 )
