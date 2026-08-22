@@ -353,6 +353,7 @@ def test_command_sync_holds_the_container_lock_while_it_runs(rootfs, tmp_path, m
 
     locks = tmp_path / "locks"
     locks.mkdir()
+    monkeypatch.setattr("chroot_distro.locking.RUNTIME_DIR", str(tmp_path))
     monkeypatch.setattr("chroot_distro.locking.LOCKS_DIR", str(locks))
     src = _tree(tmp_path / "src")
 

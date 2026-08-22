@@ -33,6 +33,7 @@ def cache_dirs(tmp_path, monkeypatch):
     monkeypatch.setattr("chroot_distro.commands.clear_cache.LAYER_CACHE_DIR", str(layers))
     monkeypatch.setattr(build_cache, "_INDEX_PATH", str(index))
     monkeypatch.setattr(build_cache, "_INDEX_LOCK_PATH", str(index) + ".lock")
+    monkeypatch.setattr(locking, "RUNTIME_DIR", str(tmp_path))
     monkeypatch.setattr(locking, "LOCKS_DIR", str(tmp_path / "locks"))
     monkeypatch.setattr(locking, "_BUILD_LOCKS_DIR", str(tmp_path / "locks" / "build"))
     return SimpleNamespace(layers=layers, manifests=manifests, index=index)

@@ -14,11 +14,7 @@ import chroot_distro.helpers.mount_manager as mount_manager
 from chroot_distro.commands.help import HELP_COMMANDS
 from chroot_distro.constants import CONTAINERS_DIR, PROGRAM_NAME
 from chroot_distro.helpers.tar_extract import _safe_resolve
-from chroot_distro.locking import (
-    ContainerLock,
-    container_lock_path,
-    read_lock_info,
-)
+from chroot_distro.locking import ContainerLock
 from chroot_distro.message import (
     C,
     crit_error,
@@ -298,7 +294,7 @@ def command_restore(args) -> None:
                     restore_name = container_name
                     lock = ContainerLock(container_name, exclusive=True, command="restore")
                     if not lock.acquire():
-                        hint = read_lock_info(container_lock_path(container_name))
+                        hint = lock.holder_hint()
                         clear_bar()
                         log_error(f"Cannot restore: container '{container_name}' is busy{hint}.")
                         sys.exit(1)

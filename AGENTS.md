@@ -87,7 +87,13 @@ Notes that matter when touching it:
 Four independent pieces of state, all under the runtime dir:
 - `locking.py`: `flock`-based `ContainerLock` / `BuildLock` / `RunCacheLock`. The
   lock file's first line is `PID command` so a conflict can name the holder;
-  exclusive locks are re-entrant within one process.
+  exclusive locks are re-entrant within one process. Every lock file is addressed
+  as `(dir_fd, name)`: `locks/` is guest-writable on Termux and its names are
+  predictable, so `_locks_dir_fd` walks down from `RUNTIME_DIR` with `O_NOFOLLOW`
+  and `open_lock_file_at` refuses anything that is not a plain file. Nothing else
+  writes there, so a planted entry is dropped and the real lock made in its
+  place; one that cannot be dropped fails closed (`_HostileLockError`) instead of
+  proceeding unlocked.
 - `helpers/session.py`: per-container session refcount, self-healing by scanning
   `/proc/*/root` for processes actually chrooted into the rootfs.
 - `helpers/session_registry.py`: one JSON file per session, kept alive by an

@@ -6,6 +6,7 @@ import logging
 import os
 import typing
 
+from chroot_distro import dirfd
 from chroot_distro.constants import RUNTIME_DIR
 from chroot_distro.exceptions import LockConflictError
 
@@ -14,6 +15,12 @@ log = logging.getLogger(__name__)
 LOCKS_DIR = os.path.join(RUNTIME_DIR, "locks")
 _BUILD_LOCKS_DIR = os.path.join(LOCKS_DIR, "build")
 _RUN_CACHE_LOCKS_DIR = os.path.join(LOCKS_DIR, "run-cache")
+
+# The three lock directories as component lists below RUNTIME_DIR: what the
+# O_NOFOLLOW walk descends, one level at a time.
+_CONTAINER_PARTS = ("locks",)
+_BUILD_PARTS = ("locks", "build")
+_RUN_CACHE_PARTS = ("locks", "run-cache")
 
 # Absolute lock-file paths for which this process currently holds an
 # exclusive flock. Used to make exclusive locking re-entrant within a
@@ -34,7 +41,7 @@ def _build_lock_path(image_ref: str, arch: str) -> str:
 
 def container_busy_status(name: str) -> str:
     """Return a short container status for display (``idle`` or ``in use …``)."""
-    hint = read_lock_info(container_lock_path(name))
+    hint = _hint_for(_CONTAINER_PARTS, f"{name}.lock")
     if hint:
         return f"in use{hint}"
     return "idle"
@@ -55,40 +62,201 @@ def _pid_state(pid: int) -> str:
         return ""
 
 
-def read_lock_info(lock_path: str) -> str:
-    """Return a human-readable hint about who holds the lock, or ''.
+class _HostileLockError(Exception):
+    """Raised when a lock file's name is occupied by something else."""
 
-    Reads the lock file's first line (PID + command name) and returns
-    a parenthesised note suitable for appending to an error message.
-    Returns '' when the file is missing, empty, or names a dead PID.
-    A stopped holder (Ctrl+Z) is called out explicitly with the commands
-    to resume or kill it, since it would otherwise hold the lock forever.
+
+# What opening an existing entry that is not a plain file reports: ELOOP or
+# ENOTDIR for a symlink (dirfd.is_refusal), EISDIR for a directory, EINVAL from
+# open_regular_at()'s own type check, ENXIO for a FIFO with no reader.
+_PLANTED_ERRNOS = frozenset((errno.EISDIR, errno.EINVAL, errno.ENXIO))
+
+
+def _is_planted(exc: OSError) -> bool:
+    """True when *exc* says the name is held by something not a plain file."""
+    return dirfd.is_refusal(exc) or exc.errno in _PLANTED_ERRNOS
+
+
+def _drop_planted(dir_fd: int, name: str) -> bool:
+    """Remove whatever occupies *name* under dir_fd. True once the name is free.
+
+    A directory needs rmdir and so only goes while it is empty, which is the one
+    shape of this that can stay in the way. Everything else -- a symlink, a
+    FIFO, a socket, a device node -- unlinks.
     """
     try:
-        with open(lock_path) as fh:
-            line = fh.readline().strip()
-        if not line:
-            return ""
-        parts = line.split(None, 1)
-        pid_str = parts[0]
-        cmd = parts[1] if len(parts) > 1 else "unknown"
-        try:
-            pid = int(pid_str)
-            os.kill(pid, 0)
-            if _pid_state(pid) == "T":
-                return (
-                    f" (PID {pid}: {cmd} — suspended, e.g. by Ctrl+Z; "
-                    f"resume it with 'kill -CONT {pid}' or terminate it with 'kill {pid}')"
-                )
-            return f" (PID {pid}: {cmd})"
-        except (OSError, ValueError):
-            return ""
+        os.unlink(name, dir_fd=dir_fd)
+        return True
+    except FileNotFoundError:
+        return True
+    except OSError as exc:
+        # unlink(2) on a directory is EISDIR on Linux, EPERM where POSIX leaves
+        # the choice open.
+        if exc.errno not in (errno.EISDIR, errno.EPERM):
+            return False
+    try:
+        os.rmdir(name, dir_fd=dir_fd)
+        return True
+    except OSError:
+        return False
+
+
+def _open_lock_subdir(dir_fd: int, name: str, path: str) -> int | None:
+    """Open (creating) the lock directory *name* under dir_fd. Descriptor, or None."""
+    try:
+        return dirfd.opendir_at(dir_fd, name)
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        if not _is_planted(exc):
+            return None
+        if not _drop_planted(dir_fd, name):
+            raise _HostileLockError(path) from None
+    try:
+        os.mkdir(name, 0o777, dir_fd=dir_fd)
+    except FileExistsError:
+        pass
+    except OSError:
+        return None
+    try:
+        return dirfd.opendir_at(dir_fd, name)
+    except OSError as exc:
+        if _is_planted(exc):
+            raise _HostileLockError(path) from None
+        return None
+
+
+def _locks_dir_fd(parts: tuple[str, ...], create: bool = False) -> int | None:
+    """Open one of the lock directories. Descriptor, or None.
+
+    RUNTIME_DIR is the trust root -- this program's own state directory, named
+    the way every other module names it -- and every component below it is
+    opened O_NOFOLLOW off the level above, so a `locks` (or `locks/build`)
+    symlink a guest left behind sends nothing into a host directory. The root
+    itself is still created by name: a first `install` on a machine that has
+    never run this program must not proceed unlocked merely because RUNTIME_DIR
+    does not exist yet.
+
+    Creating descends level by level so a planted level gets the same treatment
+    a planted lock file does -- replaced, or refused. Reading (`busy_locks`, a
+    holder hint) makes nothing and simply gives up.
+    """
+    if not create:
+        return dirfd.opendir_under(RUNTIME_DIR, parts)
+
+    fd: int | None = None
+    try:
+        os.makedirs(RUNTIME_DIR, exist_ok=True)
+        fd = dirfd.opendir(RUNTIME_DIR)
+    except OSError:
+        return None
+    try:
+        for depth, part in enumerate(parts, 1):
+            nxt = _open_lock_subdir(fd, part, os.path.join(RUNTIME_DIR, *parts[:depth]))
+            if nxt is None:
+                return None
+            os.close(fd)
+            fd = nxt
+        opened, fd = fd, None
+        return opened
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
+def open_lock_file_at(dir_fd: int, name: str, path: str) -> int | None:
+    """Open (creating) the lock file *name* under dir_fd. Descriptor, or None.
+
+    O_NOFOLLOW plus open_regular_at()'s type check, so neither a symlink nor a
+    FIFO standing under the name is opened: the first would have this program
+    truncate the host file it points at, the second would block the command
+    until a peer a hostile guest never supplies. Nothing but this program writes
+    a lock file, so an entry that is not a plain file was planted; it is dropped
+    and the real lock file made in its place. One that cannot be dropped raises
+    `_HostileLockError` rather than passing for the ordinary case, or planting a
+    directory under the name would be enough to run every later command
+    unsynchronised.
+
+    None is that ordinary case -- a read-only filesystem, no permission -- which
+    has always meant "carry on without a lock" and still does.
+
+    Public for the build-cache index, whose lock sits next to the index in the
+    download cache rather than under RUNTIME_DIR/locks. The opening rules are
+    the same; the policy at the far end is not, and `build_cache` says so.
+    """
+    flags = os.O_RDWR | os.O_CREAT
+    try:
+        fd, _st = dirfd.open_regular_at(dir_fd, name, flags, 0o644)
+        return fd
+    except OSError as exc:
+        if not _is_planted(exc):
+            return None
+    if not _drop_planted(dir_fd, name):
+        raise _HostileLockError(path)
+    try:
+        fd, _st = dirfd.open_regular_at(dir_fd, name, flags, 0o644)
+        return fd
+    except OSError as exc:
+        if _is_planted(exc):
+            raise _HostileLockError(path) from None
+        return None
+
+
+def _lock_info_at(dir_fd: int, name: str) -> str:
+    """Return a human-readable hint about who holds the lock, or ''.
+
+    Reads the lock file's first line (PID + command name) and returns a
+    parenthesised note suitable for appending to an error message. Returns ''
+    when the file is missing, empty, not a plain file, or names a dead PID.
+    A stopped holder (Ctrl+Z) is called out explicitly with the commands to
+    resume or kill it, since it would otherwise hold the lock forever.
+    """
+    try:
+        fd, _st = dirfd.open_regular_at(dir_fd, name, os.O_RDONLY)
     except OSError:
         return ""
+    try:
+        with os.fdopen(fd, "r", errors="replace") as fh:
+            line = fh.readline().strip()
+    except OSError:
+        with contextlib.suppress(OSError):
+            os.close(fd)
+        return ""
+    if not line:
+        return ""
+    fields = line.split(None, 1)
+    cmd = fields[1] if len(fields) > 1 else "unknown"
+    try:
+        pid = int(fields[0])
+        os.kill(pid, 0)
+    except (OSError, ValueError):
+        return ""
+    if _pid_state(pid) == "T":
+        return (
+            f" (PID {pid}: {cmd} — suspended, e.g. by Ctrl+Z; "
+            f"resume it with 'kill -CONT {pid}' or terminate it with 'kill {pid}')"
+        )
+    return f" (PID {pid}: {cmd})"
 
 
-def _lock_is_held(lock_path: str) -> bool:
-    """Return True iff *lock_path* is held exclusively by some process.
+def _hint_for(parts: tuple[str, ...], name: str) -> str:
+    """Return the holder hint for the lock file *name* in one lock directory.
+
+    Cosmetic, so a lock directory that cannot be reached is simply no hint --
+    whether a lock is refused is decided in `acquire()`, which never falls back
+    to a guess.
+    """
+    dir_fd = _locks_dir_fd(parts)
+    if dir_fd is None:
+        return ""
+    try:
+        return _lock_info_at(dir_fd, name)
+    finally:
+        os.close(dir_fd)
+
+
+def _lock_is_held_at(dir_fd: int, name: str) -> bool:
+    """Return True iff *name* under dir_fd is held exclusively by some process.
 
     A shared, non-blocking flock probe, dropped again immediately rather than
     held across any work: a refusal means an exclusive holder is present,
@@ -97,7 +265,7 @@ def _lock_is_held(lock_path: str) -> bool:
     stall the caller.
     """
     try:
-        fd = os.open(lock_path, os.O_RDONLY)
+        fd, _st = dirfd.open_regular_at(dir_fd, name, os.O_RDONLY)
     except OSError:
         return False
     try:
@@ -111,6 +279,25 @@ def _lock_is_held(lock_path: str) -> bool:
     finally:
         with contextlib.suppress(OSError):
             os.close(fd)
+
+
+def _probe_locks_dir(parts: tuple[str, ...], held: list[tuple[str, str]]) -> None:
+    """Append (path, hint) for every held lock in one lock directory."""
+    dir_fd = _locks_dir_fd(parts)
+    if dir_fd is None:
+        return
+    try:
+        try:
+            names = dirfd.listdir_at(dir_fd)
+        except OSError:
+            return
+        for name in names:
+            if not name.endswith(".lock"):
+                continue
+            if _lock_is_held_at(dir_fd, name):
+                held.append((os.path.join(RUNTIME_DIR, *parts, name), _lock_info_at(dir_fd, name)))
+    finally:
+        os.close(dir_fd)
 
 
 def busy_locks() -> list[tuple[str, str]]:
@@ -129,17 +316,8 @@ def busy_locks() -> list[tuple[str, str]]:
     concurrently with work in progress, not a lock.
     """
     held: list[tuple[str, str]] = []
-    for directory in (LOCKS_DIR, _BUILD_LOCKS_DIR):
-        try:
-            names = sorted(os.listdir(directory))
-        except OSError:
-            continue
-        for name in names:
-            if not name.endswith(".lock"):
-                continue
-            path = os.path.join(directory, name)
-            if _lock_is_held(path):
-                held.append((path, read_lock_info(path)))
+    for parts in (_CONTAINER_PARTS, _BUILD_PARTS):
+        _probe_locks_dir(parts, held)
     return held
 
 
@@ -159,8 +337,10 @@ class _FlockBase:
         self._blocking = blocking
         self._fd: typing.TextIO | None = None
         self._reentrant = False
+        self._hostile = ""
         # Subclasses populate these before acquire() is called.
         self._lock_path: str = ""
+        self._dir_parts: tuple[str, ...] = _CONTAINER_PARTS
         self._label: str = "resource"
         self._display: str = ""
 
@@ -168,11 +348,17 @@ class _FlockBase:
     def lock_path(self) -> str:
         return self._lock_path
 
+    def holder_hint(self) -> str:
+        """Parenthesised note naming the lock's holder, or ''."""
+        return _hint_for(self._dir_parts, os.path.basename(self._lock_path))
+
     def acquire(self) -> bool:
         """Try to acquire the lock non-blocking.
 
         Returns True on success (or when re-entrant / filesystem ignores
-        flock). Returns False when blocked by another process.
+        flock). Returns False when blocked by another process, or when the lock
+        file's name is occupied by something this module cannot remove -- see
+        `open_lock_file_at`. __enter__ tells the two apart.
         """
         if self._lock_path in _held_exclusive:
             # This process already holds an exclusive lock on this path.
@@ -180,22 +366,33 @@ class _FlockBase:
             return True
 
         try:
-            os.makedirs(os.path.dirname(self._lock_path), exist_ok=True)
-        except OSError as exc:
-            log.warning("Could not create lock directory '%s': %s. Proceeding unlocked.", os.path.dirname(self._lock_path), exc)
-            return True  # Cannot create locks dir; proceed unlocked.
+            dir_fd = _locks_dir_fd(self._dir_parts, create=True)
+            if dir_fd is None:
+                log.warning("Could not create lock directory for '%s'. Proceeding unlocked.", self._lock_path)
+                return True  # Cannot create locks dir; proceed unlocked.
+            try:
+                # O_CREAT without O_TRUNC: opening with "w" here would wipe the
+                # holder's "PID command" line *before* the flock attempt, so a
+                # conflicting acquire destroyed the very diagnostics that
+                # _lock_info_at() needs to name the busy process. The file is
+                # truncated only after the lock is actually ours.
+                raw_fd = open_lock_file_at(dir_fd, os.path.basename(self._lock_path), self._lock_path)
+            finally:
+                os.close(dir_fd)
+        except _HostileLockError as exc:
+            self._hostile = str(exc)
+            return False
+        if raw_fd is None:
+            log.warning("Could not open/create lock file '%s'. Proceeding unlocked.", self._lock_path)
+            return True  # Cannot open/create lock file; proceed unlocked.
 
         try:
-            # O_CREAT without O_TRUNC: opening with "w" here would wipe the
-            # holder's "PID command" line *before* the flock attempt, so a
-            # conflicting acquire destroyed the very diagnostics that
-            # read_lock_info() needs to name the busy process. The file is
-            # truncated only after the lock is actually ours.
-            raw_fd = os.open(self._lock_path, os.O_CREAT | os.O_RDWR, 0o644)
             fd = os.fdopen(raw_fd, "r+")
         except OSError as exc:
+            with contextlib.suppress(OSError):
+                os.close(raw_fd)
             log.warning("Could not open/create lock file '%s': %s. Proceeding unlocked.", self._lock_path, exc)
-            return True  # Cannot open/create lock file; proceed unlocked.
+            return True
 
         if self._inheritable:
             with contextlib.suppress(OSError):
@@ -239,8 +436,13 @@ class _FlockBase:
 
     def __enter__(self):
         if not self.acquire():
-            hint = read_lock_info(self._lock_path)
-            raise LockConflictError(f"{self._label} '{self._display}' is busy{hint}.")
+            if self._hostile:
+                raise LockConflictError(
+                    f"cannot lock {self._label} '{self._display}': '{self._hostile}' is not a plain "
+                    f"file and could not be replaced, so this command cannot be serialised against "
+                    f"others. Remove it and try again."
+                )
+            raise LockConflictError(f"{self._label} '{self._display}' is busy{self.holder_hint()}.")
         return self
 
     def __exit__(self, *_) -> None:
@@ -263,6 +465,7 @@ class ContainerLock(_FlockBase):
             inheritable=inheritable,
         )
         self._lock_path = container_lock_path(name)
+        self._dir_parts = _CONTAINER_PARTS
         self._label = "container"
         self._display = name
 
@@ -278,6 +481,7 @@ class BuildLock(_FlockBase):
     ) -> None:
         super().__init__(exclusive=True, command=command, inheritable=False)
         self._lock_path = _build_lock_path(image_ref, arch)
+        self._dir_parts = _BUILD_PARTS
         self._label = "image"
         self._display = f"{image_ref} ({arch})"
 
@@ -291,5 +495,6 @@ class RunCacheLock(_FlockBase):
     def __init__(self, cache_key: str, command: str = "build") -> None:
         super().__init__(exclusive=True, command=command, inheritable=False, blocking=True)
         self._lock_path = os.path.join(_RUN_CACHE_LOCKS_DIR, f"{cache_key}.lock")
+        self._dir_parts = _RUN_CACHE_PARTS
         self._label = "build cache"
         self._display = cache_key
