@@ -38,6 +38,7 @@ from chroot_distro.paths import (
     container_incomplete_marker,
     container_manifest,
     container_rootfs,
+    open_container_rootfs,
 )
 from chroot_distro.progress import clear_bar
 
@@ -238,7 +239,18 @@ def _run_install(
     # Marker first, rootfs second — see _write_incomplete_marker.
     os.makedirs(container_path, exist_ok=True)
     _write_incomplete_marker(incomplete_marker)
-    os.makedirs(rootfs_dir, exist_ok=True)
+    # Made level by level off the descriptor of the level above, for the same
+    # reason it is checked that way — and *kept*: the extraction writes every
+    # member as (dir_fd, name) beneath this descriptor, so nothing between the
+    # check and the last byte written resolves containers/<name>/rootfs a
+    # second time. Handing the path down instead left the whole unpack open to
+    # a guest that re-pointed the name, which lands the image (and the manifest
+    # that follows it) in a host directory of its choosing.
+    try:
+        rootfs_fd = open_container_rootfs(install_name, create=True)
+    except OSError as exc:
+        crit_error(f"could not create the rootfs of container '{install_name}': {exc}")
+        sys.exit(1)
 
     def _cleanup() -> None:
         with contextlib.suppress(OSError):
@@ -248,7 +260,7 @@ def _run_install(
     try:
         if local_path is not None:
             log_info("Extracting rootfs from archive...")
-            metadata = install_from_local_file(local_path, rootfs_dir, dist_arch)
+            metadata = install_from_local_file(local_path, rootfs_fd, dist_arch)
         elif url is not None:
             os.makedirs(BASE_CACHE_DIR, exist_ok=True)
             fd, tmp_archive = tempfile.mkstemp(
@@ -260,10 +272,10 @@ def _run_install(
             log_info("Downloading archive...")
             download_file(url, tmp_archive, insecure=insecure)
             log_info("Extracting rootfs from archive...")
-            metadata = install_from_local_file(tmp_archive, rootfs_dir, dist_arch)
+            metadata = install_from_local_file(tmp_archive, rootfs_fd, dist_arch)
         else:
             os.makedirs(BASE_CACHE_DIR, exist_ok=True)
-            metadata = pull_image(image_ref, rootfs_dir, dist_arch, insecure=insecure)
+            metadata = pull_image(image_ref, rootfs_fd, dist_arch, insecure=insecure)
 
         # Write manifest.json when metadata is available
         if metadata is not None:
@@ -314,6 +326,7 @@ def _run_install(
         _cleanup()
         raise
     finally:
+        os.close(rootfs_fd)
         if tmp_archive is not None:
             with contextlib.suppress(OSError):
                 os.remove(tmp_archive)

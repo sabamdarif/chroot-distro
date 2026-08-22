@@ -181,7 +181,7 @@ def _walk_spec(rootfs: str, rel_path: str, spec: str, deref_leaf: bool) -> str:
 _O_DIR = (getattr(os, "O_PATH", 0) or os.O_RDONLY) | os.O_DIRECTORY
 
 
-def open_container_rootfs(name: str) -> int:
+def open_container_rootfs(name: str, *, create: bool = False) -> int:
     """Open containers/<name>/rootfs as a descriptor. The caller closes it.
 
     Walked down from CONTAINERS_DIR with O_NOFOLLOW at every step rather than
@@ -190,19 +190,20 @@ def open_container_rootfs(name: str) -> int:
     `containers/<name>` is guest-writable, and a symlink left in place of it or
     of its rootfs is how a transfer ends up reading or writing a host directory.
 
+    With create=True each missing level is made with mkdirat off the descriptor
+    of the level above, which is what `install` needs: the tree it is about to
+    unpack into has to be created the same way it is checked, and the
+    descriptor it gets back is the one every member is then written beneath.
+
     FileNotFoundError means the container, or its rootfs, is not there — an
     ordinary answer, left to the caller. Any other refusal is an entry this
     program did not create.
     """
     root_fd = os.open(CONTAINERS_DIR, _O_DIR)
     try:
-        sub = dirfd.opendir_at(root_fd, name)
+        return dirfd.descend_at(root_fd, (name, "rootfs"), create=create)
     finally:
         os.close(root_fd)
-    try:
-        return dirfd.opendir_at(sub, "rootfs")
-    finally:
-        os.close(sub)
 
 
 def _unusable_storage(name: str, exc: OSError) -> ChrootDistroError:

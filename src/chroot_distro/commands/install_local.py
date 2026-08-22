@@ -67,9 +67,9 @@ def detect_strip_count(member_names: list) -> int:
     return best_strip
 
 
-def extract_plain_tar(archive_path: str, strip: int, rootfs_dir: str) -> None:
-    """Stream-extract a plain rootfs tarball into *rootfs_dir*."""
-    extract_tar_to_rootfs(archive_path, rootfs_dir, strip=strip)
+def extract_plain_tar(archive_path: str, strip: int, rootfs_fd: int) -> None:
+    """Stream-extract a plain rootfs tarball into the *rootfs_fd* tree."""
+    extract_tar_to_rootfs(archive_path, rootfs_fd, strip=strip)
 
 
 def _oci_blob_path(digest: str) -> str:
@@ -147,7 +147,7 @@ def _oci_cache_layer(tf, member_map, digest):
     return cache_path
 
 
-def _extract_oci(tf, member_map, rootfs_dir, dist_arch):
+def _extract_oci(tf, member_map, rootfs_fd, dist_arch):
     index = _oci_read_json(tf, member_map, "index.json")
     index_manifests = index.get("manifests", [])
     if not index_manifests:
@@ -184,7 +184,7 @@ def _extract_oci(tf, member_map, rootfs_dir, dist_arch):
             _oci_cache_layer(tf, member_map, digest)
 
         log_info(f"{short_id}: Applying layer {i + 1}/{n_layers}...")
-        apply_layer(cache_path, rootfs_dir)
+        apply_layer(cache_path, rootfs_fd)
 
     annotations = manifest_entry.get("annotations", {})
     image_ref = (
@@ -199,8 +199,13 @@ def _extract_oci(tf, member_map, rootfs_dir, dist_arch):
     }
 
 
-def install_from_local_file(archive_path: str, rootfs_dir: str, dist_arch: str):
-    """Open *archive_path*, detect its format, and extract into *rootfs_dir*."""
+def install_from_local_file(archive_path: str, rootfs_fd: int, dist_arch: str):
+    """Open *archive_path*, detect its format, and extract into *rootfs_fd*.
+
+    The rootfs is a **descriptor**: `install` walks containers/<name>/rootfs
+    down with O_NOFOLLOW and hands the result straight through, so nothing
+    between that check and the last member written resolves the name again.
+    """
     probe_names: list = []
     is_oci = False
     with tarfile.open(archive_path, "r|*") as tf_probe:
@@ -220,8 +225,8 @@ def install_from_local_file(archive_path: str, rootfs_dir: str, dist_arch: str):
             raw_members = tf.getmembers()
             clear_bar()
             member_map = {m.name: m for m in raw_members}
-            return _extract_oci(tf, member_map, rootfs_dir, dist_arch)
+            return _extract_oci(tf, member_map, rootfs_fd, dist_arch)
 
     strip = detect_strip_count(probe_names)
-    extract_plain_tar(archive_path, strip, rootfs_dir)
+    extract_plain_tar(archive_path, strip, rootfs_fd)
     return None

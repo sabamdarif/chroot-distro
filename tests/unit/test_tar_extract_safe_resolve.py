@@ -40,22 +40,53 @@ def test_safe_resolve_symlink_loop_returns_none(tmp_path):
     assert tar_extract._safe_resolve(root, ["a", "x"]) is None
 
 
-# ── _apply_whiteout ─────────────────────────────────────────────────────────────
+# ── _is_whiteout / _apply_whiteout ─────────────────────────────────────────────
+def test_is_whiteout():
+    assert tar_extract._is_whiteout(".wh.gone")
+    assert tar_extract._is_whiteout(".wh..wh..opq")
+    assert not tar_extract._is_whiteout("regular.txt")
+
+
 def test_apply_whiteout_regular(tmp_path):
-    parent = str(tmp_path)
     victim = tmp_path / "gone"
     victim.write_text("x")
-    assert tar_extract._apply_whiteout([".wh.gone"], parent) is True
+    parent_fd = os.open(str(tmp_path), os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        tar_extract._apply_whiteout(parent_fd, ".wh.gone")
+    finally:
+        os.close(parent_fd)
     assert not victim.exists()
 
 
 def test_apply_whiteout_opaque_clears_dir(tmp_path):
-    parent = str(tmp_path)
     (tmp_path / "a").write_text("1")
     (tmp_path / "b").mkdir()
-    assert tar_extract._apply_whiteout([".wh..wh..opq"], parent) is True
+    (tmp_path / "b" / "deep").write_text("2")
+    parent_fd = os.open(str(tmp_path), os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        tar_extract._apply_whiteout(parent_fd, ".wh..wh..opq")
+    finally:
+        os.close(parent_fd)
     assert list(tmp_path.iterdir()) == []
 
 
-def test_apply_whiteout_not_a_whiteout(tmp_path):
-    assert tar_extract._apply_whiteout(["regular.txt"], str(tmp_path)) is False
+def test_apply_whiteout_cannot_name_the_parent_or_above(tmp_path):
+    """`.wh...`, `.wh..` and `.wh.` name no sibling, so they remove nothing.
+
+    Without the guard the slice after the prefix is '..', '.' or '', and the
+    removal took the parent's parent (for a whiteout at the top of a layer,
+    one level above the extraction root) or the parent's own contents.
+    """
+    root = tmp_path / "rootfs"
+    root.mkdir()
+    (root / "keep").write_text("x")
+    sibling = tmp_path / "manifest.json"
+    sibling.write_text("{}")
+    parent_fd = os.open(str(root), os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for name in (".wh...", ".wh..", ".wh."):
+            tar_extract._apply_whiteout(parent_fd, name)
+    finally:
+        os.close(parent_fd)
+    assert (root / "keep").exists()
+    assert sibling.exists()

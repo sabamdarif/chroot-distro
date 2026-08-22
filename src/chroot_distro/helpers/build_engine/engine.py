@@ -5,6 +5,7 @@ import re
 import time
 import typing
 
+from chroot_distro import dirfd
 from chroot_distro.arch import get_device_cpu_arch
 from chroot_distro.helpers.build_engine.constants import (
     EXPANDS_VARS,
@@ -406,13 +407,21 @@ class BuildEngine:
         instructions append to the same list.
         """
         new_stage.image_config = json.loads(json.dumps(parent.image_config))
-        for layer in parent.layers:
-            cache_path = layer_cache_path(layer["digest"])
-            if not os.path.isfile(cache_path):
-                raise BuildError(
-                    f"Layer {layer['digest']} of stage '{parent.name or parent.index}' is missing from the cache."
-                )
-            apply_layer(cache_path, new_stage.rootfs_dir)
+        # The stage rootfs is this process's own — a fresh directory under the
+        # build's 0700 scratch root — so it is opened by name here; what the
+        # extractor needs is the descriptor, since every member below it goes
+        # in as (dir_fd, name).
+        rootfs_fd = dirfd.opendir(new_stage.rootfs_dir)
+        try:
+            for layer in parent.layers:
+                cache_path = layer_cache_path(layer["digest"])
+                if not os.path.isfile(cache_path):
+                    raise BuildError(
+                        f"Layer {layer['digest']} of stage '{parent.name or parent.index}' is missing from the cache."
+                    )
+                apply_layer(cache_path, rootfs_fd)
+        finally:
+            os.close(rootfs_fd)
         new_stage.layers = list(parent.layers)
         new_stage.parent_layer_digest = parent.parent_layer_digest
 
@@ -420,9 +429,15 @@ class BuildEngine:
         """Use helpers.docker.pull_image to populate the stage rootfs."""
         log_info(f"Pulling base image '{image_ref}' ({self.target_arch_pd})...")
         try:
-            meta = pull_image(image_ref, stage.rootfs_dir, self.target_arch_pd)
+            rootfs_fd = dirfd.opendir(stage.rootfs_dir)
+        except OSError as exc:
+            raise BuildError(f"FROM {image_ref}: {exc}") from exc
+        try:
+            meta = pull_image(image_ref, rootfs_fd, self.target_arch_pd)
         except RuntimeError as exc:
             raise BuildError(f"FROM {image_ref}: {exc}") from exc
+        finally:
+            os.close(rootfs_fd)
 
         stage.image_config = meta.get("image_config") or {"config": {}}
         manifest = meta.get("manifest") or {}

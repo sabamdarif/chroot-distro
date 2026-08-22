@@ -270,8 +270,13 @@ def _fetch_config_blob(
         return {}
 
 
-def pull_image(image_ref: str, rootfs_dir: str, arch: str, insecure: bool = False) -> dict[str, typing.Any]:
-    """Pull an OCI/Docker image and extract all layers into *rootfs_dir*.
+def pull_image(image_ref: str, rootfs_fd: int, arch: str, insecure: bool = False) -> dict[str, typing.Any]:
+    """Pull an OCI/Docker image and extract all layers into the *rootfs_fd* tree.
+
+    The rootfs is a **descriptor**, not a path: `install` validates
+    containers/<name>/rootfs with an O_NOFOLLOW walk and hands the result
+    straight down, so nothing between that check and the last member written
+    resolves the name a second time.
 
     The manifest is checked in the local cache first.
     """
@@ -332,7 +337,7 @@ def pull_image(image_ref: str, rootfs_dir: str, arch: str, insecure: bool = Fals
         short_id = _layer_short_id(digest)
         layer_path = layer_cache_path(digest)
         log_info(f"{short_id}: Applying layer {i + 1}/{n_layers}...")
-        apply_layer(layer_path, rootfs_dir)
+        apply_layer(layer_path, rootfs_fd)
 
     return {
         "manifest": manifest,

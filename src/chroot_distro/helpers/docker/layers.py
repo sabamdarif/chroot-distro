@@ -347,6 +347,11 @@ def download_blob(
     return dest
 
 
-def apply_layer(layer_path: str, rootfs_dir: str) -> None:
-    """Apply one OCI/Docker layer (gzipped tar) onto rootfs_dir."""
-    extract_tar_to_rootfs(layer_path, rootfs_dir, handle_whiteouts=True)
+def apply_layer(layer_path: str, rootfs_fd: int) -> None:
+    """Apply one OCI/Docker layer (gzipped tar) into the *rootfs_fd* tree.
+
+    The rootfs is a **descriptor**, not a path: every member goes in as
+    (dir_fd, name) beneath it, so nothing between the caller's check of the
+    tree and the last byte written resolves its name a second time.
+    """
+    extract_tar_to_rootfs(layer_path, rootfs_fd, handle_whiteouts=True)

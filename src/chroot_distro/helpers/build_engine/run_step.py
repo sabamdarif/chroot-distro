@@ -86,7 +86,11 @@ def do_run(engine: typing.Any, instr: dict[str, typing.Any]) -> None:
             cached_path = layer_cache_path(hit["layer_digest"])
             if os.path.isfile(cached_path):
                 engine.report_cache_hit(instr)
-                apply_layer(cached_path, stage.rootfs_dir)
+                rootfs_fd = dirfd.opendir(stage.rootfs_dir)
+                try:
+                    apply_layer(cached_path, rootfs_fd)
+                finally:
+                    os.close(rootfs_fd)
                 stage.layers.append(
                     {
                         "digest": hit["layer_digest"],
