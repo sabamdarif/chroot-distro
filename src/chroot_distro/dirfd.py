@@ -13,7 +13,7 @@ import errno
 import os
 import shutil
 import stat
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Any
 
 _O_RD_DIR = os.O_RDONLY | os.O_DIRECTORY
@@ -79,6 +79,105 @@ def reopen(dir_fd: int, name: str = "") -> int:
     if name:
         return opendir_at(dir_fd, name)
     return os.open(os.curdir, _O_RD_DIR, dir_fd=dir_fd)
+
+
+def opendir(path: str) -> int:
+    """Open *path* as a directory. The caller owns the descriptor."""
+    return os.open(path, _O_RD_DIR)
+
+
+def descend_at(dir_fd: int, parts: Sequence[str], *, create: bool = False, mode: int | None = None) -> int:
+    """Open the directory *parts* names under dir_fd. Descriptor, or raises.
+
+    Each level is opened O_NOFOLLOW off the level above, so a component that is
+    a symlink (ELOOP, or ENOTDIR for O_NOFOLLOW|O_DIRECTORY on Linux) or a
+    plain file raises rather than being followed. A missing level raises
+    FileNotFoundError unless create=True, which makes it with mkdirat off the
+    same validated descriptor. *mode* is applied to the leaf through its
+    descriptor.
+
+    A caller that has pinned a directory keeps the guarantee that pin gives it
+    only by descending from the descriptor: going back to the path re-resolves
+    every component above, which is the part that was validated in the first
+    place.
+
+    dir_fd itself is left open; with no parts the answer is a fresh descriptor
+    on the same directory, so the caller owns and closes what comes back either
+    way.
+    """
+    fd: int | None = None
+    try:
+        for part in parts:
+            src = dir_fd if fd is None else fd
+            try:
+                nxt = opendir_at(src, part)
+            except FileNotFoundError:
+                if not create:
+                    raise
+                with contextlib.suppress(FileExistsError):
+                    os.mkdir(part, 0o777, dir_fd=src)
+                nxt = opendir_at(src, part)
+            if fd is not None:
+                os.close(fd)
+            fd = nxt
+        if fd is None:
+            fd = reopen(dir_fd)
+        if mode is not None:
+            _chmod_fd(fd, mode)
+        opened, fd = fd, None
+        return opened
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
+def opendir_under(root: str, parts: Sequence[str], *, create: bool = False, mode: int | None = None) -> int | None:
+    """Open the directory *parts* names under *root*. Descriptor, or None.
+
+    The path form of descend_at(): the root is opened by name, everything
+    below it is reached off a descriptor. What comes back names the inode the
+    walk validated, so a caller that keeps addressing entries as
+    (dir_fd, name) is proof against the directory being re-pointed afterwards.
+
+    None means the directory is not reachable inside *root*: a component is a
+    symlink or is not a directory, is missing (create=False), or the mkdir
+    failed. The caller owns the returned descriptor and must close it.
+    """
+    try:
+        root_fd = opendir(root)
+    except OSError:
+        return None
+    try:
+        return descend_at(root_fd, parts, create=create, mode=mode)
+    except OSError:
+        return None
+    finally:
+        os.close(root_fd)
+
+
+def makedirs_under(root: str, parts: Sequence[str], mode: int | None = None) -> str | None:
+    """Create the directory *parts* names under *root*. Path, or None.
+
+    Every level is made with mkdirat off the descriptor of the level above and
+    reopened with O_NOFOLLOW, so a component that is a symlink is refused
+    instead of followed. os.makedirs() addresses each level by its path, so a
+    link the image shipped -- or a guest planted -- sends the whole tree
+    wherever it points, and the mode applied afterwards goes with it. That
+    matters because these directories are made on the *host* side, with
+    nothing confining the write.
+
+    None means the directory could not be made inside *root*. Callers treat
+    that as "do not use this path" rather than falling back to the name.
+
+    *mode* is applied to the leaf through its descriptor, never through its
+    name -- Linux has no AT_SYMLINK_NOFOLLOW for fchmodat(2), so a named chmod
+    is the very hole this is closing.
+    """
+    fd = opendir_under(root, parts, create=True, mode=mode)
+    if fd is None:
+        return None
+    os.close(fd)
+    return os.path.join(root, *parts)
 
 
 def open_file_at(dir_fd: int, name: str, flags: int, mode: int = 0o644) -> int:

@@ -4,6 +4,7 @@ import logging
 import os
 import typing
 
+from chroot_distro import dirfd
 from chroot_distro.helpers.build_engine.constants import PREDEFINED_ARGS
 from chroot_distro.helpers.build_engine.copy_step import do_add, do_copy
 from chroot_distro.helpers.build_engine.errors import BuildError
@@ -17,6 +18,7 @@ from chroot_distro.helpers.build_engine.run_step import do_run
 from chroot_distro.helpers.build_engine.users import resolve_user_for_chroot
 from chroot_distro.helpers.docker import layer_cache_path
 from chroot_distro.helpers.layer_diff import write_files_layer
+from chroot_distro.helpers.tar_extract import _safe_resolve
 
 log = logging.getLogger(__name__)
 
@@ -96,6 +98,27 @@ def do_user(engine: typing.Any, instr: dict[str, typing.Any]) -> None:
     cfg["User"] = engine.current.user
 
 
+def _stamp_build_dir(rootfs: str, parts: list[str], uid: int, gid: int) -> None:
+    """Own and lock down one directory WORKDIR created, through a descriptor.
+
+    A named chown or chmod acts on whatever the name leads to, and these are
+    host-side writes with nothing confining them: a symlink standing where the
+    directory should be would hand its target away instead. Linux has no
+    AT_SYMLINK_NOFOLLOW for fchmodat(2) either, so the descriptor is the only
+    way to name the inode the walk validated.
+    """
+    fd = dirfd.opendir_under(rootfs, parts)
+    if fd is None:
+        return
+    try:
+        with contextlib.suppress(OSError):
+            os.fchown(fd, uid, gid)
+        with contextlib.suppress(OSError):
+            os.fchmod(fd, 0o700)
+    finally:
+        os.close(fd)
+
+
 def do_workdir(engine: typing.Any, instr: dict[str, typing.Any]) -> None:
     """WORKDIR PATH: set the cwd and create the directory on disk.
 
@@ -106,40 +129,55 @@ def do_workdir(engine: typing.Any, instr: dict[str, typing.Any]) -> None:
     path = str(instr["value"]).strip()
     if not path:
         raise BuildError(f"WORKDIR with empty path at line {instr['lineno']}.")
-    if not path.startswith("/"):
-        path = os.path.normpath(os.path.join(engine.current.workdir or "/", path))
+    # Normalised whether or not it is absolute. Only the relative branch used to
+    # be, so `WORKDIR /../../../x` carried its ".." into the host path below --
+    # and os.makedirs() then created that directory as many levels above the
+    # rootfs as the instruction asked for, anywhere the invoking user can write,
+    # with a chmod behind it; the layer picked up a matching "../x" arcname.
+    # ".." is resolved against the guest's "/" here, clamping at the image root
+    # the way a chroot does and the way Docker reads it.
+    path = os.path.normpath(os.path.join("/", engine.current.workdir or "/", path))
     engine.current.workdir = path
     cfg = engine.current.image_config.setdefault("config", {})
     cfg["WorkingDir"] = path
 
     # Create the directory inside the rootfs and emit a thin layer that
-    # captures every newly-created ancestor, so the path also exists
-    # when the image is applied to a fresh rootfs by `install`.
-    host_path = os.path.join(engine.current.rootfs_dir, path.lstrip("/"))
-    new_dirs = []
-    cur = host_path
-    while cur and cur != engine.current.rootfs_dir:
-        if not os.path.lexists(cur):
-            new_dirs.append(cur)
-        cur = os.path.dirname(cur)
-    uid, gid = resolve_user_for_chroot(engine.current.rootfs_dir, engine.current.user)
-    try:
-        os.makedirs(host_path, exist_ok=True)
-        os.chown(host_path, uid, gid)
-        os.chmod(host_path, 0o700)
-    except OSError:
+    # captures every newly-created ancestor, so the path also exists when the
+    # image is applied to a fresh rootfs by `install`.
+    #
+    # The path is resolved before anything is created and then created off a
+    # descriptor per level. os.makedirs(), os.chown() and os.chmod() address
+    # every level by name, so an image shipping `/x -> /tmp/victim` had
+    # `WORKDIR /x/sub` create -- and then hand over -- a directory on the
+    # *host*, outside the rootfs entirely; a base image's `ONBUILD WORKDIR`
+    # reaches that without the Dockerfile carrying the line at all. Refusing
+    # symlinked components is not an option, since `/var/run -> /run` ships in
+    # nearly every distro image: _safe_resolve follows each link but re-anchors
+    # an absolute target at the rootfs the way the guest's own view does, and
+    # makedirs_under then refuses a component planted after the resolve rather
+    # than following it. The arcnames name the resolved location, which is
+    # where the directories really landed.
+    rootfs = engine.current.rootfs_dir
+    resolved = _safe_resolve(rootfs, path.strip("/").split("/"))
+    if resolved is None:
         return
+    rel = os.path.relpath(resolved, rootfs)
+    parts = [] if rel == os.curdir else rel.split(os.sep)
+
+    new_dirs = [parts[:depth] for depth in range(1, len(parts) + 1) if not os.path.lexists(os.path.join(rootfs, *parts[:depth]))]
+
+    uid, gid = resolve_user_for_chroot(rootfs, engine.current.user)
+    if dirfd.makedirs_under(rootfs, parts) is None:
+        return
+    _stamp_build_dir(rootfs, parts, uid, gid)
 
     if not new_dirs:
         return
 
     file_map = {}
-    for d in sorted(new_dirs):
-        arc = os.path.relpath(d, engine.current.rootfs_dir)
-        with contextlib.suppress(OSError):
-            os.chown(d, uid, gid)
-            os.chmod(d, 0o700)
-        file_map[arc] = {
+    for prefix in new_dirs:
+        _stamp_build_dir(rootfs, prefix, uid, gid)
+        file_map["/".join(prefix)] = {
             "kind": "dir",
             "mode": 0o700,
             "uid": uid,

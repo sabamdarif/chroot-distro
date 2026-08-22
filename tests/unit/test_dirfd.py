@@ -68,6 +68,39 @@ def _tree(root):
     return root
 
 
+# ── descending under a root ────────────────────────────────────────────────────
+def test_makedirs_under_creates_every_level(tmp_path):
+    made = dirfd.makedirs_under(str(tmp_path), ["a", "b", "c"], mode=0o701)
+    assert made == str(tmp_path / "a" / "b" / "c")
+    assert (tmp_path / "a" / "b" / "c").is_dir()
+    assert stat.S_IMODE((tmp_path / "a" / "b" / "c").stat().st_mode) == 0o701
+
+
+def test_makedirs_under_refuses_a_symlinked_component(tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    root = tmp_path / "root"
+    root.mkdir()
+    os.symlink(str(outside), root / "x")
+
+    assert dirfd.makedirs_under(str(root), ["x", "sub"]) is None
+    assert os.listdir(str(outside)) == []
+
+
+def test_opendir_under_without_create_reports_a_missing_level(tmp_path):
+    assert dirfd.opendir_under(str(tmp_path), ["nope"]) is None
+
+
+def test_descend_at_with_no_parts_hands_back_a_separate_descriptor(tmp_path):
+    with opened(tmp_path) as fd:
+        again = dirfd.descend_at(fd, [])
+        try:
+            assert again != fd
+            assert os.fstat(again).st_ino == os.fstat(fd).st_ino
+        finally:
+            os.close(again)
+
+
 # ── refusing what a name might have become ────────────────────────────────────
 def test_opendir_at_refuses_a_symlinked_directory(tmp_path):
     (tmp_path / "real").mkdir()

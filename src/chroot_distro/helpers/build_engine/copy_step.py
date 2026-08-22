@@ -698,7 +698,9 @@ def _materialise_files(rootfs_dir: str, file_map: dict[str, typing.Any]) -> None
     each hop inside rootfs_dir — otherwise an ADD'd tar (or a stage)
     could ship `evil -> /` followed by `evil/passwd` and the write would
     escape onto the host. The final component is left unresolved so we
-    replace the entry itself, never a same-named symlink's target.
+    replace the entry itself, never a same-named symlink's target -- which
+    means every kind has to drop a link standing there first, the directory
+    branch included.
     """
     for arcname in sorted(file_map.keys()):
         entry = file_map[arcname]
@@ -714,6 +716,20 @@ def _materialise_files(rootfs_dir: str, file_map: dict[str, typing.Any]) -> None
         kind = entry["kind"]
         try:
             if kind == "dir":
+                # A symlink already standing at this name would send both the
+                # mkdir and the chmod to whatever it points at. The parent is
+                # resolved with clamping but the final component is deliberately
+                # left alone, so `etc -> /home/user` in the image plus an ADD'd
+                # tar carrying an `etc/` member had that host directory chmod'ed
+                # to the member's mode -- and the tree then disagreed with the
+                # layer, which records a plain directory there. Overlay
+                # semantics replace a symlink with a real directory; the tar
+                # extractor already drops it the same way (see tar_extract), the
+                # materialiser did not. The other kinds unlink whatever is in
+                # the way already.
+                if os.path.islink(host):
+                    with contextlib.suppress(OSError):
+                        os.remove(host)
                 os.makedirs(host, exist_ok=True)
                 with contextlib.suppress(OSError):
                     os.chmod(host, entry.get("mode", 0o755))
