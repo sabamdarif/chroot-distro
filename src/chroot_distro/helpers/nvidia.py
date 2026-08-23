@@ -14,7 +14,8 @@ from __future__ import annotations
 import glob
 import logging
 import os
-import subprocess
+
+from chroot_distro.syscalls.chroot import chroot_and_run
 
 log = logging.getLogger(__name__)
 
@@ -397,39 +398,31 @@ def setup_ldconfig_for_wsl(rootfs: str) -> None:
 def run_ldconfig_in_chroot(rootfs: str) -> None:
     """Run ``ldconfig`` inside the chroot to refresh the shared library cache.
 
-    Uses ``chroot`` to execute ldconfig in the guest filesystem context.
     Non-fatal: logs on failure but does not raise.
     """
-    ldconfig_path = os.path.join(rootfs, "sbin", "ldconfig")
-    if not os.path.isfile(ldconfig_path):
-        ldconfig_path = os.path.join(rootfs, "usr", "sbin", "ldconfig")
-    if not os.path.isfile(ldconfig_path):
+    for guest_path in ("/sbin/ldconfig", "/usr/sbin/ldconfig"):
+        if os.path.isfile(os.path.join(rootfs, guest_path.lstrip("/"))):
+            break
+    else:
         log.debug("ldconfig not found in chroot, skipping cache refresh")
         return
 
     try:
-        result = subprocess.run(
-            ["chroot", rootfs, "/sbin/ldconfig"],
+        result = chroot_and_run(
+            rootfs,
+            [guest_path],
             capture_output=True,
             text=True,
             timeout=30,
-            check=False,
         )
-        if result.returncode != 0:
-            # Try alternate path
-            result = subprocess.run(
-                ["chroot", rootfs, "/usr/sbin/ldconfig"],
-                capture_output=True,
-                text=True,
-                timeout=30,
-                check=False,
-            )
-        if result.returncode == 0:
-            log.debug("ldconfig refreshed successfully in chroot")
-        else:
-            log.debug("ldconfig failed: %s", result.stderr.strip())
-    except (subprocess.TimeoutExpired, OSError) as e:
+    except OSError as e:
         log.debug("ldconfig execution error: %s", e)
+        return
+
+    if result.returncode == 0:
+        log.debug("ldconfig refreshed successfully in chroot")
+    else:
+        log.debug("ldconfig failed: %s", str(result.stderr).strip())
 
 
 # ---------------------------------------------------------------------------
