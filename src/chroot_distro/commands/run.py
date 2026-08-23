@@ -1,6 +1,7 @@
 import json
 import os
 import sys
+import typing
 
 from chroot_distro.commands.login import command_login
 from chroot_distro.commands.login.env import resolve_override as _resolve_override
@@ -24,20 +25,50 @@ def _read_image_config(container_name: str) -> dict:
     return data.get("image_config", {}).get("config") or {}
 
 
-def _normalize_argv(val) -> tuple[list, bool]:
+def _malformed(container_name: str, what: str) -> typing.NoReturn:
+    """Report a manifest field this command cannot build a command out of."""
+    crit_error(
+        f"the image manifest for '{container_name}' declares a {what}; the image is malformed."
+    )
+    sys.exit(1)
+
+
+def _normalize_argv(val, key: str, container_name: str) -> tuple[list[str], bool]:
     """Normalize an image Entrypoint/Cmd value into an argv list.
 
     Returns ``(argv, is_shell_form)``:
-    - a JSON-array (exec form) becomes ``(list, False)``;
+    - a JSON array of strings (exec form) becomes ``(list, False)``;
     - a non-empty string (shell form) becomes ``(["/bin/sh", "-c", val], True)``
       rather than being character-split by ``list()``;
-    - anything else becomes ``([], False)``.
+    - absent, JSON null or the empty string is "not set": ``([], False)``.
+
+    Anything else is a malformed image and is refused. Coercing each item with
+    ``str()`` invented an argv out of whatever JSON held -- ``[5]`` ran ``5`` --
+    and dropping a field of another type quietly is worse still, since `run`
+    would then execute a different command than the image names.
     """
-    if isinstance(val, list):
-        return [str(x) for x in val], False
-    if isinstance(val, str) and val:
+    if val is None or val == "":
+        return [], False
+    if isinstance(val, str):
         return ["/bin/sh", "-c", val], True
-    return [], False
+    if not isinstance(val, list) or not all(isinstance(item, str) for item in val):
+        _malformed(container_name, f"{key} that is neither a list of strings nor a string")
+    return list(val), False
+
+
+def _string_field(img_cfg: dict, key: str, container_name: str) -> str:
+    """The image config's *key* as a string, or "" when it is not set.
+
+    `WorkingDir` becomes the session's cwd and `User` the identity it resolves,
+    so a value of another type used to reach an argv through an f-string and
+    name a directory -- or a user -- no image meant.
+    """
+    value = img_cfg.get(key)
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        _malformed(container_name, f"{key} that is not a string")
+    return value
 
 
 def command_run(args) -> None:
@@ -61,8 +92,8 @@ def command_run(args) -> None:
 
     img_cfg = _read_image_config(container_name)
 
-    image_ep, ep_is_shell = _normalize_argv(img_cfg.get("Entrypoint"))
-    image_cmd, _ = _normalize_argv(img_cfg.get("Cmd"))
+    image_ep, ep_is_shell = _normalize_argv(img_cfg.get("Entrypoint"), "Entrypoint", container_name)
+    image_cmd, _ = _normalize_argv(img_cfg.get("Cmd"), "Cmd", container_name)
 
     if entrypoint_override is not None:
         # An explicit entrypoint replaces the image Entrypoint entirely and
@@ -89,11 +120,11 @@ def command_run(args) -> None:
         sys.exit(1)
 
     if not getattr(args, "work_dir", None):
-        args.work_dir = img_cfg.get("WorkingDir") or "/"
+        args.work_dir = _string_field(img_cfg, "WorkingDir", container_name) or "/"
 
     # Default to the image's User when no explicit --user (or CD_USER) was given.
     if getattr(args, "user", None) is None:
-        img_user = img_cfg.get("User")
+        img_user = _string_field(img_cfg, "User", container_name)
         if img_user:
             args.user = img_user
 

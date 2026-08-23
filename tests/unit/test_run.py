@@ -5,37 +5,50 @@ from types import SimpleNamespace
 import pytest
 
 import chroot_distro.commands.run as run_mod
-from chroot_distro.commands.run import _normalize_argv, command_run
+from chroot_distro.commands.run import _normalize_argv, _string_field, command_run
 
 # ---------------------------------------------------------------------------
-# _normalize_argv — shell-form guard
+# _normalize_argv — shell-form guard, and the shapes a manifest may not hold
 # ---------------------------------------------------------------------------
 
 
 def test_normalize_argv_json_array():
-    argv, is_shell = _normalize_argv(["/bin/echo", "hi"])
+    argv, is_shell = _normalize_argv(["/bin/echo", "hi"], "Cmd", "t")
     assert argv == ["/bin/echo", "hi"]
-    assert is_shell is False
-
-
-def test_normalize_argv_coerces_non_str_elements():
-    argv, is_shell = _normalize_argv(["/bin/echo", 42])
-    assert argv == ["/bin/echo", "42"]
     assert is_shell is False
 
 
 def test_normalize_argv_shell_form_string():
     # A shell-form (string) value must NOT be character-split by list().
-    argv, is_shell = _normalize_argv("echo hi && ls")
+    argv, is_shell = _normalize_argv("echo hi && ls", "Cmd", "t")
     assert argv == ["/bin/sh", "-c", "echo hi && ls"]
     assert is_shell is True
 
 
-@pytest.mark.parametrize("val", [None, [], "", 0])
+@pytest.mark.parametrize("val", [None, [], ""])
 def test_normalize_argv_empty(val):
-    argv, is_shell = _normalize_argv(val)
+    argv, is_shell = _normalize_argv(val, "Cmd", "t")
     assert argv == []
     assert is_shell is False
+
+
+@pytest.mark.parametrize("val", [0, 5, True, {"a": 1}, ["/bin/echo", 42], ["ok", None]])
+def test_normalize_argv_refuses_a_shape_no_argv_can_be_built_from(val, capsys):
+    # Coercing each item with str() invented an argv out of whatever JSON held,
+    # and dropping the field quietly ran a different command than the image names.
+    with pytest.raises(SystemExit) as exc:
+        _normalize_argv(val, "Entrypoint", "t")
+    assert exc.value.code == 1
+    assert "Entrypoint" in capsys.readouterr().err
+
+
+def test_string_field_reads_what_is_set_and_refuses_the_rest(capsys):
+    assert _string_field({"WorkingDir": "/srv"}, "WorkingDir", "t") == "/srv"
+    assert _string_field({}, "WorkingDir", "t") == ""
+    assert _string_field({"WorkingDir": None}, "WorkingDir", "t") == ""
+    with pytest.raises(SystemExit):
+        _string_field({"WorkingDir": 5}, "WorkingDir", "t")
+    assert "WorkingDir" in capsys.readouterr().err
 
 
 # ---------------------------------------------------------------------------
@@ -178,3 +191,29 @@ def test_image_workingdir_used_when_no_flag_or_env(captured_run, monkeypatch):
     monkeypatch.delenv("CD_WORKDIR", raising=False)
     args = captured_run({"Cmd": ["/bin/sh"], "WorkingDir": "/app"})
     assert args.work_dir == "/app"
+
+
+# ---------------------------------------------------------------------------
+# The manifest is a registry's JSON, kept verbatim by install, in a file that
+# sits under the bound $TERMUX_PREFIX on Termux. What it says about the command
+# to run is checked against the shape OCI gives it, and a refusal is a message.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        {"Entrypoint": 5, "Cmd": ["/bin/sh"]},
+        {"Cmd": {"/bin/sh": {}}},
+        {"Cmd": ["/bin/sh", 5]},
+        {"Cmd": ["/bin/sh"], "WorkingDir": ["/app"]},
+        {"Cmd": ["/bin/sh"], "User": 1000},
+    ],
+)
+def test_a_malformed_field_is_refused_rather_than_dropped(captured_run, config, monkeypatch, capsys):
+    monkeypatch.delenv("CD_USER", raising=False)
+    monkeypatch.delenv("CD_WORKDIR", raising=False)
+    with pytest.raises(SystemExit) as exc:
+        captured_run(config)
+    assert exc.value.code == 1
+    assert "malformed" in capsys.readouterr().err
