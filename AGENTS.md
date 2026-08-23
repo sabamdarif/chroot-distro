@@ -193,6 +193,14 @@ the archive (`parsing.is_tar_header` takes the bytes, not a name). A directory i
 descended without a `.dockerignore` check on purpose: `dockerignore._match`
 prefix-matches, so a pattern on a directory already covers its children, and a
 `!` line re-including one of them only survives if the walk goes in.
+An `ADD <url>` is held to the length its response declared: there is no digest to
+check a download against here, so a body ending short of its `Content-Length`
+used to be published as the whole file, and `_copy_url` refuses it (the header
+itself is read by `_declared_length`, which answers "none declared" for one it
+cannot parse, as http.client does). `_Spool.stream` returns the byte count for
+that comparison. The same net catches `http.client.HTTPException`, since the
+family http.client raises for a body cut mid-chunk is not an `OSError` and left
+`build` as a traceback.
 
 A base image's config is a document this program did not write, and every field
 is read back as the type OCI says it is (`User` and `Shell` decide what a RUN

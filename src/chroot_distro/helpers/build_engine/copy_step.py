@@ -9,6 +9,7 @@
 
 import contextlib
 import hashlib
+import http.client
 import os
 import re
 import shutil
@@ -195,13 +196,16 @@ class _Spool:
         self.fd = fd
         self._seq = 0
 
-    def stream(self, fobj: typing.IO[bytes]) -> str:
-        """Copy *fobj* into a fresh file under the spool; return its name.
+    def stream(self, fobj: typing.IO[bytes]) -> tuple[str, int]:
+        """Copy *fobj* into a fresh file under the spool; return (name, bytes).
 
         O_EXCL on a name carrying random bytes, rather than a temporary the
         caller could predict: what lands here is materialised into the rootfs
         and packed into the layer `push` uploads, so a symlink planted under the
         name would have decided where the bytes went and what was read back.
+
+        The count comes back because one caller has something to compare it
+        against: a URL response that declared a Content-Length.
         """
         while True:
             self._seq += 1
@@ -214,10 +218,11 @@ class _Spool:
         try:
             with os.fdopen(fd, "wb") as out:
                 shutil.copyfileobj(fobj, out, _SPOOL_CHUNK)
+                written = out.tell()
         except BaseException:
             dirfd.unlink_quietly(self.fd, name)
             raise
-        return name
+        return name, written
 
     def close(self) -> None:
         """Release the spool descriptor. Idempotent."""
@@ -626,6 +631,22 @@ def _copy_from_rootfs(
     )
 
 
+def _declared_length(resp: typing.Any) -> int:
+    """The body length *resp* declares, or 0 when it declares none.
+
+    A header is a string the remote chose, so `int()` on one is this program's
+    own contribution to the problem: `Content-Length: abc` is a ValueError, and
+    an ADD's net is around network failures, not around that. http.client itself
+    treats a length it cannot parse as absent and reads until the connection
+    closes, so this answers the same way.
+    """
+    try:
+        value = int(resp.headers.get("Content-Length", 0))
+    except (TypeError, ValueError):
+        return 0
+    return value if value > 0 else 0
+
+
 def _copy_url(
     url: str,
     dest: str,
@@ -640,6 +661,20 @@ def _copy_url(
     Streamed onto disk rather than read whole: how much a URL answers with is
     the remote's choice, and the response used to be held in memory until the
     whole instruction was packed.
+
+    A body that ends short of the length it declared is not the file the
+    Dockerfile asked for, and nothing downstream would notice: there is no
+    digest to check an ADD against, so the short bytes went into the rootfs and
+    into the layer `push` uploads under the name of the whole file. The framing
+    is why the check has to be here — a truncated *chunked* body raises
+    IncompleteRead on its own, while a truncated **Content-Length** one raises
+    nothing at all, CPython's HTTPResponse.read(amt) declining to for
+    compatibility.
+
+    That IncompleteRead is also why the net catches http.client.HTTPException:
+    urllib wraps what it can into URLError, which is an OSError, but
+    http.client's own family for a response that is malformed or cut short is
+    not one, and used to walk out of here and out of `build` as a traceback.
     """
     if dest.endswith("/"):
         name = os.path.basename(urllib.parse.urlparse(url).path) or "index"
@@ -649,8 +684,11 @@ def _copy_url(
     opener = urllib.request.build_opener(AuthStrippingRedirectHandler)
     try:
         with opener.open(url) as resp:
-            spooled = spool.stream(resp)
-    except (urllib.error.URLError, OSError) as exc:
+            declared = _declared_length(resp)
+            spooled, written = spool.stream(resp)
+            if declared and written < declared:
+                raise BuildError(f"ADD {url}: the response ended after {written} of {declared} bytes.")
+    except (urllib.error.URLError, OSError, http.client.HTTPException) as exc:
         raise BuildError(f"ADD {url}: {exc}") from exc
     _spool_entry(
         file_map,
@@ -985,11 +1023,12 @@ def _extract_tar_into_dest(
                     member = tf.extractfile(m)
                     if member is None:
                         continue
+                    spooled, _written = spool.stream(member)
                     _spool_entry(
                         file_map,
                         arc,
                         spool,
-                        spool.stream(member),
+                        spooled,
                         stat.S_IMODE(m.mode) or 0o644,
                         uid,
                         gid,

@@ -292,7 +292,8 @@ def test_the_add_spool_writes_and_reads_through_its_descriptor(scratch):
     spool = copy_step._Spool(*copy_step._open_scratch_dir(engine, "add-spool"))
     moved = _repoint(root, decoy)
     try:
-        name = spool.stream(io.BytesIO(b"spooled\n"))
+        name, written = spool.stream(io.BytesIO(b"spooled\n"))
+        assert written == len(b"spooled\n")
         file_map: dict[str, object] = {}
         copy_step._spool_entry(file_map, "opt/blob", spool, name, 0o644, 0, 0, 0)
 

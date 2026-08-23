@@ -9,6 +9,7 @@
 # signature is all it can be: gzip, bzip2 and xz magic say "compressed", not
 # "compressed tar".
 
+import http.client
 import io
 import os
 import sys
@@ -120,6 +121,8 @@ def test_url_response_is_spooled(spool, monkeypatch):
     body = b"N" * (1 << 20)
 
     class _Resp(io.BytesIO):
+        headers = {"Content-Length": str(len(body))}
+
         def __enter__(self):
             return self
 
@@ -187,3 +190,77 @@ def test_a_truncated_archive_names_the_source(tmp_path, spool):
 
     with pytest.raises(BuildError, match="cannot extract"):
         _extract(str(arc), "extracted", file_map, spool)
+
+
+# ── a response that ends early ────────────────────────────────────────────────
+# ADD has no digest to check its download against, so a truncated body is
+# caught nowhere downstream: the short bytes land in the rootfs and in the layer
+# `push` uploads, under the name of the whole file.
+def _add_url(spool, monkeypatch, resp_factory):
+    """Run one ADD <url> against a response *resp_factory* makes."""
+
+    class _Opener:
+        def open(self, _url):
+            return resp_factory()
+
+    monkeypatch.setattr(copy_step.urllib.request, "build_opener", lambda *_a: _Opener())
+    file_map = {}
+    copy_step._copy_url("https://example.invalid/blob.bin", "/opt/blob.bin", file_map, 0, 0, None, spool)
+    return file_map
+
+
+class _Resp(io.BytesIO):
+    """A response body with headers, entered and exited like urllib's."""
+
+    headers: dict = {}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_a):
+        self.close()
+        return False
+
+
+def test_a_body_short_of_its_declared_length_is_refused(spool, monkeypatch):
+    class _Short(_Resp):
+        headers = {"Content-Length": "1048576"}
+
+    with pytest.raises(BuildError, match="4096 of 1048576"):
+        _add_url(spool, monkeypatch, lambda: _Short(b"N" * 4096))
+
+
+def test_a_body_cut_mid_chunk_is_a_build_error(spool, monkeypatch):
+    # A chunked body has no declared length to check, and the read raises
+    # http.client.IncompleteRead — not an OSError, so it used to walk out of
+    # here and out of `build` as a traceback.
+    class _Cut(_Resp):
+        def read(self, *_a):
+            raise http.client.IncompleteRead(b"partial", 900)
+
+    with pytest.raises(BuildError, match="IncompleteRead"):
+        _add_url(spool, monkeypatch, lambda: _Cut(b""))
+
+
+def test_a_length_the_remote_wrote_by_hand_is_treated_as_absent(spool, monkeypatch):
+    # int() on a header the remote chose is a ValueError nothing here catches,
+    # and http.client's own answer to one it cannot parse is to read on.
+    class _Nonsense(_Resp):
+        headers = {"Content-Length": "not a number"}
+
+    file_map = _add_url(spool, monkeypatch, lambda: _Nonsense(b"payload"))
+
+    with open(file_map["opt/blob.bin"]["src"], "rb") as fh:
+        assert fh.read() == b"payload"
+
+
+def test_a_body_past_its_declared_length_is_kept_whole(spool, monkeypatch):
+    # The check is short-of-declared only: more bytes than announced is the
+    # remote disagreeing with itself, not a download this program cut off.
+    class _Long(_Resp):
+        headers = {"Content-Length": "4"}
+
+    file_map = _add_url(spool, monkeypatch, lambda: _Long(b"payload"))
+
+    with open(file_map["opt/blob.bin"]["src"], "rb") as fh:
+        assert fh.read() == b"payload"
