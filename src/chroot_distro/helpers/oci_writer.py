@@ -9,7 +9,7 @@ else:
     from backports.zstd import tarfile
 import typing
 
-from chroot_distro.atomic import atomic_replace, atomic_write
+from chroot_distro.atomic import atomic_write
 from chroot_distro.helpers.docker import (
     layer_cache_path,
     manifest_cache_path,
@@ -157,6 +157,14 @@ def write_oci_archive(
     root so the tarball is consumable by `docker load`, which falls
     back to a buggy 'per-directory legacy import' loop when only the
     OCI layout is present.
+
+    The archive is packed into the descriptor `atomic_write` staged rather than
+    into a second open of the temporary's name: the name is one this program
+    chose, but the directory it stands in is the user's -- `--output
+    /tmp/img.tar` stages the temporary in a world-writable directory, where
+    readdir names it for anyone sharing it -- and between the create and a
+    reopen it can be unlinked and replaced with a symlink, which the rename then
+    publishes over whatever it pointed at.
     """
     mode = _detect_tar_mode(out_path)
     config_bytes = canonical_json(image_config)
@@ -191,7 +199,11 @@ def write_oci_archive(
     oci_layout_bytes = canonical_json({"imageLayoutVersion": "1.0.0"})
     docker_manifest_bytes = canonical_json(_build_docker_manifest(manifest, config_digest_hex, image_ref))
 
-    with atomic_replace(os.path.abspath(out_path)) as tmp, tarfile.open(tmp, mode) as tf:  # type: ignore[call-overload]
+    out_abs = os.path.abspath(out_path)
+    with (
+        atomic_write(out_abs, binary=True) as tmp_fh,
+        tarfile.open(fileobj=tmp_fh, mode=mode) as tf,  # type: ignore[call-overload]
+    ):
         # oci-layout first so our own install probe detects the
         # OCI format on the first member it sees.
         _add_bytes(tf, "oci-layout", oci_layout_bytes)

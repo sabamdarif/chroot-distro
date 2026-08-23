@@ -238,7 +238,13 @@ had the run of.
   that root walked one at a time with `O_NOFOLLOW` and its temporary created
   `O_EXCL` off the descriptor, so a `cache/oci_layers -> <host dir>` a guest left
   behind cannot redirect the write; a path the *user* named (`backup -o`,
-  `build --output`) keeps the plain behaviour.
+  `build --output`) keeps the plain behaviour. Which is why an archive is packed
+  into the descriptor `atomic_write` staged rather than into a second open of the
+  temporary's name (`oci_writer.write_oci_archive`): the name is this program's,
+  but the directory is the user's, and between the create and a reopen the
+  temporary can be unlinked and replaced with a symlink that the rename then
+  publishes over whatever it pointed at. `atomic_replace` yields the path, so it
+  is for a destination whose writer needs one.
 - `message.py` (colors, `--quiet`) and `progress.py` (byte/count bars, spinners)
   for all user-facing output. `build_engine/events.py` is the exception, since
   build output has its own reporters.
