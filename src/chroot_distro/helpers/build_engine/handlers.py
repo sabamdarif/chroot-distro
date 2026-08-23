@@ -19,7 +19,7 @@ from chroot_distro.helpers.build_engine.run_step import do_run
 from chroot_distro.helpers.build_engine.users import resolve_user_for_chroot
 from chroot_distro.helpers.docker import layer_cache_path
 from chroot_distro.helpers.layer_diff import write_files_layer
-from chroot_distro.helpers.tar_extract import _safe_resolve
+from chroot_distro.helpers.tar_extract import safe_resolve_parts
 
 log = logging.getLogger(__name__)
 
@@ -99,7 +99,37 @@ def do_user(engine: typing.Any, instr: dict[str, typing.Any]) -> None:
     cfg["User"] = engine.current.user
 
 
-def _stamp_build_dir(rootfs: str, parts: list[str], uid: int, gid: int) -> None:
+def _build_dir_fd(
+    rootfs: str,
+    parts: typing.Sequence[str],
+    rootfs_fd: int | None,
+    *,
+    create: bool = False,
+) -> int | None:
+    """A descriptor on the directory *parts* names under the rootfs, or None.
+
+    Descends from the rootfs descriptor when the caller has pinned one, so the
+    levels above the directory are not resolved by name a second time; only a
+    caller without a pin (a test working on a tree it made itself) opens the
+    rootfs by name.
+    """
+    if rootfs_fd is None:
+        return dirfd.opendir_under(rootfs, parts, create=create)
+    try:
+        return dirfd.descend_at(rootfs_fd, parts, create=create)
+    except OSError:
+        return None
+
+
+def _stamp_build_dir(
+    rootfs: str,
+    parts: typing.Sequence[str],
+    uid: int,
+    gid: int,
+    rootfs_fd: int | None = None,
+    *,
+    create: bool = False,
+) -> bool:
     """Own and lock down one directory WORKDIR created, through a descriptor.
 
     A named chown or chmod acts on whatever the name leads to, and these are
@@ -107,10 +137,14 @@ def _stamp_build_dir(rootfs: str, parts: list[str], uid: int, gid: int) -> None:
     directory should be would hand its target away instead. Linux has no
     AT_SYMLINK_NOFOLLOW for fchmodat(2) either, so the descriptor is the only
     way to name the inode the walk validated.
+
+    With create=True the missing levels are made on the way down, so the
+    directory is created and stamped in one walk rather than made by name and
+    then reopened. False means it is not reachable inside the rootfs.
     """
-    fd = dirfd.opendir_under(rootfs, parts)
+    fd = _build_dir_fd(rootfs, parts, rootfs_fd, create=create)
     if fd is None:
-        return
+        return False
     try:
         with contextlib.suppress(OSError):
             os.fchown(fd, uid, gid)
@@ -118,6 +152,40 @@ def _stamp_build_dir(rootfs: str, parts: list[str], uid: int, gid: int) -> None:
             os.fchmod(fd, 0o700)
     finally:
         os.close(fd)
+    return True
+
+
+def _missing_levels(rootfs: str, parts: typing.Sequence[str], rootfs_fd: int | None = None) -> list[list[str]]:
+    """The prefixes of *parts* that do not exist yet, shallowest first.
+
+    One descent answers for every level, each looked up off the descriptor of
+    the level above; asking os.path.lexists() per prefix resolved every
+    component above it again, once per level, and each of those resolves was a
+    fresh chance for a component to have changed underneath.
+
+    Everything below the first gap is missing too, so the walk stops
+    descending there.
+    """
+    try:
+        fd = dirfd.reopen(rootfs_fd) if rootfs_fd is not None else dirfd.opendir(rootfs)
+    except OSError:
+        return [list(parts[:depth]) for depth in range(1, len(parts) + 1)]
+
+    missing: list[list[str]] = []
+    try:
+        for depth, comp in enumerate(parts, start=1):
+            if missing or not dirfd.exists_at(fd, comp):
+                missing.append(list(parts[:depth]))
+                continue
+            try:
+                nxt = dirfd.opendir_at(fd, comp)
+            except OSError:
+                break
+            os.close(fd)
+            fd = nxt
+    finally:
+        os.close(fd)
+    return missing
 
 
 def do_workdir(engine: typing.Any, instr: dict[str, typing.Any]) -> None:
@@ -159,25 +227,23 @@ def do_workdir(engine: typing.Any, instr: dict[str, typing.Any]) -> None:
     # than following it. The arcnames name the resolved location, which is
     # where the directories really landed.
     rootfs = engine.current.rootfs_dir
-    resolved = _safe_resolve(rootfs, path.strip("/").split("/"))
-    if resolved is None:
+    rootfs_fd = engine.current.rootfs_fd
+    parts = safe_resolve_parts(rootfs, path.strip("/").split("/"), root_fd=rootfs_fd)
+    if parts is None:
         return
-    rel = os.path.relpath(resolved, rootfs)
-    parts = [] if rel == os.curdir else rel.split(os.sep)
 
-    new_dirs = [parts[:depth] for depth in range(1, len(parts) + 1) if not os.path.lexists(os.path.join(rootfs, *parts[:depth]))]
+    new_dirs = _missing_levels(rootfs, parts, rootfs_fd)
 
-    uid, gid = resolve_user_for_chroot(rootfs, engine.current.user)
-    if dirfd.makedirs_under(rootfs, parts) is None:
+    uid, gid = resolve_user_for_chroot(rootfs, engine.current.user, root_fd=rootfs_fd)
+    if not _stamp_build_dir(rootfs, parts, uid, gid, rootfs_fd, create=True):
         return
-    _stamp_build_dir(rootfs, parts, uid, gid)
 
     if not new_dirs:
         return
 
     file_map = {}
     for prefix in new_dirs:
-        _stamp_build_dir(rootfs, prefix, uid, gid)
+        _stamp_build_dir(rootfs, prefix, uid, gid, rootfs_fd)
         file_map["/".join(prefix)] = {
             "kind": "dir",
             "mode": 0o700,

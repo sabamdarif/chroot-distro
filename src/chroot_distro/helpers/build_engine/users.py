@@ -24,7 +24,7 @@ _MAX_SYMLINK_HOPS = 40
 _MAX_ID_FILE_BYTES = 1 << 20
 
 
-def _open_guest_file(rootfs_dir: str, guest_path: str) -> typing.IO[str] | None:
+def _open_guest_file(rootfs_dir: str, guest_path: str, root_fd: int | None = None) -> typing.IO[str] | None:
     """Open the absolute guest path *guest_path* under *rootfs_dir*.
 
     Returns a text-mode file object for a regular file, or None -- the path
@@ -38,9 +38,12 @@ def _open_guest_file(rootfs_dir: str, guest_path: str) -> typing.IO[str] | None:
     every hop is clamped: an absolute symlink target restarts at the rootfs
     (the guest's "/"), a relative one continues from the directory holding the
     link, and ".." stops at the rootfs the way a chroot does.
+
+    *root_fd* is the rootfs when the caller has pinned it; the walk then
+    starts from that inode instead of resolving the name again.
     """
     try:
-        root_fd = dirfd.opendir(rootfs_dir)
+        root_fd = dirfd.reopen(root_fd) if root_fd is not None else dirfd.opendir(rootfs_dir)
     except OSError:
         return None
     # One fd per level of the current path; ".." pops rather than opening a
@@ -106,7 +109,7 @@ def _read_capped(fh: typing.IO[str]) -> str:
     return data[: data.rfind("\n") + 1]
 
 
-def resolve_id(rootfs_dir: str, name: str, is_group: bool, default: int) -> int:
+def resolve_id(rootfs_dir: str, name: str, is_group: bool, default: int, *, root_fd: int | None = None) -> int:
     """Translate a user or group name into a numeric ID.
 
     Numeric strings pass through. Otherwise the name is looked up in
@@ -118,7 +121,7 @@ def resolve_id(rootfs_dir: str, name: str, is_group: bool, default: int) -> int:
     if name.isdigit():
         return int(name)
     guest_path = "/etc/group" if is_group else "/etc/passwd"
-    fh = _open_guest_file(rootfs_dir, guest_path)
+    fh = _open_guest_file(rootfs_dir, guest_path, root_fd)
     if fh is None:
         return default
     try:
@@ -137,18 +140,18 @@ def resolve_id(rootfs_dir: str, name: str, is_group: bool, default: int) -> int:
     return default
 
 
-def resolve_chown(rootfs_dir: str, chown: str) -> tuple[int, int]:
+def resolve_chown(rootfs_dir: str, chown: str, *, root_fd: int | None = None) -> tuple[int, int]:
     """Resolve --chown=user[:group] against the rootfs /etc/passwd."""
     if ":" in chown:
         user, group = chown.split(":", 1)
     else:
         user, group = chown, ""
-    uid = resolve_id(rootfs_dir, user, is_group=False, default=0)
-    gid = resolve_id(rootfs_dir, group, is_group=True, default=uid) if group else uid
+    uid = resolve_id(rootfs_dir, user, is_group=False, default=0, root_fd=root_fd)
+    gid = resolve_id(rootfs_dir, group, is_group=True, default=uid, root_fd=root_fd) if group else uid
     return uid, gid
 
 
-def resolve_user_for_chroot(rootfs_dir: str, user_spec: str) -> tuple[int, int]:
+def resolve_user_for_chroot(rootfs_dir: str, user_spec: str, *, root_fd: int | None = None) -> tuple[int, int]:
     """Resolve a USER directive's value into a (uid, gid) pair."""
     if not user_spec:
         return (0, 0)
@@ -157,6 +160,6 @@ def resolve_user_for_chroot(rootfs_dir: str, user_spec: str) -> tuple[int, int]:
         u, g = spec.split(":", 1)
     else:
         u, g = spec, ""
-    uid = resolve_id(rootfs_dir, u, is_group=False, default=0)
-    gid = resolve_id(rootfs_dir, g, is_group=True, default=uid) if g else uid
+    uid = resolve_id(rootfs_dir, u, is_group=False, default=0, root_fd=root_fd)
+    gid = resolve_id(rootfs_dir, g, is_group=True, default=uid, root_fd=root_fd) if g else uid
     return uid, gid

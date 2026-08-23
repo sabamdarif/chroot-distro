@@ -158,6 +158,23 @@ entry belongs and `copy_step._materialise_entry` re-walks those components with
 `O_NOFOLLOW` to write it as `(dir_fd, name)`, while `layer_diff.snapshot` walks
 on descriptors and `_add_entry` takes its parent from `_ParentFds` and sizes a
 file from the fstat of the descriptor it reads.
+The stage rootfs itself is pinned the same way. `commands/build._make_build_tmp`
+hands back the scratch root's path *and* a descriptor on it, `engine`
+`_make_stage_dirs` makes `stage-N/rootfs` off that descriptor, and a `Stage`
+carries both fds (its own directory and its rootfs) for the length of the build.
+Every consumer takes one as an optional keyword -- `snapshot`, `write_layer_tar`,
+`_materialise_files`, `_copy_from_rootfs`, `resolve_chown`,
+`resolve_user_for_chroot`, `do_workdir`, `write_resolv_conf`/`write_hosts` --
+so production always passes it and a test working on a tree it made itself keeps
+the path form. `RUN` closes the last of it the way `login` does: `chroot` gets
+`.` as its `NEWROOT` and a `preexec_fn` fchdirs the child onto the pinned
+descriptor, so chroot(2) resolves its argument against the inode the build
+validated. The path stays for what only a path can express: messages, bind
+sources, and the `--mount=from=` bind that reaches mount(2) as a string anyway.
+The rest of the scratch root goes with it, being the same class of name: the ADD
+spool (`copy_step._Spool`, creating each file `O_EXCL` off the directory's fd)
+and a `COPY --from` image's throwaway tree are both made and read through
+descriptors from `_open_scratch_dir`.
 The *source* side is the same bargain: `copy_step._SourceTree` is the one way a
 `COPY`/`ADD` source is located, resolving the spec beneath the build context or
 the stage rootfs with `safe_resolve_parts` (so `..` is refused and a symlink out

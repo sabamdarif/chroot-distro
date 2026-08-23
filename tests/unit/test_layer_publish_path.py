@@ -114,22 +114,44 @@ def runtime(tmp_path, monkeypatch):
 
 
 def test_build_tmp_is_made_inside_the_runtime_tree(runtime):
-    tmp_root, dir_fd = _make_build_tmp()
+    tmp_root, dir_fd, root_fd = _make_build_tmp()
     try:
         assert os.path.dirname(tmp_root) == str(runtime / "build-tmp")
         assert os.path.isdir(tmp_root)
         assert stat.S_IMODE(os.stat(tmp_root).st_mode) == 0o700
     finally:
+        os.close(root_fd)
         _remove_build_tmp(tmp_root, dir_fd)
     assert not os.path.exists(tmp_root)
 
 
+def test_the_root_descriptor_is_the_root_the_build_created(runtime, outside):
+    # What every stage tree, the ADD spool and each COPY --from rootfs are made
+    # off. Re-pointing the name afterwards must not move any of them, so the
+    # descriptor has to be on the inode, not on the name.
+    tmp_root, dir_fd, root_fd = _make_build_tmp()
+    try:
+        assert os.fstat(root_fd).st_ino == os.stat(tmp_root).st_ino
+        os.rename(tmp_root, str(runtime / "moved"))
+        os.symlink(str(outside), tmp_root)
+
+        os.mkdir("stage-0", dir_fd=root_fd)
+
+        assert os.path.isdir(str(runtime / "moved" / "stage-0"))
+        assert os.listdir(str(outside)) == ["keepsake"]
+    finally:
+        os.close(root_fd)
+        os.close(dir_fd)
+
+
 def test_build_tmp_roots_are_distinct(runtime):
-    first, first_fd = _make_build_tmp()
-    second, second_fd = _make_build_tmp()
+    first, first_fd, first_root_fd = _make_build_tmp()
+    second, second_fd, second_root_fd = _make_build_tmp()
     try:
         assert first != second
     finally:
+        os.close(first_root_fd)
+        os.close(second_root_fd)
         _remove_build_tmp(first, first_fd)
         _remove_build_tmp(second, second_fd)
 
@@ -137,7 +159,7 @@ def test_build_tmp_roots_are_distinct(runtime):
 def test_build_tmp_does_not_follow_a_planted_name(runtime, outside, capsys):
     os.symlink(str(outside), str(runtime / "build-tmp"))
 
-    tmp_root, dir_fd = _make_build_tmp()
+    tmp_root, dir_fd, root_fd = _make_build_tmp()
     try:
         # Refused, and the build falls back to the system temp directory the way
         # it always did when the runtime tree could not hold one.
@@ -145,11 +167,13 @@ def test_build_tmp_does_not_follow_a_planted_name(runtime, outside, capsys):
         assert os.listdir(str(outside)) == ["keepsake"]
         assert "falling back" in capsys.readouterr().err
     finally:
+        os.close(root_fd)
         _remove_build_tmp(tmp_root, dir_fd)
 
 
 def test_the_removal_does_not_follow_a_name_replaced_mid_build(runtime, outside):
-    tmp_root, dir_fd = _make_build_tmp()
+    tmp_root, dir_fd, root_fd = _make_build_tmp()
+    os.close(root_fd)
     (runtime / "build-tmp" / os.path.basename(tmp_root) / "stage-0").mkdir()
     # The window the descriptor closes: `build-tmp` is re-pointed while the build
     # runs, so a removal by name would empty the host directory instead.
@@ -163,7 +187,8 @@ def test_the_removal_does_not_follow_a_name_replaced_mid_build(runtime, outside)
 
 
 def test_the_removal_gets_out_a_sealed_directory(runtime):
-    tmp_root, dir_fd = _make_build_tmp()
+    tmp_root, dir_fd, root_fd = _make_build_tmp()
+    os.close(root_fd)
     sealed = os.path.join(tmp_root, "stage-0", "etc")
     os.makedirs(sealed)
     open(os.path.join(sealed, "passwd"), "w").close()

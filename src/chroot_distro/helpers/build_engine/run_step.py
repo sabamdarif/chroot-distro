@@ -51,6 +51,18 @@ from chroot_distro.helpers.tar_extract import _safe_resolve
 from chroot_distro.message import log_info, warn
 
 
+def _rootfs_fd(stage: typing.Any) -> int:
+    """A caller-owned descriptor on *stage*'s rootfs.
+
+    Re-opened from the stage's pin when it has one, so what is written is the
+    tree the stage was created against; opened by name only for a stage some
+    caller built itself.
+    """
+    if stage.rootfs_fd is not None:
+        return dirfd.reopen(stage.rootfs_fd)
+    return dirfd.opendir(stage.rootfs_dir)
+
+
 def do_run(engine: typing.Any, instr: dict[str, typing.Any]) -> None:
     """RUN <cmd>: execute command under chroot and snapshot the diff into a layer.
 
@@ -86,7 +98,7 @@ def do_run(engine: typing.Any, instr: dict[str, typing.Any]) -> None:
             cached_path = layer_cache_path(hit["layer_digest"])
             if os.path.isfile(cached_path):
                 engine.report_cache_hit(instr)
-                rootfs_fd = dirfd.opendir(stage.rootfs_dir)
+                rootfs_fd = _rootfs_fd(stage)
                 try:
                     apply_layer(cached_path, rootfs_fd)
                 finally:
@@ -102,13 +114,13 @@ def do_run(engine: typing.Any, instr: dict[str, typing.Any]) -> None:
                 return
 
     engine.log("Indexing rootfs state...")
-    before = snapshot(stage.rootfs_dir)
+    before = snapshot(stage.rootfs_dir, rootfs_fd=stage.rootfs_fd)
     exit_code = _exec_chroot(engine, stage, command, stdin_input, mounts)
     if exit_code != 0:
         raise BuildError(f"RUN command failed at line {instr['lineno']} with exit code {exit_code}.")
 
     engine.log("Capturing filesystem changes...")
-    after = snapshot(stage.rootfs_dir)
+    after = snapshot(stage.rootfs_dir, rootfs_fd=stage.rootfs_fd)
     added, modified, deleted = diff_snapshots(before, after)
     paths_to_pack = added + modified
 
@@ -123,6 +135,7 @@ def do_run(engine: typing.Any, instr: dict[str, typing.Any]) -> None:
         paths_to_pack,
         deleted,
         tmp_layer_path,
+        rootfs_fd=stage.rootfs_fd,
     )
     # Published through the same walk every other cache writer uses:
     # os.makedirs(dirname) plus os.replace(tmp, final) resolved the layer cache
@@ -155,22 +168,27 @@ def _exec_chroot(
     from chroot_distro.commands.login.chroot_cmd import build_chroot_args
     from chroot_distro.commands.login.passwd import find_user_groups
 
-    uid, gid = resolve_user_for_chroot(rootfs, stage.user)
+    uid, gid = resolve_user_for_chroot(rootfs, stage.user, root_fd=stage.rootfs_fd)
 
     user_name = stage.user or "root"
     user_spec = user_name if not user_name.isdigit() else str(uid)
     groups = find_user_groups(rootfs, user_spec, str(gid))
 
-    chroot_args = build_chroot_args(
-        rootfs=rootfs,
-        login_uid=str(uid) if uid else None,
-        login_gid=str(gid) if gid else None,
-        groups=groups,
-        workdir=stage.workdir or "/",
-        inner_cmd=command,
-    )
+    def _args(newroot: str) -> list[str]:
+        return build_chroot_args(
+            rootfs=rootfs,
+            login_uid=str(uid) if uid else None,
+            login_gid=str(gid) if gid else None,
+            groups=groups,
+            workdir=stage.workdir or "/",
+            inner_cmd=command,
+            newroot=newroot,
+        )
 
     child_env = _build_child_env(stage)
+
+    def _plain_args() -> list[str]:
+        return _args(os.curdir if stage.rootfs_fd is not None else rootfs)
 
     if not engine.quiet and not engine.verbose:
         log_info(f"Running step (user={stage.user or 'root'}, cwd={stage.workdir or '/'})...")
@@ -191,11 +209,13 @@ def _exec_chroot(
         )
         with session(container_key, rootfs, minimal=True) as holder:
             if holder is not None:
+                # The holder execs the child itself, so its cwd is not ours to
+                # place; NEWROOT stays the path there.
                 with run_mount_session(engine, stage, mounts or [], holder=holder) as extra_env:
-                    return _run_in_holder(holder, chroot_args, {**child_env, **extra_env})
-            return _run_plain(rootfs, chroot_args, child_env, stdin_input, engine, stage, mounts or [])
+                    return _run_in_holder(holder, _args(rootfs), {**child_env, **extra_env})
+            return _run_plain(rootfs, _plain_args(), child_env, stdin_input, engine, stage, mounts or [])
 
-    return _run_plain(rootfs, chroot_args, child_env, stdin_input, engine, stage, mounts or [])
+    return _run_plain(rootfs, _plain_args(), child_env, stdin_input, engine, stage, mounts or [])
 
 
 def _run_in_holder(holder: typing.Any, chroot_args: list[str], child_env: dict[str, str]) -> int:
@@ -235,6 +255,23 @@ def _mount_point(rootfs: str, guest_path: str) -> str | None:
         return None
     rel = os.path.relpath(resolved, rootfs)
     return dirfd.makedirs_under(rootfs, [] if rel == os.curdir else rel.split(os.sep))
+
+
+def _chdir_to(rootfs_fd: int | None) -> typing.Callable[[], None] | None:
+    """A preexec hook that puts the child's cwd on *rootfs_fd*, or None.
+
+    Paired with ``chroot .``: chroot(2) then resolves its argument against the
+    inode the build pinned, so the last name-based read the step had left --
+    the one chroot's own argv performed, after every check here had finished --
+    is gone. The hook runs between the fork and the exec and does one syscall.
+    """
+    if rootfs_fd is None:
+        return None
+
+    def _hook() -> None:
+        os.fchdir(rootfs_fd)
+
+    return _hook
 
 
 def _run_plain(
@@ -279,6 +316,7 @@ def _run_plain(
                 env={**child_env, **extra_env},
                 stdin=stdin_arg,
                 start_new_session=True,
+                preexec_fn=_chdir_to(stage.rootfs_fd if stage is not None else None),  # noqa: PLW1509
             )
             try:
                 if stdin_input is not None:

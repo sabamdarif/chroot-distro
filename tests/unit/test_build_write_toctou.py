@@ -57,7 +57,7 @@ def test_materialise_refuses_a_parent_that_is_a_symlink_now(tree, monkeypatch):
     # write happens that name is a link out of the rootfs.
     rootfs, outside = tree
     os.symlink(str(outside), str(rootfs / "etc"))
-    monkeypatch.setattr(copy_step, "safe_resolve_parts", lambda root, parts: ["etc"])
+    monkeypatch.setattr(copy_step, "safe_resolve_parts", lambda root, parts, root_fd=None: ["etc"])
 
     payload = rootfs.parent / "payload"
     payload.write_bytes(b"pwned\n")

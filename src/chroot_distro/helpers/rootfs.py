@@ -5,6 +5,7 @@ import os
 import pwd
 import stat
 
+from chroot_distro import dirfd
 from chroot_distro.constants import (
     DEFAULT_PRIMARY_NS,
     DEFAULT_SECONDARY_NS,
@@ -75,42 +76,101 @@ def host_nameservers() -> list[str]:
     return _read_resolv_nameservers(host_path)
 
 
-def write_resolv_conf(rootfs: str) -> None:
+def _open_etc(rootfs: str, root_fd: int | None) -> int | None:
+    """Open <rootfs>/etc with O_NOFOLLOW, or None when there is none.
+
+    `etc` is image content like everything below it: an image shipping it as
+    a symlink aims both writers here at whatever directory the link names,
+    and since they run outside the chroot that can be a host directory.
+    None covers a missing `etc`, one that is a link, and one that is not a
+    directory -- every caller already treats the fixups as best-effort.
+
+    *root_fd* is the rootfs when the caller has pinned it. `build` has one
+    per stage, and the rootfs there is a name inside the build's scratch
+    tree, which anything running as the invoking user can re-point --
+    including a process a previous RUN step left behind.
+    """
+    own_fd = None
+    try:
+        if root_fd is None:
+            own_fd = root_fd = dirfd.opendir(rootfs)
+    except OSError:
+        return None
+    try:
+        return dirfd.opendir_at(root_fd, "etc")
+    except OSError:
+        return None
+    finally:
+        if own_fd is not None:
+            os.close(own_fd)
+
+
+def _replace_at(etc_fd: int, name: str, content: str) -> None:
+    """Replace <etc>/<name> with a plain file holding *content*.
+
+    The mode is set on the descriptor rather than left to the umask, since
+    the guest reads both files as an unprivileged user.
+
+    The old entry is unlinked rather than truncated, so a symlink standing
+    under the name is removed instead of written through, and the create is
+    O_EXCL, so whatever reappears under the name is not adopted either -- a
+    hard link to a host file being the case nothing about the entry could
+    reveal.
+    """
+    mode = stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IROTH
+    dirfd.unlink_quietly(etc_fd, name)
+    try:
+        fd, _st = dirfd.open_new_at(etc_fd, name, mode)
+    except OSError as exc:
+        log.warning("Failed to write /etc/%s into the rootfs: %s", name, exc)
+        return
+    try:
+        os.fchmod(fd, mode)
+        os.write(fd, content.encode())
+    except OSError as exc:
+        log.warning("Failed to write /etc/%s into the rootfs: %s", name, exc)
+    finally:
+        os.close(fd)
+
+
+def write_resolv_conf(rootfs: str, *, root_fd: int | None = None) -> None:
     """Replace guest /etc/resolv.conf with a plain file using host DNS servers."""
-    path = os.path.join(rootfs, "etc", "resolv.conf")
     servers = host_nameservers()
     if not servers:
         servers = [DEFAULT_PRIMARY_NS, DEFAULT_SECONDARY_NS]
 
-    with contextlib.suppress(OSError):
-        os.remove(path)
-    with open(path, "w") as fh:
-        for ns in servers:
-            fh.write(f"nameserver {ns}\n")
-    with contextlib.suppress(OSError):
-        os.chmod(path, stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IROTH)
+    etc_fd = _open_etc(rootfs, root_fd)
+    if etc_fd is None:
+        return
+    try:
+        _replace_at(etc_fd, "resolv.conf", "".join(f"nameserver {ns}\n" for ns in servers))
+    finally:
+        os.close(etc_fd)
 
 
-def write_hosts(rootfs: str) -> None:
+_HOSTS = (
+    "# IPv4.\n"
+    "127.0.0.1   localhost.localdomain localhost\n\n"
+    "# IPv6.\n"
+    "::1         localhost.localdomain localhost"
+    " ip6-localhost ip6-loopback\n"
+    "fe00::0     ip6-localnet\n"
+    "ff00::0     ip6-mcastprefix\n"
+    "ff02::1     ip6-allnodes\n"
+    "ff02::2     ip6-allrouters\n"
+    "ff02::3     ip6-allhosts\n"
+)
+
+
+def write_hosts(rootfs: str, *, root_fd: int | None = None) -> None:
     """Write a minimal /etc/hosts into the rootfs."""
-    path = os.path.join(rootfs, "etc", "hosts")
-    with contextlib.suppress(OSError):
-        os.remove(path)
-    with open(path, "w") as fh:
-        fh.write(
-            "# IPv4.\n"
-            "127.0.0.1   localhost.localdomain localhost\n\n"
-            "# IPv6.\n"
-            "::1         localhost.localdomain localhost"
-            " ip6-localhost ip6-loopback\n"
-            "fe00::0     ip6-localnet\n"
-            "ff00::0     ip6-mcastprefix\n"
-            "ff02::1     ip6-allnodes\n"
-            "ff02::2     ip6-allrouters\n"
-            "ff02::3     ip6-allhosts\n"
-        )
-    with contextlib.suppress(OSError):
-        os.chmod(path, stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IROTH)
+    etc_fd = _open_etc(rootfs, root_fd)
+    if etc_fd is None:
+        return
+    try:
+        _replace_at(etc_fd, "hosts", _HOSTS)
+    finally:
+        os.close(etc_fd)
 
 
 def ensure_hosts_entry(rootfs: str, *hostnames: str) -> None:

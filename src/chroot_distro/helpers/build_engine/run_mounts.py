@@ -208,7 +208,14 @@ def _resolve_bind(engine: typing.Any, m: RunMount, n: int, tmp_paths: list[str])
         from chroot_distro.helpers.build_engine.copy_step import _pull_throwaway_image
 
         ref_stage = engine.stages.get(m.from_)
-        base = _pull_throwaway_image(engine, m.from_) if ref_stage is None else ref_stage.rootfs_dir
+        if ref_stage is None:
+            # The bind source reaches mount(2) as a path whatever happens, so
+            # the pull's descriptor buys nothing here.
+            base, pulled_fd = _pull_throwaway_image(engine, m.from_)
+            with contextlib.suppress(OSError):
+                os.close(pulled_fd)
+        else:
+            base = ref_stage.rootfs_dir
     else:
         base = engine.build_dir
     base_abs = os.path.abspath(base)

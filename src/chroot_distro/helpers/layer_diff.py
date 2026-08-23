@@ -19,6 +19,7 @@ else:
     from backports.zstd import tarfile
 
 from chroot_distro import dirfd
+from chroot_distro.atomic import atomic_write
 from chroot_distro.progress import (
     clear_bar,
     draw_bytes_bar,
@@ -85,10 +86,15 @@ class MapSources:
     One directory at a time is cached, which covers a whole directory's worth of
     entries: both consumers walk the map in sorted-arcname order and an arcname
     follows the layout of the source it came from.
+
+    An entry that also carries a "root_fd" was recorded against a tree the
+    enumeration had pinned (a build stage's rootfs, the ADD spool), and the
+    walk then starts from that descriptor rather than resolving the root's
+    name a second time.
     """
 
     def __init__(self) -> None:
-        self._key: tuple[str, tuple[str, ...]] | None = None
+        self._key: tuple[str, int | None, tuple[str, ...]] | None = None
         self._fd: int | None = None
 
     def open(self, entry: dict[str, typing.Any]) -> tuple[int, os.stat_result]:
@@ -100,17 +106,21 @@ class MapSources:
         raises KeyError rather than quietly reading a path.
         """
         root = entry["root"]
+        root_fd = entry.get("root_fd")
         rel = tuple(entry["rel"])
         if not rel:
             raise OSError(errno.EINVAL, "source entry names no file", root)
-        key = (root, rel[:-1])
+        key = (root, root_fd, rel[:-1])
         if key != self._key:
             self.close()
-            root_fd = dirfd.opendir(root)
-            try:
-                fd = dirfd.descend_at(root_fd, rel[:-1])
-            finally:
-                os.close(root_fd)
+            if root_fd is None:
+                own_fd = dirfd.opendir(root)
+                try:
+                    fd = dirfd.descend_at(own_fd, rel[:-1])
+                finally:
+                    os.close(own_fd)
+            else:
+                fd = dirfd.descend_at(root_fd, rel[:-1]) if rel[:-1] else dirfd.reopen(root_fd)
             self._fd, self._key = fd, key
         assert self._fd is not None
         return dirfd.open_regular_at(self._fd, rel[-1], os.O_RDONLY)
@@ -141,10 +151,13 @@ class _ParentFds:
     the entry is addressed as (dir_fd, name). The rels arrive sorted, so caching
     the last parent covers a whole directory's worth of entries and the walk
     costs about one openat apiece.
+
+    *rootfs_fd* is the rootfs when the caller has pinned it, so even the root
+    of the walk is an inode rather than a name.
     """
 
-    def __init__(self, rootfs: str) -> None:
-        self._root_fd = dirfd.opendir(rootfs)
+    def __init__(self, rootfs: str, *, rootfs_fd: int | None = None) -> None:
+        self._root_fd = dirfd.reopen(rootfs_fd) if rootfs_fd is not None else dirfd.opendir(rootfs)
         self._rel: str | None = None
         self._fd: int | None = None
         self._owned = False
@@ -190,7 +203,7 @@ class _ParentFds:
 # ---------------------------------------------------------------------------
 
 
-def snapshot(rootfs: str) -> dict[str, tuple[typing.Any, ...]]:
+def snapshot(rootfs: str, *, rootfs_fd: int | None = None) -> dict[str, tuple[typing.Any, ...]]:
     """Return {rel_path: fingerprint_tuple} for every entry under rootfs.
 
     Tuple kinds:
@@ -212,11 +225,16 @@ def snapshot(rootfs: str) -> dict[str, tuple[typing.Any, ...]]:
     a second time, so a process an earlier RUN left running could have a host
     file's content decide a fingerprint.
 
+    *rootfs_fd* is the rootfs when the caller has pinned it. A RUN step's two
+    snapshots straddle the step, so the name they would resolve is one the
+    step itself had the run of; starting from the descriptor means both walks
+    describe the same tree the step was given.
+
     Frame layout: [fd, None, pending names, rel prefix, owned].
     """
     state: dict[str, tuple[typing.Any, ...]] = {}
     try:
-        root_fd = dirfd.opendir(rootfs)
+        root_fd = dirfd.reopen(rootfs_fd) if rootfs_fd is not None else dirfd.opendir(rootfs)
     except OSError:
         return state
 
@@ -529,17 +547,22 @@ def _pack_stream(
     Headers and padding add a small constant overhead beyond this.
 
     Returns (digest, compressed_size, diff_id).
-    """
-    os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    tmp = out_path + ".tmp"
 
+    The write goes through atomic_write rather than a `<out_path>.tmp` of our
+    own: the layer's name is derived from the stage and layer index, so that
+    temporary is entirely predictable, and a symlink standing under it had the
+    layer's bytes written through it -- and the link itself published into the
+    cache, where `push` reads it. atomic_write names its temporary
+    unpredictably and creates it O_EXCL off a descriptor on the destination
+    directory.
+    """
     digest_h = hashlib.sha256()
     diff_id_h = hashlib.sha256()
     show, clear = _make_progress_callback(total_uncompressed)
 
     digest_tee: _ProgressHashTee | None = None
     try:
-        with open(tmp, "wb") as out_fh:
+        with atomic_write(out_path, binary=True) as out_fh:
             digest_tee = _ProgressHashTee(out_fh, digest_h)
 
             compressor: typing.Any
@@ -552,13 +575,9 @@ def _pack_stream(
                 diff_id_tee = _ProgressHashTee(cmp_file, diff_id_h, on_progress=show)
                 with tarfile.open(fileobj=diff_id_tee, mode="w|") as tf:  # type: ignore[call-overload]
                     populate(tf)
-            out_fh.flush()
         clear()
-        os.replace(tmp, out_path)
     except BaseException:
         clear()
-        with contextlib.suppress(OSError):
-            os.remove(tmp)
         raise
 
     assert digest_tee is not None
@@ -580,6 +599,8 @@ def write_layer_tar(
     deleted: list[str],
     out_path: str,
     opaque_dirs: typing.Iterable[str] = (),
+    *,
+    rootfs_fd: int | None = None,
 ) -> tuple[str, int, str]:
     """Write a gzipped OCI layer to `out_path`.
 
@@ -592,34 +613,45 @@ def write_layer_tar(
     Returns (digest, size, diff_id) where digest is "sha256:<hex>" of
     the gzipped bytes, size is the gzipped byte count, and diff_id is
     "sha256:<hex>" of the uncompressed tar bytes.
+
+    *rootfs_fd* is the rootfs when the caller has pinned it. The one
+    _ParentFds is built before the size pre-pass and outlives it, so the
+    sizes the progress bar is scaled to and the bytes that are packed come
+    out of the same directories -- the pre-pass used to lstat each entry by
+    its joined path, which is a second resolve of every name in the layer.
     """
     sorted_paths = sorted(paths_to_pack)
+    try:
+        parents: _ParentFds | None = _ParentFds(rootfs, rootfs_fd=rootfs_fd)
+    except OSError:
+        parents = None
+
     total = 0
-    for rel in sorted_paths:
-        full = os.path.join(rootfs, rel)
-        try:
-            st = os.lstat(full)
-        except OSError:
-            continue
-        if stat.S_ISREG(st.st_mode):
-            total += st.st_size
+    if parents is not None:
+        for rel in sorted_paths:
+            parent_rel, _, name = rel.rpartition("/")
+            dir_fd = parents.open(parent_rel)
+            if dir_fd is None:
+                continue
+            try:
+                st = dirfd.lstat_at(dir_fd, name)
+            except OSError:
+                continue
+            if stat.S_ISREG(st.st_mode):
+                total += st.st_size
 
     def _populate(tf: tarfile.TarFile) -> None:
-        try:
-            parents = _ParentFds(rootfs)
-        except OSError:
-            parents = None
-        try:
-            for rel in sorted_paths:
-                if parents is not None:
-                    _add_entry(tf, parents, rel)
-            for wh in _whiteout_paths(deleted, opaque_dirs):
-                _add_whiteout(tf, wh)
-        finally:
+        for rel in sorted_paths:
             if parents is not None:
-                parents.close()
+                _add_entry(tf, parents, rel)
+        for wh in _whiteout_paths(deleted, opaque_dirs):
+            _add_whiteout(tf, wh)
 
-    return _pack_stream(out_path, total, _populate)
+    try:
+        return _pack_stream(out_path, total, _populate)
+    finally:
+        if parents is not None:
+            parents.close()
 
 
 def write_files_layer(file_map: dict[str, typing.Any], out_path: str) -> tuple[str, int, str]:

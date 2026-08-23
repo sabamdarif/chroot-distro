@@ -62,6 +62,7 @@ def _stage(tmp_path):
     rootfs.mkdir(exist_ok=True)
     return SimpleNamespace(
         rootfs_dir=str(rootfs),
+        rootfs_fd=None,
         user="",
         workdir="/",
         index=0,

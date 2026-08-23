@@ -59,6 +59,7 @@ def build_chroot_args(
     workdir: str = "",
     inner_cmd: list[str] | None = None,
     is_run: bool = False,
+    newroot: str | None = None,
 ) -> list[str]:
     """Build the argv for the GNU chroot command.
 
@@ -66,6 +67,14 @@ def build_chroot_args(
     ``sh -c 'cd <dir> && exec …'`` so the chdir happens inside the chroot
     (GNU chroot's ``--skip-chdir`` only works for NEWROOT=/). Images without
     a shell skip the wrapper and run from ``/``.
+
+    *newroot* overrides what goes into argv as chroot's NEWROOT, which is
+    otherwise *rootfs*. A caller that has pinned the rootfs passes ``"."``
+    and puts the child's cwd on the pinned descriptor before the exec, so the
+    root chroot(2) takes is the inode the caller validated rather than
+    whatever the name resolves to by the time the binary runs. *rootfs* is
+    still the path the shell lookup below reads, and that lookup only chooses
+    a guest path for the child to exec inside the new root.
     """
     chroot_exe = None
     if IS_TERMUX:
@@ -94,7 +103,7 @@ def build_chroot_args(
         args.append(f"--groups={group_str}")
 
     # 3. Rootfs target directory
-    args.append(rootfs)
+    args.append(newroot if newroot is not None else rootfs)
 
     # 4. Inner command — optionally prefixed with a cd into workdir. A `run`
     # command (image Entrypoint/Cmd) is never shell-wrapped: the image may

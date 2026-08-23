@@ -66,6 +66,7 @@ def test_run_cache_hit_emits_event(tmp_path):
     layer.write_bytes(b"")
     stage = SimpleNamespace(
         rootfs_dir=str(tmp_path),
+        rootfs_fd=None,
         layers=[],
         parent_layer_digest=None,
         shell=["/bin/sh", "-c"],

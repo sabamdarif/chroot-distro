@@ -172,8 +172,9 @@ def command_build(args: typing.Any) -> None:
             lock_stack.enter_context(lock)
 
         # ----- run the build -----
-        tmp_root, tmp_parent_fd = _make_build_tmp()
+        tmp_root, tmp_parent_fd, tmp_root_fd = _make_build_tmp()
 
+        engine: BuildEngine | None = None
         try:
             secrets = _parse_secret_opts(getattr(args, "secrets", None) or [], tmp_root)
             ssh_sockets = _parse_ssh_opts(getattr(args, "ssh", None) or [])
@@ -195,6 +196,7 @@ def command_build(args: typing.Any) -> None:
                 secrets=secrets,
                 ssh_sockets=ssh_sockets,
                 reporter=make_reporter(getattr(args, "progress", "auto") or "auto", quiet),
+                tmp_root_fd=tmp_root_fd,
             )
 
             try:
@@ -255,6 +257,12 @@ def command_build(args: typing.Any) -> None:
             log_error("Aborted by user.")
             sys.exit(1)
         finally:
+            # The stage descriptors point inside the tree about to be removed,
+            # and the run's own root descriptor is what they were made off.
+            if engine is not None:
+                engine.close()
+            with contextlib.suppress(OSError):
+                os.close(tmp_root_fd)
             _remove_build_tmp(tmp_root, tmp_parent_fd)
 
 
@@ -263,10 +271,14 @@ def command_build(args: typing.Any) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _make_build_tmp() -> tuple[str, int]:
+def _make_build_tmp() -> tuple[str, int, int]:
     """Create the scratch root a build assembles its stages in.
 
-    Returns (path, a descriptor on the directory holding it). `build-tmp` is a
+    Returns (path, a descriptor on the directory holding it, a descriptor on the
+    root itself). The second is what the build addresses its own tree through:
+    the stage directories, the ADD spool and the COPY --from rootfs are all made
+    off it, so none of them is reached by resolving `tmp_root` again. `build-tmp`
+    is a
     predictable name inside the runtime tree, which on Termux sits under the
     $TERMUX_PREFIX bound read-write into every non-isolated container, and
     `tempfile.mkdtemp(dir=...)` resolved it: a guest that left
@@ -276,9 +288,10 @@ def _make_build_tmp() -> tuple[str, int]:
     mkdirat off the descriptor that walk validated. What is made *inside* that
     root needs no walk of its own: the name is fresh and the mode is 0700.
 
-    The descriptor is kept for the length of the build so the removal at the end
+    Both descriptors are kept for the length of the build: the removal at the end
     names the directory this created the root in rather than resolving
-    `build-tmp` a second time.
+    `build-tmp` a second time, and the root's own descriptor outlives every stage
+    that was made off it.
 
     A runtime tree that cannot hold the directory falls back to /tmp, as it
     always did.
@@ -294,10 +307,11 @@ def _make_build_tmp() -> tuple[str, int]:
     try:
         name = f"cd-build-{os.getpid()}.{os.urandom(4).hex()}"
         os.mkdir(name, 0o700, dir_fd=dir_fd)
+        root_fd = dirfd.opendir_at(dir_fd, name)
     except OSError:
         os.close(dir_fd)
         raise
-    return os.path.join(build_tmp, name), dir_fd
+    return os.path.join(build_tmp, name), dir_fd, root_fd
 
 
 def _remove_build_tmp(tmp_root: str, dir_fd: int) -> None:

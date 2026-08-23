@@ -42,6 +42,7 @@ def test_parents_dest_outside_anchor_rejected():
 class _Stage:
     def __init__(self, base):
         self.rootfs_dir = str(base / "rootfs")
+        self.rootfs_fd = None
         self.workdir = "/"
         self.layers = []
         self.parent_layer_digest = None
@@ -144,6 +145,7 @@ def test_parents_from_stage_rootfs(engine, tmp_path):
 
     class _Ref:
         rootfs_dir = str(other)
+        rootfs_fd = None
 
     engine.stages["builder"] = _Ref()
     _copy(engine, "/opt/./tool/bin.sh /dst/", flags={"parents": "", "from": "builder"})

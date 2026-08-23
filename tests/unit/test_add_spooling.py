@@ -22,6 +22,7 @@ import gzip
 
 import pytest
 
+from chroot_distro import dirfd
 from chroot_distro.helpers.build_engine import copy_step
 from chroot_distro.helpers.build_engine.errors import BuildError
 
@@ -30,7 +31,9 @@ from chroot_distro.helpers.build_engine.errors import BuildError
 def spool(tmp_path):
     d = tmp_path / "spool"
     d.mkdir()
-    return str(d)
+    sp = copy_step._Spool(str(d), dirfd.opendir(str(d)))
+    yield sp
+    sp.close()
 
 
 def _make_tar(path, entries):
