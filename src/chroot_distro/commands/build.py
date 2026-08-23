@@ -33,7 +33,7 @@ from chroot_distro.helpers.oci_writer import (
 from chroot_distro.locking import BuildLock
 from chroot_distro.message import C, crit_error, log_error, log_info, msg, warn
 from chroot_distro.names import is_valid_name, require_valid_name
-from chroot_distro.paths import container_rootfs
+from chroot_distro.paths import container_is_installed
 from chroot_distro.progress import fmt_size
 
 # ---------------------------------------------------------------------------
@@ -123,7 +123,7 @@ def command_build(args: typing.Any) -> None:
     if install_as:
         require_valid_name(install_as, kind="--install-as value")
 
-        if os.path.isdir(container_rootfs(install_as)):
+        if container_is_installed(install_as):
             crit_error(
                 f"container '{install_as}' defined by --install-as already "
                 f"exists. Use '{PROGRAM_NAME} remove {install_as}' first or "
