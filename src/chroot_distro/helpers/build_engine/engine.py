@@ -10,6 +10,7 @@ from chroot_distro.arch import get_device_cpu_arch
 from chroot_distro.helpers.build_engine.constants import (
     EXPANDS_VARS,
     PREDEFINED_ARGS,
+    is_host_exec_var,
 )
 from chroot_distro.helpers.build_engine.dockerignore import load_dockerignore
 from chroot_distro.helpers.build_engine.errors import BuildError
@@ -36,6 +37,130 @@ log = logging.getLogger(__name__)
 
 _FROM_RE = re.compile(r"^\s*(\S+)(?:\s+AS\s+(\S+))?\s*$", re.IGNORECASE)
 _FROM_AS_RE = re.compile(r"\s+AS\s+(\S+)\s*$", re.IGNORECASE)
+
+
+def _malformed(image_ref: str, what: str) -> typing.NoReturn:
+    """The one refusal shape for a base image config that will not do."""
+    raise BuildError(f"FROM {image_ref}: the image config is malformed: {what}.")
+
+
+def _cfg_object(value: typing.Any, image_ref: str, what: str) -> dict[str, typing.Any]:
+    if not isinstance(value, dict):
+        _malformed(image_ref, f"{what} is not an object")
+    return value
+
+
+def _cfg_str_list(value: typing.Any, image_ref: str, what: str) -> list[str]:
+    if not isinstance(value, list):
+        _malformed(image_ref, f"{what} is not a list")
+    for entry in value:
+        if not isinstance(entry, str):
+            _malformed(image_ref, f"{what} holds an entry that is not a string")
+    return value
+
+
+def _adopt_image_config(image_config: typing.Any, image_ref: str) -> dict[str, typing.Any]:
+    """Return a pulled image's config, held to the shapes read out of it.
+
+    Two things happen here, both at the point a stranger's config is *adopted*
+    rather than where it is used, so nothing downstream can re-seed a value: a
+    stage's env is seeded from this at FROM, `FROM <earlier stage>` deep-copies
+    the whole config, and what the build finally stores as its own image's
+    config comes from here too. One pass, and all three are clean by
+    construction.
+
+    The first is the LD_* filter over `Env`. An ENV line in the user's own
+    Dockerfile still reaches the image config -- it goes through do_env, which
+    writes this same list afterwards, and what a Dockerfile says about the
+    image it produces is its author's business. What no such name reaches from
+    any source is the environment `chroot` itself is exec'd with, which
+    run_step refuses separately (constants.is_host_exec_var states the one rule
+    both apply).
+
+    The second is the shape. Every field below is read back by this module or
+    by a handler -- `User` and `Shell` decide what a RUN step runs and who as,
+    `WorkingDir` becomes its cwd, `OnBuild` is parsed as Dockerfile lines,
+    `Env` seeds the stage, `Cmd` and `Entrypoint` are what `run` later
+    executes, `Labels`, `ExposedPorts` and `Volumes` are merged into by their
+    handlers, and `history` is appended to once per instruction. All of it is a
+    registry's JSON, or a manifest-cache entry's, which on Termux sits under
+    the bound $TERMUX_PREFIX and is a guest's to compose -- and every consumer
+    subscripted it as the type OCI says it is: `"config": "x"` was an
+    AttributeError at FROM, `"Labels": ["a"]` a ValueError in do_label,
+    `"OnBuild": 5` a TypeError, `"history": null` an AttributeError at the
+    first instruction, and `build` catches none of those, so each was a
+    traceback rather than a message.
+
+    A field of the wrong type is a refusal naming it, not a value dropped
+    quietly: two of them decide what runs, and the rest would otherwise be
+    carried into the image this build publishes and hands to whoever pulls it.
+    Absent and JSON `null` are simply "not set", which is how a registry spells
+    an empty field; a `null` is removed rather than left standing, since
+    `.get(key) or default` and `setdefault(key, default)` do not answer alike
+    for one.
+    """
+    doc = _cfg_object(image_config, image_ref, "the document")
+
+    if doc.get("history") is None:
+        doc.pop("history", None)
+    elif not isinstance(doc["history"], list):
+        _malformed(image_ref, "'history' is not a list")
+
+    if doc.get("rootfs") is None:
+        doc.pop("rootfs", None)
+    else:
+        rootfs = _cfg_object(doc["rootfs"], image_ref, "'rootfs'")
+        if rootfs.get("diff_ids") is None:
+            rootfs.pop("diff_ids", None)
+        else:
+            _cfg_str_list(rootfs["diff_ids"], image_ref, "'rootfs.diff_ids'")
+
+    if doc.get("config") is None:
+        doc["config"] = {}
+        return doc
+    cfg = _cfg_object(doc["config"], image_ref, "'config'")
+
+    for key in ("Cmd", "Entrypoint", "OnBuild", "Shell"):
+        if cfg.get(key) is None:
+            cfg.pop(key, None)
+        else:
+            _cfg_str_list(cfg[key], image_ref, f"'config.{key}'")
+
+    for key in ("User", "WorkingDir"):
+        if cfg.get(key) is None:
+            cfg.pop(key, None)
+        elif not isinstance(cfg[key], str):
+            _malformed(image_ref, f"'config.{key}' is not a string")
+
+    for key in ("ExposedPorts", "Volumes"):
+        if cfg.get(key) is None:
+            cfg.pop(key, None)
+        else:
+            # The key set is the whole of what either field says: the spec's
+            # value is an empty object, and both handlers write one. Rewritten
+            # rather than checked, so an inherited value of any other shape
+            # cannot reach the built image either.
+            names = _cfg_object(cfg[key], image_ref, f"'config.{key}'")
+            cfg[key] = {name: {} for name in names}
+
+    if cfg.get("Labels") is None:
+        cfg.pop("Labels", None)
+    else:
+        labels = _cfg_object(cfg["Labels"], image_ref, "'config.Labels'")
+        for value in labels.values():
+            if value is not None and not isinstance(value, str):
+                _malformed(image_ref, "'config.Labels' holds a value that is not a string")
+        # A null label value is the empty string, as it is to every other
+        # reader of a map of strings.
+        cfg["Labels"] = {k: (v if v is not None else "") for k, v in labels.items()}
+
+    if cfg.get("Env") is None:
+        cfg.pop("Env", None)
+    else:
+        env_list = _cfg_str_list(cfg["Env"], image_ref, "'config.Env'")
+        cfg["Env"] = [e for e in env_list if not ("=" in e and is_host_exec_var(e.partition("=")[0]))]
+
+    return doc
 
 
 def _stage_rootfs_fd(stage: Stage) -> int:
@@ -114,6 +239,13 @@ class BuildEngine:
         self.global_args: dict[str, str] = {}  # ARG declared before first FROM
         self.declared_global: set[str] = set()
         self.ignore_patterns = load_dockerignore(self.build_dir)
+        # LD_* names the Dockerfile set and the host-side chroot exec was
+        # refused (run_step._refuse_host_exec). Kept per build so a name is
+        # named once rather than once per RUN step.
+        self.warned_host_exec: set[str] = set()
+        # True only while the base image's ONBUILD triggers run, so do_env can
+        # tell a stranger's ENV line from the author's.
+        self.firing_onbuild = False
         self._stop_after = False
         self._step_no = 0
         self._step_total = 0
@@ -416,18 +548,26 @@ class BuildEngine:
         if base_onbuild:
             from chroot_distro.helpers.dockerfile import parse_dockerfile
 
-            for trig in base_onbuild:
-                _, trig_instrs = parse_dockerfile(trig + "\n")
-                for ti in trig_instrs:
-                    self._step_no += 1
-                    self._announce(ti)
-                    trig_instr = ti
-                    if ti["name"] in EXPANDS_VARS and not ti["exec_form"]:
-                        trig_instr = self._expand_instruction(ti)
-                    h = HANDLERS.get(trig_instr["name"])
-                    if h is None:
-                        raise BuildError(f"ONBUILD trigger uses unsupported instruction '{trig_instr['name']}'.")
-                    self._run_with_history(h, trig_instr)
+            # A trigger that *fires* is always the base image's, never this
+            # Dockerfile's: an ONBUILD here only records one for whoever builds
+            # FROM the result. So an ENV among them is a stranger's line, and
+            # do_env holds it to the rule the image's own Env is held to.
+            self.firing_onbuild = True
+            try:
+                for trig in base_onbuild:
+                    _, trig_instrs = parse_dockerfile(trig + "\n")
+                    for ti in trig_instrs:
+                        self._step_no += 1
+                        self._announce(ti)
+                        trig_instr = ti
+                        if ti["name"] in EXPANDS_VARS and not ti["exec_form"]:
+                            trig_instr = self._expand_instruction(ti)
+                        h = HANDLERS.get(trig_instr["name"])
+                        if h is None:
+                            raise BuildError(f"ONBUILD trigger uses unsupported instruction '{trig_instr['name']}'.")
+                        self._run_with_history(h, trig_instr)
+            finally:
+                self.firing_onbuild = False
 
     def _make_stage_dirs(self, idx: int) -> tuple[int | None, int | None]:
         """Create stage *idx*'s scratch tree. (stage_fd, rootfs_fd), or (None, None).
@@ -489,13 +629,19 @@ class BuildEngine:
         finally:
             os.close(rootfs_fd)
 
-        stage.image_config = meta.get("image_config") or {"config": {}}
+        stage.image_config = _adopt_image_config(meta.get("image_config") or {"config": {}}, image_ref)
         manifest = meta.get("manifest") or {}
         config_diff_ids = (stage.image_config.get("rootfs") or {}).get("diff_ids") or []
         stage.layers = []
         for i, layer in enumerate(manifest.get("layers", [])):
+            # The pull has already read every digest here, to name a blob and a
+            # cache path. A `size` it never reads, and this one is copied into
+            # the manifest the build publishes: take a non-int as absent, the
+            # way every other reader of the field does.
             digest = layer.get("digest", "")
             size = layer.get("size", 0)
+            if not isinstance(size, int) or isinstance(size, bool):
+                size = 0
             diff_id = config_diff_ids[i] if i < len(config_diff_ids) else digest
             stage.layers.append({"digest": digest, "size": size, "diff_id": diff_id})
         if stage.layers:

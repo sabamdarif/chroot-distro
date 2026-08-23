@@ -6,7 +6,7 @@ import typing
 
 from chroot_distro import dirfd
 from chroot_distro.atomic import publish_file
-from chroot_distro.helpers.build_engine.constants import PREDEFINED_ARGS
+from chroot_distro.helpers.build_engine.constants import PREDEFINED_ARGS, is_host_exec_var
 from chroot_distro.helpers.build_engine.copy_step import do_add, do_copy
 from chroot_distro.helpers.build_engine.errors import BuildError
 from chroot_distro.helpers.build_engine.parsing import (
@@ -20,6 +20,7 @@ from chroot_distro.helpers.build_engine.users import resolve_user_for_chroot
 from chroot_distro.helpers.docker import layer_cache_path
 from chroot_distro.helpers.layer_diff import write_files_layer
 from chroot_distro.helpers.tar_extract import safe_resolve_parts
+from chroot_distro.message import warn
 
 log = logging.getLogger(__name__)
 
@@ -65,7 +66,20 @@ def do_env(engine: typing.Any, instr: dict[str, typing.Any]) -> None:
     cfg = engine.current.image_config.setdefault("config", {})
     env_list = cfg.get("Env") or []
     env_map = {e.split("=", 1)[0]: e.split("=", 1)[1] for e in env_list if isinstance(e, str) and "=" in e}
+    # An ENV fired by the base image's ONBUILD is the image's line and not the
+    # author's, so it is held to the rule the image's own Env is held to: the
+    # LD_* namespace is read by the host loader when a RUN step execs `chroot`,
+    # before anything has entered the rootfs (see constants.is_host_exec_var).
+    # Dropped rather than merely not applied, so the built image does not carry
+    # it on to whoever runs a container from it either.
+    from_image = engine.firing_onbuild
     for k, v in pairs:
+        if from_image and is_host_exec_var(k):
+            warn(
+                f"ignoring ONBUILD ENV '{k}' from the base image: it is read by the host's "
+                f"loader, not by the container."
+            )
+            continue
         env_map[k] = v
         engine.current.env[k] = v
     cfg["Env"] = [f"{k}={v}" for k, v in env_map.items()]

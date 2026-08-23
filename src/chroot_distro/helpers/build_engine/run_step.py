@@ -33,7 +33,7 @@ from chroot_distro.helpers.build_cache import (
 from chroot_distro.helpers.build_cache import (
     record as cache_record,
 )
-from chroot_distro.helpers.build_engine.constants import PREDEFINED_ARGS
+from chroot_distro.helpers.build_engine.constants import PREDEFINED_ARGS, is_host_exec_var
 from chroot_distro.helpers.build_engine.errors import BuildError
 from chroot_distro.helpers.build_engine.run_mounts import (
     RunMount,
@@ -185,7 +185,7 @@ def _exec_chroot(
             newroot=newroot,
         )
 
-    child_env = _build_child_env(stage)
+    child_env = _build_child_env(engine, stage)
 
     def _plain_args() -> list[str]:
         return _args(os.curdir if stage.rootfs_fd is not None else rootfs)
@@ -503,7 +503,46 @@ def _stop_step(pgid: int | None, baseline: typing.Container[int] = (), *, quiet:
     return found
 
 
-def _build_child_env(stage: typing.Any) -> dict[str, str]:
+def _refuse_host_exec(engine: typing.Any, key: str) -> bool:
+    """True when *key* is the host side's, so the Dockerfile may not set it.
+
+    The dict handed to Popen is the host `chroot` binary's own environment and
+    chroot passes it on to the command inside the new root, so one dict serves
+    two masters: LD_* means "a setting for the process that has not entered the
+    rootfs yet" to the host's dynamic loader, read before the step exists.
+
+    constants.is_host_exec_var states the rule as one about provenance, and
+    that is what this applies. Both of the sources filtered here are the
+    Dockerfile's -- `stage.env` (its ENV lines, and a base image's, seeded at
+    FROM) and the ARG values keyed by names it declared -- while the host
+    variables read below come from os.environ, which is the user's own
+    environment and stays sovereign.
+
+    What makes it more than a tidiness rule is where the exec starts from. The
+    argv gives chroot `.` and the child fchdirs onto the stage rootfs between
+    the fork and the exec, so a *relative* LD_LIBRARY_PATH or LD_AUDIT entry is
+    resolved by the host loader against that rootfs -- a directory an earlier
+    RUN step had the run of. A step dropping a library under `lib/`, then
+    `ENV LD_LIBRARY_PATH=lib` on any later step, was the invoking user running
+    the guest's code outside any container, on a build where nothing of the
+    host is bound in at all.
+
+    The value still goes into the image config: what the Dockerfile says about
+    the image it produces is its author's business, and only the host-side exec
+    is refused it.
+    """
+    if not is_host_exec_var(key):
+        return False
+    if key not in engine.warned_host_exec:
+        engine.warned_host_exec.add(key)
+        warn(
+            f"ignoring '{key}' for RUN steps: it is read by the host's loader when `chroot` is "
+            f"exec'd, not by the container. It stays in the image config."
+        )
+    return True
+
+
+def _build_child_env(engine: typing.Any, stage: typing.Any) -> dict[str, str]:
     env = {}
     env["PATH"] = stage.env.get("PATH") or DEFAULT_PATH_ENV
     env["HOME"] = stage.env.get("HOME", "/root")
@@ -521,13 +560,13 @@ def _build_child_env(stage: typing.Any) -> dict[str, str]:
 
     # Declared ARGs in this stage.
     for k in stage.declared_args:
-        if k in stage.args:
+        if k in stage.args and not _refuse_host_exec(engine, k):
             env[k] = stage.args[k]
 
     # ENVs always win.
     for k, v in stage.env.items():
+        if _refuse_host_exec(engine, k):
+            continue
         env[k] = v
 
-    # Clean up dangerous env vars
-    env.pop("LD_PRELOAD", None)
     return env

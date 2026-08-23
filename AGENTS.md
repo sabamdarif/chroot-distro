@@ -189,6 +189,29 @@ descended without a `.dockerignore` check on purpose: `dockerignore._match`
 prefix-matches, so a pattern on a directory already covers its children, and a
 `!` line re-including one of them only survives if the walk goes in.
 
+A base image's config is a document this program did not write, and every field
+is read back as the type OCI says it is (`User` and `Shell` decide what a RUN
+step runs and who as, `WorkingDir` becomes its cwd, `OnBuild` is parsed as
+Dockerfile lines, the rest are merged into by their handlers and published in
+the produced image). `engine._adopt_image_config` is the one place a pulled
+config is taken on: it holds each field to its shape and refuses a wrong type
+with a `BuildError` naming it, treats a null as absent rather than as a value,
+rewrites `ExposedPorts`/`Volumes` down to their key sets, reads a null label as
+`""`, and takes a non-int layer `size` in the manifest as 0. The environment a
+RUN step's host side is handed goes the same way: chroot passes its own
+environment on to the command inside the new root, so `constants.is_host_exec_var`
+names what the *host* loader reads (the `LD_*` prefix) and both Dockerfile-owned
+sources are refused it -- an `ENV` line or a declared `ARG`'s value never reaches
+`run_step._build_child_env`'s output, and an `ENV` fired by the base image's
+ONBUILD triggers (`engine.firing_onbuild`, checked in `handlers.do_env`) is
+dropped outright, being a stranger's line rather than the author's. What the
+user's own environment says still reaches the exec, since they chose this command
+line; a value the Dockerfile set still stands in the image config, which is what
+it was a statement about. It matters because the argv gives `chroot` `.` and the
+child fchdirs onto the stage rootfs, so a *relative* `LD_LIBRARY_PATH` or
+`LD_AUDIT` entry is resolved by the host loader inside a tree an earlier RUN step
+had the run of.
+
 ### Cross-cutting
 - `atomic.py`: every state file write goes through `atomic_write` /
   `atomic_replace` (tempfile, fsync, rename) so a crash never leaves half a file.
