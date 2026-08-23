@@ -666,6 +666,355 @@ jobs:
                   sudo chroot-distro remove test-build-adv
                   rm -f /tmp/adv-secret.txt
 
+            # ── Phase 8c: Build Outputs, ADD over HTTP, Failure Paths ──────
+            # Covers what 8b does not reach: `--output` archives (packed into
+            # the descriptor the staging helper created, so the published file
+            # has to be a complete OCI image), the host-loader env vars a
+            # Dockerfile may not hand a RUN step, an `--install-as` name that is
+            # already taken, an ADD whose response ends short of the length it
+            # declared, and what a failed build prints.
+            - name: "Build (output): create the build context"
+              run: |
+                  mkdir -p /tmp/out-build/ctx-tree/sub
+                  echo "context-file" > /tmp/out-build/ctx-tree/sub/f.txt
+                  cat > /tmp/out-build/Dockerfile << 'DOCKERFILE'
+                  FROM alpine:latest
+                  ARG LD_AUDIT=./audit-default.so
+                  ENV LD_LIBRARY_PATH=lib
+                  ENV APP_MODE=prod
+
+                  # A rw bind is a scratch copy the step may do as it likes
+                  # with, sealed directories and a tree deeper than the host's
+                  # recursion limit included; the teardown after the step still
+                  # has to get the copy out.
+                  RUN --mount=type=bind,source=ctx-tree,target=/ctx,rw <<'EOF'
+                  set -e
+                  test -f /ctx/sub/f.txt
+                  mkdir -p /ctx/sealed/inner
+                  chmod 000 /ctx/sealed
+                  cd /ctx
+                  i=0
+                  # One character per level: the shell tracks its cwd as a string
+                  # and 1200 levels of a longer name run past PATH_MAX.
+                  while [ "$i" -lt 1200 ]; do
+                      mkdir d
+                      cd d
+                      i=$((i + 1))
+                  done
+                  EOF
+
+                  # LD_* is read by the host's loader when `chroot` is exec'd, so
+                  # neither an ENV line nor a declared ARG's value may reach a RUN
+                  # step. Both must be missing from the step's environment.
+                  RUN printenv LD_LIBRARY_PATH > /ld-library-path.txt || echo refused > /ld-library-path.txt
+                  RUN printenv LD_AUDIT > /ld-audit.txt || echo refused > /ld-audit.txt
+                  RUN printenv APP_MODE > /app-mode.txt
+                  CMD ["/bin/sh"]
+                  DOCKERFILE
+                  echo "--- Dockerfile ---"
+                  cat /tmp/out-build/Dockerfile
+
+            - name: "Build (output): write the archive checker"
+              run: |
+                  cat > /tmp/verify-oci.py << 'PY'
+                  import hashlib
+                  import json
+                  import sys
+                  import tarfile
+
+
+                  def blob(tf, digest):
+                      hex_digest = digest.split(":", 1)[1]
+                      member = f"blobs/sha256/{hex_digest}"
+                      data = tf.extractfile(member).read()
+                      if hashlib.sha256(data).hexdigest() != hex_digest:
+                          sys.exit(f"FAIL: {member} does not hash to its own name")
+                      return data
+
+
+                  with tarfile.open(sys.argv[1]) as tf:
+                      names = tf.getnames()
+                      if names[0] != "oci-layout":
+                          sys.exit(f"FAIL: first member is '{names[0]}', not oci-layout")
+                      for required in ("index.json", "manifest.json"):
+                          if required not in names:
+                              sys.exit(f"FAIL: {required} missing from the archive")
+                      index = json.loads(tf.extractfile("index.json").read())
+                      docker = json.loads(tf.extractfile("manifest.json").read())
+                      manifest = json.loads(blob(tf, index["manifests"][0]["digest"]))
+                      config = json.loads(blob(tf, manifest["config"]["digest"]))
+
+                      config_member = "blobs/sha256/" + manifest["config"]["digest"].split(":", 1)[1]
+                      if docker[0]["Config"] != config_member:
+                          sys.exit("FAIL: the docker-legacy manifest points at another config blob")
+                      layer_members = []
+                      for layer in manifest["layers"]:
+                          data = blob(tf, layer["digest"])
+                          if len(data) != layer["size"]:
+                              sys.exit(f"FAIL: {layer['digest']} is {len(data)} bytes, the manifest says {layer['size']}")
+                          layer_members.append("blobs/sha256/" + layer["digest"].split(":", 1)[1])
+                      if docker[0]["Layers"] != layer_members:
+                          sys.exit("FAIL: the docker-legacy manifest lists another layer set")
+                      if len(config["rootfs"]["diff_ids"]) != len(manifest["layers"]):
+                          sys.exit("FAIL: diff_ids and layers disagree on how many layers there are")
+
+                  print(f"layers {len(manifest['layers'])}")
+                  print(f"arch {config['architecture']}")
+                  for tag in docker[0]["RepoTags"]:
+                      print(f"tag {tag}")
+                  for entry in config.get("config", {}).get("Env", []):
+                      print(f"env {entry}")
+                  PY
+                  python3 -c "compile(open('/tmp/verify-oci.py').read(), 'verify-oci.py', 'exec')"
+                  echo "PASS: checker parses"
+
+            - name: "Build (output): build with two --output archives"
+              run: |
+                  set -o pipefail
+                  sudo chroot-distro build /tmp/out-build \
+                    -t test-build-out:latest \
+                    --build-arg LD_AUDIT=./audit-passed.so \
+                    -o /tmp/out-build.tar \
+                    -o /tmp/out-build.tar.gz \
+                    --progress plain \
+                    --install-as test-build-out 2>&1 | tee /tmp/out-build.log
+                  echo "PASS: build with --output completed"
+
+            - name: "Verify (output): both archives are complete OCI images"
+              run: |
+                  set -o pipefail
+                  # Root-owned: the archive is published from a 0600 temporary.
+                  sudo python3 /tmp/verify-oci.py /tmp/out-build.tar | tee /tmp/oci-report.txt
+                  sudo python3 /tmp/verify-oci.py /tmp/out-build.tar.gz > /tmp/oci-report-gz.txt
+                  cat /tmp/oci-report-gz.txt
+
+                  # Every blob hashed to its own name, so the tar carries the whole
+                  # image rather than the prefix a lost write would have left.
+                  diff /tmp/oci-report.txt /tmp/oci-report-gz.txt
+                  echo "PASS: .tar and .tar.gz describe the same image"
+
+                  layers=$(sed -n 's/^layers //p' /tmp/oci-report.txt)
+                  [ "$layers" -ge 1 ] || { echo "FAIL: the image has no layers"; exit 1; }
+                  grep -qx "tag test-build-out:latest" /tmp/oci-report.txt
+                  echo "PASS: archive holds $layers layers and the primary tag"
+
+            - name: "Verify (output): the Dockerfile's LD_* never reached a RUN step"
+              run: |
+                  run() { sudo chroot-distro login test-build-out -- "$@"; }
+
+                  # The claim is about provenance, not about the variable being
+                  # unset: what the Dockerfile said must not be what the step saw.
+                  # (The runner's own environment sets LD_LIBRARY_PATH, and a value
+                  # the invoking user chose is theirs to pass.)
+                  lib=$(run cat /ld-library-path.txt)
+                  audit=$(run cat /ld-audit.txt)
+                  echo "LD_LIBRARY_PATH seen by the step: $lib"
+                  echo "LD_AUDIT seen by the step: $audit"
+                  [ "$lib" != "lib" ] \
+                    || { echo "FAIL: the ENV line's value reached the RUN step"; exit 1; }
+                  [ "$audit" != "./audit-passed.so" ] \
+                    || { echo "FAIL: the --build-arg value reached the RUN step"; exit 1; }
+                  echo "PASS: neither the ENV line nor the --build-arg value was in the step env"
+
+                  run cat /app-mode.txt | grep -qx "prod"
+                  echo "PASS: an ordinary ENV still reaches the step"
+
+                  grep -qF "ignoring 'LD_LIBRARY_PATH' for RUN steps" /tmp/out-build.log
+                  grep -qF "ignoring 'LD_AUDIT' for RUN steps" /tmp/out-build.log
+                  echo "PASS: the build said what it dropped"
+
+                  # Refused for the exec, kept in the image: what the Dockerfile
+                  # says about the image it produces is its author's business.
+                  grep -qx "env LD_LIBRARY_PATH=lib" /tmp/oci-report.txt
+                  grep -qx "env APP_MODE=prod" /tmp/oci-report.txt
+                  echo "PASS: both ENV lines stand in the image config"
+
+            - name: "Verify (output): the scratch root left nothing behind"
+              run: |
+                  data=$(sudo chroot-distro info 2>&1 | grep -m1 "Data location:" \
+                    | sed 's/.*Data location:[[:space:]]*//')
+                  echo "Data location: $data"
+                  sudo test -d "$data/build-tmp" || { echo "FAIL: no build-tmp; the build fell back to /tmp"; exit 1; }
+                  left=$(sudo ls -A "$data/build-tmp" | wc -l)
+                  if [ "$left" -ne 0 ]; then
+                    sudo ls -lA "$data/build-tmp"
+                    echo "FAIL: $left entries survived the build, sealed rw-bind copy included"
+                    exit 1
+                  fi
+                  echo "PASS: build-tmp is empty"
+
+            - name: "Verify (output): --install-as refuses a name already installed"
+              run: |
+                  set +e
+                  sudo chroot-distro build /tmp/out-build -t test-build-out:latest \
+                    --install-as test-build-out --progress plain > /tmp/taken.log 2>&1
+                  rc=$?
+                  set -e
+                  cat /tmp/taken.log
+                  [ "$rc" -ne 0 ] || { echo "FAIL: a name that is already installed was accepted"; exit 1; }
+                  grep -qF "already exists" /tmp/taken.log
+                  # The refusal comes before the build, so the container stands.
+                  sudo chroot-distro login test-build-out -- cat /app-mode.txt | grep -qx "prod"
+                  echo "PASS: the taken name was refused and the container untouched"
+
+            - name: "Verify (output): the archive installs as a container of its own"
+              run: |
+                  sudo chroot-distro install /tmp/out-build.tar --name test-build-out2
+                  output=$(sudo chroot-distro login test-build-out2 -- cat /app-mode.txt)
+                  echo "$output"
+                  echo "$output" | grep -qx "prod"
+                  # The bind was torn down before the layer was snapshotted, so
+                  # what the step wrote through it is not in the published image.
+                  if sudo chroot-distro login test-build-out2 -- test -e /ctx/sub/f.txt; then
+                    echo "FAIL: the rw bind's contents were committed to the image"; exit 1
+                  fi
+                  echo "PASS: the published archive round-trips through install"
+
+            - name: "Unmount: the --output containers"
+              run: |
+                  sudo chroot-distro unmount test-build-out || true
+                  sudo chroot-distro unmount test-build-out2 || true
+
+            - name: "Remove: the --output containers"
+              run: |
+                  sudo chroot-distro remove test-build-out
+                  sudo chroot-distro remove test-build-out2
+                  sudo rm -f /tmp/out-build.tar /tmp/out-build.tar.gz
+
+            - name: "Build (ADD url): start a server that lies about Content-Length"
+              run: |
+                  cat > /tmp/lying-server.py << 'PY'
+                  import http.server
+                  import socketserver
+
+                  BODY = b"downloaded-by-add\n"
+
+
+                  class Handler(http.server.BaseHTTPRequestHandler):
+                      protocol_version = "HTTP/1.1"
+
+                      def do_GET(self):
+                          if self.path == "/good":
+                              self.send_response(200)
+                              self.send_header("Content-Length", str(len(BODY)))
+                              self.end_headers()
+                              self.wfile.write(BODY)
+                          elif self.path == "/short":
+                              # Claims a megabyte, hangs up after 4 KiB. A
+                              # Content-Length body that ends early raises
+                              # nothing in http.client, which is why the build
+                              # has to compare the counts itself.
+                              self.send_response(200)
+                              self.send_header("Content-Length", "1048576")
+                              self.end_headers()
+                              self.wfile.write(b"x" * 4096)
+                              self.close_connection = True
+                          else:
+                              self.send_error(404)
+
+                      def log_message(self, *args):
+                          pass
+
+
+                  class Server(socketserver.ThreadingTCPServer):
+                      allow_reuse_address = True
+                      daemon_threads = True
+
+
+                  Server(("127.0.0.1", 8099), Handler).serve_forever()
+                  PY
+                  nohup python3 /tmp/lying-server.py > /tmp/lying-server.log 2>&1 &
+                  for i in $(seq 1 20); do
+                    if curl -sf http://127.0.0.1:8099/good | grep -q "downloaded-by-add"; then
+                      echo "server answering on attempt $i"
+                      break
+                    fi
+                    sleep 1
+                  done
+                  curl -sf http://127.0.0.1:8099/good | grep -q "downloaded-by-add"
+                  echo "PASS: server up"
+
+            - name: "Build (ADD url): a complete download lands in the image"
+              run: |
+                  set -o pipefail
+                  mkdir -p /tmp/add-build
+                  cat > /tmp/add-build/Dockerfile << 'DOCKERFILE'
+                  FROM alpine:latest
+                  ADD http://127.0.0.1:8099/good /downloaded.txt
+                  DOCKERFILE
+                  sudo chroot-distro build /tmp/add-build -t test-build-add:latest \
+                    --progress plain --install-as test-build-add 2>&1 | tee /tmp/add-build.log
+                  output=$(sudo chroot-distro login test-build-add -- cat /downloaded.txt)
+                  echo "$output"
+                  echo "$output" | grep -qx "downloaded-by-add"
+                  echo "PASS: ADD over HTTP wrote the whole body"
+
+            - name: "Build (ADD url): a body that ends early fails the build"
+              run: |
+                  mkdir -p /tmp/short-build
+                  cat > /tmp/short-build/Dockerfile << 'DOCKERFILE'
+                  FROM alpine:latest
+                  ADD http://127.0.0.1:8099/short /truncated.bin
+                  DOCKERFILE
+                  set +e
+                  sudo chroot-distro build /tmp/short-build -t test-build-short:latest \
+                    --progress plain --install-as test-build-short > /tmp/short-build.log 2>&1
+                  rc=$?
+                  set -e
+                  cat /tmp/short-build.log
+                  [ "$rc" -ne 0 ] || { echo "FAIL: a truncated download was accepted as the file"; exit 1; }
+                  grep -qF "the response ended after 4096 of 1048576 bytes" /tmp/short-build.log
+                  if grep -q "Traceback" /tmp/short-build.log; then
+                    echo "FAIL: the failure left the program as a traceback"; exit 1
+                  fi
+                  if sudo chroot-distro list -q 2>&1 | grep -q "test-build-short"; then
+                    echo "FAIL: the failed build still installed a container"; exit 1
+                  fi
+                  echo "PASS: the short body failed the build, cleanly and with nothing installed"
+
+            - name: "Build (ADD url): stop the server"
+              if: always()
+              run: pkill -f lying-server.py || true
+
+            - name: "Remove: test-build-add"
+              run: |
+                  sudo chroot-distro unmount test-build-add || true
+                  sudo chroot-distro remove test-build-add
+
+            - name: "Build (failure): an untrusted name in an error is escaped"
+              run: |
+                  # The name a failed build reports on is not always the author's
+                  # -- a member of an ADD'd archive, an entry of a base image --
+                  # and one holding ESC repaints the terminal it is printed to.
+                  mkdir -p /tmp/escape-build
+                  printf 'FROM alpine:latest\nCOPY nope\033file.txt /nope.txt\n' \
+                    > /tmp/escape-build/Dockerfile
+                  cat -v /tmp/escape-build/Dockerfile
+                  set +e
+                  sudo chroot-distro build /tmp/escape-build -t test-build-escape:latest \
+                    --progress plain > /tmp/escape-build.log 2>&1
+                  rc=$?
+                  set -e
+                  cat -v /tmp/escape-build.log
+                  [ "$rc" -ne 0 ] || { echo "FAIL: a missing COPY source did not fail the build"; exit 1; }
+                  # The progress log echoes the Dockerfile's own lines, which is
+                  # the author's text; the assertion is about the error line, whose
+                  # name may just as well have come out of an image.
+                  grep -F "Build failed" /tmp/escape-build.log > /tmp/escape-failline.txt \
+                    || { echo "FAIL: the build printed no failure line"; exit 1; }
+                  cat -v /tmp/escape-failline.txt
+                  grep -qF 'nope\efile.txt' /tmp/escape-failline.txt \
+                    || { echo "FAIL: the reported name was not escaped"; exit 1; }
+                  if grep -qF "$(printf 'nope\033file.txt')" /tmp/escape-failline.txt; then
+                    echo "FAIL: a raw escape reached the terminal"; exit 1
+                  fi
+                  [ "$(wc -l < /tmp/escape-failline.txt)" -eq 1 ] \
+                    || { echo "FAIL: the failure was not one line"; exit 1; }
+                  if grep -q "Traceback" /tmp/escape-build.log; then
+                    echo "FAIL: the failure left the program as a traceback"; exit 1
+                  fi
+                  echo "PASS: the name was printed escaped and the build failed cleanly"
+
             # ── Phase 10: Namespace Security Tests ──────────────────────────
             # Regression tests for the security report findings (Tests 2,3,7).
             # These verify that --isolated mode provides the expected isolation
@@ -878,12 +1227,15 @@ jobs:
               run: |
                   echo "=== Killing all sessions ==="
                   sudo chroot-distro kill httpd 2>/dev/null || true
+                  pkill -f lying-server.py 2>/dev/null || true
                   echo "=== Unmounting all containers ==="
-                  for name in httpd debian alpine alpine-test test-build test-build-adv debian-sec; do
+                  for name in httpd debian alpine alpine-test test-build test-build-adv \
+                              test-build-out test-build-out2 test-build-add debian-sec; do
                     sudo chroot-distro unmount "$name" 2>/dev/null || true
                   done
                   echo "=== Removing all containers ==="
-                  for name in httpd debian alpine alpine-test test-build test-build-adv debian-sec; do
+                  for name in httpd debian alpine alpine-test test-build test-build-adv \
+                              test-build-out test-build-out2 test-build-add debian-sec; do
                     sudo chroot-distro remove "$name" 2>/dev/null || true
                   done
                   echo "=== Final state ==="
