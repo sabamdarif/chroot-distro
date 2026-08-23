@@ -157,6 +157,12 @@ declined to finish reading. A finished layer is renamed into the cache through
 created with `mkdirat` off an `O_NOFOLLOW` walk down to `RUNTIME_DIR/build-tmp`
 (falling back to `/tmp`), then removed under that same descriptor, so neither a
 planted `oci_layers` nor a planted `build-tmp` can redirect a build's output.
+A `RUN --mount` scratch copy goes the same way at the end of the step
+(`run_mounts._remove_scratch`, recording the names below the scratch root rather
+than a path): the tree is what the step wrote, so its depth and its modes are
+the step's choice, and `shutil.rmtree(ignore_errors=True)` swallowed an OSError
+but not the RecursionError a deep tree raises, in a teardown that runs after the
+step has already succeeded.
 Both halves of a step address the stage rootfs by descriptor rather than by the
 name they resolved: `tar_extract.safe_resolve_parts` says where a `COPY`/`ADD`
 entry belongs and `copy_step._materialise_entry` re-walks those components with

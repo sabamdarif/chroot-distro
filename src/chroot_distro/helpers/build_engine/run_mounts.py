@@ -12,6 +12,7 @@ import shutil
 import typing
 from dataclasses import dataclass
 
+from chroot_distro import dirfd
 from chroot_distro.constants import BASE_CACHE_DIR
 from chroot_distro.helpers.build_engine.errors import BuildError
 from chroot_distro.helpers.tar_extract import _safe_resolve
@@ -203,7 +204,34 @@ def _scratch_copy(src: str, scratch: str) -> str:
     return scratch
 
 
-def _resolve_bind(engine: typing.Any, m: RunMount, n: int, tmp_paths: list[str]) -> tuple[str, bool]:
+def _remove_scratch(engine: typing.Any, parts: typing.Sequence[str]) -> None:
+    """Remove the scratch copy *parts* names below the build's scratch root.
+
+    What a mount leaves there is a RUN step's own doing -- a rw bind of the
+    build context or of a pulled image, a private cache the step wrote into --
+    so the depth and the modes are the step's choice, not this program's.
+    `shutil.rmtree(ignore_errors=True)` swallowed an OSError but not the
+    RecursionError a tree deeper than the interpreter's limit raises, and this
+    runs in the session's `finally`: a step that had otherwise succeeded ended
+    the build in a traceback. The walk answers both, and it starts from the
+    scratch root's own descriptor, so a `tmp_root` re-pointed while the step ran
+    does not get to say where the removal lands.
+    """
+    root_fd = getattr(engine, "tmp_root_fd", None)
+    try:
+        if root_fd is None:
+            parent_fd = dirfd.opendir(os.path.join(engine.tmp_root, *parts[:-1]))
+        else:
+            parent_fd = dirfd.descend_at(root_fd, parts[:-1])
+    except OSError:
+        return
+    try:
+        dirfd.rmtree_at(parent_fd, parts[-1], force=True, on_error=lambda _rel, _exc: None)
+    finally:
+        os.close(parent_fd)
+
+
+def _resolve_bind(engine: typing.Any, m: RunMount, n: int, scratch_names: list[tuple[str, ...]]) -> tuple[str, bool]:
     if m.from_:
         from chroot_distro.helpers.build_engine.copy_step import _pull_throwaway_image
 
@@ -228,13 +256,15 @@ def _resolve_bind(engine: typing.Any, m: RunMount, n: int, tmp_paths: list[str])
     if not m.readonly:
         # rw bind: writes must not hit the build context / stage rootfs, so
         # bind a scratch copy instead (writes are discarded after the step).
-        scratch = os.path.join(engine.tmp_root, f"runmount-rw-{n}")
-        tmp_paths.append(scratch)
-        src = _scratch_copy(src, scratch)
+        parts = (f"runmount-rw-{n}",)
+        scratch_names.append(parts)
+        src = _scratch_copy(src, os.path.join(engine.tmp_root, *parts))
     return src, bool(m.readonly)
 
 
-def _resolve_cache(engine: typing.Any, m: RunMount, n: int, tmp_paths: list[str], locks: list) -> tuple[str, bool]:
+def _resolve_cache(
+    engine: typing.Any, m: RunMount, n: int, scratch_names: list[tuple[str, ...]], locks: list
+) -> tuple[str, bool]:
     from chroot_distro.locking import RunCacheLock
 
     key = hashlib.sha256((m.id or m.target).encode()).hexdigest()[:16]
@@ -253,13 +283,13 @@ def _resolve_cache(engine: typing.Any, m: RunMount, n: int, tmp_paths: list[str]
     elif m.sharing == "private":
         # ponytail: private = throwaway copy, writes discarded; switch to a
         # persist-back copy if private caches ever need to accumulate.
-        scratch = os.path.join(engine.tmp_root, f"runmount-cache-{n}")
-        tmp_paths.append(scratch)
-        return _scratch_copy(cache_dir, scratch), False
+        parts = (f"runmount-cache-{n}",)
+        scratch_names.append(parts)
+        return _scratch_copy(cache_dir, os.path.join(engine.tmp_root, *parts)), False
     return cache_dir, False
 
 
-def _resolve_secret(engine: typing.Any, m: RunMount, tmp_paths: list[str]) -> tuple[str, bool]:
+def _resolve_secret(engine: typing.Any, m: RunMount, scratch_names: list[tuple[str, ...]]) -> tuple[str, bool]:
     src_path = (getattr(engine, "secrets", None) or {}).get(m.id)
     if src_path is None:
         raise BuildError(
@@ -276,7 +306,7 @@ def _resolve_secret(engine: typing.Any, m: RunMount, tmp_paths: list[str]) -> tu
     if m.uid or m.gid:
         with contextlib.suppress(OSError):
             os.chown(tmp_copy, m.uid, m.gid)
-    tmp_paths.append(tmp_copy)
+    scratch_names.append(("secrets", m.id))
     return tmp_copy, True
 
 
@@ -303,7 +333,7 @@ def run_mount_session(
     rootfs = stage.rootfs_dir
     extra_env: dict[str, str] = {}
     mounted: list[str] = []
-    tmp_paths: list[str] = []
+    scratch_names: list[tuple[str, ...]] = []
     locks: list[typing.Any] = []
     created: list[str] = []
 
@@ -328,11 +358,11 @@ def run_mount_session(
                 continue
 
             if m.type == "bind":
-                src, ro = _resolve_bind(engine, m, n, tmp_paths)
+                src, ro = _resolve_bind(engine, m, n, scratch_names)
             elif m.type == "cache":
-                src, ro = _resolve_cache(engine, m, n, tmp_paths, locks)
+                src, ro = _resolve_cache(engine, m, n, scratch_names, locks)
             elif m.type == "secret":
-                src, ro = _resolve_secret(engine, m, tmp_paths)
+                src, ro = _resolve_secret(engine, m, scratch_names)
             else:  # ssh
                 sock = (getattr(engine, "ssh_sockets", None) or {}).get(m.id)
                 if sock is None:
@@ -363,11 +393,7 @@ def run_mount_session(
                     os.rmdir(path)
                 else:
                     os.remove(path)
-        for path in tmp_paths:
-            with contextlib.suppress(OSError):
-                if os.path.isdir(path):
-                    shutil.rmtree(path, ignore_errors=True)
-                else:
-                    os.remove(path)
+        for parts in reversed(scratch_names):
+            _remove_scratch(engine, parts)
         for lock in locks:
             lock.release()

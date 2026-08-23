@@ -3,6 +3,7 @@ from unittest.mock import patch
 
 import pytest
 
+from chroot_distro import dirfd
 from chroot_distro.helpers.build_engine import run_mounts
 from chroot_distro.helpers.build_engine.errors import BuildError
 from chroot_distro.helpers.build_engine.run_mounts import (
@@ -517,3 +518,50 @@ def test_tmpfs_target_is_the_resolved_path(env):
         "chroot_distro.helpers.mount_manager.safe_unmount"
     ), run_mount_session(engine, stage, [m]):
         assert asm.call_args[0][1].target == "/run/scratch"
+
+
+# ── what a step leaves in the scratch copy ────────────────────────────────────
+def test_a_scratch_directory_the_step_sealed_still_goes(env):
+    # The rw bind is the step's to write into, so the modes at teardown are its
+    # choice. shutil.rmtree(ignore_errors=True) could not read a directory left
+    # mode 0 and left the tree standing.
+    engine, stage = env
+    src = os.path.join(engine.build_dir, "data")
+    os.makedirs(os.path.join(src, "sub"))
+    m = _mount("type=bind,target=/x,source=data,rw")
+
+    with patch("chroot_distro.helpers.mount_manager.safe_mount") as sm, patch(
+        "chroot_distro.helpers.mount_manager.safe_unmount"
+    ):
+        with run_mount_session(engine, stage, [m]):
+            mounted_src = sm.call_args[0][0]
+            os.chmod(os.path.join(mounted_src, "sub"), 0o000)
+        assert not os.path.exists(mounted_src)
+
+
+def test_the_scratch_removal_follows_the_pinned_root_not_the_name(env, tmp_path):
+    # `tmp_root` is a name a process a previous step left behind can re-point;
+    # the removal is made off the descriptor the build opened on it.
+    engine, stage = env
+    os.makedirs(os.path.join(engine.build_dir, "data"))
+    engine.tmp_root_fd = dirfd.opendir(engine.tmp_root)
+    m = _mount("type=bind,target=/x,source=data,rw")
+
+    moved = str(tmp_path / "moved")
+    decoy = tmp_path / "decoy-file"
+    try:
+        with patch("chroot_distro.helpers.mount_manager.safe_mount") as sm, patch(
+            "chroot_distro.helpers.mount_manager.safe_unmount"
+        ):
+            with run_mount_session(engine, stage, [m]):
+                scratch = os.path.basename(sm.call_args[0][0])
+                os.rename(engine.tmp_root, moved)
+                os.mkdir(engine.tmp_root)
+                os.mkdir(os.path.join(engine.tmp_root, scratch))
+                decoy.write_text("kept")
+                os.link(str(decoy), os.path.join(engine.tmp_root, scratch, "kept"))
+    finally:
+        os.close(engine.tmp_root_fd)
+
+    assert not os.path.exists(os.path.join(moved, scratch))
+    assert os.path.isfile(os.path.join(engine.tmp_root, scratch, "kept"))
