@@ -7,7 +7,12 @@ import subprocess
 import sys
 import tempfile
 
-from chroot_distro.constants import IS_TERMUX, TERMUX_HOME, TERMUX_PREFIX
+from chroot_distro.constants import (
+    ANDROID_HOST_ENV_VARS,
+    IS_TERMUX,
+    TERMUX_HOME,
+    TERMUX_PREFIX,
+)
 from chroot_distro.exceptions import RootRequiredError
 from chroot_distro.syscalls._constants import (
     CAP_DAC_OVERRIDE,
@@ -97,9 +102,9 @@ def is_root_available() -> bool:
 
 
 def _forwarded_env_assignments() -> list[str]:
-    """Return ``VAR=value`` strings for the CD_* and display vars present in the env."""
+    """Return ``VAR=value`` strings for the forwarded vars present in the env."""
     assignments: list[str] = []
-    for name in (*_FORWARDED_ENV_VARS, *_FORWARDED_DISPLAY_VARS):
+    for name in (*_FORWARDED_ENV_VARS, *_FORWARDED_DISPLAY_VARS, *ANDROID_HOST_ENV_VARS):
         value = os.environ.get(name)
         if value is not None:
             assignments.append(f"{name}={value}")
@@ -319,7 +324,7 @@ def _termux_root_env_exports(secret_file: str | None = None) -> str:
         if os.path.exists(termux_exec):
             exports["LD_PRELOAD"] = termux_exec
             break
-    for name in (*_FORWARDED_ENV_VARS, *_FORWARDED_DISPLAY_VARS):
+    for name in (*_FORWARDED_ENV_VARS, *_FORWARDED_DISPLAY_VARS, *ANDROID_HOST_ENV_VARS):
         value = os.environ.get(name)
         if value is not None:
             exports[name] = value

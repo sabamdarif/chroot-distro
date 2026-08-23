@@ -4,7 +4,7 @@ import logging
 import os
 import re
 
-from chroot_distro.constants import TERMUX_PREFIX
+from chroot_distro.constants import ANDROID_HOST_ENV_VARS, TERMUX_PREFIX
 from chroot_distro.message import warn
 
 log = logging.getLogger(__name__)
@@ -26,31 +26,10 @@ _SENSITIVE_ENV_KEYS = frozenset(
 )
 
 
-ANDROID_HOST_ENV_VARS = (
-    "ANDROID_ART_ROOT",
-    "ANDROID_DATA",
-    "ANDROID_I18N_ROOT",
-    "ANDROID_ROOT",
-    "ANDROID_RUNTIME_ROOT",
-    "ANDROID_TZDATA_ROOT",
-    "BOOTCLASSPATH",
-    "DEX2OATBOOTCLASSPATH",
-    "EXTERNAL_STORAGE",
-)
-
-
 # Vars the image Env must not override.
 IMAGE_ENV_BLOCKED = frozenset(
     {
-        "ANDROID_ART_ROOT",
-        "ANDROID_DATA",
-        "ANDROID_I18N_ROOT",
-        "ANDROID_ROOT",
-        "ANDROID_RUNTIME_ROOT",
-        "ANDROID_TZDATA_ROOT",
-        "BOOTCLASSPATH",
-        "DEX2OATBOOTCLASSPATH",
-        "EXTERNAL_STORAGE",
+        *ANDROID_HOST_ENV_VARS,
         "MOZ_FAKE_NO_SANDBOX",
         "PULSE_SERVER",
         "TERM",

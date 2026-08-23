@@ -142,3 +142,21 @@ if IS_TERMUX:
     )
 else:
     DEFAULT_PATH_ENV = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/local/games:/usr/games"
+
+
+# Android system vars every Android process inherits from init. The guest
+# needs them for ART tooling (`am`, `app_process`, hence termux-api) to find
+# the runtime, and elevate.py has to carry them across `su`, which is free to
+# hand the root side an environment of its own choosing. Kept here rather
+# than in commands/login/env.py so both layers read one list.
+ANDROID_HOST_ENV_VARS = (
+    "ANDROID_ART_ROOT",
+    "ANDROID_DATA",
+    "ANDROID_I18N_ROOT",
+    "ANDROID_ROOT",
+    "ANDROID_RUNTIME_ROOT",
+    "ANDROID_TZDATA_ROOT",
+    "BOOTCLASSPATH",
+    "DEX2OATBOOTCLASSPATH",
+    "EXTERNAL_STORAGE",
+)

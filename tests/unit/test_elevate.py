@@ -1,5 +1,6 @@
 import json
 import os
+import shlex
 import tempfile
 from unittest.mock import MagicMock, patch
 
@@ -195,6 +196,22 @@ def test_forwarded_env_assignments_only_present_vars():
     assert all(not a.startswith("CD_DOCKER_AUTH=") for a in assignments)
     # Unrelated host vars are never forwarded.
     assert all(not a.startswith("UNRELATED=") for a in assignments)
+
+
+def test_android_host_vars_survive_elevation():
+    """`su` may hand the root side an environment of its own, so the Android
+    system vars the guest needs for `am`/termux-api are forwarded explicitly."""
+    from chroot_distro.elevate import _termux_root_env_exports
+
+    android = {"BOOTCLASSPATH": "/apex/com.android.art/javalib/core-oj.jar", "ANDROID_ART_ROOT": "/apex/com.android.art"}
+    with patch.dict("os.environ", android, clear=True):
+        assignments = _forwarded_env_assignments()
+        with patch("os.makedirs"):
+            prelude = _termux_root_env_exports()
+
+    for key, value in android.items():
+        assert f"{key}={value}" in assignments
+        assert f"export {key}={shlex.quote(value)}" in prelude
 
 
 def test_elevate_forwards_cd_use_ns_via_sudo():
