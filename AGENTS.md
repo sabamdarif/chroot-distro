@@ -147,7 +147,12 @@ silently ignored), `events.py` renders progress (`--progress plain|tty|rawjson`)
 recipe hash (index and lock reached by an `O_NOFOLLOW` walk down to the cache
 directory, so a planted entry under either fixed name is refused rather than
 read, and a lock name that cannot be cleared records the step unlocked instead
-of failing the build). A finished layer is renamed into the cache through
+of failing the build). How much of the index a build will read is its own
+choice too: the file holds one record per cached step, so the read is capped at
+`_MAX_INDEX_BYTES` (16 MiB) counted off the bytes actually drawn, and an entry
+holding more raises rather than yielding a prefix -- half a JSON document parses
+as no index at all, and `record()` would then write over entries it had merely
+declined to finish reading. A finished layer is renamed into the cache through
 `atomic.publish_file`, and the scratch root a build assembles its stages in is
 created with `mkdirat` off an `O_NOFOLLOW` walk down to `RUNTIME_DIR/build-tmp`
 (falling back to `/tmp`), then removed under that same descriptor, so neither a

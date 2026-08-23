@@ -1,3 +1,4 @@
+import errno
 import json
 import os
 import subprocess
@@ -239,3 +240,70 @@ def test_a_symlinked_cache_directory_is_refused_not_followed(monkeypatch, tmp_pa
     # that nothing is pinned. The refusal has to reach the caller.
     with pytest.raises(OSError):
         build_cache.discard_index()
+
+
+# How much of the index this program will read is its own choice, for the same
+# reason: json.loads on whatever the read returned stops only at end of file, so
+# without a ceiling whoever can write under that fixed name decides how many
+# bytes a build holds in memory before finding out the document is nonsense.
+
+
+def test_an_index_over_the_cap_is_refused_not_truncated(monkeypatch, tmp_path):
+    index = _redirect(monkeypatch, tmp_path)
+    monkeypatch.setattr(build_cache, "_MAX_INDEX_BYTES", 4096)
+    index.write_bytes(b"[" * 4097)
+
+    with pytest.raises(OSError) as exc:
+        build_cache._read_index()
+    assert exc.value.errno == errno.EFBIG
+
+
+def test_an_index_at_the_cap_still_reads(monkeypatch, tmp_path):
+    index = _redirect(monkeypatch, tmp_path)
+    payload = json.dumps({"version": 1, "entries": {"h": {"layer_digest": "sha256:a"}}}).encode()
+    monkeypatch.setattr(build_cache, "_MAX_INDEX_BYTES", len(payload))
+    index.write_bytes(payload)
+
+    assert build_cache.lookup("h") == {"layer_digest": "sha256:a"}
+
+
+def test_a_padded_index_is_refused_by_size_alone(monkeypatch, tmp_path):
+    # The document parses: whitespace after a JSON value is legal, so nothing
+    # but the cap stands between this file and its bytes being resident.
+    index = _redirect(monkeypatch, tmp_path)
+    monkeypatch.setattr(build_cache, "_MAX_INDEX_BYTES", 4096)
+    index.write_bytes(json.dumps({"version": 1, "entries": {"h": {}}}).encode() + b" " * 8192)
+
+    assert build_cache.lookup("h") is None
+
+
+def test_the_cap_counts_bytes_read_not_the_size_reported(monkeypatch, tmp_path):
+    # A size check would pass for a file being appended to as it is read. The
+    # cap is on the read itself, so a descriptor that keeps yielding raises.
+    monkeypatch.setattr(build_cache, "_MAX_INDEX_BYTES", 4096)
+    monkeypatch.setattr(build_cache, "_READ_CHUNK", 512)
+    r, w = os.pipe()
+    try:
+        os.write(w, b"x" * 4608)
+        os.close(w)
+        w = -1
+        with pytest.raises(OSError) as exc:
+            build_cache._read_capped(r)
+    finally:
+        os.close(r)
+        if w != -1:
+            os.close(w)
+    assert exc.value.errno == errno.EFBIG
+
+
+def test_recording_over_an_oversized_index_replaces_it(monkeypatch, tmp_path):
+    # Whatever holds that many bytes is not an index this program wrote, so the
+    # step being recorded goes into a fresh one rather than failing the build.
+    index = _redirect(monkeypatch, tmp_path)
+    monkeypatch.setattr(build_cache, "_MAX_INDEX_BYTES", 4096)
+    index.write_bytes(b"[" * 8192)
+
+    build_cache.record("h", "sha256:layer", "sha256:diff", 1)
+
+    assert build_cache.lookup("h")["layer_digest"] == "sha256:layer"
+    assert index.stat().st_size < 4096

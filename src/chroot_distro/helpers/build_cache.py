@@ -1,4 +1,5 @@
 import contextlib
+import errno
 import fcntl
 import hashlib
 import json
@@ -12,6 +13,20 @@ from chroot_distro.constants import BASE_CACHE_DIR, RUNTIME_DIR
 
 _INDEX_PATH = os.path.join(BASE_CACHE_DIR, "build_cache_index.json")
 _INDEX_LOCK_PATH = _INDEX_PATH + ".lock"
+
+# What the index is allowed to cost to read.
+#
+# The document is this program's own -- one record per cached build step, a few
+# kilobytes -- but the file standing under its name is not: on Termux the cache
+# is nested inside the $PREFIX that is bound read-write into every non-isolated
+# container. A read that stops only at end of file lets whoever is in that
+# position decide how many bytes every `build` pulls into memory before finding
+# out the document is nonsense, and it need not even be nonsense -- a valid
+# index padded with whitespace parses, and is then resident. 16 MiB is orders of
+# magnitude above anything written here.
+_MAX_INDEX_BYTES = 16 * 1024 * 1024
+
+_READ_CHUNK = 1 << 20
 
 
 def _index_walk() -> tuple[str, tuple[str, ...]]:
@@ -100,14 +115,43 @@ def _read_index() -> bytes:
     that is there and is not an index: a symlink O_NOFOLLOW refused, a FIFO, a
     directory. `_load_index` answers both with an empty index, but the read has
     no business being the thing that decides that.
+
+    An index too large to read is that same kind of entry, and is refused the
+    same way rather than truncated: a prefix of a JSON document parses as no
+    index at all, so `record()` would write over entries it had merely declined
+    to finish reading. Whatever stands there holding more than
+    `_MAX_INDEX_BYTES` is not an index this program wrote.
     """
     dir_fd = _index_dir_fd()
     try:
         fd, _st = dirfd.open_regular_at(dir_fd, os.path.basename(_INDEX_PATH), os.O_RDONLY)
     finally:
         os.close(dir_fd)
-    with os.fdopen(fd, "rb") as fh:
-        return fh.read()
+    try:
+        return _read_capped(fd)
+    finally:
+        os.close(fd)
+
+
+def _read_capped(fd: int) -> bytes:
+    """Everything behind *fd*, or OSError(EFBIG) past `_MAX_INDEX_BYTES`.
+
+    The cap counts the bytes actually drawn rather than an fstat's st_size: the
+    size a file reports is not a promise about what reading it costs, and one
+    being appended to while it is read would pass a size check and then exceed
+    it. The descriptor stays the caller's to close.
+    """
+    chunks: list[bytes] = []
+    remaining = _MAX_INDEX_BYTES + 1
+    while remaining > 0:
+        chunk = os.read(fd, min(remaining, _READ_CHUNK))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    if remaining <= 0:
+        raise OSError(errno.EFBIG, f"build cache index is larger than {_MAX_INDEX_BYTES} bytes")
+    return b"".join(chunks)
 
 
 def _load_index() -> dict[str, typing.Any]:
