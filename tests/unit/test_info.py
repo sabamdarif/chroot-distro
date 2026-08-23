@@ -147,11 +147,21 @@ def test_binfmt_qemu_status_ok_with_handler():
     assert "aarch64" in value and "arm" in value
 
 
-def test_namespace_status_warns_when_tools_missing():
-    with patch("shutil.which", return_value=None):
+def test_namespace_status_warns_when_the_kernel_lacks_namespaces():
+    with patch.object(info, "probe_flag_runtime", return_value=info.PROBE_ABSENT):
         value, level = info._namespace_status()
     assert level == "warn"
     assert "--isolated" in value
+
+
+def test_namespace_status_reports_userns_separately():
+    with (
+        patch.object(info, "probe_flag_runtime", return_value=info.PROBE_PRESENT),
+        patch.object(info, "_userns_enabled", return_value=False),
+    ):
+        value, level = info._namespace_status()
+    assert level == "warn"
+    assert "user namespaces disabled" in value
 
 
 def test_data_mount_flags_warns_on_nosuid():

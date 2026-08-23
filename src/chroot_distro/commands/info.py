@@ -1,8 +1,8 @@
+import ctypes
 import json
 import os
 import platform
 import shutil
-import subprocess
 import sys
 from dataclasses import dataclass, field
 
@@ -100,22 +100,33 @@ def _read_os_release() -> dict[str, str]:
     return data
 
 
-def _read_build_prop(keys: tuple[str, ...]) -> dict[str, str]:
-    """Read selected getprop-style keys from Android, falling back to file."""
-    found: dict[str, str] = {}
+def _system_property(key: str) -> str:
+    """Read one Android system property, or "" when it cannot be read.
+
+    The property is asked of libc, the way getprop(1) itself asks: the values
+    live in a shared memory area no file exposes, and __system_property_get
+    writes into a caller-supplied buffer of PROP_VALUE_MAX (92) bytes.
+    """
     try:
-        out = subprocess.check_output(["getprop"], stderr=subprocess.DEVNULL, text=True, timeout=5)
-        for line in out.splitlines():
-            # Format: [key]: [value]
-            if "]: [" not in line:
-                continue
-            key, _, value = line.partition("]: [")
-            key = key.lstrip("[").strip()
-            value = value.rstrip("]").strip()
-            if key in keys and value:
-                found[key] = value
-    except (OSError, subprocess.SubprocessError):
-        pass
+        libc = ctypes.CDLL(None, use_errno=True)
+        getter = libc.__system_property_get
+    except (OSError, AttributeError):
+        return ""
+    getter.argtypes = (ctypes.c_char_p, ctypes.c_char_p)
+    getter.restype = ctypes.c_int
+    buf = ctypes.create_string_buffer(92)
+    if getter(key.encode(), buf) <= 0:
+        return ""
+    return buf.value.decode(errors="replace").strip()
+
+
+def _read_build_prop(keys: tuple[str, ...]) -> dict[str, str]:
+    """Read selected Android system properties, falling back to build.prop."""
+    found: dict[str, str] = {}
+    for key in keys:
+        value = _system_property(key)
+        if value:
+            found[key] = value
     if all(k in found for k in keys):
         return found
     try:
@@ -262,16 +273,20 @@ def _userns_enabled() -> bool | None:
 
 
 def _namespace_status() -> tuple[str, str]:
-    """Return (value, level) describing unshare/nsenter + userns support."""
-    tools = [t for t in ("unshare", "nsenter") if shutil.which(t)]
-    if not tools:
-        return "unshare/nsenter not found (--isolated unavailable)", "warn"
+    """Return (value, level) describing kernel namespace + userns support.
+
+    Isolation is unshare(2) and setns(2) from this process, so there is no tool
+    to look for: what decides it is the kernel.  /proc/self/ns answers that
+    without root, which `info` may well be running without.
+    """
+    if probe_flag_runtime("NAMESPACES") == PROBE_ABSENT:
+        return "not supported by this kernel (--isolated unavailable)", "warn"
     userns = _userns_enabled()
     if userns is False:
-        return f"{'+'.join(tools)} present, user namespaces disabled", "warn"
+        return "supported, user namespaces disabled", "warn"
     if userns is None:
-        return f"{'+'.join(tools)} present", "ok"
-    return f"{'+'.join(tools)} present, user namespaces enabled", "ok"
+        return "supported", "ok"
+    return "supported, user namespaces enabled", "ok"
 
 
 def _read_sysctl_int(path: str) -> int | None:
