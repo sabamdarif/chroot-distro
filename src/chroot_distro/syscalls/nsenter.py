@@ -20,6 +20,8 @@ enter_and_exec
     Fork, enter namespaces, and ``execvpe`` a command.
 run_in_namespaces
     Higher-level wrapper returning :class:`subprocess.CompletedProcess`.
+call_in_namespaces
+    Fork, enter namespaces, and run a Python callable there.
 filter_accessible_namespaces
     Return only the namespace bits whose ``/proc`` files are accessible.
 """
@@ -31,6 +33,7 @@ import logging
 import os
 import signal
 import subprocess
+import typing
 
 from chroot_distro.syscalls._constants import (
     CLONE_NEWCGROUP,
@@ -266,10 +269,6 @@ def run_in_namespaces(
 ) -> subprocess.CompletedProcess:
     """Enter namespaces and run a command, returning a :class:`~subprocess.CompletedProcess`.
 
-    This is a higher-level interface that replaces the old
-    ``NamespaceHolder.run()`` method which spawned the external
-    ``nsenter`` binary as a subprocess.
-
     The function forks a child process that enters the target namespaces
     and ``exec``-s *command*.  When *capture_output* is ``True``, pipes
     are set up for ``stdout`` and ``stderr`` and their contents are
@@ -428,6 +427,60 @@ def run_in_namespaces(
         )
 
 
+def call_in_namespaces(
+    target_pid: int,
+    namespaces: int,
+    fn: typing.Callable[[], bytes | None],
+) -> bytes | None:
+    """Run *fn* inside *target_pid*'s namespaces and return what it produced.
+
+    This is what a coreutils argv was standing in for: the work is a few
+    syscalls, and the only reason to leave this process was to be in another
+    namespace when they run. A fork plus setns(2) gets that, so *fn* is
+    ordinary Python and its bytes come back down a pipe. ``None`` means the
+    child raised or died, which the caller reads as failure.
+
+    *fn* runs in a forked copy of this process. Nothing it does to memory
+    reaches the parent, so anything it has to say belongs in its return value.
+    """
+    read_fd, write_fd = os.pipe()
+    child_pid = os.fork()
+
+    if child_pid == 0:
+        # --- Child ---
+        try:
+            os.close(read_fd)
+            enter_namespaces(target_pid, namespaces)
+            data = fn()
+            if data:
+                os.write(write_fd, data)
+            os.close(write_fd)
+            os._exit(0)
+        except BaseException:
+            os._exit(1)
+
+    # --- Parent ---
+    # Read to EOF before reaping: fn's output can exceed the pipe buffer, and
+    # a child blocked in write(2) would never be waited for.
+    os.close(write_fd)
+    try:
+        chunks = []
+        while True:
+            chunk = os.read(read_fd, 65536)
+            if not chunk:
+                break
+            chunks.append(chunk)
+    except OSError:
+        chunks = []
+    finally:
+        os.close(read_fd)
+
+    _, status = os.waitpid(child_pid, 0)
+    if not (os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0):
+        return None
+    return b"".join(chunks)
+
+
 def filter_accessible_namespaces(pid: int, namespaces: int) -> int:
     """Return only the namespace bits whose ``/proc`` files are accessible.
 
@@ -461,8 +514,14 @@ def enter_and_run_with_pty(
     env: dict[str, str] | None = None,
     fork_for_pid: bool = True,
     drop_caps: bool = False,
+    setup: typing.Callable[[], None] | None = None,
 ) -> int:
     """Enter namespaces via native ``setns(2)`` and exec *command* with a PTY.
+
+    *setup* runs in the child once it is in the namespaces and has dropped what
+    it is going to drop, immediately before the exec. It is how a caller puts
+    the child somewhere this module knows nothing about (a chroot, an identity)
+    without handing over an argv for a binary that would do it.
 
     When stdin is a terminal, allocates a fresh PTY pair so the child has
     its own controlling terminal (enabling job control, ``ttyname()``,
@@ -480,6 +539,7 @@ def enter_and_run_with_pty(
         _copy_terminal_size,
         _pty_relay,
         _setup_child_pty,
+        _try_exec,
         _wait_for_child_with_signals,
     )
 
@@ -511,11 +571,10 @@ def enter_and_run_with_pty(
             if drop_caps:
                 drop_bounding_caps()
 
-            os.execvpe(
-                command[0],
-                command,
-                env if env is not None else dict(os.environ),
-            )
+            if setup is not None:
+                setup()
+
+            _try_exec(command, env if env is not None else dict(os.environ))
         except BaseException:
             os._exit(127)
 

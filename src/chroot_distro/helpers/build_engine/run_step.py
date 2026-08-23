@@ -15,7 +15,6 @@ import ctypes
 import functools
 import os
 import signal
-import subprocess
 import time
 import typing
 
@@ -49,6 +48,12 @@ from chroot_distro.helpers.layer_diff import (
 )
 from chroot_distro.helpers.tar_extract import _safe_resolve
 from chroot_distro.message import log_info, warn
+from chroot_distro.syscalls.chroot import (
+    _try_exec,
+    _wait_for_child,
+    _wait_for_child_with_signals,
+    enter_chroot,
+)
 
 
 def _rootfs_fd(stage: typing.Any) -> int:
@@ -162,10 +167,10 @@ def _exec_chroot(
     stdin_input: str | None,
     mounts: list[RunMount] | None = None,
 ) -> int:
-    """Invoke chroot against *stage*'s rootfs to execute *command*."""
+    """Run *command* chrooted into *stage*'s rootfs; return its exit code."""
     rootfs = stage.rootfs_dir
 
-    from chroot_distro.commands.login.chroot_cmd import build_chroot_args
+    from chroot_distro.commands.login.chroot_cmd import build_chroot_config
     from chroot_distro.commands.login.passwd import find_user_groups
 
     uid, gid = resolve_user_for_chroot(rootfs, stage.user, root_fd=stage.rootfs_fd)
@@ -174,21 +179,16 @@ def _exec_chroot(
     user_spec = user_name if not user_name.isdigit() else str(uid)
     groups = find_user_groups(rootfs, user_spec, str(gid))
 
-    def _args(newroot: str) -> list[str]:
-        return build_chroot_args(
-            rootfs=rootfs,
-            login_uid=str(uid) if uid else None,
-            login_gid=str(gid) if gid else None,
-            groups=groups,
-            workdir=stage.workdir or "/",
-            inner_cmd=command,
-            newroot=newroot,
-        )
+    config = build_chroot_config(
+        rootfs=rootfs,
+        login_uid=str(uid) if uid else None,
+        login_gid=str(gid) if gid else None,
+        groups=groups,
+        workdir=stage.workdir or "/",
+        inner_cmd=command,
+    )
 
     child_env = _build_child_env(engine, stage)
-
-    def _plain_args() -> list[str]:
-        return _args(os.curdir if stage.rootfs_fd is not None else rootfs)
 
     if not engine.quiet and not engine.verbose:
         log_info(f"Running step (user={stage.user or 'root'}, cwd={stage.workdir or '/'})...")
@@ -209,27 +209,23 @@ def _exec_chroot(
         )
         with session(container_key, rootfs, minimal=True) as holder:
             if holder is not None:
-                # The holder execs the child itself, so its cwd is not ours to
-                # place; NEWROOT stays the path there.
                 with run_mount_session(engine, stage, mounts or [], holder=holder) as extra_env:
-                    return _run_in_holder(holder, _args(rootfs), {**child_env, **extra_env})
-            return _run_plain(rootfs, _plain_args(), child_env, stdin_input, engine, stage, mounts or [])
+                    return _run_in_holder(holder, config, {**child_env, **extra_env})
+            return _run_plain(rootfs, config, child_env, stdin_input, engine, stage, mounts or [])
 
-    return _run_plain(rootfs, _plain_args(), child_env, stdin_input, engine, stage, mounts or [])
+    return _run_plain(rootfs, config, child_env, stdin_input, engine, stage, mounts or [])
 
 
-def _run_in_holder(holder: typing.Any, chroot_args: list[str], child_env: dict[str, str]) -> int:
-    """Execute *chroot_args* inside the holder's namespaces; return the exit code.
+def _run_in_holder(holder: typing.Any, config: typing.Any, child_env: dict[str, str]) -> int:
+    """Run the step inside the holder's namespaces; return its exit code.
 
-    The holder is already chrooted into the rootfs (maximum isolation); the
-    child enters its mount/PID/UTS/IPC namespaces via ``nsenter`` and inherits
-    the build's stdio so RUN output streams live.
+    The rootfs is entered by path here, not through the stage's pinned
+    descriptor: that descriptor names the tree as the host's mount namespace
+    sees it, while the step has to see the one this holder's namespace holds,
+    which is where its binds were applied.
     """
-    try:
-        result = holder.run(chroot_args, env=child_env)
-    except FileNotFoundError as exc:
-        raise BuildError(f"chroot command execution failed: {exc}") from exc
-    return int(result.returncode)
+    pid = _fork_step(config, child_env, holder=holder)
+    return _wait_for_child_with_signals(pid)
 
 
 def _mount_point(rootfs: str, guest_path: str) -> str | None:
@@ -257,33 +253,83 @@ def _mount_point(rootfs: str, guest_path: str) -> str | None:
     return dirfd.makedirs_under(rootfs, [] if rel == os.curdir else rel.split(os.sep))
 
 
-def _chdir_to(rootfs_fd: int | None) -> typing.Callable[[], None] | None:
-    """A preexec hook that puts the child's cwd on *rootfs_fd*, or None.
+def _step_stdin(stdin_input: str | None) -> int:
+    """A readable descriptor for the step's stdin. The caller closes it.
 
-    Paired with ``chroot .``: chroot(2) then resolves its argument against the
-    inode the build pinned, so the last name-based read the step had left --
-    the one chroot's own argv performed, after every check here had finished --
-    is gone. The hook runs between the fork and the exec and does one syscall.
+    A file rather than a pipe when there is input: nothing has to keep writing
+    while the step reads, so a body larger than the pipe buffer cannot deadlock
+    the build.
     """
-    if rootfs_fd is None:
-        return None
+    if stdin_input is None:
+        return os.open(os.devnull, os.O_RDONLY)
+    fd = os.memfd_create("run-stdin", 0)
+    os.write(fd, stdin_input.encode())
+    os.lseek(fd, 0, os.SEEK_SET)
+    return fd
 
-    def _hook() -> None:
-        os.fchdir(rootfs_fd)
 
-    return _hook
+def _fork_step(
+    config: typing.Any,
+    env: dict[str, str],
+    *,
+    stdin_input: str | None = None,
+    holder: typing.Any = None,
+    rootfs_fd: int | None = None,
+) -> int:
+    """Fork the step's command and return the child's pid.
+
+    The child leads a session of its own, so the process group _stop_step
+    sweeps afterwards is the step's and nothing else's. With *rootfs_fd* it
+    chroots onto that pinned descriptor rather than onto the rootfs path, so
+    the name the build validated is not resolved a second time; the chroot is
+    the last thing it does before the exec, since it has to happen after the
+    namespaces are joined.
+    """
+    stdin_fd = _step_stdin(stdin_input)
+    try:
+        pid = os.fork()
+    except OSError:
+        os.close(stdin_fd)
+        raise
+
+    if pid == 0:
+        # --- Child ---
+        try:
+            os.setsid()
+            os.dup2(stdin_fd, 0)
+            if holder is not None:
+                from chroot_distro.syscalls.nsenter import enter_namespaces
+
+                enter_namespaces(holder.pid, holder._live_ns_flags())
+            newroot = config.rootfs
+            if rootfs_fd is not None:
+                os.fchdir(rootfs_fd)
+                newroot = os.curdir
+            enter_chroot(
+                newroot,
+                uid=config.uid,
+                gid=config.gid,
+                groups=config.groups,
+                workdir=config.workdir,
+            )
+            _try_exec(config.command, env)
+        except BaseException:
+            os._exit(127)
+
+    os.close(stdin_fd)
+    return pid
 
 
 def _run_plain(
     rootfs: str,
-    chroot_args: list[str],
+    config: typing.Any,
     child_env: dict[str, str],
     stdin_input: str | None,
     engine: typing.Any = None,
     stage: typing.Any = None,
     mounts: list[RunMount] | None = None,
 ) -> int:
-    """Execute *chroot_args* with host-namespace bind mounts (no isolation)."""
+    """Run the step with host-namespace bind mounts (no isolation)."""
     import chroot_distro.helpers.mount_manager as mount_manager
     from chroot_distro.commands.login import bindings
 
@@ -306,33 +352,29 @@ def _run_plain(
         # RUN --mount targets go on top of the base binds (and are torn down
         # before them when the `with` block exits).
         with run_mount_session(engine, stage, mounts or []) as extra_env:
-            stdin_arg = subprocess.PIPE if stdin_input is not None else subprocess.DEVNULL
             # Before anything is spawned, so a descendant that outlives its own
             # parent is reparented here rather than onto init.
             _become_subreaper()
             baseline = set(_adopted())
-            proc = subprocess.Popen(
-                chroot_args,
-                env={**child_env, **extra_env},
-                stdin=stdin_arg,
-                start_new_session=True,
-                preexec_fn=_chdir_to(stage.rootfs_fd if stage is not None else None),  # noqa: PLW1509
-            )
             try:
-                if stdin_input is not None:
-                    proc.communicate(input=stdin_input.encode())
-                else:
-                    proc.wait()
+                pid = _fork_step(
+                    config,
+                    {**child_env, **extra_env},
+                    stdin_input=stdin_input,
+                    rootfs_fd=stage.rootfs_fd if stage is not None else None,
+                )
+            except OSError as exc:
+                raise BuildError(f"could not start the RUN step: {exc}") from exc
+            try:
+                returncode = _wait_for_child(pid)
             except KeyboardInterrupt:
                 with contextlib.suppress(OSError):
-                    os.killpg(proc.pid, signal.SIGTERM)
-                proc.wait()
-                _stop_step(proc.pid, baseline, quiet=True)
+                    os.killpg(pid, signal.SIGTERM)
+                _wait_for_child(pid)
+                _stop_step(pid, baseline, quiet=True)
                 raise
-            _stop_step(proc.pid, baseline, quiet=engine is not None and engine.quiet)
-            return proc.returncode
-    except FileNotFoundError as exc:
-        raise BuildError(f"chroot command execution failed: {exc}") from exc
+            _stop_step(pid, baseline, quiet=engine is not None and engine.quiet)
+            return returncode
     finally:
         # Clean up mounts
         mount_manager.unmount_all(rootfs)
@@ -504,12 +546,7 @@ def _stop_step(pgid: int | None, baseline: typing.Container[int] = (), *, quiet:
 
 
 def _refuse_host_exec(engine: typing.Any, key: str) -> bool:
-    """True when *key* is the host side's, so the Dockerfile may not set it.
-
-    The dict handed to Popen is the host `chroot` binary's own environment and
-    chroot passes it on to the command inside the new root, so one dict serves
-    two masters: LD_* means "a setting for the process that has not entered the
-    rootfs yet" to the host's dynamic loader, read before the step exists.
+    """True when *key* aims a loader, so the Dockerfile may not set it for a step.
 
     constants.is_host_exec_var states the rule as one about provenance, and
     that is what this applies. Both of the sources filtered here are the
@@ -518,26 +555,17 @@ def _refuse_host_exec(engine: typing.Any, key: str) -> bool:
     variables read below come from os.environ, which is the user's own
     environment and stays sovereign.
 
-    What makes it more than a tidiness rule is where the exec starts from. The
-    argv gives chroot `.` and the child fchdirs onto the stage rootfs between
-    the fork and the exec, so a *relative* LD_LIBRARY_PATH or LD_AUDIT entry is
-    resolved by the host loader against that rootfs -- a directory an earlier
-    RUN step had the run of. A step dropping a library under `lib/`, then
-    `ENV LD_LIBRARY_PATH=lib` on any later step, was the invoking user running
-    the guest's code outside any container, on a build where nothing of the
-    host is bound in at all.
-
     The value still goes into the image config: what the Dockerfile says about
-    the image it produces is its author's business, and only the host-side exec
-    is refused it.
+    the image it produces is its author's business, and only the command this
+    build execs is refused it.
     """
     if not is_host_exec_var(key):
         return False
     if key not in engine.warned_host_exec:
         engine.warned_host_exec.add(key)
         warn(
-            f"ignoring '{key}' for RUN steps: it is read by the host's loader when `chroot` is "
-            f"exec'd, not by the container. It stays in the image config."
+            f"ignoring '{key}' for RUN steps: it aims the dynamic loader rather than the "
+            f"command, and this build did not set it. It stays in the image config."
         )
     return True
 

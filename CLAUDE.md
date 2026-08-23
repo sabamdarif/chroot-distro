@@ -162,20 +162,13 @@ Kernel operations go through the ctypes wrappers in `syscalls/`; `nsenter(1)`
 and `unshare(1)` are fully reimplemented there (`syscalls/nsenter.py`,
 `syscalls/unshare.py`) and nothing new may exec a binary to reach the kernel.
 
-Two binary calls are still in the tree, and both are debts to pay off rather
-than paths to extend:
-- `commands/login/chroot_cmd.build_chroot_args` builds an argv for GNU
-  `chroot(1)`. The native replacement already exists next to it
-  (`build_chroot_config` -> `syscalls.chroot.chroot_and_exec`) and `login`
-  prefers it, but the argv is still exec'd (`_sp.run(chroot_args, ...)`)
-  whenever a namespace holder is in play (the holder is handed a command line
-  to exec), and `build_engine/run_step.py` uses only the argv form. Paying
-  this off means giving the holder a way to be handed a `ChrootConfig` instead
-  of an argv.
-- `helpers/namespace._create_holder_subprocess` execs `unshare(1)` for a holder
-  with a caller-supplied foreground command. The native
-  `create_holder_process` path already does this by forking and unsharing
-  directly, so this one wants removing outright.
+No container work execs a binary. A chroot is described by a `ChrootConfig`
+(`commands/login/chroot_cmd.build_chroot_config`) and entered by
+`syscalls.chroot.enter_chroot` / `chroot_and_run` in the child itself, after
+setns(2) and the capability drop, so the holder is handed a config rather than a
+command line and `build_engine/run_step.py` forks the step the same way. The
+argv forms that remain (`chroot_display_argv`, `NamespaceHolder.nsenter_flags`)
+are only ever printed, for `--get-chroot-cmd`.
 
 The exception is host administration, not container work: `elevate.py`
 (`sudo`/`doas`/`pkexec`/`su`) and `commands/setup.py` (`groupadd`/`usermod` and
@@ -242,10 +235,16 @@ shared by `login`, `run` and `build`:
 `helpers/namespace.py` owns `NamespaceHolder`, a long-lived holder process that
 keeps the namespaces alive between sessions (pid/flags state under
 `data/<name>/`), plus kernel capability probes and tiered flag fallbacks.
-`helpers/max_iso_holder.py` is executed as PID 1 *inside* the new namespace
-(`python3 -m chroot_distro.helpers.max_iso_holder`); it chroots itself and mounts
-a fresh procfs (`hidepid=2`), read-only sysfs, tmpfs `/dev` and devpts from the
-inside, so the parent never has to `nsenter` back in.
+The holder is forked and unshared in this process
+(`syscalls/unshare.create_holder_process`, returning a `HolderPids`, and the
+holder is a grandchild under `CLONE_NEWPID` so it can be PID 1); given a
+*rootfs* it chroots itself, which closes the `chroot /proc/1/root` escape. Under
+max isolation the hardened mount set `login/bindings.py` names (procfs with
+`hidepid=2`, read-only sysfs, tmpfs `/dev`, devpts, `/dev/shm`) is made from
+inside that namespace, `mount_manager` reaching it through `holder.call` and
+`holder.do_*`, so nothing execs a tool in the guest and no mount is set up from
+the host's view. `helpers/max_iso_holder.py` is the old standalone PID 1 for
+this, run as `python3 -m`; nothing in `src/` executes or imports it any more.
 `syscalls/capabilities.py` drops dangerous bounding-set capabilities when user
 namespaces are unavailable (opt out with `CD_NO_CAP_DROP=1`).
 
@@ -307,10 +306,11 @@ Every consumer takes one as an optional keyword (`snapshot`, `write_layer_tar`,
 `_materialise_files`, `_copy_from_rootfs`, `resolve_chown`,
 `resolve_user_for_chroot`, `do_workdir`, `write_resolv_conf`/`write_hosts`),
 so production always passes it and a test working on a tree it made itself keeps
-the path form. `RUN` closes the last of it the way `login` does: `chroot` gets
-`.` as its `NEWROOT` and a `preexec_fn` fchdirs the child onto the pinned
-descriptor, so chroot(2) resolves its argument against the inode the build
-validated. The path stays for what only a path can express: messages, bind
+the path form. `RUN` closes the last of it in the forked child
+(`run_step._fork_step`): it fchdirs onto the pinned descriptor and hands
+`enter_chroot` `os.curdir`, so chroot(2) resolves its argument against the inode
+the build validated, and it happens after the namespaces are joined and before
+the exec. The path stays for what only a path can express: messages, bind
 sources, and the `--mount=from=` bind that reaches mount(2) as a string anyway.
 The rest of the scratch root goes with it, being the same class of name: the ADD
 spool (`copy_step._Spool`, creating each file `O_EXCL` off the directory's fd)
@@ -347,19 +347,18 @@ config is taken on: it holds each field to its shape and refuses a wrong type
 with a `BuildError` naming it, treats a null as absent rather than as a value,
 rewrites `ExposedPorts`/`Volumes` down to their key sets, reads a null label as
 `""`, and takes a non-int layer `size` in the manifest as 0. The environment a
-RUN step's host side is handed goes the same way: chroot passes its own
-environment on to the command inside the new root, so `constants.is_host_exec_var`
-names what the *host* loader reads (the `LD_*` prefix) and both Dockerfile-owned
-sources are refused it: an `ENV` line or a declared `ARG`'s value never reaches
+RUN step is handed goes the same way: `constants.is_host_exec_var` names what a
+loader reads out of it (the `LD_*` prefix) and both Dockerfile-owned sources are
+refused it: an `ENV` line or a declared `ARG`'s value never reaches
 `run_step._build_child_env`'s output, and an `ENV` fired by the base image's
 ONBUILD triggers (`engine.firing_onbuild`, checked in `handlers.do_env`) is
 dropped outright, being a stranger's line rather than the author's. What the
 user's own environment says still reaches the exec, since they chose this command
 line; a value the Dockerfile set still stands in the image config, which is what
-it was a statement about. It matters because the argv gives `chroot` `.` and the
-child fchdirs onto the stage rootfs, so a *relative* `LD_LIBRARY_PATH` or
-`LD_AUDIT` entry is resolved by the host loader inside a tree an earlier RUN step
-had the run of.
+it was a statement about. The step's own exec happens after chroot(2), so this is
+provenance and not a host-loader escape: what the Dockerfile's author wrote
+about the image is not a line the image's own base or a stranger's ONBUILD gets
+to add to the loader's environment.
 
 ### Cross-cutting
 - `atomic.py`: every state file write goes through `atomic_write` /

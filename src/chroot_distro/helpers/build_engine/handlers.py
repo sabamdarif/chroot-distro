@@ -68,16 +68,16 @@ def do_env(engine: typing.Any, instr: dict[str, typing.Any]) -> None:
     env_map = {e.split("=", 1)[0]: e.split("=", 1)[1] for e in env_list if isinstance(e, str) and "=" in e}
     # An ENV fired by the base image's ONBUILD is the image's line and not the
     # author's, so it is held to the rule the image's own Env is held to: the
-    # LD_* namespace is read by the host loader when a RUN step execs `chroot`,
-    # before anything has entered the rootfs (see constants.is_host_exec_var).
-    # Dropped rather than merely not applied, so the built image does not carry
-    # it on to whoever runs a container from it either.
+    # LD_* namespace aims the dynamic loader rather than the command that
+    # carries it (see constants.is_host_exec_var). Dropped rather than merely
+    # not applied, so the built image does not carry it on to whoever runs a
+    # container from it either.
     from_image = engine.firing_onbuild
     for k, v in pairs:
         if from_image and is_host_exec_var(k):
             warn(
-                f"ignoring ONBUILD ENV '{k}' from the base image: it is read by the host's "
-                f"loader, not by the container."
+                f"ignoring ONBUILD ENV '{k}' from the base image: it aims the dynamic "
+                f"loader rather than the command that carries it."
             )
             continue
         env_map[k] = v

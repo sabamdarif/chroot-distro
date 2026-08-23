@@ -20,9 +20,11 @@ create_holder_process
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import logging
 import os
 import time
+import typing
 
 from chroot_distro.syscalls._constants import (
     CLONE_NEWPID,
@@ -120,9 +122,6 @@ def probe_namespace_support(flags: int) -> int:
     and attempts ``unshare(bit)``.  The child exits with status ``0`` on
     success or ``1`` on failure.  The parent collects the results and
     returns a bitmask of the flags that succeeded.
-
-    This replaces the legacy pattern of spawning ``unshare --flag true``
-    as a subprocess.
 
     Args:
         flags: A bitmask of ``CLONE_NEW*`` constants to probe.
@@ -225,19 +224,63 @@ def _write_id_mappings(child_pid: int, id_map: tuple[str, str] | None = None) ->
 # ---------------------------------------------------------------------------
 
 
+class HolderPids(typing.NamedTuple):
+    """The two PIDs a holder is made of.
+
+    *holder* keeps the namespaces open and is the one to join or kill.
+    *launcher* is this process's own child, so it is the one to wait for; with
+    a PID namespace the two differ, because unshare(2) only puts *children* in
+    the new namespace and the holder therefore has to be a grandchild.
+    """
+
+    holder: int
+    launcher: int
+
+
+@dataclasses.dataclass(frozen=True)
+class ForegroundExec:
+    """What a holder becomes instead of sleeping forever.
+
+    A holder that execs the session's own command is how the command gets to be
+    PID 1 of the namespace it runs in, so the namespace dies with it. It has to
+    wait to be told the mounts are up, which is what *go_fd* is for: the parent
+    writes one byte there once it has finished the setup the command depends on.
+
+    The chroot waits for that byte too, rather than being the holder-wide one
+    :func:`create_holder_process` takes: the parent mounts into this namespace
+    after the holder is up, and the command has to see those mounts.
+    """
+
+    go_fd: int
+    rootfs: str
+    command: list[str]
+    env: dict[str, str] | None = None
+    stdio_fd: int = -1
+    stdio_master_fd: int = -1
+    uid: int | None = None
+    gid: int | None = None
+    groups: list[int] | None = None
+    workdir: str = "/"
+    drop_caps: bool = False
+
+
 def create_holder_process(
     flags: int,
     *,
     rootfs: str | None = None,
     ready_fd: int = -1,
     id_map: tuple[str, str] | None = None,
-) -> int:
+    foreground: ForegroundExec | None = None,
+) -> HolderPids:
     """Create a long-lived process that holds namespaces open.
 
     The holder process calls ``unshare(2)`` with *flags*, optionally
     ``chroot``\\ s into *rootfs* for maximum isolation, and then sleeps
     forever.  Other processes can later join its namespaces via
     ``/proc/<pid>/ns/*``.
+
+    With *foreground* the holder execs that command instead of sleeping, once
+    the parent writes the go byte; see :class:`ForegroundExec`.
 
     Synchronisation
     ~~~~~~~~~~~~~~~
@@ -260,9 +303,11 @@ def create_holder_process(
             holder calls ``os.chroot(rootfs)`` followed by ``os.chdir('/')``.
         ready_fd: File descriptor to write the ready byte to.  When set
             to ``-1`` (the default) an internal pipe is created.
+        foreground: When given, what the holder execs instead of sleeping.
 
     Returns:
-        The host PID of the actual holder process (the one that is sleeping).
+        The holder's host PID and this process's own child's PID; see
+        :class:`HolderPids`.
 
     Raises:
         OSError: If ``unshare(2)`` or ``fork(2)`` fails, or if the
@@ -378,7 +423,7 @@ def create_holder_process(
             except OSError:
                 log.exception("failed to write to caller ready_fd")
 
-        return holder_pid
+        return HolderPids(holder=holder_pid, launcher=launcher_pid)
 
     # ---- Launcher (child) process ----
     os.close(pid_r)
@@ -438,7 +483,13 @@ def create_holder_process(
 
         grandchild_pid = os.fork()
         if grandchild_pid > 0:
-            # Launcher:
+            # Launcher: only the holder is to hold the terminal open, or the
+            # relay would never see the session end.
+            if foreground is not None:
+                for fd in (foreground.stdio_fd, foreground.stdio_master_fd):
+                    if fd >= 0:
+                        with contextlib.suppress(OSError):
+                            os.close(fd)
             os.close(sync_w)
             # Wait for the grandchild to complete its setup and signal readiness.
             try:
@@ -454,18 +505,23 @@ def create_holder_process(
                     os.write(pid_w, str(grandchild_pid).encode())
             os.close(pid_w)
 
-            # Wait for the grandchild to exit (it won't, unless killed).
+            # Wait for the grandchild. A sleeping holder only ever gets here
+            # by being killed; a foreground one exits with the session's own
+            # status, which this process is what the parent waits on for.
+            status = 0
             with contextlib.suppress(ChildProcessError):
-                os.waitpid(grandchild_pid, 0)
-            os._exit(0)
+                _, status = os.waitpid(grandchild_pid, 0)
+            if os.WIFEXITED(status):
+                os._exit(os.WEXITSTATUS(status))
+            os._exit(128 + os.WTERMSIG(status) if os.WIFSIGNALED(status) else 1)
 
         # Grandchild - this is the actual holder (PID 1).
         os.close(sync_r)
         os.close(pid_w)
-        _run_holder(sync_w, rootfs)
+        _run_holder(sync_w, rootfs, foreground)
     else:
         # No PID namespace - the launcher itself is the holder.
-        _run_holder(pid_w, rootfs)
+        _run_holder(pid_w, rootfs, foreground)
 
     # Should never be reached.
     os._exit(1)
@@ -476,15 +532,17 @@ def create_holder_process(
 # ---------------------------------------------------------------------------
 
 
-def _run_holder(notify_fd: int, rootfs: str | None) -> None:
-    """Execute the holder loop: set propagation, chroot, signal, sleep.
+def _run_holder(notify_fd: int, rootfs: str | None, foreground: ForegroundExec | None = None) -> None:
+    """Execute the holder loop: set propagation, chroot, signal, then wait.
 
-    This function never returns - it either sleeps forever or calls
-    ``os._exit``.
+    This function never returns - it sleeps forever, execs *foreground*'s
+    command, or calls ``os._exit``.
 
     Args:
         notify_fd: File descriptor to write the readiness byte to.
         rootfs: Optional root filesystem to ``chroot`` into.
+        foreground: What to exec once the parent gives the go-ahead, instead
+            of sleeping.
     """
     # 1. Set mount propagation to private.
     with contextlib.suppress(OSError):
@@ -508,6 +566,10 @@ def _run_holder(notify_fd: int, rootfs: str | None) -> None:
     finally:
         os.close(notify_fd)
 
+    # 4a. Foreground holder: become the session's command.
+    if foreground is not None:
+        _exec_foreground(foreground)
+
     # 4. Sleep forever.  The process keeps the namespaces alive until it
     #    is explicitly killed.
     log.debug("holder process %d entering sleep loop", os.getpid())
@@ -517,6 +579,44 @@ def _run_holder(notify_fd: int, rootfs: str | None) -> None:
     except (KeyboardInterrupt, SystemExit) as exc:
         log.debug("Holder process interrupted: %s", exc)
     os._exit(0)
+
+
+def _exec_foreground(fg: ForegroundExec) -> None:
+    """Wait for the go byte, then become *fg*'s command. Never returns.
+
+    Already inside the namespaces; what is left is the terminal, the root, the
+    identity, and the exec.
+    """
+    from chroot_distro.syscalls.chroot import _setup_child_pty, _try_exec, enter_chroot
+
+    try:
+        go = os.read(fg.go_fd, 1)
+    except OSError:
+        go = b""
+    finally:
+        with contextlib.suppress(OSError):
+            os.close(fg.go_fd)
+
+    if go != b"\n":
+        # The parent gave up on the setup this command depends on.
+        os._exit(1)
+
+    try:
+        if fg.stdio_fd >= 0:
+            _setup_child_pty(fg.stdio_master_fd, fg.stdio_fd)
+
+        enter_chroot(
+            fg.rootfs,
+            uid=fg.uid,
+            gid=fg.gid,
+            groups=fg.groups,
+            workdir=fg.workdir,
+            drop_caps=fg.drop_caps,
+        )
+
+        _try_exec(fg.command, fg.env if fg.env is not None else dict(os.environ))
+    except BaseException:
+        os._exit(127)
 
 
 def _reap_child(pid: int) -> None:

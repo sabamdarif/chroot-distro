@@ -7,11 +7,11 @@ import functools
 import logging
 import os
 import signal
-import subprocess
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 
-from chroot_distro.constants import IS_TERMUX, PROGRAM_NAME, RUNTIME_DIR
+from chroot_distro.constants import PROGRAM_NAME, RUNTIME_DIR
 from chroot_distro.exceptions import ChrootDistroError, MountError
 from chroot_distro.syscalls._constants import (
     CLONE_NEWCGROUP,
@@ -23,18 +23,18 @@ from chroot_distro.syscalls._constants import (
     MS_PRIVATE,
     MS_REC,
     MS_SLAVE,
-    NS_FILE_MAP,
     bitmask_to_cli_flags,
     cli_flags_to_bitmask,
 )
 from chroot_distro.syscalls._libc import libc_sethostname
 from chroot_distro.syscalls.mount import bind_mount, mount_filesystem, set_propagation
 from chroot_distro.syscalls.nsenter import (
+    call_in_namespaces,
     filter_accessible_namespaces,
-    run_in_namespaces,
 )
 from chroot_distro.syscalls.umount import native_umount
 from chroot_distro.syscalls.unshare import (
+    ForegroundExec,
     create_holder_process,
 )
 from chroot_distro.syscalls.unshare import (
@@ -187,7 +187,7 @@ def holder_is_max_isolation(container_name: str) -> bool:
     return os.path.isfile(_holder_maxiso_file(container_name))
 
 
-# ── Namespace probing (native — no subprocess) ──────────────────────────────
+# ── Namespace probing ───────────────────────────────────────────────────────
 
 
 @dataclass
@@ -300,7 +300,7 @@ def _userns_mount_probe_inner() -> bool:
     flags = CLONE_NEWUSER | CLONE_NEWNS | CLONE_NEWPID
     id_map = resolve_userns_map(ISOLATION_TIER_USERNS)  # identity range
     try:
-        holder_pid = create_holder_process(flags, id_map=id_map)
+        holder_pid = create_holder_process(flags, id_map=id_map).holder
     except (OSError, RuntimeError):
         log.debug("userns smoke test: holder creation failed", exc_info=True)
         return False
@@ -391,9 +391,8 @@ def _idmapped_mounts_supported() -> bool:
 def probe_unshare_flags() -> int:
     """Return a bitmask of supported namespace flags; mount NS is required.
 
-    Replaces the old string-list based probe_unshare_flags() that shelled
-    out to the ``unshare`` binary. ``CLONE_NEWUSER`` is included only when the
-    kernel both supports it and permits mounts inside a user namespace (see
+    ``CLONE_NEWUSER`` is included only when the kernel both supports it and
+    permits mounts inside a user namespace (see
     :func:`probe_and_report_namespaces`).
     """
     supported = _probe_ns_support(_ALL_PROBE_FLAGS)
@@ -572,23 +571,6 @@ def _is_legacy_sleep_holder(pid: int) -> bool:
     return bool(_HOLDER_SLEEP_ARGS.intersection(cmdline.split()))
 
 
-def _read_host_child_pids(pid: int) -> list[int]:
-    children: list[int] = []
-    task_dir = f"/proc/{pid}/task"
-    if not os.path.isdir(task_dir):
-        return children
-    for tid in os.listdir(task_dir):
-        children_path = os.path.join(task_dir, tid, "children")
-        try:
-            with open(children_path) as fh:
-                for token in fh.read().split():
-                    if token.isdigit():
-                        children.append(int(token))
-        except OSError:
-            continue
-    return children
-
-
 # Maps each unshare long flag to the /proc/<pid>/ns/<name> entry.
 _FLAG_TO_NS_FILE = {
     "--mount": "mnt",
@@ -623,6 +605,12 @@ def filter_flags_by_ns_files(pid: int, flags: list[str]) -> list[str]:
     return kept
 
 
+def _read_proc_mounts() -> bytes:
+    """The mount table as the caller's mount namespace sees it."""
+    with open("/proc/mounts", "rb") as fh:
+        return fh.read()
+
+
 # ── NamespaceHolder ──────────────────────────────────────────────────────────
 
 
@@ -633,11 +621,14 @@ class NamespaceHolder:
     pid: int
     ns_flags: int  # CLONE_NEW* bitmask
     container_name: str
-    proc: subprocess.Popen | None = None
+    launcher_pid: int = -1
     master_fd: int = -1
+    # True only for a holder that execs the session's command itself (a
+    # ForegroundExec). A plain sleeping holder also has a live launcher_pid,
+    # so that alone cannot tell the two apart.
+    is_foreground: bool = False
 
-    # Kept for backward compat — callers that used nsenter_flags as
-    # a list of CLI strings can still access them via this property.
+    # Only ever printed, for the nsenter(1) prefix `--get-chroot-cmd` shows.
     @property
     def nsenter_flags(self) -> list[str]:
         return bitmask_to_cli_flags(self.ns_flags)
@@ -650,62 +641,21 @@ class NamespaceHolder:
             live |= CLONE_NEWNS
         return live
 
-    def run_argv(self, cmd: list[str]) -> list[str]:
-        """Build a command that would run *cmd* inside this holder's namespaces.
+    def call(self, fn: Callable[[], bytes | None]) -> bytes | None:
+        """Run *fn* inside this holder's namespaces, ``None`` if it failed.
 
-        .. deprecated::
-            Prefer :meth:`run` which enters namespaces natively.
-            This method is kept for callers that need the raw argv
-            (e.g. for os.execvp).
+        The way to do filesystem work in the holder's view: what a coreutils
+        argv used to stand in for is a stdlib call, and this only moves it into
+        the right namespace. ``b""`` is a success that had nothing to say.
         """
-        # Build the equivalent nsenter-style argv using native nsenter.
-        # This is only used as a fallback or for display purposes.
-        flags = self._live_ns_flags()
-        ns_args: list[str] = []
-        for bit, name in NS_FILE_MAP.items():
-            if flags & bit:
-                ns_args.extend(["--" + ("mount" if name == "mnt" else name)])
-        return ["nsenter", "--target", str(self.pid), *ns_args, "--", *cmd]
-
-    def run(self, cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
-        """Execute *cmd* inside this holder's namespaces.
-
-        Uses native setns(2) via run_in_namespaces instead of spawning
-        the nsenter binary.
-        """
-        flags = self._live_ns_flags()
-        capture = kwargs.pop("capture_output", False)
-        text = kwargs.pop("text", False)
-        timeout = kwargs.pop("timeout", None)
-        check = kwargs.pop("check", False)
-        env = kwargs.pop("env", None)
-        result = run_in_namespaces(
-            self.pid,
-            flags,
-            cmd,
-            capture_output=capture,
-            text=text,
-            timeout=timeout,
-            env=env,
-        )
-        if check and result.returncode != 0:
-            raise subprocess.CalledProcessError(result.returncode, cmd, result.stdout, result.stderr)
-        return result
-
-    def is_mounted(self, target: str) -> bool:
-        """Check if *target* is a mount point inside this holder's namespaces."""
-        try:
-            result = self.run(["mountpoint", "-q", target], capture_output=True)
-        except OSError:
-            return False
-        return result.returncode == 0
+        return call_in_namespaces(self.pid, self._live_ns_flags(), fn)
 
     def get_proc_mounts(self) -> str:
         """Read /proc/mounts from inside this holder's namespaces."""
-        result = self.run(["cat", "/proc/mounts"], capture_output=True, text=True)
-        if result.returncode != 0:
+        data = self.call(_read_proc_mounts)
+        if data is None:
             return ""
-        return result.stdout or ""
+        return data.decode("utf-8", errors="replace")
 
     # ── Native mount/umount operations inside the holder's namespaces ──
 
@@ -854,92 +804,20 @@ def get_live_holder(container_name: str) -> NamespaceHolder | None:
     )
 
 
-def _snapshot_legacy_holder_pids() -> set[int]:
-    """Return PIDs of all running legacy ``sleep``-based holders."""
-    pids: set[int] = set()
-    for entry in os.listdir("/proc"):
-        if not entry.isdigit():
-            continue
-        pid = int(entry)
-        if _is_legacy_sleep_holder(pid):
-            pids.add(pid)
-    return pids
-
-
-def _snapshot_all_pids() -> set[int]:
-    pids: set[int] = set()
-    try:
-        for entry in os.listdir("/proc"):
-            if entry.isdigit():
-                pids.add(int(entry))
-    except OSError as exc:
-        log.warning("Failed to list /proc to snapshot all pids: %s", exc)
-    return pids
-
-
-def _is_custom_holder(pid: int, pipe_r: int) -> bool:
-    try:
-        with open(f"/proc/{pid}/cmdline", "rb") as fh:
-            cmdline = fh.read().decode("utf-8", errors="ignore").replace("\0", " ")
-    except OSError:
-        return False
-    return f"os.read({pipe_r}, 1)" in cmdline
-
-
-def _descendant_legacy_holders(launcher_pid: int, max_depth: int = 4) -> list[int]:
-    """Return legacy ``sleep``-based holders reachable from *launcher_pid*."""
-    found: list[int] = []
-    seen: set[int] = {launcher_pid}
-    frontier = [launcher_pid]
-    depth = 0
-    while frontier and depth <= max_depth:
-        next_frontier: list[int] = []
-        for pid in frontier:
-            if pid != launcher_pid and _is_legacy_sleep_holder(pid) and pid not in found:
-                found.append(pid)
-            for child_pid in _read_host_child_pids(pid):
-                if child_pid not in seen:
-                    seen.add(child_pid)
-                    next_frontier.append(child_pid)
-        frontier = next_frontier
-        depth += 1
-    return found
-
-
-def _pick_new_holder_pid(before: set[int], launcher_pid: int | None = None) -> int | None:
-    if launcher_pid is not None:
-        if launcher_pid not in before and _is_legacy_sleep_holder(launcher_pid):
-            return launcher_pid
-        descendants = [pid for pid in _descendant_legacy_holders(launcher_pid) if pid not in before]
-        if descendants:
-            if len(descendants) == 1:
-                return descendants[0]
-            return min(descendants, key=lambda pid: os.stat(f"/proc/{pid}").st_mtime)
-
-    candidates = [pid for pid in _snapshot_legacy_holder_pids() if pid not in before]
-    if not candidates:
-        return None
-    if len(candidates) == 1:
-        return candidates[0]
-    return min(candidates, key=lambda pid: os.stat(f"/proc/{pid}").st_mtime)
-
-
 def _create_holder(
     container_name: str,
     flags: int,
-    holder_cmd: list[str] | None = None,
-    pipe_r: int | None = None,
-    env: dict | None = None,
+    foreground: ForegroundExec | None = None,
     rootfs: str | None = None,
     id_map: tuple[str, str] | None = None,
 ) -> NamespaceHolder:
     """Create a new namespace holder process.
 
-    When *holder_cmd* is given (custom foreground holder), we still use
-    subprocess.Popen with the unshare binary for that code path to
-    preserve the pipe-sync protocol. For the normal (sleep-based) and
-    max-isolation (chrooted) holders, we use the native
-    create_holder_process() via ctypes.
+    *rootfs* makes the holder chroot itself before it starts holding (maximum
+    isolation, so ``/proc/<pid>/root`` cannot reach the host); *foreground*
+    makes it exec the session's own command once the caller says the mounts are
+    ready, instead of sleeping. They are alternatives: a foreground holder does
+    its own chroot after that go-ahead.
 
     *id_map* is the ``(uid_map, gid_map)`` to write when *flags* include
     ``CLONE_NEWUSER``; when omitted it defaults to this host's tier map.
@@ -947,15 +825,7 @@ def _create_holder(
     pid_file = _holder_pid_file(container_name)
     _remove_holder_state(container_name)
 
-    before_pids = _snapshot_all_pids()
-    _snapshot_legacy_holder_pids()
-
-    # ── Custom holder command path (subprocess-based, preserves pipe sync) ──
-    if holder_cmd:
-        return _create_holder_subprocess(container_name, flags, holder_cmd, pipe_r, env, before_pids)
-
-    # ── Native holder path (no subprocess) ──
-    self_chroot_holder = bool(rootfs)
+    self_chroot_holder = bool(rootfs) or foreground is not None
 
     if id_map is None and (flags & CLONE_NEWUSER):
         use_remap = _TIER_B_ROOTFS_IDMAP_READY and _idmapped_mounts_supported()
@@ -963,11 +833,11 @@ def _create_holder(
         id_map = resolve_userns_map(tier)
 
     try:
-        # Use the native create_holder_process which forks+unshares directly.
-        holder_pid = create_holder_process(
+        holder_pid, launcher_pid = create_holder_process(
             flags,
             rootfs=rootfs,
             id_map=id_map,
+            foreground=foreground,
         )
     except (OSError, RuntimeError) as exc:
         raise NamespaceError(
@@ -1006,7 +876,7 @@ def _create_holder(
 
     _write_holder_flags(container_name, flags)
 
-    if self_chroot_holder:
+    if rootfs:
         with open(_holder_maxiso_file(container_name), "w") as fh:
             fh.write("1")
 
@@ -1014,158 +884,15 @@ def _create_holder(
         pid=holder_pid,
         ns_flags=flags,
         container_name=container_name,
-    )
-
-
-def _create_holder_subprocess(
-    container_name: str,
-    flags: int,
-    holder_cmd: list[str],
-    pipe_r: int | None,
-    env: dict | None,
-    before_pids: set[int],
-) -> NamespaceHolder:
-    """Create a holder with a custom foreground command via subprocess.
-
-    This path is kept for the case where the caller provides a custom
-    holder_cmd with pipe-based synchronization.
-    """
-    import shutil
-
-    from chroot_distro.constants import TERMUX_PREFIX
-
-    def _resolve_unshare() -> str:
-        if IS_TERMUX:
-            termux_unshare = os.path.join(TERMUX_PREFIX, "bin", "unshare")
-            if os.path.isfile(termux_unshare):
-                return termux_unshare
-        resolved = shutil.which("unshare")
-        if not resolved:
-            raise NamespaceError("Required executable 'unshare' not found.")
-        return resolved
-
-    unshare = _resolve_unshare()
-    pid_file = _holder_pid_file(container_name)
-    # This path execs the `unshare` binary and cannot run our uid/gid-map
-    # handshake, so a userns here would leave the process unmapped (nobody).
-    # Keep it at the capability-drop tier by dropping CLONE_NEWUSER.
-    flags &= ~CLONE_NEWUSER
-    cli_flags = bitmask_to_cli_flags(flags)
-
-    master_fd = slave_fd = -1
-    use_pty = os.isatty(0)
-    if use_pty:
-        from chroot_distro.syscalls.chroot import _copy_terminal_size
-
-        master_fd, slave_fd = os.openpty()
-        _copy_terminal_size(0, master_fd)
-
-    assert pipe_r is not None
-    python_script = (
-        "import os, sys\n"
-        f"data = os.read({pipe_r}, 1)\n"
-        f"os.close({pipe_r})\n"
-        "if data == b'\\n':\n"
-        "    os.execvp(sys.argv[1], sys.argv[1:])\n"
-    )
-    unshare_argv = [unshare]
-    if flags & CLONE_NEWPID:
-        unshare_argv.append("--fork")
-    unshare_argv.extend(cli_flags)
-    unshare_argv.extend(["python3", "-c", python_script, *holder_cmd])
-
-    popen_kwargs: dict = {}
-    if use_pty:
-        popen_kwargs["stdin"] = slave_fd
-        popen_kwargs["stdout"] = slave_fd
-        popen_kwargs["stderr"] = slave_fd
-
-        def _preexec_fn() -> None:
-            import fcntl
-            import os
-
-            with contextlib.suppress(OSError):
-                os.close(master_fd)
-            os.setsid()
-            with contextlib.suppress(OSError):
-                fcntl.ioctl(slave_fd, 0x540E, 0)
-
-        popen_kwargs["preexec_fn"] = _preexec_fn
-        popen_kwargs["pass_fds"] = (pipe_r, slave_fd)
-    else:
-        if pipe_r is not None:
-            popen_kwargs["pass_fds"] = (pipe_r,)
-    if env is not None:
-        popen_kwargs["env"] = env
-
-    proc = subprocess.Popen(unshare_argv, **popen_kwargs)
-
-    if use_pty:
-        os.close(slave_fd)
-
-    success = False
-    host_pid: int | None = None
-    try:
-        for _ in range(250):
-            children = _read_host_child_pids(proc.pid)
-            if children:
-                host_pid = children[0]
-                break
-            # Fallback scan
-            for pid in _snapshot_all_pids() - before_pids:
-                if _is_custom_holder(pid, pipe_r):
-                    host_pid = pid
-                    break
-            if host_pid is not None:
-                break
-            if proc.poll() is not None and proc.returncode not in (0, None):
-                break
-            time.sleep(0.02)
-
-        if host_pid is None:
-            raise NamespaceError("Failed to locate custom namespace holder process.")
-
-        # Filter accessible namespaces.
-        flags = filter_accessible_namespaces(host_pid, flags)
-
-        start_time = _get_process_start_time(host_pid)
-        with open(pid_file, "w") as fh:
-            if start_time is not None:
-                fh.write(f"{host_pid}\n{start_time}\n")
-            else:
-                fh.write(f"{host_pid}\n")
-            fh.write("custom\n")
-
-        _write_holder_flags(container_name, flags)
-        success = True
-
-    finally:
-        if not success:
-            if use_pty and master_fd >= 0:
-                with contextlib.suppress(OSError):
-                    os.close(master_fd)
-            with contextlib.suppress(OSError):
-                proc.kill()
-            if host_pid is not None:
-                with contextlib.suppress(OSError):
-                    os.kill(host_pid, signal.SIGKILL)
-            _remove_holder_state(container_name)
-
-    assert host_pid is not None
-    return NamespaceHolder(
-        pid=host_pid,
-        ns_flags=flags,
-        container_name=container_name,
-        proc=proc,
-        master_fd=master_fd,
+        launcher_pid=launcher_pid,
+        master_fd=foreground.stdio_master_fd if foreground is not None else -1,
+        is_foreground=foreground is not None,
     )
 
 
 def acquire_holder(
     container_name: str,
-    holder_cmd: list[str] | None = None,
-    pipe_r: int | None = None,
-    env: dict | None = None,
+    foreground: ForegroundExec | None = None,
     rootfs: str | None = None,
     id_map: tuple[str, str] | None = None,
 ) -> NamespaceHolder:
@@ -1174,9 +901,7 @@ def acquire_holder(
     if existing is not None:
         return existing
     flags = probe_unshare_flags()
-    return _create_holder(
-        container_name, flags, holder_cmd=holder_cmd, pipe_r=pipe_r, env=env, rootfs=rootfs, id_map=id_map
-    )
+    return _create_holder(container_name, flags, foreground=foreground, rootfs=rootfs, id_map=id_map)
 
 
 def release_holder(container_name: str) -> None:
@@ -1215,7 +940,9 @@ def make_mount_private(holder: NamespaceHolder) -> bool:
 def set_namespace_hostname(holder: NamespaceHolder, hostname: str) -> bool:
     """Set *hostname* inside the holder's UTS namespace (best-effort).
 
-    Uses native sethostname(2) via setns into the holder's UTS namespace.
+    Cosmetic, so a kernel that refuses it is not an error. There is no
+    non-syscall way to ask: writing ``/proc/sys/kernel/hostname`` wants the same
+    CAP_SYS_ADMIN that sethostname(2) just failed for.
     """
     if not hostname:
         return False
@@ -1224,42 +951,12 @@ def set_namespace_hostname(holder: NamespaceHolder, hostname: str) -> bool:
         log.debug("UTS namespace not held; skipping sethostname for %s", hostname)
         return False
 
-    # Fork, enter the holder's namespaces, and call sethostname.
-    child_pid = os.fork()
-    if child_pid == 0:
-        try:
-            from chroot_distro.syscalls.nsenter import enter_namespaces
+    def _sethostname() -> None:
+        libc_sethostname(hostname)
 
-            enter_namespaces(holder.pid, holder._live_ns_flags())
-            libc_sethostname(hostname)
-            os._exit(0)
-        except Exception:
-            os._exit(1)
-
-    _, status = os.waitpid(child_pid, 0)
-    if os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0:
+    if holder.call(_sethostname) is not None:
         return True
-
-    log.debug("Native sethostname failed; trying hostname binary fallback")
-    # Fallback: use the hostname binary inside the namespace.
-    try:
-        result = holder.run(["hostname", hostname], capture_output=True, text=True)
-        if result.returncode == 0:
-            return True
-    except OSError as exc:
-        log.debug("Hostname binary fallback failed: %s", exc)
-
-    # Last resort: write to /proc/sys/kernel/hostname.
-    try:
-        result = holder.run(
-            ["sh", "-c", f"printf %s {hostname!r} > /proc/sys/kernel/hostname"],
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode == 0:
-            return True
-    except OSError as exc:
-        log.warning("Last resort hostname change failed: %s", exc)
+    log.debug("Could not set the namespace hostname to %s", hostname)
     return False
 
 

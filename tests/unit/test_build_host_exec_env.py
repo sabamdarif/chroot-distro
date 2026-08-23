@@ -76,9 +76,9 @@ def test_the_users_own_loader_settings_are_not_this_functions_business(monkeypat
 
 
 def test_the_dockerfiles_own_path_still_decides_the_guests():
-    # PATH is the guest's to set and deliberately not refused; what keeps it
-    # from choosing the binary this process becomes is that build_chroot_args
-    # resolves `chroot` on the host before the exec.
+    # PATH is the guest's to set and deliberately not refused: the exec it
+    # decides happens after chroot(2), so it can only pick a binary out of the
+    # tree the step was given.
     env, _engine = _child_env({"PATH": "/opt/bin"})
     assert env["PATH"] == "/opt/bin"
 

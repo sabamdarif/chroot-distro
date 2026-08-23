@@ -266,7 +266,18 @@ def test_run_plain_leaves_off_a_bind_whose_target_will_not_validate(tmp_path, mo
     monkeypatch.setattr(mount_manager, "safe_mount", lambda src, dst, **kw: mounted.append((src, dst)))
     monkeypatch.setattr(mount_manager, "unmount_all", lambda *a, **kw: None)
 
-    rc = run_step._run_plain(str(rootfs), ["true"], {}, None)
+    # The chroot itself is stubbed out, so the step's own /bin/true reports the
+    # exit code and only the bind loop is under test.
+    monkeypatch.setattr(run_step, "enter_chroot", lambda _newroot, **_kw: None)
+    config = SimpleNamespace(
+        rootfs=str(rootfs),
+        command=["true"],
+        uid=None,
+        gid=None,
+        groups=None,
+        workdir="/",
+    )
+    rc = run_step._run_plain(str(rootfs), config, {"PATH": os.environ.get("PATH", "/usr/bin:/bin")}, None)
 
     assert rc == 0
     assert mounted == [("/sys", str(rootfs / "sys"))]

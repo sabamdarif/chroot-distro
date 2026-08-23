@@ -6,11 +6,10 @@ the lifetime of the session.  The ``ps`` command probes liveness with a
 shared, non-blocking flock: refusal means the session is alive; success
 means it is dead (the file is pruned on sight).
 
-For interactive sessions (``subprocess.run`` in the parent), the parent
-holds the flock fd open during the wait and closes it in the ``finally``
-block.  For detached sessions (``subprocess.Popen`` with
-``start_new_session``), the fd is passed to the child via ``pass_fds``
-so the lock survives the parent's exit.
+For interactive sessions the parent holds the flock fd open while it waits
+for the guest and closes it in the ``finally`` block.  For detached sessions
+the fd is handed to the child (``spawn_detached``'s *keep_fds*) so the lock
+survives the parent's exit.
 
 Registration is strictly best-effort: any failure returns ``None`` and
 must never prevent a session from starting.

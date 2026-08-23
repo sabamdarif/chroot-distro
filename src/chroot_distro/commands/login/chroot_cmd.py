@@ -7,17 +7,14 @@ from dataclasses import dataclass, field
 
 from chroot_distro.commands.login.passwd import resolve_rootfs_path
 from chroot_distro.constants import IS_TERMUX, TERMUX_PREFIX
-from chroot_distro.exceptions import ChrootDistroError
 
 log = logging.getLogger(__name__)
 
 
 @dataclass
 class ChrootConfig:
-    """Chroot invocation parameters for the native
-    :func:`chroot_distro.syscalls.chroot.chroot_and_exec` path (vs the
-    ``list[str]`` argv that :func:`build_chroot_args` builds for the GNU
-    ``chroot`` binary)."""
+    """Chroot invocation parameters for
+    :func:`chroot_distro.syscalls.chroot.chroot_and_exec`."""
 
     rootfs: str
     command: list[str] = field(default_factory=list)
@@ -51,88 +48,25 @@ def _find_rootfs_shell(rootfs: str) -> str | None:
     return None
 
 
-def build_chroot_args(
-    rootfs: str,
-    login_uid: str | None = None,
-    login_gid: str | None = None,
-    groups: list[str] | None = None,
-    workdir: str = "",
-    inner_cmd: list[str] | None = None,
-    is_run: bool = False,
-    newroot: str | None = None,
-) -> list[str]:
-    """Build the argv for the GNU chroot command.
+def chroot_display_argv(config: ChrootConfig, ns_prefix: list[str] | None = None) -> list[str]:
+    """Render *config* as the GNU ``chroot`` command line it is equivalent to.
 
-    When *workdir* is set the inner command is wrapped with
-    ``sh -c 'cd <dir> && exec …'`` so the chdir happens inside the chroot
-    (GNU chroot's ``--skip-chdir`` only works for NEWROOT=/). Images without
-    a shell skip the wrapper and run from ``/``.
-
-    *newroot* overrides what goes into argv as chroot's NEWROOT, which is
-    otherwise *rootfs*. A caller that has pinned the rootfs passes ``"."``
-    and puts the child's cwd on the pinned descriptor before the exec, so the
-    root chroot(2) takes is the inode the caller validated rather than
-    whatever the name resolves to by the time the binary runs. *rootfs* is
-    still the path the shell lookup below reads, and that lookup only chooses
-    a guest path for the child to exec inside the new root.
+    Only ever printed, for ``--get-chroot-cmd``: the session itself never execs
+    a binary to enter the chroot. *ns_prefix* is what a shell would need in
+    front of it to be in the session's namespaces first.
     """
-    chroot_exe = None
-    if IS_TERMUX:
-        termux_chroot = os.path.join(TERMUX_PREFIX, "bin", "chroot")
-        if os.path.isfile(termux_chroot):
-            chroot_exe = termux_chroot
-    if not chroot_exe:
-        chroot_exe = shutil.which("chroot")
-    if not chroot_exe:
-        raise ChrootDistroError(
-            "Required executable 'chroot' not found on the system. Please ensure it is in your PATH."
-        )
-
-    args = [chroot_exe]
-
-    # 1. Handle user and group specifications
-    if login_uid is not None:
-        userspec = str(login_uid)
-        if login_gid is not None:
-            userspec += f":{login_gid}"
-        args.append(f"--userspec={userspec}")
-
-    # 2. Handle supplementary groups
-    if groups:
-        group_str = ",".join(str(g) for g in groups)
-        args.append(f"--groups={group_str}")
-
-    # 3. Rootfs target directory
-    args.append(newroot if newroot is not None else rootfs)
-
-    # 4. Inner command — optionally prefixed with a cd into workdir. A `run`
-    # command (image Entrypoint/Cmd) is never shell-wrapped: the image may
-    # have no usable in-rootfs shell.
-    cmd = list(inner_cmd) if inner_cmd else []
-    if workdir and workdir != "/" and not is_run:
-        shell_path = _find_rootfs_shell(rootfs)
-        if shell_path:
-            # cd inside the chroot, falling back to /; exec keeps the PID
-            # tree clean.
-            quoted_workdir = shlex.quote(workdir)
-            wrapped = (
-                f"cd {quoted_workdir} 2>/dev/null || cd /; exec {shlex.join(cmd)}"
-                if cmd
-                else f"cd {quoted_workdir} 2>/dev/null || cd /"
-            )
-            args.extend([shell_path, "-c", wrapped])
-        else:
-            # No shell to wrap with; run directly from /.
-            log.debug(
-                "No usable shell in rootfs %s; skipping workdir cd to %s",
-                rootfs,
-                workdir,
-            )
-            args.extend(cmd)
-    else:
-        args.extend(cmd)
-
-    return args
+    argv = list(ns_prefix) if ns_prefix else []
+    argv.append("chroot")
+    if config.uid is not None:
+        userspec = str(config.uid)
+        if config.gid is not None:
+            userspec += f":{config.gid}"
+        argv.append(f"--userspec={userspec}")
+    if config.groups:
+        argv.append("--groups=" + ",".join(str(g) for g in config.groups))
+    argv.append(config.rootfs)
+    argv.extend(config.command)
+    return argv
 
 
 def format_get_chroot_cmd(child_env: dict, exec_argv: list[str]) -> str:
@@ -161,8 +95,14 @@ def build_chroot_config(
     inner_cmd: list[str] | None = None,
     is_run: bool = False,
 ) -> ChrootConfig:
-    """Build a :class:`ChrootConfig` for native chroot execution; the
-    signature mirrors :func:`build_chroot_args`."""
+    """Build a :class:`ChrootConfig` for native chroot execution.
+
+    When *workdir* is set the inner command is wrapped with
+    ``sh -c 'cd <dir> && exec ...'`` so the chdir happens inside the chroot,
+    where the path means what the Dockerfile or the user meant by it. Images
+    without a shell run from ``/``, and a ``run`` command (image
+    Entrypoint/Cmd) is never wrapped: the image may have no usable shell.
+    """
     uid: int | None = None
     gid: int | None = None
     parsed_groups: list[int] | None = None
@@ -181,7 +121,6 @@ def build_chroot_config(
             with contextlib.suppress(ValueError, TypeError):
                 parsed_groups.append(int(g))
 
-    # Workdir wrapping, same logic as build_chroot_args.
     cmd = list(inner_cmd) if inner_cmd else []
     effective_wd = workdir if workdir else "/"
 

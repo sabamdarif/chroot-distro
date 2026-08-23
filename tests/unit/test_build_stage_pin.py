@@ -26,7 +26,6 @@ if sys.version_info >= (3, 14):
 else:
     from backports.zstd import tarfile
 
-from chroot_distro.commands.login import chroot_cmd
 from chroot_distro.helpers import layer_diff
 from chroot_distro.helpers.build_engine import copy_step, handlers, run_step
 from chroot_distro.helpers.build_engine.stage import Stage
@@ -191,41 +190,49 @@ def test_user_is_resolved_out_of_the_pinned_inode(staged):
     assert resolve_user_for_chroot(stage.rootfs_dir, "app", root_fd=stage.rootfs_fd) == (1234, 1234)
 
 
-# ── the argv chroot is handed ─────────────────────────────────────────────────
-def test_run_hands_chroot_a_relative_newroot(staged, tmp_path, monkeypatch):
+# ── the newroot chroot(2) is handed ───────────────────────────────────────────
+def test_run_pins_the_step_to_the_stage_descriptor(staged, tmp_path, monkeypatch):
     # chroot(2) resolving its own argument is the last name-based read of the
-    # rootfs a step makes, and it happens after every check here has finished.
+    # rootfs a step makes, and it happens after every check here has finished,
+    # so the step is handed the stage rather than a path to walk again.
     stage, _rootfs, _decoy = staged
-    monkeypatch.setattr(chroot_cmd, "IS_TERMUX", False)
-    monkeypatch.setattr(chroot_cmd.shutil, "which", lambda _name: "/usr/bin/chroot")
-    seen: list[list[str]] = []
-    monkeypatch.setattr(run_step, "_run_plain", lambda _rootfs, args, *a, **k: seen.append(args) or 0)
+    seen: dict[str, object] = {}
+
+    def fake_run_plain(rootfs, config, child_env, stdin_input, engine=None, stage=None, mounts=None):
+        seen.update(rootfs=rootfs, config=config, stage=stage)
+        return 0
+
+    monkeypatch.setattr(run_step, "_run_plain", fake_run_plain)
 
     engine = SimpleNamespace(quiet=True, verbose=False, isolation_mode="none", tmp_root=str(tmp_path))
     assert run_step._exec_chroot(engine, stage, ["true"], None) == 0
 
-    # NEWROOT is the argument before the inner command.
-    assert seen[0][-2:] == [os.curdir, "true"]
-    assert stage.rootfs_dir not in seen[0]
+    assert seen["stage"] is stage
+    assert seen["config"].command == ["true"]
 
 
-def test_the_preexec_hook_puts_the_child_on_the_pinned_inode(staged):
-    # What makes "." mean the pinned inode. It runs in the forked child in
-    # production; here it runs in place, with the working directory restored
-    # from a descriptor afterwards.
-    stage, _rootfs, _decoy = staged
-    hook = run_step._chdir_to(stage.rootfs_fd)
-    assert hook is not None
+def test_the_step_child_starts_on_the_pinned_inode(staged, monkeypatch):
+    # What makes chroot(2)'s "." mean the pinned inode: the child fchdirs onto
+    # the descriptor first. With the chroot itself stubbed out the cwd is
+    # observable, so the step's own command reports it.
+    stage, rootfs, decoy = staged
+    moved = _repoint(rootfs, decoy)
+    monkeypatch.setattr(run_step, "enter_chroot", lambda _newroot, **_kw: None)
 
-    saved = os.open(os.curdir, os.O_RDONLY | os.O_DIRECTORY)
-    try:
-        hook()
-        assert os.stat(os.curdir).st_ino == os.fstat(stage.rootfs_fd).st_ino
-    finally:
-        os.fchdir(saved)
-        os.close(saved)
+    config = SimpleNamespace(
+        rootfs=stage.rootfs_dir,
+        command=["/bin/sh", "-c", "pwd > pinned.txt"],
+        uid=None,
+        gid=None,
+        groups=None,
+        workdir="/",
+    )
+    pid = run_step._fork_step(config, {"PATH": "/usr/bin:/bin"}, rootfs_fd=stage.rootfs_fd)
+    assert run_step._wait_for_child(pid) == 0
 
-    assert run_step._chdir_to(None) is None
+    with open(os.path.join(moved, "pinned.txt")) as fh:
+        assert fh.read().strip() == moved
+    assert not os.path.exists(os.path.join(str(decoy), "pinned.txt"))
 
 
 # ── the scratch root every stage tree is made under ───────────────────────────

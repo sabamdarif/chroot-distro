@@ -22,6 +22,7 @@ import select
 import signal
 import subprocess
 import sys
+import typing
 
 from chroot_distro.syscalls.capabilities import drop_bounding_caps
 
@@ -106,6 +107,37 @@ def native_chroot(
         _try_exec(command, dict(os.environ))
 
 
+def enter_chroot(
+    rootfs: str,
+    *,
+    uid: int | None = None,
+    gid: int | None = None,
+    groups: list[int] | None = None,
+    workdir: str = "/",
+    drop_caps: bool = False,
+) -> None:
+    """Chroot into *rootfs* and take on the target identity, without exec'ing.
+
+    The current process is left inside the new root, so the caller is a process
+    that is about to exec or exit. The order is coreutils' own: chroot, chdir,
+    then setgroups before setgid before setuid, because each of those can only
+    be given up once. A capability drop belongs before them, while the process
+    still has the privilege to make it.
+    """
+    os.chroot(rootfs)
+    os.chdir(workdir)
+
+    if drop_caps:
+        drop_bounding_caps()
+
+    if groups is not None:
+        os.setgroups(groups)
+    if gid is not None:
+        os.setgid(gid)
+    if uid is not None:
+        os.setuid(uid)
+
+
 def chroot_and_exec(
     rootfs: str,
     command: list[str],
@@ -147,15 +179,7 @@ def chroot_and_exec(
                 os.environ.clear()
                 os.environ.update(env)
 
-            os.chroot(rootfs)
-            os.chdir(workdir)
-
-            if groups is not None:
-                os.setgroups(groups)
-            if gid is not None:
-                os.setgid(gid)
-            if uid is not None:
-                os.setuid(uid)
+            enter_chroot(rootfs, uid=uid, gid=gid, groups=groups, workdir=workdir)
 
             _try_exec(command, dict(os.environ))
         except Exception as exc:
@@ -250,20 +274,16 @@ def chroot_and_run(
                 os.environ.clear()
                 os.environ.update(env)
 
-            os.chroot(rootfs)
-            os.chdir(workdir)
-
-            # Drop dangerous capabilities from the bounding set when no
-            # user namespace is providing capability scoping.
-            if drop_caps:
-                drop_bounding_caps()
-
-            if groups is not None:
-                os.setgroups(groups)
-            if gid is not None:
-                os.setgid(gid)
-            if uid is not None:
-                os.setuid(uid)
+            # drop_caps drops the bounding set when no user namespace is
+            # providing capability scoping.
+            enter_chroot(
+                rootfs,
+                uid=uid,
+                gid=gid,
+                groups=groups,
+                workdir=workdir,
+                drop_caps=drop_caps,
+            )
 
             _try_exec(command, dict(os.environ))
         except Exception as exc:
@@ -305,6 +325,49 @@ def chroot_and_run(
         stdout=stdout_out if capture_output else None,
         stderr=stderr_out if capture_output else None,
     )
+
+
+def spawn_detached(
+    command: list[str],
+    *,
+    env: dict[str, str] | None = None,
+    stdin_fd: int,
+    stdout_fd: int,
+    stderr_fd: int,
+    keep_fds: tuple[int, ...] = (),
+    setup: typing.Callable[[], None] | None = None,
+) -> int:
+    """Fork and exec *command* in its own session, returning the child's PID.
+
+    The parent does not wait: the child is meant to outlive this process. Its
+    three standard descriptors are the ones given, *keep_fds* are handed over
+    as well (their close-on-exec is cleared, which is what a caller passing a
+    lock descriptor is after: the flock has to survive the exec to keep
+    signalling that the session is alive), and *setup* runs last, between the
+    fork and the exec, for whatever the child has to become first.
+
+    Raises:
+        OSError: if the fork fails. A failure after it is the child's, and
+            surfaces as its exit status.
+    """
+    child_pid = os.fork()
+
+    if child_pid == 0:
+        # --- Child ---
+        try:
+            os.setsid()
+            os.dup2(stdin_fd, 0)
+            os.dup2(stdout_fd, 1)
+            os.dup2(stderr_fd, 2)
+            for fd in keep_fds:
+                os.set_inheritable(fd, True)
+            if setup is not None:
+                setup()
+            _try_exec(command, env if env is not None else dict(os.environ))
+        except BaseException:
+            os._exit(127)
+
+    return child_pid
 
 
 # ---------------------------------------------------------------------------
@@ -375,12 +438,13 @@ def _setup_child_pty(master_fd: int, slave_fd: int) -> None:
     """Set up the child side of a PTY pair as the controlling terminal.
 
     Called in the forked child *before* chroot/exec:
-    1. Close the master (parent keeps it).
+    1. Close the master (parent keeps it), when this child inherited one.
     2. ``setsid()`` — become session leader.
     3. ``TIOCSCTTY`` on the slave — make it the controlling terminal.
     4. Dup the slave to stdin/stdout/stderr.
     """
-    os.close(master_fd)
+    if master_fd >= 0:
+        os.close(master_fd)
     os.setsid()
     with contextlib.suppress(OSError):
         fcntl.ioctl(slave_fd, _TIOCSCTTY, 0)

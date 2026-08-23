@@ -1,5 +1,7 @@
 """Tests for namespace-aware mount_manager helpers."""
 
+import os
+import stat
 from unittest.mock import MagicMock, patch
 
 from chroot_distro.helpers import mount_manager as mm
@@ -36,35 +38,38 @@ def test_safe_mount_via_holder():
 
 
 def test_create_dev_nodes_via_holder():
+    # The node is made by a stdlib call run inside the holder's namespaces.
     holder = MagicMock()
-    holder.run.return_value = MagicMock(returncode=0)
+    holder.call.side_effect = lambda fn: fn() or b""
     rootfs = "/tmp/rootfs"
     nodes = [("null", 1, 3, 0o666)]
-    mm.create_dev_nodes(rootfs, nodes, holder=holder)
-    holder.run.assert_called_once_with(
-        ["mknod", "-m", "666", "/tmp/rootfs/dev/null", "c", "1", "3"],
-        capture_output=True,
-        text=True,
-    )
+    with (
+        patch("os.path.exists", return_value=False),
+        patch("os.mknod") as mock_mknod,
+        patch("os.chmod") as mock_chmod,
+    ):
+        mm.create_dev_nodes(rootfs, nodes, holder=holder)
+
+    holder.call.assert_called_once()
+    mock_mknod.assert_called_once_with("/tmp/rootfs/dev/null", 0o666 | stat.S_IFCHR, os.makedev(1, 3))
+    mock_chmod.assert_called_once_with("/tmp/rootfs/dev/null", 0o666)
 
 
 def test_create_dev_nodes_under_userns_binds_instead_of_mknod():
     # Inside a user namespace mknod is forbidden, so the host device node is
-    # bind-mounted onto a stub created inside the holder — no mknod is issued.
+    # bind-mounted onto a stub created inside the holder.
     holder = MagicMock()
-    holder.run.return_value = MagicMock(returncode=0, stderr="")
+    holder.call.return_value = b""
     rootfs = "/tmp/rootfs"
     nodes = [("null", 1, 3, 0o666)]
     with (
         patch("os.path.exists", return_value=True),
         patch("chroot_distro.helpers.mount_manager.safe_mount") as mock_safe,
+        patch("os.mknod") as mock_mknod,
     ):
         mm.create_dev_nodes(rootfs, nodes, holder=holder, use_userns=True)
-    # Stub is touched inside the holder, then the host node is bind-mounted.
-    holder.run.assert_called_once_with(
-        ["sh", "-c", "touch /tmp/rootfs/dev/null"], capture_output=True, text=True
-    )
-    mock_safe.assert_called_once_with("/dev/null", "/tmp/rootfs/dev/null", holder=holder)
-    # No mknod command was ever issued.
-    assert all("mknod" not in c.args[0] for c in holder.run.call_args_list)
 
+    # The stub is created inside the holder, then the host node is bound over it.
+    holder.call.assert_called_once()
+    mock_safe.assert_called_once_with("/dev/null", "/tmp/rootfs/dev/null", holder=holder)
+    mock_mknod.assert_not_called()

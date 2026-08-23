@@ -76,7 +76,6 @@ def _dispatch(engine, stage):
     """Run _exec_chroot with everything below the dispatch stubbed out."""
     with (
         patch.object(run_step, "resolve_user_for_chroot", return_value=(0, 0)),
-        patch("chroot_distro.commands.login.chroot_cmd.build_chroot_args", return_value=["chroot"]),
         patch("chroot_distro.commands.login.passwd.find_user_groups", return_value=[]),
         patch.object(run_step, "_run_plain", return_value=0) as run_plain,
         patch.object(run_step, "_run_in_holder", return_value=0) as run_in_holder,

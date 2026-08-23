@@ -6,6 +6,7 @@ import functools
 import logging
 import os
 import re
+import stat
 from typing import TYPE_CHECKING
 
 from chroot_distro.exceptions import MountError
@@ -69,24 +70,20 @@ def get_active_mounts(rootfs: str, holder: NamespaceHolder | None = None) -> lis
 
 def is_mounted(target: str, holder: NamespaceHolder | None = None) -> bool:
     """Check if a specific path is currently a mount point."""
-    if holder is not None:
-        return holder.is_mounted(target)
+    try:
+        lines = _read_proc_mounts_lines(holder)
+    except MountError as exc:
+        log.warning("Failed to check if %s is mounted: %s", target, exc)
+        return False
 
     # Kernel mount paths are canonical; realpath the target once, not per line.
     target_abs = os.path.realpath(target)
-    if not os.path.exists("/proc/mounts"):
-        return False
-
-    try:
-        with open("/proc/mounts") as f:
-            for line in f:
-                parts = line.strip().split()
-                if len(parts) < 2:
-                    continue
-                if decode_mount_path(parts[1]) == target_abs:
-                    return True
-    except OSError as exc:
-        log.warning("Failed to check if %s is mounted: %s", target, exc)
+    for line in lines:
+        parts = line.strip().split()
+        if len(parts) < 2:
+            continue
+        if decode_mount_path(parts[1]) == target_abs:
+            return True
     return False
 
 
@@ -183,8 +180,8 @@ def safe_mount(
     kernel_options = _filter_bind_options(options)
 
     if holder is not None:
-        # When a namespace holder is active, mount operations must happen
-        # inside the holder's mount namespace. Use run_in_namespaces.
+        # A mount only reaches the guest from inside the holder's mount
+        # namespace, so the holder makes it.
         try:
             holder.do_bind_mount(source_abs, target, recursive=recursive, options=kernel_options)
         except (OSError, MountError) as e:
@@ -193,7 +190,7 @@ def safe_mount(
                     os.remove(target)
             raise MountError(f"Failed to mount {source} to {target}: {e}") from e
     else:
-        # Direct syscall path — no holder, no subprocess.
+        # No holder, so mount(2) straight from this process.
         try:
             bind_mount(source_abs, target, recursive=recursive, options=kernel_options)
         except OSError as e:
@@ -246,9 +243,12 @@ def create_dev_nodes(
                 log.debug("Skipping /dev/%s bind: host node %s missing", name, source)
                 continue
             if holder is not None:
-                touch = holder.run(["sh", "-c", f"touch {host_path}"], capture_output=True, text=True)
-                if touch.returncode != 0:
-                    log.debug("Could not create stub %s in holder: %s", host_path, (touch.stderr or "").strip())
+
+                def _stub(path: str = host_path) -> None:
+                    os.close(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o644))
+
+                if holder.call(_stub) is None:
+                    log.debug("Could not create stub %s in the holder's namespaces", host_path)
                     continue
             try:
                 safe_mount(source, host_path, holder=holder)
@@ -256,21 +256,19 @@ def create_dev_nodes(
                 log.debug("Bind of device node %s -> %s failed: %s", source, host_path, exc)
             continue
 
+        def _make_node(path: str = host_path, mode: int = mode, major: int = major, minor: int = minor) -> None:
+            if os.path.exists(path):
+                return
+            os.mknod(path, mode | stat.S_IFCHR, os.makedev(major, minor))
+            os.chmod(path, mode)
+
         if holder is not None:
-            cmd = ["mknod", "-m", format(mode, "o"), host_path, "c", str(major), str(minor)]
-            try:
-                result = holder.run(cmd, capture_output=True, text=True)
-                if result.returncode != 0:
-                    log.debug("mknod %s failed: %s", host_path, (result.stderr or "").strip())
-            except OSError as exc:
-                log.debug("mknod %s raised: %s", host_path, exc)
+            if holder.call(_make_node) is None:
+                log.debug("Could not create device node %s in the holder's namespaces", host_path)
             continue
         # No holder (no mount namespace): create directly on the host path.
         try:
-            if os.path.exists(host_path):
-                continue
-            os.mknod(host_path, mode | 0o020000, os.makedev(major, minor))  # S_IFCHR
-            os.chmod(host_path, mode)
+            _make_node()
         except OSError as exc:
             log.debug("os.mknod %s failed: %s", host_path, exc)
 
@@ -600,9 +598,12 @@ def apply_special_mount(rootfs: str, sm, holder: NamespaceHolder | None = None, 
         # subsequent mount fails with "mount point does not exist". Create the
         # directory inside the holder's mount namespace instead.
         if holder is not None:
-            mk = holder.run(["mkdir", "-p", target], capture_output=True, text=True)
-            if mk.returncode != 0:
-                msg = f"Failed to create mount target directory {target}: {(mk.stderr or '').strip()}"
+
+            def _mkdir() -> None:
+                os.makedirs(target, exist_ok=True)
+
+            if holder.call(_mkdir) is None:
+                msg = f"Failed to create mount target directory {target} inside the holder's namespaces"
                 if optional:
                     log.debug(msg)
                     return False
@@ -619,8 +620,11 @@ def apply_special_mount(rootfs: str, sm, holder: NamespaceHolder | None = None, 
     elif not os.path.exists(target):
         # With a holder, existence must also be checked inside its namespace.
         if holder is not None:
-            chk = holder.run(["test", "-e", target], capture_output=True, text=True)
-            if chk.returncode != 0:
+
+            def _exists() -> bytes:
+                return b"1" if os.path.exists(target) else b""
+
+            if not holder.call(_exists):
                 log.debug(f"Mount target {target} does not exist in holder NS and mkdir=False, skipping")
                 return False
         else:

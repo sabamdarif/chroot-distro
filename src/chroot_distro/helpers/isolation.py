@@ -176,20 +176,22 @@ def _ensure_ptmx_symlink(rootfs: str, holder: NamespaceHolder | None) -> None:
     when given, else directly on the host view of the rootfs.
     """
     ptmx_path = os.path.join(rootfs, "dev/ptmx")
+
+    def _relink() -> None:
+        if os.path.islink(ptmx_path):
+            return
+        if os.path.exists(ptmx_path):
+            os.remove(ptmx_path)
+        os.symlink("pts/ptmx", ptmx_path)
+
     if holder is not None:
-        is_link = holder.run(["test", "-L", ptmx_path]).returncode == 0
-        if not is_link:
-            if holder.run(["test", "-e", ptmx_path]).returncode == 0:
-                holder.run(["rm", "-f", ptmx_path])
-            holder.run(["ln", "-s", "pts/ptmx", ptmx_path], capture_output=True, text=True)
-    else:
-        try:
-            if not os.path.islink(ptmx_path):
-                if os.path.exists(ptmx_path):
-                    os.remove(ptmx_path)
-                os.symlink("pts/ptmx", ptmx_path)
-        except OSError as exc:
-            log.debug("Failed to create ptmx symlink: %s", exc)
+        if holder.call(_relink) is None:
+            log.debug("Failed to create ptmx symlink in the holder's namespaces")
+        return
+    try:
+        _relink()
+    except OSError as exc:
+        log.debug("Failed to create ptmx symlink: %s", exc)
 
 
 def apply_special_mounts(

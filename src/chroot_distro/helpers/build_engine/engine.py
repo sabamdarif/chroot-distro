@@ -73,9 +73,9 @@ def _adopt_image_config(image_config: typing.Any, image_ref: str) -> dict[str, t
     Dockerfile still reaches the image config -- it goes through do_env, which
     writes this same list afterwards, and what a Dockerfile says about the
     image it produces is its author's business. What no such name reaches from
-    any source is the environment `chroot` itself is exec'd with, which
-    run_step refuses separately (constants.is_host_exec_var states the one rule
-    both apply).
+    any source is the environment a RUN step is exec'd with, which run_step
+    refuses separately (constants.is_host_exec_var states the one rule both
+    apply).
 
     The second is the shape. Every field below is read back by this module or
     by a handler -- `User` and `Shell` decide what a RUN step runs and who as,

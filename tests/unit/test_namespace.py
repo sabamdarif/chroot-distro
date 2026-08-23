@@ -15,6 +15,7 @@ from chroot_distro.syscalls._constants import (
     MS_PRIVATE,
     MS_REC,
 )
+from chroot_distro.syscalls.unshare import HolderPids
 
 # ---------------------------------------------------------------------------
 # CD_USE_NS environment detection
@@ -153,16 +154,20 @@ def test_set_namespace_hostname_skips_without_uts():
         assert ns.set_namespace_hostname(holder, "alpine") is False
 
 
-@patch("chroot_distro.helpers.namespace.os.fork", return_value=9999)
-@patch("chroot_distro.helpers.namespace.os.waitpid", return_value=(9999, 0))
-def test_set_namespace_hostname_success(mock_waitpid, mock_fork):
+def test_set_namespace_hostname_success():
     holder = MagicMock(container_name="alpine", pid=123)
-    holder._live_ns_flags.return_value = CLONE_NEWUTS
+    holder.call.return_value = b""
     with patch("chroot_distro.helpers.namespace._read_holder_flags", return_value=CLONE_NEWUTS):
         assert ns.set_namespace_hostname(holder, "myhost") is True
 
-    mock_fork.assert_called_once()
-    mock_waitpid.assert_called_once_with(9999, 0)
+    holder.call.assert_called_once()
+
+
+def test_set_namespace_hostname_reports_a_failed_call():
+    holder = MagicMock(container_name="alpine", pid=123)
+    holder.call.return_value = None
+    with patch("chroot_distro.helpers.namespace._read_holder_flags", return_value=CLONE_NEWUTS):
+        assert ns.set_namespace_hostname(holder, "myhost") is False
 
 
 def test_make_mount_private_success():
@@ -228,7 +233,7 @@ def test_release_holder(mock_kill, mock_read, mock_remove):
 @patch("chroot_distro.helpers.namespace._pid_alive", return_value=True)
 @patch("chroot_distro.helpers.namespace.RUNTIME_DIR", "/tmp")
 def test_create_holder_success(mock_alive, mock_remove, mock_filter, mock_create):
-    mock_create.return_value = 555
+    mock_create.return_value = HolderPids(holder=555, launcher=554)
     mock_filter.return_value = CLONE_NEWNS | CLONE_NEWPID
 
     m_open = mock_open()
@@ -239,5 +244,8 @@ def test_create_holder_success(mock_alive, mock_remove, mock_filter, mock_create
         holder = ns._create_holder("alpine", CLONE_NEWNS | CLONE_NEWPID, rootfs="/tmp/rootfs")
 
     assert holder.pid == 555
+    assert holder.launcher_pid == 554
     assert holder.ns_flags == CLONE_NEWNS | CLONE_NEWPID
-    mock_create.assert_called_once_with(CLONE_NEWNS | CLONE_NEWPID, rootfs="/tmp/rootfs", id_map=None)
+    mock_create.assert_called_once_with(
+        CLONE_NEWNS | CLONE_NEWPID, rootfs="/tmp/rootfs", id_map=None, foreground=None
+    )

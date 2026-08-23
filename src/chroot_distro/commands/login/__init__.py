@@ -3,10 +3,7 @@ import json
 import logging
 import os
 import shlex
-import signal
-import subprocess
 import sys
-from collections.abc import Callable
 
 import chroot_distro.helpers.mount_manager as mount_manager
 import chroot_distro.helpers.namespace as namespace
@@ -14,8 +11,8 @@ import chroot_distro.helpers.session as session
 from chroot_distro.commands.login import bindings
 from chroot_distro.commands.login.chroot_cmd import (
     ChrootConfig,
-    build_chroot_args,
     build_chroot_config,
+    chroot_display_argv,
     format_get_chroot_cmd,
 )
 from chroot_distro.commands.login.env import (
@@ -81,8 +78,9 @@ from chroot_distro.locking import ContainerLock
 from chroot_distro.message import crit_error, warn
 from chroot_distro.names import require_valid_name
 from chroot_distro.paths import container_dir, container_log_path, container_rootfs
-from chroot_distro.syscalls.chroot import chroot_and_run
+from chroot_distro.syscalls.chroot import chroot_and_run, enter_chroot, spawn_detached
 from chroot_distro.syscalls.nsenter import enter_and_run_with_pty
+from chroot_distro.syscalls.unshare import ForegroundExec
 
 log = logging.getLogger(__name__)
 
@@ -901,10 +899,33 @@ def _command_login_inner_once(container_name: str, args) -> None:
             if key not in user_keys:
                 child_env[key] = val
 
+    chroot_config = build_chroot_config(
+        rootfs=rootfs,
+        login_uid=login_uid,
+        login_gid=login_gid,
+        groups=groups,
+        workdir=login_wd,
+        inner_cmd=inner,
+        is_run=run_inner is not None,
+    )
+
     holder = None
     pipe_w = None
-    chroot_args = None
-    chroot_config: ChrootConfig | None = None
+    master_fd = -1
+
+    def _abandon_holder_fds() -> None:
+        """Close the go pipe and the session terminal after a failed setup.
+
+        The go byte is never coming, and a foreground holder reads the closed
+        pipe as the parent having given up.
+        """
+        nonlocal pipe_w, master_fd
+        for fd in (pipe_w, master_fd):
+            if fd is not None and fd >= 0:
+                with contextlib.suppress(OSError):
+                    os.close(fd)
+        pipe_w = None
+        master_fd = -1
 
     try:
         host_mounts_exist = bool(mount_manager.get_active_mounts(rootfs))
@@ -933,25 +954,38 @@ def _command_login_inner_once(container_name: str, args) -> None:
                     # open).
                     _detach_run = getattr(args, "detach", False) and run_inner is not None
                     if run_inner is not None and not _detach_run and not max_isolation:
-                        chroot_args = build_chroot_args(
-                            rootfs=rootfs,
-                            login_uid=login_uid,
-                            login_gid=login_gid,
-                            groups=groups,
-                            workdir=login_wd,
-                            inner_cmd=inner,
-                            is_run=True,
-                        )
+                        from chroot_distro.syscalls.chroot import _copy_terminal_size
+
                         pipe_r, pipe_w = os.pipe()
+                        slave_fd = -1
+                        if os.isatty(0):
+                            master_fd, slave_fd = os.openpty()
+                            _copy_terminal_size(0, master_fd)
                         try:
                             holder = namespace.acquire_holder(
                                 container_name,
-                                holder_cmd=chroot_args,
-                                pipe_r=pipe_r,
-                                env=child_env,
+                                foreground=ForegroundExec(
+                                    go_fd=pipe_r,
+                                    rootfs=chroot_config.rootfs,
+                                    command=chroot_config.command,
+                                    env=child_env,
+                                    stdio_fd=slave_fd,
+                                    stdio_master_fd=master_fd,
+                                    uid=chroot_config.uid,
+                                    gid=chroot_config.gid,
+                                    groups=chroot_config.groups,
+                                    workdir=chroot_config.workdir,
+                                    drop_caps=not has_userns,
+                                ),
                             )
                         finally:
                             os.close(pipe_r)
+                            if slave_fd >= 0:
+                                os.close(slave_fd)
+                        if holder.launcher_pid < 0:
+                            # A holder was already running, so nothing is going
+                            # to exec the command; the session runs it itself.
+                            _abandon_holder_fds()
                     else:
                         # Under max isolation the holder chroots before
                         # sleeping, so /proc/<pid>/root cannot reach the host.
@@ -962,9 +996,7 @@ def _command_login_inner_once(container_name: str, args) -> None:
                     # Record mode, make mounts private, set UTS hostname.
                     isolation.finalize_holder(holder, container_name, hostname=hostname_arg)
                 except NamespaceError as exc:
-                    if pipe_w is not None:
-                        with contextlib.suppress(OSError):
-                            os.close(pipe_w)
+                    _abandon_holder_fds()
                     with contextlib.suppress(Exception):
                         mount_manager.unmount_all(rootfs, holder=holder)
                     if holder is not None:
@@ -1007,9 +1039,7 @@ def _command_login_inner_once(container_name: str, args) -> None:
                     best_effort_sources=bindings.best_effort_bind_sources(),
                 )
             except Exception as e:
-                if pipe_w is not None:
-                    with contextlib.suppress(OSError):
-                        os.close(pipe_w)
+                _abandon_holder_fds()
                 mount_manager.unmount_all(rootfs, holder=holder)
                 if holder is not None:
                     namespace.release_holder(container_name)
@@ -1043,9 +1073,7 @@ def _command_login_inner_once(container_name: str, args) -> None:
                     use_userns=has_userns,
                 )
             except Exception as e:
-                if pipe_w is not None:
-                    with contextlib.suppress(OSError):
-                        os.close(pipe_w)
+                _abandon_holder_fds()
                 mount_manager.unmount_all(rootfs, holder=holder)
                 if holder is not None:
                     namespace.release_holder(container_name)
@@ -1180,32 +1208,11 @@ def _command_login_inner_once(container_name: str, args) -> None:
                     )
                     sys.exit(1)
 
-    if chroot_args is None:
-        chroot_args = build_chroot_args(
-            rootfs=rootfs,
-            login_uid=login_uid,
-            login_gid=login_gid,
-            groups=groups,
-            workdir=login_wd,
-            inner_cmd=inner,
-            is_run=run_inner is not None,
-        )
-        chroot_config = build_chroot_config(
-            rootfs=rootfs,
-            login_uid=login_uid,
-            login_gid=login_gid,
-            groups=groups,
-            workdir=login_wd,
-            inner_cmd=inner,
-            is_run=run_inner is not None,
-        )
-
-    exec_argv = chroot_args
-    if holder is not None:
-        exec_argv = holder.run_argv(chroot_args)
-
     if getattr(args, "get_chroot_cmd", False):
-        print(format_get_chroot_cmd(child_env, exec_argv))
+        ns_prefix = (
+            ["nsenter", "--target", str(holder.pid), *holder.nsenter_flags] if holder is not None else None
+        )
+        print(format_get_chroot_cmd(child_env, chroot_display_argv(chroot_config, ns_prefix)))
 
         with session.lock(container_name) as lock_fh:
             sess_count = session.decrement(container_name, lock_fh=lock_fh)
@@ -1232,7 +1239,7 @@ def _command_login_inner_once(container_name: str, args) -> None:
     if getattr(args, "detach", False) and run_inner is not None:
         _run_detached(
             container_name,
-            chroot_args=chroot_args,
+            chroot_config=chroot_config,
             child_env=child_env,
             holder=holder,
             session_handle=_sess_handle,
@@ -1242,25 +1249,18 @@ def _command_login_inner_once(container_name: str, args) -> None:
     # Inner command's exit code, propagated to our own exit status.
     exit_code = 0
 
-    if holder is not None and holder.proc is not None:
+    # Only a foreground holder execs the command itself and exits through its
+    # launcher. A sleeping holder (isolated login, CD_USE_NS) also has a live
+    # launcher_pid but never execs it, so it must be entered below to run the
+    # command; waiting on its launcher here would hang the session forever.
+    if holder is not None and holder.is_foreground:
         try:
-            if getattr(holder, "master_fd", -1) >= 0:
-                from chroot_distro.syscalls.chroot import _pty_relay
+            from chroot_distro.syscalls.chroot import _pty_relay, _wait_for_child_with_signals
 
-                exit_code = _pty_relay(holder.master_fd, holder.proc.pid)
+            if holder.master_fd >= 0:
+                exit_code = _pty_relay(holder.master_fd, holder.launcher_pid)
             else:
-                exit_code = holder.proc.wait()
-        except KeyboardInterrupt:
-            exit_code = 130
-            with contextlib.suppress(OSError):
-                holder.proc.send_signal(signal.SIGINT)
-            try:
-                holder.proc.wait(timeout=5)
-            except (subprocess.TimeoutExpired, KeyboardInterrupt):
-                with contextlib.suppress(OSError):
-                    holder.proc.kill()
-                with contextlib.suppress(OSError):
-                    holder.proc.wait()
+                exit_code = _wait_for_child_with_signals(holder.launcher_pid)
         finally:
             if _sess_handle is not None:
                 _sess_handle.close()
@@ -1274,8 +1274,7 @@ def _command_login_inner_once(container_name: str, args) -> None:
                         namespace.clear_isolation_mode(container_name)
     else:
         try:
-            if chroot_config is not None and holder is None:
-                # Native path: chroot + exec without spawning the chroot binary.
+            if holder is None:
                 exit_code = chroot_and_run(
                     chroot_config.rootfs,
                     chroot_config.command,
@@ -1286,20 +1285,26 @@ def _command_login_inner_once(container_name: str, args) -> None:
                     env=child_env,
                     drop_caps=not has_userns,
                 ).returncode
-            elif holder is not None:
-                # Namespace path: enter namespaces via native setns(2) + PTY.
+            else:
+                # The chroot is the child's own last step, after setns(2) and
+                # the capability drop.
+                def _enter() -> None:
+                    enter_chroot(
+                        chroot_config.rootfs,
+                        uid=chroot_config.uid,
+                        gid=chroot_config.gid,
+                        groups=chroot_config.groups,
+                        workdir=chroot_config.workdir,
+                    )
+
                 exit_code = enter_and_run_with_pty(
                     holder.pid,
                     holder._live_ns_flags(),
-                    chroot_args,
+                    chroot_config.command,
                     env=child_env,
                     drop_caps=not has_userns,
+                    setup=_enter,
                 )
-            else:
-                # Fallback: should not normally be reached.
-                import subprocess as _sp
-
-                exit_code = _sp.run(chroot_args, env=child_env, check=False).returncode
         finally:
             if _sess_handle is not None:
                 _sess_handle.close()
@@ -1320,7 +1325,7 @@ def _command_login_inner_once(container_name: str, args) -> None:
 def _run_detached(
     container_name: str,
     *,
-    chroot_args: list,
+    chroot_config: ChrootConfig,
     child_env: dict,
     holder,
     session_handle=None,
@@ -1354,36 +1359,36 @@ def _run_detached(
         sys.exit(1)
 
     # Pass the session flock fd to the child so it inherits the liveness
-    # signal; the parent closes its copy after Popen returns.
-    extra_fds: tuple = ()
+    # signal; the parent closes its copy once the child has forked.
+    extra_fds: tuple[int, ...] = ()
     if session_handle is not None:
         extra_fds = (session_handle.fileno(),)
 
-    # With a namespace holder, enter namespaces via native setns(2) in a
-    # preexec_fn instead of exec'ing the nsenter binary.
-    exec_argv = chroot_args
-    preexec: Callable[[], None] | None = None
-    if holder is not None:
-        from chroot_distro.syscalls.nsenter import enter_namespaces
+    ns_flags = holder._live_ns_flags() if holder is not None else 0
+    holder_pid = holder.pid if holder is not None else -1
 
-        ns_flags = holder._live_ns_flags()
-        holder_pid = holder.pid
+    def _become_guest() -> None:
+        if holder_pid > 0:
+            from chroot_distro.syscalls.nsenter import enter_namespaces
 
-        def _preexec_fn() -> None:
             enter_namespaces(holder_pid, ns_flags)
-
-        preexec = _preexec_fn
+        enter_chroot(
+            chroot_config.rootfs,
+            uid=chroot_config.uid,
+            gid=chroot_config.gid,
+            groups=chroot_config.groups,
+            workdir=chroot_config.workdir,
+        )
 
     try:
-        proc = subprocess.Popen(
-            exec_argv,
+        child_pid = spawn_detached(
+            chroot_config.command,
             env=child_env,
-            stdin=devnull,
-            stdout=log_fh,
-            stderr=log_fh,
-            start_new_session=True,
-            pass_fds=extra_fds,
-            preexec_fn=preexec,  # noqa: PLW1509
+            stdin_fd=devnull.fileno(),
+            stdout_fd=log_fh.fileno(),
+            stderr_fd=log_fh.fileno(),
+            keep_fds=extra_fds,
+            setup=_become_guest,
         )
     except OSError as exc:
         log_fh.close()
@@ -1409,7 +1414,7 @@ def _run_detached(
 
     from chroot_distro.message import log_info
 
-    log_info(f"Container '{container_name}' started in background (PID {proc.pid}).")
+    log_info(f"Container '{container_name}' started in background (PID {child_pid}).")
     log_info(f"Output is being written to: {log_path}")
     log_info(f"Stop it with: {PROGRAM_NAME} kill {container_name}")
 

@@ -8,7 +8,7 @@ from chroot_distro.commands.login import (
     _MaxIsolationFallback,
     _safe_hostname,
 )
-from chroot_distro.commands.login.chroot_cmd import build_chroot_args
+from chroot_distro.commands.login.chroot_cmd import build_chroot_config, chroot_display_argv
 from chroot_distro.commands.login.env import read_cd_env, resolve_override, resolve_term
 
 
@@ -146,14 +146,14 @@ def test_resolve_term_exists_termux(tmp_path):
     assert res == "xterm-ghostty"
 
 
-def test_build_chroot_args_fault_tolerant_cd(tmp_path):
-    # Test that when a workdir is specified AND /bin/sh exists, it wraps the command with a fault-tolerant cd.
+def test_build_chroot_config_fault_tolerant_cd(tmp_path):
+    # A workdir with /bin/sh present wraps the command in a fault-tolerant cd.
     rootfs = tmp_path / "rootfs"
     (rootfs / "bin").mkdir(parents=True)
     (rootfs / "bin" / "sh").touch()
     (rootfs / "bin" / "sh").chmod(0o755)
 
-    args = build_chroot_args(
+    config = build_chroot_config(
         rootfs=str(rootfs),
         login_uid="1000",
         login_gid="1000",
@@ -162,21 +162,36 @@ def test_build_chroot_args_fault_tolerant_cd(tmp_path):
         inner_cmd=["/bin/bash", "-l"],
     )
 
-    assert args[0].endswith("chroot")
-    assert "--userspec=1000:1000" in args
-    assert "--groups=1000,4" in args
-    assert str(rootfs) in args
+    assert config.rootfs == str(rootfs)
+    assert (config.uid, config.gid) == (1000, 1000)
+    assert config.groups == [1000, 4]
 
-    # Verify the wrapped cd command structure
-    assert "/bin/sh" in args
-    assert "-c" in args
-    wrapped_cmd = args[-1]
-    assert "cd /home/saba 2>/dev/null || cd /" in wrapped_cmd
-    assert "exec /bin/bash -l" in wrapped_cmd
+    assert config.command[:2] == ["/bin/sh", "-c"]
+    assert "cd /home/saba 2>/dev/null || cd /" in config.command[2]
+    assert "exec /bin/bash -l" in config.command[2]
+    # The cd happens inside the wrapper, so the chroot itself starts at /.
+    assert config.workdir == "/"
 
 
-def test_build_chroot_args_no_workdir():
-    args = build_chroot_args(
+def test_chroot_display_argv_renders_userspec_and_groups(tmp_path):
+    config = build_chroot_config(
+        rootfs=str(tmp_path),
+        login_uid="1000",
+        login_gid="1000",
+        groups=["1000", "4"],
+        inner_cmd=["/bin/bash", "-l"],
+    )
+    argv = chroot_display_argv(config, ["nsenter", "--target", "42", "--mount"])
+
+    assert argv[:4] == ["nsenter", "--target", "42", "--mount"]
+    assert argv[4] == "chroot"
+    assert "--userspec=1000:1000" in argv
+    assert "--groups=1000,4" in argv
+    assert argv[-3:] == [str(tmp_path), "/bin/bash", "-l"]
+
+
+def test_build_chroot_config_no_workdir():
+    config = build_chroot_config(
         rootfs="/fake/rootfs",
         login_uid="1000",
         login_gid="1000",
@@ -184,18 +199,18 @@ def test_build_chroot_args_no_workdir():
         workdir="",
         inner_cmd=["/bin/bash", "-l"],
     )
-    # When no workdir is specified, it should NOT wrap it with cd.
-    assert "/bin/sh" not in args
-    assert args[-2:] == ["/bin/bash", "-l"]
+    # Without a workdir there is nothing to cd to, so no shell wrapper.
+    assert config.command == ["/bin/bash", "-l"]
+    assert config.workdir == "/"
 
 
-def test_build_chroot_args_distroless_no_shell(tmp_path):
+def test_build_chroot_config_distroless_no_shell(tmp_path):
     """Distroless images without /bin/sh should skip the cd wrapper."""
     rootfs = tmp_path / "rootfs"
     rootfs.mkdir()
-    # No /bin/sh created — simulates a distroless image like cloudflare/cloudflared
+    # No /bin/sh created, simulating a distroless image like cloudflare/cloudflared
 
-    args = build_chroot_args(
+    config = build_chroot_config(
         rootfs=str(rootfs),
         login_uid="65532",
         login_gid="65532",
@@ -203,16 +218,12 @@ def test_build_chroot_args_distroless_no_shell(tmp_path):
         inner_cmd=["/usr/local/bin/cloudflared", "--help"],
     )
 
-    assert args[0].endswith("chroot")
-    assert str(rootfs) in args
-    # /bin/sh should NOT be in the args — no shell wrapper
-    assert "/bin/sh" not in args
-    assert "-c" not in args
-    # The command should be appended directly
-    assert args[-2:] == ["/usr/local/bin/cloudflared", "--help"]
+    assert config.rootfs == str(rootfs)
+    assert config.command == ["/usr/local/bin/cloudflared", "--help"]
+    assert config.workdir == "/"
 
 
-def test_build_chroot_args_shell_symlink_escapes_rootfs(tmp_path):
+def test_build_chroot_config_shell_symlink_escapes_rootfs(tmp_path):
     """A /bin/sh symlink pointing outside the rootfs must not be used as the
     workdir wrapper shell (e.g. bind-mounted host $PREFIX on Termux). The
     command should then be run directly without a shell wrapper."""
@@ -225,17 +236,15 @@ def test_build_chroot_args_shell_symlink_escapes_rootfs(tmp_path):
     # /bin/sh in the rootfs is a symlink to a file *outside* the rootfs tree.
     os.symlink(str(outside / "sh"), rootfs / "bin" / "sh")
 
-    args = build_chroot_args(
+    config = build_chroot_config(
         rootfs=str(rootfs),
         workdir="/home/nonroot",
         inner_cmd=["/app", "--help"],
     )
-    assert "/bin/sh" not in args
-    assert "-c" not in args
-    assert args[-2:] == ["/app", "--help"]
+    assert config.command == ["/app", "--help"]
 
 
-def test_build_chroot_args_run_skips_workdir_wrapper(tmp_path):
+def test_build_chroot_config_run_skips_workdir_wrapper(tmp_path):
     """For `run` (is_run=True), a non-root workdir must NOT wrap the command in
     a shell, even when a real /bin/sh exists in the rootfs (which on Termux can
     be the host $PREFIX shell exposed via a bind-mounted /data)."""
@@ -244,31 +253,30 @@ def test_build_chroot_args_run_skips_workdir_wrapper(tmp_path):
     (rootfs / "bin" / "sh").touch()
     (rootfs / "bin" / "sh").chmod(0o755)
 
-    args = build_chroot_args(
+    config = build_chroot_config(
         rootfs=str(rootfs),
         workdir="/home/nonroot",
         inner_cmd=["/usr/local/bin/cloudflared", "--help"],
         is_run=True,
     )
 
-    assert "/bin/sh" not in args
-    assert "-c" not in args
-    assert args[-2:] == ["/usr/local/bin/cloudflared", "--help"]
+    assert config.command == ["/usr/local/bin/cloudflared", "--help"]
+    assert config.workdir == "/home/nonroot"
 
 
-def test_build_chroot_args_distroless_workdir_root(tmp_path):
+def test_build_chroot_config_distroless_workdir_root(tmp_path):
     """Distroless images with workdir='/' should not attempt any wrapping."""
     rootfs = tmp_path / "rootfs"
     rootfs.mkdir()
 
-    args = build_chroot_args(
+    config = build_chroot_config(
         rootfs=str(rootfs),
         workdir="/",
         inner_cmd=["/cloudflared", "tunnel"],
     )
 
-    assert "/bin/sh" not in args
-    assert args[-2:] == ["/cloudflared", "tunnel"]
+    assert config.command == ["/cloudflared", "tunnel"]
+    assert config.workdir == "/"
 
 
 def test_get_bindings_home_sharing():
@@ -586,16 +594,6 @@ def test_ensure_data_suid_skips_when_already_suid():
         ),
     ):
         assert ensure_data_suid() is True
-
-
-def test_build_chroot_args_termux_chroot_resolution():
-    with (
-        patch("chroot_distro.commands.login.chroot_cmd.IS_TERMUX", True),
-        patch("chroot_distro.commands.login.chroot_cmd.TERMUX_PREFIX", "/fake/termux/usr"),
-        patch("os.path.isfile", side_effect=lambda p: p == "/fake/termux/usr/bin/chroot"),
-    ):
-        args = build_chroot_args(rootfs="/fake/rootfs")
-        assert args[0] == "/fake/termux/usr/bin/chroot"
 
 
 def test_special_mounts_default():
@@ -1086,10 +1084,11 @@ def test_filter_flags_by_ns_files_keeps_all_when_openable():
         assert ns.filter_flags_by_ns_files(1, flags) == flags
 
 
-def test_holder_run_argv_drops_unopenable_ipc_at_call_time():
-    """run_argv must drop a namespace whose ns file is unopenable right now,
-    but always keep the essential mount namespace."""
+def test_holder_live_ns_flags_drops_unopenable_ipc_at_call_time():
+    """A namespace whose ns file is unopenable right now must be dropped, but
+    the essential mount namespace is always kept."""
     from chroot_distro.helpers import namespace as ns
+    from chroot_distro.syscalls import nsenter
     from chroot_distro.syscalls._constants import CLONE_NEWIPC, CLONE_NEWNS, CLONE_NEWPID, CLONE_NEWUTS
 
     holder = ns.NamespaceHolder(
@@ -1103,17 +1102,17 @@ def test_holder_run_argv_drops_unopenable_ipc_at_call_time():
             raise OSError(2, "No such file or directory")
         return 5
 
-    with patch.object(ns.os, "open", side_effect=fake_open), patch.object(ns.os, "close"):
-        argv = holder.run_argv(["true"])
+    with patch.object(nsenter.os, "open", side_effect=fake_open), patch.object(nsenter.os, "close"):
+        live = holder._live_ns_flags()
 
-    assert "--ipc" not in argv
-    assert "--mount" in argv
-    assert "--pid" in argv and "--uts" in argv
-    assert argv[:3] == ["nsenter", "--target", "4321"]
+    assert not live & CLONE_NEWIPC
+    assert live & CLONE_NEWNS
+    assert live & CLONE_NEWPID and live & CLONE_NEWUTS
 
 
-def test_holder_run_argv_keeps_mount_even_if_unopenable():
+def test_holder_live_ns_flags_keeps_mount_even_if_unopenable():
     from chroot_distro.helpers import namespace as ns
+    from chroot_distro.syscalls import nsenter
     from chroot_distro.syscalls._constants import CLONE_NEWNS
 
     holder = ns.NamespaceHolder(
@@ -1121,9 +1120,8 @@ def test_holder_run_argv_keeps_mount_even_if_unopenable():
         ns_flags=CLONE_NEWNS,
         container_name="x",
     )
-    with patch.object(ns.os, "open", side_effect=OSError(2, "nope")):
-        argv = holder.run_argv(["true"])
-    assert "--mount" in argv
+    with patch.object(nsenter.os, "open", side_effect=OSError(2, "nope")):
+        assert holder._live_ns_flags() & CLONE_NEWNS
 
 
 def test_special_mounts_max_isolation_proc_hidepid():
