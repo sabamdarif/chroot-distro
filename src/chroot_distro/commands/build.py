@@ -31,7 +31,7 @@ from chroot_distro.helpers.oci_writer import (
     write_oci_archive,
 )
 from chroot_distro.locking import BuildLock
-from chroot_distro.message import C, crit_error, log_error, log_info, msg, warn
+from chroot_distro.message import C, crit_error, log_error, log_info, msg, quote_path, warn
 from chroot_distro.names import is_valid_name, require_valid_name
 from chroot_distro.paths import container_is_installed
 from chroot_distro.progress import fmt_size
@@ -202,7 +202,11 @@ def command_build(args: typing.Any) -> None:
             try:
                 final_stage = engine.run(instructions)
             except BuildError as exc:
-                log_error(f"Build failed: {exc}")
+                # A BuildError builds its message by interpolation and the
+                # names it reports on are not the author's: a member of an
+                # ADD'd archive (copy_step._materialise_files), an entry of a
+                # base image, the output of a RUN step's own tooling.
+                log_error(f"Build failed: {quote_path(str(exc))}")
                 sys.exit(1)
 
             # ----- assemble manifest + image_config -----
