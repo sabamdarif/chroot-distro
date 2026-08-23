@@ -208,6 +208,14 @@ def command_build(args: typing.Any) -> None:
                 # base image, the output of a RUN step's own tooling.
                 log_error(f"Build failed: {quote_path(str(exc))}")
                 sys.exit(1)
+            except OSError as exc:
+                # The engine's walks report a per-entry failure and carry on, so
+                # one that gets this far is a walk losing its footing: a
+                # directory a step's leftovers moved out from under it, which
+                # `dirfd.Levels` answers with ESTALE rather than reopening a
+                # level somewhere else. A build, not an unexpected error.
+                log_error(f"Build failed: {quote_path(exc.strerror or str(exc))}")
+                sys.exit(1)
 
             # ----- assemble manifest + image_config -----
             arch_docker = ARCH_TO_DOCKER.get(target_arch, (target_arch, ""))[0]
