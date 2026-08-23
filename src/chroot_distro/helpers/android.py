@@ -1,9 +1,16 @@
 import logging
 import os
-import subprocess
 
 from chroot_distro.constants import IS_TERMUX, TERMUX_HOME
 from chroot_distro.message import warn
+from chroot_distro.syscalls.mount import (
+    MS_NODEV,
+    MS_NOEXEC,
+    MS_NOSUID,
+    MS_REMOUNT,
+    _parse_and_split_mount_options,
+    native_mount,
+)
 
 log = logging.getLogger(__name__)
 
@@ -38,8 +45,11 @@ def ensure_data_suid() -> bool:
     Required for sudo in chroot (nosuid) and for gpgv/apt to work
     when --shared-tmp bind-mounts $PREFIX/tmp as /tmp (noexec).
 
-    Only replaces nosuid/nodev/noexec flags; preserves other mount options to avoid
-    EINVAL from stripping lazytime, seclabel, etc.
+    A remount takes its whole VFS flag word from this one call, so the flags
+    already in force are read back out of /proc/mounts and only nosuid, nodev
+    and noexec are cleared.  Whatever in that option field is the filesystem's
+    own (lazytime, seclabel, an f2fs tunable) goes back as mount(2) data
+    untouched, since stripping it is what earns an EINVAL.
     """
     if not IS_TERMUX:
         return False
@@ -53,21 +63,16 @@ def ensure_data_suid() -> bool:
     if "nosuid" not in opts and "noexec" not in opts:
         return True
 
-    new_opts = opts.replace("nosuid", "suid").replace("nodev", "dev").replace("noexec", "exec")
-    mount_arg = f"remount,{new_opts}"
-    mount_cmd = ["mount", "-o", mount_arg, device, "/data"]
+    flags, data = _parse_and_split_mount_options(opts)
+    flags &= ~(MS_NOSUID | MS_NODEV | MS_NOEXEC)
     try:
-        subprocess.run(
-            mount_cmd,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        log.info("Remounted /data with suid enabled")
-        return True
-    except (OSError, subprocess.CalledProcessError) as exc:
+        native_mount(device, "/data", None, MS_REMOUNT | flags, data or None)
+    except OSError as exc:
         warn(f"Failed to enable SUID on /data (remount failed): {exc}")
         return False
+
+    log.info("Remounted /data with suid enabled")
+    return True
 
 
 ANDROID_GROUPS = {

@@ -15,15 +15,24 @@ from __future__ import annotations
 
 from chroot_distro.syscalls._constants import (
     MS_BIND,
+    MS_DIRSYNC,
+    MS_I_VERSION,
+    MS_LAZYTIME,
+    MS_MANDLOCK,
+    MS_NOATIME,
     MS_NODEV,
+    MS_NODIRATIME,
     MS_NOEXEC,
     MS_NOSUID,
+    MS_NOSYMFOLLOW,
     MS_PRIVATE,
     MS_RDONLY,
     MS_REC,
+    MS_RELATIME,
     MS_REMOUNT,
     MS_SHARED,
     MS_SLAVE,
+    MS_SYNCHRONOUS,
 )
 from chroot_distro.syscalls._libc import libc_mount
 
@@ -51,12 +60,27 @@ __all__ = [
 # Option-string → flag-bit mapping (used by _parse_mount_options)
 # ---------------------------------------------------------------------------
 
+# Every VFS option name the kernel prints in the option field of
+# /proc/mounts, so an option string read back from there translates whole and
+# nothing generic is left to be mistaken for a filesystem's own option. "rw"
+# is the absence of MS_RDONLY, and is here to be recognised rather than
+# forwarded.
 _OPTION_FLAG_MAP: dict[str, int] = {
     "ro": MS_RDONLY,
+    "rw": 0,
     "nosuid": MS_NOSUID,
     "nodev": MS_NODEV,
     "noexec": MS_NOEXEC,
     "remount": MS_REMOUNT,
+    "sync": MS_SYNCHRONOUS,
+    "dirsync": MS_DIRSYNC,
+    "mand": MS_MANDLOCK,
+    "noatime": MS_NOATIME,
+    "nodiratime": MS_NODIRATIME,
+    "relatime": MS_RELATIME,
+    "lazytime": MS_LAZYTIME,
+    "nosymfollow": MS_NOSYMFOLLOW,
+    "i_version": MS_I_VERSION,
 }
 
 
@@ -73,19 +97,8 @@ def _encode(value: str | None) -> bytes | None:
 def _parse_mount_options(options: str) -> int:
     """Parse a comma-separated mount option string into a flag bitmask.
 
-    Recognised options are mapped to their ``MS_*`` constants:
-
-    =========  ============
-    Option     Constant
-    =========  ============
-    ``ro``     ``MS_RDONLY``
-    ``nosuid`` ``MS_NOSUID``
-    ``nodev``  ``MS_NODEV``
-    ``noexec`` ``MS_NOEXEC``
-    ``remount````MS_REMOUNT``
-    =========  ============
-
-    Unknown options (e.g. ``"size=64m"``) are silently ignored — they
+    Options named in :data:`_OPTION_FLAG_MAP` are mapped to their ``MS_*``
+    constants.  Unknown options (e.g. ``"size=64m"``) are silently ignored — they
     belong in the *data* argument of ``mount(2)``, not the *flags*.
 
     Args:
@@ -195,9 +208,9 @@ def bind_mount(
         readonly: Convenience flag — equivalent to passing ``"ro"`` in
             *options*.
         options: Comma-separated mount options applied via a remount
-            after the initial bind.  Recognised tokens: ``ro``,
-            ``nosuid``, ``nodev``, ``noexec``.  Unknown tokens are
-            silently ignored.
+            after the initial bind.  Recognised tokens are the generic VFS
+            ones (:data:`_OPTION_FLAG_MAP`); unknown tokens are silently
+            ignored.
 
     Raises:
         OSError: If any ``mount(2)`` call fails.
@@ -237,8 +250,8 @@ def mount_filesystem(
     Use this for pseudo-filesystems commonly required inside a chroot:
     ``proc``, ``sysfs``, ``tmpfs``, ``devpts``, etc.
 
-    Generic VFS options found in *options* (e.g. ``"ro"``, ``"nosuid"``,
-    ``"nodev"``, ``"noexec"``) are automatically parsed and merged into the VFS
+    Generic VFS options found in *options* (:data:`_OPTION_FLAG_MAP`) are
+    automatically parsed and merged into the VFS
     *flags*, while filesystem-specific options are forwarded to the driver's
     *data* parameter. This avoids ``EINVAL`` failures from drivers that do
     not recognise generic options.
