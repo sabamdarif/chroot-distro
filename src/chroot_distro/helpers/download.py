@@ -1,3 +1,41 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
+"""The HTTP layer: retry policy, TLS diagnosis, and the segmented downloader.
+
+Everything that fetches bytes over the network shares this module, including the
+registry transport, which imports `retry_http` and `is_retryable_http_error` rather
+than keeping its own copy, so a plain URL and a registry blob fail the same way.
+
+Only a failure a repeat request could fix is retried. A 4xx other than 408 and 429, a
+certificate verification failure, and a plaintext reply to an https:// URL are
+deterministic, so they are re-raised at once and the caller turns them into an
+explanation instead of the loop burning five attempts on them.
+
+The two TLS failures are told apart on purpose. A peer that speaks TLS with a
+certificate this host does not trust is answered with the `--allow-insecure` hint; a
+peer not speaking TLS at all is answered with "use the http:// scheme", and OpenSSL's
+own handshake reason proves which it is, so no second probe is needed.
+
+Segmentation is earned, never assumed: HEAD first, a `Range: bytes=0-0` GET when HEAD
+is silent about ranges or answers 405, and segments only when Range works *and* the
+length is known. `MIN_SEGMENT_BYTES` keeps a small file whole, and a split that yields
+one segment raises `_FallbackToSingleError`. Every incompatibility falls back to a
+single connection rather than failing the download. Range requests always send
+`Accept-Encoding: identity`, because a compressed body makes byte offsets meaningless.
+
+An interrupted download resumes: `.chunkN.tmp` files plus a `.chunks.json` split that
+is only reused when it matches the probed length, each segment restarting at its own
+file size and reconnecting on its own up to `_MAX_RECONNECTIONS`. Both paths publish
+through `atomic_replace`, so a partial body never appears under the destination name.
+
+Ctrl+C is the subtle part. `_LiveResponses.close_all` shuts the socket down instead of
+closing the response, because `HTTPResponse.close()` from a signal handler deadlocks
+against the buffer lock a worker blocked in `read()` holds at the C level. Every retry
+loop also re-checks the abort event before opening a connection: a force-closed socket
+surfaces as a retryable OSError, and the loop would otherwise reconnect straight past
+the interrupt.
+"""
+
 import contextlib
 import functools
 import hashlib
@@ -56,7 +94,7 @@ def insecure_ssl_context() -> ssl.SSLContext:
     Used only when the caller explicitly opts in via ``--allow-insecure``,
     so an HTTPS endpoint with an untrusted/expired/self-signed certificate
     (or a hostname mismatch) can still be reached. This disables the
-    protection TLS provides against impersonation — never the default.
+    protection TLS provides against impersonation, and is never the default.
     """
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
@@ -68,7 +106,7 @@ def is_cert_verification_error(exc: urllib.error.URLError) -> bool:
     """Return True if *exc* is a TLS certificate verification failure.
 
     Covers an untrusted CA, an expired or self-signed certificate, and a
-    hostname mismatch — i.e. the server *does* speak TLS, but its
+    hostname mismatch: the server *does* speak TLS, but its
     certificate is not trusted. Distinct from is_plaintext_http_tls_error,
     which means the peer is not speaking TLS at all.
     """
@@ -81,7 +119,7 @@ def is_cert_verification_error(exc: urllib.error.URLError) -> bool:
 def certificate_error_msg(target: str) -> str:
     """Return the error shown when *target* presents an untrusted certificate."""
     return (
-        f"TLS certificate verification failed for '{target}' — the server's "
+        f"TLS certificate verification failed for '{target}': the server's "
         f"certificate is untrusted, expired, self-signed, or issued for a "
         f"different hostname. If you trust this endpoint, re-run with "
         f"'--allow-insecure' to skip certificate verification."
@@ -89,7 +127,7 @@ def certificate_error_msg(target: str) -> str:
 
 
 # OpenSSL handshake-failure reasons that mean the peer answered our TLS
-# ClientHello with plaintext bytes — the signature of a server that only
+# ClientHello with plaintext bytes, the signature of a server that only
 # speaks plain HTTP reached over an https:// URL. WRONG_VERSION_NUMBER is what
 # modern OpenSSL reports; the others cover older or edge builds. These are
 # *not* emitted for genuine TLS problems (expired/untrusted cert,
@@ -111,7 +149,7 @@ def is_plaintext_http_tls_error(exc: urllib.error.URLError) -> bool:
     ``urlopen`` of an https:// URL against a server that only speaks plain
     HTTP raises ``URLError`` whose ``reason`` is an ``ssl.SSLError`` with a
     telltale reason string (e.g. WRONG_VERSION_NUMBER). That alone proves the
-    peer is HTTP-only — no second network probe is needed. Shared by the
+    peer is HTTP-only, so no second network probe is needed. Shared by the
     Docker registry transport and the generic URL downloader.
     """
     reason = getattr(exc, "reason", None)
@@ -123,11 +161,11 @@ def is_plaintext_http_tls_error(exc: urllib.error.URLError) -> bool:
 def is_retryable_http_error(exc: BaseException) -> bool:
     """Return True if a failed HTTP request is worth retrying.
 
-    Deterministic failures are not retried — they cannot succeed on a repeat
+    Deterministic failures are not retried, since they cannot succeed on a repeat
     request: an HTTP client error (4xx, except 408 Request Timeout and 429 Too
     Many Requests, which mean "retry later"), a TLS certificate verification
-    failure, or a plaintext-HTTP reply to an https:// URL. Everything else —
-    5xx server errors, connection resets, timeouts, DNS failures — is treated
+    failure, or a plaintext-HTTP reply to an https:// URL. Everything else
+    (5xx server errors, connection resets, timeouts, DNS failures) is treated
     as transient and retried.
     """
     import http.client
@@ -154,8 +192,8 @@ def retry_http(
 
     This is the single retry policy shared by the plain URL downloader and the
     Docker/OCI registry transport, so both behave identically. A deterministic
-    failure (see is_retryable_http_error) is re-raised immediately — without
-    retrying or logging — so the caller can translate it into a meaningful
+    failure (see is_retryable_http_error) is re-raised immediately, without
+    retrying or logging, so the caller can translate it into a meaningful
     message. The original exception is likewise re-raised once every attempt is
     spent. *what* is a short label for the retry log line.
 
@@ -184,15 +222,13 @@ def retry_http(
     return None
 
 
-_READ_CHUNK = 262144  # 256 KiB — balances syscall overhead vs memory
-_SOCKET_TIMEOUT = 30  # seconds — prevents threads from blocking in read() forever
+_READ_CHUNK = 262144  # 256 KiB
+_SOCKET_TIMEOUT = 30  # seconds, so a stalled read() cannot pin a thread forever
 
-# Maximum number of reconnection attempts for a single chunk (PyLoad §6).
-# This is the outer reconnection cap; each reconnection attempt itself
+# Outer reconnection cap for one chunk; each reconnection attempt itself
 # retries up to _max_retries times internally.
 _MAX_RECONNECTIONS = 10
 
-# Transient error types worth retrying.
 _TRANSIENT_ERRORS = (
     ssl.SSLError,
     ConnectionResetError,
@@ -224,28 +260,27 @@ def _get_retry_delays(max_retries: int) -> tuple[float, ...]:
     return tuple(min(2**i, 30) for i in range(max_retries))
 
 
-# ---------------------------------------------------------------------------
-# Data types
-# ---------------------------------------------------------------------------
-
-
 @dataclass(frozen=True)
 class _ProbeResult:
-    """Result of probing a URL for Range support."""
+    """Result of probing a URL for Range support.
 
-    content_length: int  # total bytes (0 if unknown)
-    final_url: str  # URL after redirects
-    range_ok: bool  # server supports Accept-Ranges: bytes
+    *content_length* is 0 when the server did not report one, *final_url* is
+    the URL after redirects.
+    """
+
+    content_length: int
+    final_url: str
+    range_ok: bool
 
 
 @dataclass(frozen=True)
 class _Segment:
-    """One byte-range slice of a segmented download."""
+    """One byte-range slice of a segmented download, *start* and *end* inclusive."""
 
     index: int
-    start: int  # inclusive byte offset
-    end: int  # inclusive byte offset
-    tmp_path: str  # absolute path to .chunkN.tmp
+    start: int
+    end: int
+    tmp_path: str
 
 
 class _RangeNotSupportedError(Exception):
@@ -254,11 +289,6 @@ class _RangeNotSupportedError(Exception):
 
 class _FallbackToSingleError(Exception):
     """Signal to retry the whole download as a single connection."""
-
-
-# ---------------------------------------------------------------------------
-# Probe
-# ---------------------------------------------------------------------------
 
 
 def _range_probe(
@@ -276,9 +306,8 @@ def _range_probe(
         range_headers = {**headers, "Range": "bytes=0-0", "Accept-Encoding": "identity"}
         range_req = urllib.request.Request(url, headers=range_headers)
         with open_fn(range_req) as resp:
-            resp.read(1)  # consume minimal body
+            resp.read(1)
             if resp.status == 206:
-                # Parse Content-Range: bytes 0-0/TOTAL
                 cr = resp.headers.get("Content-Range", "")
                 total = 0
                 if "/" in cr:
@@ -289,7 +318,6 @@ def _range_probe(
                     final_url=resp.url,
                     range_ok=True,
                 )
-            # Server returned 200 — no range support
             return _ProbeResult(
                 content_length=int(resp.headers.get("Content-Length", 0)),
                 final_url=resp.url,
@@ -308,9 +336,9 @@ def _probe_url(
 
     Strategy (two-stage):
 
-    1. **HEAD** — fast, no body.  If the response contains
+    1. **HEAD**, fast and with no body. If the response contains
        ``Accept-Ranges: bytes`` we're done.
-    2. **GET Range: bytes=0-0** — sent when HEAD succeeds but omits
+    2. **GET Range: bytes=0-0**, sent when HEAD succeeds but omits
        ``Accept-Ranges`` (common on CDNs), *or* when HEAD returns 405.
        A 206 reply proves Range support; a 200 reply means no support.
 
@@ -322,7 +350,6 @@ def _probe_url(
     if open_fn is None:
         open_fn = functools.partial(urllib.request.urlopen, timeout=_SOCKET_TIMEOUT)
 
-    # --- 1st try: HEAD ---
     need_range_probe = False
     try:
         head_req = urllib.request.Request(url, headers=headers, method="HEAD")
@@ -337,14 +364,11 @@ def _probe_url(
                     range_ok=True,
                 )
             if accept_ranges == "none":
-                # Server explicitly says no ranges.
                 return _ProbeResult(
                     content_length=content_length,
                     final_url=final_url,
                     range_ok=False,
                 )
-            # No Accept-Ranges header — many CDNs omit it but still
-            # support Range requests.  Fall through to the GET probe.
             need_range_probe = content_length > 0
             if not need_range_probe:
                 return _ProbeResult(
@@ -354,12 +378,11 @@ def _probe_url(
                 )
     except urllib.error.HTTPError as exc:
         if exc.code != 405:
-            return None  # non-405 → give up probing
+            return None
         need_range_probe = True
     except (OSError, urllib.error.URLError):
         return None
 
-    # --- 2nd try: GET Range: bytes=0-0 ---
     if need_range_probe:
         return _range_probe(url, headers, open_fn)
 
@@ -379,15 +402,10 @@ def _probe_server(url: str, headers: dict[str, str], insecure: bool = False) -> 
     return _probe_url(url, headers, open_fn=open_fn)
 
 
-# ---------------------------------------------------------------------------
-# Segment computation
-# ---------------------------------------------------------------------------
-
-
 def _compute_segments(total: int, n: int, dest: str) -> list[_Segment]:
     """Split *total* bytes into up to *n* non-overlapping segments.
 
-    Enforces ``MIN_SEGMENT_BYTES`` — the actual segment count may be less
+    Enforces ``MIN_SEGMENT_BYTES``, so the actual segment count may be less
     than *n* for small files.
     """
     n = min(n, max(1, total // MIN_SEGMENT_BYTES))
@@ -406,11 +424,6 @@ def _compute_segments(total: int, n: int, dest: str) -> list[_Segment]:
             )
         )
     return segments
-
-
-# ---------------------------------------------------------------------------
-# Per-segment download (PyLoad §4 + §6 resilience)
-# ---------------------------------------------------------------------------
 
 
 def _interruptible_sleep(seconds: float, abort_event: threading.Event) -> None:
@@ -451,7 +464,7 @@ class _LiveResponses:
     thread while worker threads sit inside ``resp.read()``. Calling
     ``resp.close()`` there deadlocks: HTTPResponse.close() closes its
     BufferedReader, which needs the same internal buffer lock the blocked
-    reader thread is holding — uninterruptibly, at the C level. Instead we
+    reader thread is holding, uninterruptibly, at the C level. Instead we
     ``shutdown(2)`` the underlying socket, which takes no Python-level lock
     and makes the blocked ``recv()`` return immediately.
     """
@@ -475,7 +488,7 @@ class _LiveResponses:
                     with contextlib.suppress(Exception):
                         sock.shutdown(socket.SHUT_RDWR)
                 else:
-                    # No live socket to shut down — close() cannot block.
+                    # No live socket to shut down: close() cannot block.
                     with contextlib.suppress(Exception):
                         resp.close()
             self.responses.clear()
@@ -524,7 +537,7 @@ def _download_segment(
     while reconnections <= _MAX_RECONNECTIONS:
         for attempt in range(max_retries + 1):
             try:
-                # Never open a new connection after the user aborted — a
+                # Never open a new connection after the user aborted: a
                 # force-closed socket surfaces as a retryable OSError, and
                 # this loop would otherwise reconnect right past the Ctrl+C.
                 if abort_event.is_set():
@@ -566,14 +579,12 @@ def _download_segment(
                             if unsent >= REDRAW_THRESHOLD_BYTES:
                                 aggregate.add(unsent)
                                 unsent = 0
-                    # flush remaining unsent bytes
                     if aggregate and unsent:
                         aggregate.add(unsent)
                     fh.flush()
                     os.fsync(fh.fileno())
                 if live_responses is not None:
                     live_responses.discard(resp)
-                # verify size
                 actual = os.path.getsize(seg.tmp_path)
                 if actual != expected:
                     raise RuntimeError(f"Segment {seg.index}: expected {expected} bytes, got {actual}")
@@ -601,29 +612,22 @@ def _download_segment(
                     if os.path.isfile(seg.tmp_path):
                         downloaded = os.path.getsize(seg.tmp_path)
                     continue
-                # All retries exhausted for this reconnection attempt.
-                # PyLoad §6: reconnect the chunk from where we left off.
+                # Retries exhausted: reconnect and resume from what is on
+                # disk rather than failing the whole segment.
                 if os.path.isfile(seg.tmp_path):
                     downloaded = os.path.getsize(seg.tmp_path)
                 if downloaded >= expected:
-                    return  # actually complete
+                    return
                 reconnections += 1
                 if reconnections > _MAX_RECONNECTIONS:
                     raise
-                # Recreate the opener for a fresh connection
                 opener = urllib.request.build_opener()
-                break  # break the retry loop, re-enter the reconnection loop
+                break  # re-enter the reconnection loop
 
-    # Exhausted all reconnection attempts
     raise RuntimeError(
         f"Segment {seg.index}: exhausted {_MAX_RECONNECTIONS} reconnection attempts "
         f"(downloaded {downloaded}/{expected} bytes)"
     )
-
-
-# ---------------------------------------------------------------------------
-# Chunk concatenation
-# ---------------------------------------------------------------------------
 
 
 def _concat_chunks(segments: list[_Segment], dest: str) -> None:
@@ -637,7 +641,7 @@ def _concat_chunks(segments: list[_Segment], dest: str) -> None:
 
 
 def _concat_chunks_inplace(segments: list[_Segment], dest: str) -> None:
-    """PyLoad §4.5 chunk-0 append assembly.
+    """Chunk-0 append assembly.
 
     Appends subsequent chunks into chunk0 in-place, then renames to *dest*.
     Saves disk space (no full-size temp copy) but is less crash-safe than
@@ -649,7 +653,7 @@ def _concat_chunks_inplace(segments: list[_Segment], dest: str) -> None:
         for seg in ordered[1:]:
             with open(seg.tmp_path, "rb") as inp:
                 while True:
-                    buf = inp.read(1 << 15)  # 32 KiB buffers per PyLoad
+                    buf = inp.read(1 << 15)  # 32 KiB
                     if not buf:
                         break
                     out.write(buf)
@@ -657,11 +661,6 @@ def _concat_chunks_inplace(segments: list[_Segment], dest: str) -> None:
         out.flush()
         os.fsync(out.fileno())
     os.replace(base, dest)
-
-
-# ---------------------------------------------------------------------------
-# Multi-connection orchestrator
-# ---------------------------------------------------------------------------
 
 
 def _download_multi(
@@ -676,7 +675,6 @@ def _download_multi(
     chunks_meta_path = f"{dest}.chunks.json"
     segments = None
 
-    # Try to load existing chunk metadata
     if os.path.isfile(chunks_meta_path):
         try:
             with open(chunks_meta_path, encoding="utf-8") as f:
@@ -695,7 +693,8 @@ def _download_multi(
             log.debug("Failed to load chunks metadata from %s: %s", chunks_meta_path, exc)
 
     if not segments:
-        # Clean up any potential stale chunk files
+        # A previous run may have split into more segments than this one, so
+        # sweep a few indices past the current count.
         for i in range(connections + 5):
             with contextlib.suppress(OSError):
                 os.remove(f"{dest}.chunk{i}.tmp")
@@ -706,7 +705,6 @@ def _download_multi(
         if len(segments) == 1:
             raise _FallbackToSingleError
 
-        # Save metadata
         try:
             meta = {
                 "total": probe.content_length,
@@ -814,11 +812,6 @@ def _download_multi(
                 os.remove(chunks_meta_path)
 
 
-# ---------------------------------------------------------------------------
-# Single-connection download (original logic, renamed)
-# ---------------------------------------------------------------------------
-
-
 def _download_single(
     url: str,
     dest: str,
@@ -876,7 +869,6 @@ def _download_single_loop(
             ):
                 total = int(resp.headers.get("Content-Length", 0))
                 downloaded = 0
-                # Draw initial 0% bar immediately
                 draw_bytes_bar(0, total, noun="downloaded")
                 last_speed_time = time.monotonic()
                 last_speed_bytes = 0
@@ -889,7 +881,6 @@ def _download_single_loop(
                     downloaded += len(chunk)
                     if bucket:
                         bucket.consume(len(chunk))
-                    # Update speed every ~0.5s
                     now = time.monotonic()
                     dt = now - last_speed_time
                     if dt >= 0.5:
@@ -930,11 +921,6 @@ def _download_single_loop(
             raise RuntimeError(f"Cannot download {url}: {exc}") from exc
 
 
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
-
-
 def download_file(
     url: str,
     dest: str,
@@ -956,12 +942,10 @@ def download_file(
 
     connections = layer_download_workers()
 
-    # Create a shared rate limiter (0 = unlimited)
     rate = download_rate_limit()
     bucket = TokenBucket(rate) if rate > 0 else None
 
     if connections > 1:
-        # Probe with immediate spinner feedback
         with loading_line("Connecting..."):
             probe = _probe_server(url, _ua_headers(), insecure=insecure)
 
@@ -998,7 +982,6 @@ def download_file(
                     raise RuntimeError(f"Cannot download {url}: HTTP {exc.code} {exc.reason}") from exc
                 raise RuntimeError(f"Cannot download {url}: {exc}") from exc
 
-    # Single-connection fallback
     _download_single(url, dest, bucket, insecure=insecure)
 
 

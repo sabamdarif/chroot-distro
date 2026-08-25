@@ -32,9 +32,7 @@ def test_safe_mount_via_holder():
     ):
         mm.safe_mount("/host/src", "/tmp/rootfs/mnt", holder=holder)
 
-    holder.do_bind_mount.assert_called_once_with(
-        "/host/src", "/tmp/rootfs/mnt", recursive=False, options=""
-    )
+    holder.do_bind_mount.assert_called_once_with("/host/src", "/tmp/rootfs/mnt", recursive=False, options="")
 
 
 def test_create_dev_nodes_via_holder():

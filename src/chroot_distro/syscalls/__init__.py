@@ -1,27 +1,12 @@
-"""Native Linux syscall wrappers for chroot-distro.
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
+"""Pure-Python kernel access, in place of the binaries this program refuses to call.
 
-This package provides pure-Python/ctypes replacements for the external
-binaries ``chroot``, ``mount``, ``umount``, ``unshare``, and ``nsenter``.
-All functions call the corresponding Linux syscalls directly via ``ctypes``
-and do **not** shell out to any external binary.
-
-Submodules
-----------
-_libc
-    Shared libc handle, errno helper, and Python 3.10-3.11 backports for
-    ``os.unshare`` / ``os.setns``.
-_constants
-    Linux kernel constants (mount flags, namespace flags, capabilities).
-chroot
-    ``chroot(2)`` + user/group switching + exec.
-mount
-    ``mount(2)`` wrappers for bind mounts, filesystem mounts, propagation.
-umount
-    ``umount2(2)`` wrapper.
-unshare
-    ``unshare(2)`` + fork for namespace creation.
-nsenter
-    ``setns(2)`` for entering existing namespaces.
+Every submodule below reaches the kernel through ctypes and libc: chroot(1),
+mount(1), umount(1), unshare(1) and nsenter(1) are reimplemented here, and nothing
+new in the tree may exec a binary to reach a syscall. This file re-exports the
+constants used outside the package so a caller can name `syscalls.MS_BIND` without
+importing the private `_constants` module.
 """
 
 from __future__ import annotations
@@ -59,14 +44,12 @@ from chroot_distro.syscalls._constants import (
 )
 
 __all__ = [
-    # Capability constants
     "CAP_MAC_ADMIN",
     "CAP_MAC_OVERRIDE",
     "CAP_SYS_BOOT",
     "CAP_SYS_MODULE",
     "CAP_SYS_PTRACE",
     "CAP_SYS_RAWIO",
-    # Clone/namespace flags
     "CLONE_NEWCGROUP",
     "CLONE_NEWIPC",
     "CLONE_NEWNET",
@@ -75,10 +58,8 @@ __all__ = [
     "CLONE_NEWTIME",
     "CLONE_NEWUSER",
     "CLONE_NEWUTS",
-    # Umount flags
     "MNT_DETACH",
     "MNT_FORCE",
-    # Mount flags
     "MS_BIND",
     "MS_NODEV",
     "MS_NOEXEC",
@@ -89,9 +70,7 @@ __all__ = [
     "MS_REMOUNT",
     "MS_SHARED",
     "MS_SLAVE",
-    # prctl constants
     "PR_CAPBSET_DROP",
     "PR_CAPBSET_READ",
-    # Misc
     "S_IFCHR",
 ]

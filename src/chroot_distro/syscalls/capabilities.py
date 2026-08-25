@@ -1,10 +1,21 @@
-"""Capability bounding set management for container isolation.
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
+"""Drop the capabilities a container has no business holding.
 
-When user namespace isolation is NOT available (container root = host root),
-we drop dangerous capabilities from the bounding set to limit damage.
+Without a user namespace, container root *is* host root, so the bounding set is the
+only thing left between a guest process and the host. `CAPS_TO_DROP` names what
+goes: loading kernel modules, raw I/O, ptrace of arbitrary host processes, reboot
+and kexec, and overriding or editing MAC policy. What stays is what a container
+genuinely needs, CAP_SYS_ADMIN, CAP_SYS_CHROOT, CAP_SETUID, CAP_SETGID, CAP_MKNOD
+and CAP_DAC_OVERRIDE, which is why this is a mitigation and not a sandbox: a user
+namespace is the real boundary, and this is the fallback when none is available.
 
-Users who need full capabilities (e.g. for specific privileged programs)
-can opt out with the ``CD_NO_CAP_DROP=1`` environment variable.
+PR_CAPBSET_DROP is irreversible for the process and everything it forks, so the
+drop belongs immediately before the exec and after any privileged setup the caller
+still has to do. A failed drop is a warning string, not an exception: a container
+that will not start is worse than one running with a capability the kernel refused
+to remove. `CD_NO_CAP_DROP=1` skips the whole thing, for a guest program that needs
+the full set.
 """
 
 from __future__ import annotations
@@ -28,11 +39,11 @@ log = logging.getLogger(__name__)
 # Capabilities to DROP from the bounding set when no user namespace.
 #
 # Intentionally NOT dropping:
-#   CAP_SYS_ADMIN  -- needed for mount(2) inside the container
-#   CAP_SYS_CHROOT -- needed for chroot(2)
-#   CAP_SETUID/CAP_SETGID -- needed for user switching
-#   CAP_MKNOD -- needed for /dev node creation
-#   CAP_DAC_OVERRIDE -- needed for file access inside rootfs
+#   CAP_SYS_ADMIN: mount(2) inside the container
+#   CAP_SYS_CHROOT: chroot(2)
+#   CAP_SETUID/CAP_SETGID: user switching
+#   CAP_MKNOD: /dev node creation
+#   CAP_DAC_OVERRIDE: file access inside the rootfs
 CAPS_TO_DROP: tuple[int, ...] = (
     CAP_SYS_MODULE,  # Load/unload kernel modules on host
     CAP_SYS_RAWIO,  # Raw I/O port access to host devices
@@ -44,7 +55,6 @@ CAPS_TO_DROP: tuple[int, ...] = (
 
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
 
-# Human-readable names for log messages.
 _CAP_NAMES: dict[int, str] = {
     CAP_SYS_MODULE: "CAP_SYS_MODULE",
     CAP_SYS_RAWIO: "CAP_SYS_RAWIO",

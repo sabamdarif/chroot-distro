@@ -1,3 +1,36 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
+"""Resolve an image reference to one architecture's manifest, then fill the rootfs.
+
+`pull_image` is the whole entry point. It answers from the manifest cache when it can,
+authenticates and fetches when it cannot, downloads every missing layer in parallel,
+then applies them in order into a rootfs the caller has already validated.
+
+The rootfs arrives as a *descriptor*, not a path. `install` walks
+`containers/<name>/rootfs` with O_NOFOLLOW and hands the result straight down, so no
+name between that check and the last tar member written is resolved a second time.
+
+Two documents come back from a registry and neither is trusted. The Accept header asks
+for all four manifest types, and an index or manifest list is narrowed by
+`_pick_platform`: os must be linux, architecture must match, and a variant matches
+either exactly or when the entry declares none. A miss falls back to any linux entry
+for the architecture, and only then fails, listing what the image does offer, since
+"no image for aarch64" is unhelpful without that. The `Content-Type` header wins over
+the body's own `mediaType` for deciding which shape arrived, kept as `_ct` on the
+parsed dict.
+
+Layer order is the one thing that cannot be relaxed. Downloads run in parallel across
+`layer_download_workers()`, but application is strictly sequential, because a later
+layer's whiteouts and overwrites only mean anything against the tree the earlier ones
+built.
+
+Failures are translated where the HTTP status is known and left alone otherwise: 401
+and 403 become the credential message, 404 becomes "does not exist", and a cache miss
+that then fails to reach the network says how many layers were missing, so a user can
+tell an offline problem from a wrong reference. A config blob that cannot be fetched is
+not fatal: it returns empty, since a rootfs without image metadata is still usable.
+"""
+
 import contextlib
 import json
 import os
@@ -99,7 +132,9 @@ def _download_layers_parallel(
     # connections. With several pending layers, split the workers between
     # concurrent layers so the total connection count stays near the budget
     # instead of multiplying workers_limit by the number of layers.
-    connections_per_layer = workers_limit if len(pending) == 1 else max(1, workers_limit // min(len(pending), workers_limit))
+    connections_per_layer = (
+        workers_limit if len(pending) == 1 else max(1, workers_limit // min(len(pending), workers_limit))
+    )
 
     def _download_one(item: tuple[int, dict[str, typing.Any]]) -> None:
         i, layer = item
@@ -188,7 +223,6 @@ def _pick_platform(
     entries: list[dict[str, typing.Any]], arch: str, variant: str, image_ref: str
 ) -> dict[str, typing.Any]:
     """Find the manifest list entry matching arch (and optionally variant)."""
-    # Exact match first (arch + non-empty variant must match).
     for entry in entries:
         plat = entry.get("platform", {})
         if plat.get("os", "linux") != "linux":
@@ -199,7 +233,7 @@ def _pick_platform(
             continue
         return entry
 
-    # Variant-agnostic fallback.
+    # Fallback: any linux entry for the arch, whatever its variant.
     for entry in entries:
         plat = entry.get("platform", {})
         if plat.get("os", "linux") == "linux" and plat.get("architecture") == arch:

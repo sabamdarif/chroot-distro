@@ -1,20 +1,35 @@
-"""Wrappers around ``unshare(2)`` for Linux namespace creation.
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
+"""Create namespaces with unshare(2), and hold them open.
 
-This module provides high-level helpers that combine ``unshare(2)`` with
-``fork(2)`` to safely create and enter new namespaces.  All syscalls go
-through :mod:`chroot_distro.syscalls._libc` so the process-wide libc
-handle is reused.
+unshare(2) has one rule that shapes everything here: it only puts *children* in a
+new PID namespace, never the caller. So `unshare_and_fork` forks when CLONE_NEWPID
+is in the flags and the child comes back as PID 1, and `create_holder_process`
+forks twice, which is why it returns a `HolderPids` pair: the *holder* is the
+grandchild whose namespaces are joined or killed, the *launcher* is this process's
+own child and therefore the one to wait for. A child that becomes PID 1 also resets
+mount propagation to MS_REC|MS_PRIVATE, or every mount made inside would propagate
+straight back to the host namespace.
 
-Functions
----------
-native_unshare
-    Thin wrapper around ``unshare(2)``.
-unshare_and_fork
-    Unshare namespaces and fork when a PID namespace is requested.
-probe_namespace_support
-    Discover which namespace flags the running kernel/user supports.
-create_holder_process
-    Spawn a long-lived "holder" process that keeps namespaces alive.
+A holder exists because namespaces die with their last member. Given a *rootfs* it
+chroots itself, which closes the `chroot /proc/1/root` escape a namespace whose PID
+1 sits on the host root would leave open. It then sleeps forever, or, with a
+`ForegroundExec`, execs the session's own command so that command *is* PID 1 and
+the namespaces end when it does.
+
+Two synchronisation channels are not optional. A pipe carries the holder's host PID
+back out, since a PID inside a new namespace means nothing to the parent. And the
+foreground exec waits for its own go byte, separate from the holder-wide readiness
+byte, because the parent mounts into the namespace only after the holder is up and
+the command has to see those mounts.
+
+A user namespace needs a third: uid_map and gid_map can only be written from
+outside, and the child must not proceed until they exist, so the parent writes them
+and then sends `M`.
+
+`probe_namespace_support` forks a throw-away child per bit rather than trusting a
+kernel version, because whether a flag works depends on the kernel config, the
+sysctls and the caller's own privileges.
 """
 
 from __future__ import annotations
@@ -39,10 +54,6 @@ from chroot_distro.syscalls._libc import (
 
 log = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# 1. native_unshare - thin wrapper
-# ---------------------------------------------------------------------------
-
 
 def native_unshare(flags: int) -> None:
     """Call ``unshare(2)`` directly.
@@ -56,11 +67,6 @@ def native_unshare(flags: int) -> None:
             ``EPERM``, ``EINVAL``).
     """
     py_unshare(flags)
-
-
-# ---------------------------------------------------------------------------
-# 2. unshare_and_fork - namespace creation with optional PID-ns fork
-# ---------------------------------------------------------------------------
 
 
 def unshare_and_fork(
@@ -100,7 +106,6 @@ def unshare_and_fork(
 
     pid = os.fork()
     if pid > 0:
-        # Parent - return child PID.
         return pid
 
     # Child (PID 1 inside the new PID namespace).
@@ -108,11 +113,6 @@ def unshare_and_fork(
         libc_mount(None, b"/", None, propagation, None)
 
     return 0
-
-
-# ---------------------------------------------------------------------------
-# 3. probe_namespace_support - discover supported CLONE_NEW* flags
-# ---------------------------------------------------------------------------
 
 
 def probe_namespace_support(flags: int) -> int:
@@ -140,14 +140,12 @@ def probe_namespace_support(flags: int) -> int:
 
         pid = os.fork()
         if pid == 0:
-            # Child - attempt the unshare and exit.
             try:
                 py_unshare(bit)
             except OSError:
                 os._exit(1)
             os._exit(0)
 
-        # Parent - wait for the child.
         _, status = os.waitpid(pid, 0)
         if os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0:
             supported |= bit
@@ -164,11 +162,6 @@ def probe_namespace_support(flags: int) -> int:
         bit <<= 1
 
     return supported
-
-
-# ---------------------------------------------------------------------------
-# 3a. _write_id_mappings - user namespace uid/gid mapping
-# ---------------------------------------------------------------------------
 
 
 def _default_id_map() -> tuple[str, str]:
@@ -198,14 +191,13 @@ def _write_id_mappings(child_pid: int, id_map: tuple[str, str] | None = None) ->
     ``setgroups`` handling: writing a gid_map requires ``setgroups`` to be
     ``deny`` *unless* the writer has ``CAP_SETGID`` in the parent user
     namespace. A privileged (root) parent has it, so we leave ``setgroups``
-    at ``allow`` — otherwise the container's own ``login``/``su`` cannot call
+    at ``allow``, or the container's own ``login``/``su`` cannot call
     ``setgroups(2)`` to set supplementary groups (it fails with EPERM). An
     unprivileged parent must write ``deny`` for the gid_map write to succeed.
     """
     uid_map, gid_map = id_map if id_map is not None else _default_id_map()
 
     if os.getuid() != 0:
-        # Unprivileged: setgroups must be denied before gid_map can be written.
         try:
             with open(f"/proc/{child_pid}/setgroups", "w") as fh:
                 fh.write("deny")
@@ -217,11 +209,6 @@ def _write_id_mappings(child_pid: int, id_map: tuple[str, str] | None = None) ->
 
     with open(f"/proc/{child_pid}/gid_map", "w") as fh:
         fh.write(gid_map)
-
-
-# ---------------------------------------------------------------------------
-# 4. create_holder_process - long-lived namespace holder
-# ---------------------------------------------------------------------------
 
 
 class HolderPids(typing.NamedTuple):
@@ -317,9 +304,9 @@ def create_holder_process(
     # Pipe to send the actual holder's host PID back to the parent.
     pid_r, pid_w = os.pipe()
 
-    # If user namespace is requested, create a dedicated pipe for id-mapping
-    # synchronisation.  The parent writes 'M' after writing uid/gid maps;
-    # the child waits for it before proceeding.
+    # A user namespace needs a second pipe for id-mapping synchronisation:
+    # the parent writes 'M' after writing uid/gid maps, and the child waits
+    # for it before proceeding.
     has_userns = bool(flags & CLONE_NEWUSER)
     map_r = map_w = -1
     if has_userns:
@@ -333,8 +320,8 @@ def create_holder_process(
             os.close(map_r)  # Parent only writes map_w.
 
         if has_userns:
-            # The child will unshare(CLONE_NEWUSER) and then send its PID
-            # so we can write uid/gid mappings.
+            # The child unshares CLONE_NEWUSER and reports its PID, which
+            # is what the mappings below are written against.
             try:
                 data = os.read(pid_r, 64)
             except OSError:
@@ -359,20 +346,17 @@ def create_holder_process(
                     _reap_child(launcher_pid)
                     raise RuntimeError(f"Invalid MAP request from child: {decoded!r}") from exc
 
-                # Write uid/gid mappings for the child's user namespace.
                 try:
                     _write_id_mappings(child_pid, id_map)
                 except OSError as exc:
                     log.warning("Failed to write id mappings for pid %d: %s", child_pid, exc)
 
-                # Signal the child that mappings are written.
                 if map_w >= 0:
                     with contextlib.suppress(OSError):
                         os.write(map_w, b"M")
                     os.close(map_w)
                     map_w = -1
 
-                # Now read the actual holder PID.
                 try:
                     data2 = os.read(pid_r, 32)
                 except OSError:
@@ -400,7 +384,6 @@ def create_holder_process(
                     _reap_child(launcher_pid)
                     raise RuntimeError(f"namespace holder sent invalid PID: {data!r}") from exc
         else:
-            # No user namespace -- simple path.
             try:
                 data = os.read(pid_r, 32)
             finally:
@@ -416,7 +399,6 @@ def create_holder_process(
                 _reap_child(launcher_pid)
                 raise RuntimeError(f"namespace holder process sent invalid PID: {data!r}") from exc
 
-        # If the caller provided a ready_fd, write the ready byte.
         if ready_fd >= 0:
             try:
                 os.write(ready_fd, b"K")
@@ -434,7 +416,6 @@ def create_holder_process(
         py_unshare(flags)
     except OSError:
         if has_userns:
-            # User namespace may have caused the failure -- retry without it.
             log.warning(
                 "unshare with CLONE_NEWUSER failed; retrying without user "
                 "namespace. Container root will have real host capabilities."
@@ -462,7 +443,6 @@ def create_holder_process(
             log.exception("failed to send MAP request to parent")
             os._exit(1)
 
-        # Wait for the parent to finish writing mappings.
         if map_r >= 0:
             try:
                 signal_byte = os.read(map_r, 1)
@@ -477,8 +457,8 @@ def create_holder_process(
                 os._exit(1)
 
     if flags & CLONE_NEWPID:
-        # Fork again so the grandchild becomes PID 1 in the new PID namespace.
-        # Create a pipe to synchronize the launcher with the grandchild's readiness.
+        # Fork again so the grandchild becomes PID 1 in the new PID
+        # namespace; sync_r/sync_w carry its readiness signal back here.
         sync_r, sync_w = os.pipe()
 
         grandchild_pid = os.fork()
@@ -491,7 +471,6 @@ def create_holder_process(
                         with contextlib.suppress(OSError):
                             os.close(fd)
             os.close(sync_w)
-            # Wait for the grandchild to complete its setup and signal readiness.
             try:
                 ready_signal = os.read(sync_r, 1)
             except OSError:
@@ -500,14 +479,13 @@ def create_holder_process(
                 os.close(sync_r)
 
             if ready_signal == b"K":
-                # Grandchild is ready. Send its host PID to the parent.
                 with contextlib.suppress(OSError):
                     os.write(pid_w, str(grandchild_pid).encode())
             os.close(pid_w)
 
-            # Wait for the grandchild. A sleeping holder only ever gets here
-            # by being killed; a foreground one exits with the session's own
-            # status, which this process is what the parent waits on for.
+            # A sleeping holder only ever gets here by being killed; a
+            # foreground one exits with the session's own status, and this
+            # process is what the parent waits on.
             status = 0
             with contextlib.suppress(ChildProcessError):
                 _, status = os.waitpid(grandchild_pid, 0)
@@ -520,16 +498,11 @@ def create_holder_process(
         os.close(pid_w)
         _run_holder(sync_w, rootfs, foreground)
     else:
-        # No PID namespace - the launcher itself is the holder.
+        # No PID namespace: the launcher itself is the holder.
         _run_holder(pid_w, rootfs, foreground)
 
     # Should never be reached.
     os._exit(1)
-
-
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
 
 
 def _run_holder(notify_fd: int, rootfs: str | None, foreground: ForegroundExec | None = None) -> None:
@@ -544,11 +517,9 @@ def _run_holder(notify_fd: int, rootfs: str | None, foreground: ForegroundExec |
         foreground: What to exec once the parent gives the go-ahead, instead
             of sleeping.
     """
-    # 1. Set mount propagation to private.
     with contextlib.suppress(OSError):
         libc_mount(None, b"/", None, MS_REC | MS_PRIVATE, None)
 
-    # 2. Isolate into rootfs if requested.
     if rootfs is not None:
         try:
             os.chroot(rootfs)
@@ -557,7 +528,6 @@ def _run_holder(notify_fd: int, rootfs: str | None, foreground: ForegroundExec |
             log.exception("chroot into %s failed", rootfs)
             os._exit(1)
 
-    # 3. Signal readiness.
     try:
         os.write(notify_fd, b"K")
     except OSError:
@@ -566,12 +536,11 @@ def _run_holder(notify_fd: int, rootfs: str | None, foreground: ForegroundExec |
     finally:
         os.close(notify_fd)
 
-    # 4a. Foreground holder: become the session's command.
     if foreground is not None:
         _exec_foreground(foreground)
 
-    # 4. Sleep forever.  The process keeps the namespaces alive until it
-    #    is explicitly killed.
+    # Sleeping forever is the point: the namespaces live as long as this
+    # process does.
     log.debug("holder process %d entering sleep loop", os.getpid())
     try:
         while True:

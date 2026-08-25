@@ -1,3 +1,33 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
+"""Per-container session refcount, so the last session out tears the mounts down.
+
+`data/<name>/sessions` holds one integer, guarded by `sessions.lock`. `login` and
+`run` increment on the way in and decrement on the way out; the mounts and the
+namespace holder are only released when the count reaches zero, which is what lets
+several sessions share one set of mounts.
+
+A counter that only ever goes up and down cannot survive a crash, so `/proc` is the
+real authority and the file is a cache of it. Every read path calls
+`get_active_chroot_pids`, which scans `/proc/*/root` for processes whose root really
+is this rootfs, and a positive count with no such process is corrected to zero on the
+spot, along with the stale `mount_opts.json` a crashed session left behind. This is
+why `decrement` can return zero from any starting value: what it writes is what the
+kernel says, not one less than what the file said.
+
+`has_tracked_ancestor` exists because a process inside the container is not always
+chrooted itself. A browser helper a login spawned is a descendant of a tracked pid, so
+the /proc parent chain is walked up to init before anything is called an orphan.
+
+`mount_opts.json` records the options the *first* session mounted with, so a later
+session can tell it is joining a differently configured container instead of silently
+inheriting mounts it did not ask for. It is written once, at count one, and removed on
+the last teardown or by the self-heal above.
+
+Session *identity* is not here: `helpers/session_registry.py` owns the per-session
+JSON files `ps` and `kill` work from. This file only counts.
+"""
+
 import contextlib
 import fcntl
 import json
@@ -55,7 +85,7 @@ def read_ppid(pid: int) -> int | None:
     """Return the parent PID of *pid* from ``/proc/<pid>/stat``, or ``None``.
 
     The process name in field 2 can contain spaces and parentheses, so we
-    split after the final ``)`` — everything past it is space-separated and
+    split after the final ``)``: everything past it is space-separated and
     the second field there is the PPID.
     """
     try:
@@ -108,10 +138,9 @@ def _increment_inner(name: str, session_file: str) -> int:
         except (ValueError, OSError):
             count_val = 0
 
-    # Self-heal check: If process list is empty, count must be 0
     if count_val > 0 and not get_active_chroot_pids(name):
         count_val = 0
-        # Stale mount_opts.json from a crashed session — clean it up.
+        # Stale mount_opts.json from a crashed session.
         clear_mount_options(name)
 
     count_val += 1
@@ -147,7 +176,6 @@ def _decrement_inner(name: str, session_file: str) -> int:
         except (ValueError, OSError):
             count_val = 0
 
-    # Self-heal check: If process list is empty, count must be 0
     active_pids = get_active_chroot_pids(name)
     count_val = 0 if not active_pids else max(0, count_val - 1)
 
@@ -188,7 +216,6 @@ def count(name: str) -> int:
             except (ValueError, OSError):
                 count_val = 0
 
-        # Self-heal check: If process list is empty, count must be 0
         if count_val > 0 and not get_active_chroot_pids(name):
             count_val = 0
             with open(session_file, "w") as f:
@@ -210,11 +237,6 @@ def reset(name: str) -> None:
         with open(session_file, "w") as f:
             f.write("0")
         fcntl.flock(lock_fh, fcntl.LOCK_UN)
-
-
-# ---------------------------------------------------------------------------
-# Mount options metadata
-# ---------------------------------------------------------------------------
 
 
 def _mount_opts_file(name: str) -> str:

@@ -19,9 +19,7 @@ def test_with_digest_appends_query():
     assert push._with_digest("https://r/v2/x/blobs/uploads/abc", "sha256:d") == (
         "https://r/v2/x/blobs/uploads/abc?digest=sha256%3Ad"
     )
-    assert push._with_digest("https://r/upload?state=1", "sha256:d") == (
-        "https://r/upload?state=1&digest=sha256%3Ad"
-    )
+    assert push._with_digest("https://r/upload?state=1", "sha256:d") == ("https://r/upload?state=1&digest=sha256%3Ad")
 
 
 def test_is_retriable():

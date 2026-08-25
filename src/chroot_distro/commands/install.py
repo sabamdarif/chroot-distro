@@ -1,3 +1,28 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
+"""Install a container from a registry image, a URL, or a local archive.
+
+The three source kinds are told apart by the reference's shape alone: a leading `/`,
+`./`, `../` or `~` is a local file, an `http://` or `https://` prefix a URL, anything
+else a registry reference. The container name is derived from whichever of those it is
+unless `--name` gave one, and a name that cannot be derived is an error asking for
+`--name` rather than a guess.
+
+Two things here are about surviving a crash and a hostile archive. The
+`incomplete` marker is created and fsynced *before* the rootfs directory exists and
+removed only after the last install step, so the next run recognises an interrupted
+install and clears it instead of finding a half tree that looks finished. And the rootfs
+is opened once as a descriptor and handed down to every extractor, so nothing between
+that check and the last member written resolves `containers/<name>/rootfs` a second time.
+
+Ctrl+C ends in `os._exit` on purpose: `sys.exit` would run the `concurrent.futures`
+atexit hook, which joins download workers that may each be blocked in a socket read for
+the full timeout, long after the user asked to stop.
+
+`reset` and `build` call `command_install` directly with a single reference string, while
+the CLI parser hands it a list.
+"""
+
 import contextlib
 import json
 import os
@@ -195,7 +220,7 @@ def _run_install(
     dist_arch: str,
     insecure: bool = False,
 ) -> None:
-    """Inner install logic — called with the container lock already held."""
+    """Inner install logic, called with the container lock already held."""
     container_path = container_dir(install_name)
     rootfs_dir = container_rootfs(install_name)
     incomplete_marker = container_incomplete_marker(install_name)
@@ -236,16 +261,15 @@ def _run_install(
         if workers != DEFAULT_LAYER_DOWNLOAD_WORKERS:
             log_info(f"Parallel download workers: {workers}")
 
-    # Marker first, rootfs second — see _write_incomplete_marker.
+    # Marker first, rootfs second: see _write_incomplete_marker.
     os.makedirs(container_path, exist_ok=True)
     _write_incomplete_marker(incomplete_marker)
     # Made level by level off the descriptor of the level above, for the same
-    # reason it is checked that way — and *kept*: the extraction writes every
+    # reason it is checked that way, and *kept*: the extraction writes every
     # member as (dir_fd, name) beneath this descriptor, so nothing between the
-    # check and the last byte written resolves containers/<name>/rootfs a
-    # second time. Handing the path down instead left the whole unpack open to
-    # a guest that re-pointed the name, which lands the image (and the manifest
-    # that follows it) in a host directory of its choosing.
+    # check and the last byte written resolves containers/<name>/rootfs a second
+    # time. Handing the path down instead lets a guest re-point the name
+    # mid-unpack and land the image in a host directory of its choosing.
     try:
         rootfs_fd = open_container_rootfs(install_name, create=True)
     except OSError as exc:
@@ -277,7 +301,6 @@ def _run_install(
             os.makedirs(BASE_CACHE_DIR, exist_ok=True)
             metadata = pull_image(image_ref, rootfs_fd, dist_arch, insecure=insecure)
 
-        # Write manifest.json when metadata is available
         if metadata is not None:
             manifest_data = {
                 "image_ref": (metadata.get("image_ref") or (image_ref if local_path is None else "")),
@@ -311,7 +334,7 @@ def _run_install(
             with contextlib.suppress(OSError):
                 os.remove(tmp_archive)
         # sys.exit() would run the concurrent.futures atexit hook, which
-        # joins every download worker thread — each possibly blocked in
+        # joins every download worker thread, each possibly blocked in
         # connect()/read() for up to the 30s socket timeout. The user asked
         # to stop *now*; cleanup is done, so exit without joining them.
         sys.stdout.flush()

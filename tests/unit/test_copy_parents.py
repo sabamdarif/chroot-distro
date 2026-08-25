@@ -67,9 +67,7 @@ def engine(tmp_path, monkeypatch):
     eng = _Engine(tmp_path)
     layer_dir = tmp_path / "layers"
     layer_dir.mkdir()
-    monkeypatch.setattr(
-        copy_step, "layer_cache_path", lambda digest: str(layer_dir / digest.replace(":", "_"))
-    )
+    monkeypatch.setattr(copy_step, "layer_cache_path", lambda digest: str(layer_dir / digest.replace(":", "_")))
     return eng
 
 

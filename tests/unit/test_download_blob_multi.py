@@ -235,7 +235,9 @@ class TestDownloadBlobSegmented:
             )
 
             # Write bad data
-            def mock_download_segment_bad(seg, url, headers, progress, abort, bucket=None, live_responses=None, **kwargs):
+            def mock_download_segment_bad(
+                seg, url, headers, progress, abort, bucket=None, live_responses=None, **kwargs
+            ):
                 with open(seg.tmp_path, "wb") as f:
                     f.write(b"B" * (seg.end - seg.start + 1))
 
@@ -243,7 +245,8 @@ class TestDownloadBlobSegmented:
                 mock.patch("chroot_distro.helpers.docker.layers._probe_blob", return_value=probe_result),
                 mock.patch(
                     "chroot_distro.helpers.docker.layers._download_segment", side_effect=mock_download_segment_bad
-                ),pytest.raises(RuntimeError, match="Layer integrity check failed")
+                ),
+                pytest.raises(RuntimeError, match="Layer integrity check failed"),
             ):
                 download_blob(
                     repo="library/nextcloud",
@@ -408,7 +411,8 @@ class TestDownloadBlobSegmented:
             with (
                 mock.patch("chroot_distro.helpers.docker.layers._probe_blob", return_value=probe_result),
                 mock.patch("urllib.request.build_opener", return_value=mock_opener_first),
-                mock.patch("chroot_distro.helpers.download._interruptible_sleep"),pytest.raises(Exception)
+                mock.patch("chroot_distro.helpers.download._interruptible_sleep"),
+                pytest.raises(Exception),
             ):
                 download_blob(
                     repo="library/nextcloud",
@@ -527,7 +531,9 @@ class TestDownloadBlobSegmented:
                 range_ok=True,
             )
 
-            def mock_download_segment_ki(seg, url, headers, progress, abort, bucket=None, live_responses=None, **kwargs):
+            def mock_download_segment_ki(
+                seg, url, headers, progress, abort, bucket=None, live_responses=None, **kwargs
+            ):
                 raise KeyboardInterrupt
 
             from concurrent.futures import ThreadPoolExecutor

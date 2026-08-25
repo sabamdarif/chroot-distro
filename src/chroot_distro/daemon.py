@@ -1,25 +1,35 @@
-"""Group-gated privileged daemon and its client (pure standard library).
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
+"""Group-gated privileged daemon and its client.
 
-This implements the same access model Docker uses: a root-owned Unix
-socket whose group ownership (``chroot-distro``) decides who may run
-privileged commands, with no password prompt and no sudoers changes.
+The access model is Docker's: a root-owned Unix socket at `/run/chroot-distro.sock`
+whose group ownership (`chroot-distro`) decides who may run privileged commands,
+with no password prompt and no sudoers change. `commands/setup.py` creates the
+group and installs the service.
 
-Server side (``chroot-distro daemon``, started as root by the init
-system): listens on ``/run/chroot-distro.sock``, authenticates peers
-with ``SO_PEERCRED`` and authorises them by membership of the
-``chroot-distro`` group. For each request it forks and re-executes the
-CLI as root, wired directly to the client's own terminal file
-descriptors (passed over the socket via ``SCM_RIGHTS``), so interactive
-sessions like ``chroot-distro login`` work transparently.
+The socket is the trust boundary, so what a peer says about itself is never
+believed. Its uid and gid come from the kernel through SO_PEERCRED, and
+authorisation is root, or membership of the group by primary gid, member list or
+supplementary groups. Everything else in a request is the peer's own text: the
+header is read under `_HEADER_LIMIT`, and of the environment it offers only `CD_*`
+names and `_CLIENT_ENV_ALLOWLIST` are passed on, because the child is about to
+exec as root with whatever is handed to it. Display and session variables are on
+that allowlist deliberately: the child sits in a different process tree from the
+user's shell, so `helpers.x11.get_invoking_env()` cannot reach the real environment
+and `--shared-display` would otherwise not work over the socket. For the same
+reason `SUDO_UID`/`SUDO_USER` are set from the peer's uid, or
+`resolve_invoking_uid()` answers with root's and the display helpers look in
+/run/user/0, which does not exist.
 
-Client side: serialises ``argv``/``cwd``/an env allow-list, sends its
-stdio fds, forwards terminal signals, and exits with the exit code the
-server reports back.
+The server forks per request and re-execs the CLI as root on the client's own
+stdio, which arrives over the socket via SCM_RIGHTS, so an interactive `login`
+works with no pty of the daemon's own. The client relays terminal signals
+(`_RELAY_SIGNALS` plus SIGWINCH) to that child and exits with the code the server
+reports.
 
-Under systemd the socket is activated on demand (``LISTEN_FDS``). Under
-other init systems (OpenRC, runit, dinit, sysvinit) the daemon creates
-the socket itself and, unless started with ``--persist``, exits after an
-idle timeout.
+Under systemd the listening socket is passed in by activation (`LISTEN_FDS`).
+Under OpenRC, runit, dinit or sysvinit the daemon binds it itself and, unless
+started with `--persist`, exits after `IDLE_TIMEOUT_SECONDS` idle.
 """
 
 import contextlib
@@ -56,7 +66,6 @@ _CLIENT_ENV_ALLOWLIST = (
     "LANG",
     "COLUMNS",
     "LINES",
-    # Display / Wayland / X11
     "DISPLAY",
     "WAYLAND_DISPLAY",
     "XAUTHORITY",
@@ -64,20 +73,13 @@ _CLIENT_ENV_ALLOWLIST = (
     "XDG_SESSION_TYPE",
     "XDG_CURRENT_DESKTOP",
     "DESKTOP_SESSION",
-    # Audio
     "PULSE_SERVER",
-    # D-Bus
     "DBUS_SESSION_BUS_ADDRESS",
 )
 
 # Terminal signals the client relays to the root-side child.
 _RELAY_SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGQUIT)
 _RELAYABLE_SIGNAL_NUMBERS = {int(s) for s in _RELAY_SIGNALS} | {int(signal.SIGWINCH)}
-
-
-# ---------------------------------------------------------------------------
-# Client
-# ---------------------------------------------------------------------------
 
 
 def _client_env() -> dict[str, str]:
@@ -150,11 +152,6 @@ def run_client(argv: list[str]) -> int | None:
             with contextlib.suppress(OSError, ValueError):
                 signal.signal(sig, handler)
         conn.close()
-
-
-# ---------------------------------------------------------------------------
-# Server
-# ---------------------------------------------------------------------------
 
 
 def _activation_socket() -> socket.socket | None:
@@ -230,10 +227,8 @@ def _spawn(header: dict, fds: list[int], *, peer_uid: int = 0) -> int:
             "_CHROOT_DISTRO_ELEVATING": "1",
             "_CHROOT_DISTRO_DAEMON": "1",
         }
-        # Propagate the invoking user's identity so that
-        # resolve_invoking_uid() returns the real user UID, not root.
-        # Without this, display helpers fall back to /run/user/0 which
-        # does not exist.
+        # resolve_invoking_uid() has to answer with the real user's uid, not
+        # root's, or the display helpers look in /run/user/0, which does not exist.
         if peer_uid > 0:
             env["SUDO_UID"] = str(peer_uid)
             with contextlib.suppress(KeyError, OSError):
@@ -363,7 +358,7 @@ def serve(persist: bool = False) -> None:
                     last_activity = time.monotonic()
                     continue
                 if not persist and time.monotonic() - last_activity > IDLE_TIMEOUT_SECONDS:
-                    log.info("idle for %.0fs — exiting", IDLE_TIMEOUT_SECONDS)
+                    log.info("idle for %.0fs, exiting", IDLE_TIMEOUT_SECONDS)
                     return
                 continue
             except OSError:

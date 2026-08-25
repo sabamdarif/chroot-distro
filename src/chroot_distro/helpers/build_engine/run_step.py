@@ -1,14 +1,40 @@
-# A step is over when nothing of it is still running, not when the command it
-# started exits. Docker gets that from the pid namespace it tears down, and so
-# do the CD_USE_NS / CD_USE_ISOLATION paths here, where the holder is pid 1 of
-# a namespace that dies with the session. The default path has neither: a
-# `RUN cmd &` or a `RUN service x start` left a process writing into the stage
-# rootfs while the "after" snapshot was being taken -- which makes a layer that
-# differs from run to run -- kept the bind mounts busy so the teardown could not
-# unmount them, and left a daemon running long after the build. _stop_step()
-# closes both halves of that: the process group the step leads, and the
-# descendants that daemonise out of it, which land back on this process because
-# it makes itself a child subreaper first.
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
+"""RUN: execute one step under chroot and pack what it changed into a layer.
+
+Cache first: a recipe-hash hit applies the cached layer and never enters a
+chroot. On a miss the rootfs is snapshotted, the command runs, the rootfs is
+snapshotted again, and the delta becomes a gzipped OCI layer, published into the
+layer cache through the same O_NOFOLLOW walk every other cache writer uses.
+
+A step is over when nothing of it is still running, not when the command it
+started exits. Docker gets that from the pid namespace it tears down, and so do
+the CD_USE_NS and CD_USE_ISOLATION paths here, where the holder is pid 1 of a
+namespace that dies with the session. The default path has neither: a `RUN cmd &`
+or a `RUN service x start` left a process writing into the stage rootfs while the
+"after" snapshot was taken, which makes a layer that differs from run to run,
+keeps the binds busy so teardown cannot unmount them, and leaves a daemon running
+long after the build. `_stop_step` closes both halves of that, the process group
+the step leads and the descendants that daemonise out of it, which land back on
+this process because it makes itself a child subreaper first.
+
+`_exec_chroot` picks between a max isolation holder, a namespace holder and the
+plain host-namespace bind set; a step with stdin (a here-doc) and a kernel
+without mount-namespace support both fall back to the plain path. Either way the
+chroot happens in the child, as the last thing before the exec so the namespaces
+are already joined, and onto the stage's pinned descriptor where there is one.
+
+The plain path applies its binds from the host's mount namespace, so every target
+is a name an image chose: `_mount_point` resolves one the way the guest sees it,
+because makedirs accepts a symlink to a directory and mount(2) then resolves the
+name all over again, so `dev -> <host dir>` had the host's own /dev mounted there
+and left behind.
+
+`_refuse_host_exec` keeps an `LD_*` value out of a step's environment when it
+came from an ENV line or a declared ARG. The invoking user's environment is not
+filtered and the value still stands in the image config: provenance is the whole
+rule, and `constants.is_host_exec_var` states it.
+"""
 
 import contextlib
 import ctypes
@@ -94,7 +120,6 @@ def do_run(engine: typing.Any, instr: dict[str, typing.Any]) -> None:
             command = [*list(stage.shell), str(instr["value"])]
         stdin_input = None
 
-    # Cache lookup.
     extra = _run_extra_inputs(engine)
     recipe = compute_recipe_hash(stage.parent_layer_digest, instr, extra_inputs=extra)
     if not engine.no_cache:
@@ -202,11 +227,7 @@ def _exec_chroot(
         from chroot_distro.helpers import isolation
 
         container_key = f"build_{os.path.basename(engine.tmp_root)}_{stage.index}"
-        session = (
-            isolation.max_isolation_session
-            if engine.isolation_mode == "max"
-            else isolation.namespace_session
-        )
+        session = isolation.max_isolation_session if engine.isolation_mode == "max" else isolation.namespace_session
         with session(container_key, rootfs, minimal=True) as holder:
             if holder is not None:
                 with run_mount_session(engine, stage, mounts or [], holder=holder) as extra_env:
@@ -236,7 +257,7 @@ def _mount_point(rootfs: str, guest_path: str) -> str | None:
     component of one of these is image content and the step's binds are applied
     in the host's mount namespace, so an image shipping `dev -> <host dir>` had
     the host's own /dev mounted onto that directory, `dev/pts` created inside
-    it, and the mount left behind afterwards -- unmount_all() sweeps what is
+    it, and the mount left behind afterwards: unmount_all() sweeps what is
     under the rootfs, and this is not.
 
     The path is resolved the way the guest sees it, with an absolute link
@@ -335,7 +356,6 @@ def _run_plain(
 
     resolved_binds, _ = bindings.get_bindings(rootfs=rootfs, minimal=True)
 
-    # Pre-clean stale mounts if any
     with contextlib.suppress(Exception):
         mount_manager.unmount_all(rootfs)
 
@@ -376,7 +396,6 @@ def _run_plain(
             _stop_step(pid, baseline, quiet=engine is not None and engine.quiet)
             return returncode
     finally:
-        # Clean up mounts
         mount_manager.unmount_all(rootfs)
 
 
@@ -388,15 +407,16 @@ _STRAY_GRACE_SECONDS = 2.0
 # prctl(2), Linux 3.4 and up, Android included.
 _PR_SET_CHILD_SUBREAPER = 36
 
+
 @functools.lru_cache(maxsize=1)
 def _become_subreaper() -> bool:
     """Ask the kernel to reparent orphaned descendants onto this process.
 
     This is what makes a step's leftovers findable at all. A backgrounded
-    command outlives the shell that started it and a daemon goes further --
-    fork, setsid, fork, which leaves the step's process group as well -- and
-    either way the process is then no relation of ours that any interface will
-    name. As a subreaper it is reparented here instead of onto init, so
+    command outlives the shell that started it, and a daemon goes further
+    (fork, setsid, fork, which leaves the step's process group as well). Either
+    way the process is then no relation of ours that any interface will name.
+    As a subreaper it is reparented here instead of onto init, so
     /proc/self/task/<pid>/children lists it.
 
     Asked once, best effort: a kernel (or a seccomp filter) that refuses leaves
@@ -423,8 +443,8 @@ def _adopted(baseline: typing.Container[int] = (), skip_pid: int | None = None) 
     """The step's descendants the kernel has reparented onto this process.
 
     *baseline* is what was already there when the step started, which should be
-    nothing -- the previous step is stopped before the next one begins -- but a
-    straggler that would not die must not be counted against every step that
+    nothing, since the previous step is stopped before the next one begins, but
+    a straggler that would not die must not be counted against every step that
     follows it.
     """
     return [pid for pid in _children_of(os.getpid()) if pid != skip_pid and pid not in baseline]
@@ -467,7 +487,7 @@ def _signal_leftovers(targets: list[int], sig: int) -> None:
     """Deliver *sig* to each leftover, and to any group it leads.
 
     A daemonised leftover called setsid, so it leads a group of its own and
-    that group goes too -- otherwise its children outlive it by a generation.
+    that group goes too, otherwise its children outlive it by a generation.
     killpg(pid) can only ever reach a group led by that very process, a group id
     being the pid of its leader, so this cannot reach anything the step did not
     start.
@@ -550,8 +570,8 @@ def _refuse_host_exec(engine: typing.Any, key: str) -> bool:
 
     constants.is_host_exec_var states the rule as one about provenance, and
     that is what this applies. Both of the sources filtered here are the
-    Dockerfile's -- `stage.env` (its ENV lines, and a base image's, seeded at
-    FROM) and the ARG values keyed by names it declared -- while the host
+    Dockerfile's, `stage.env` (its ENV lines, and a base image's, seeded at
+    FROM) and the ARG values keyed by names it declared, while the host
     variables read below come from os.environ, which is the user's own
     environment and stays sovereign.
 
@@ -579,19 +599,17 @@ def _build_child_env(engine: typing.Any, stage: typing.Any) -> dict[str, str]:
     if host_colorterm:
         env["COLORTERM"] = host_colorterm
 
-    # Predefined ARGs from the host environment (proxies etc.) are
-    # passed through even if the Dockerfile didn't declare them.
+    # A predefined ARG (proxies and the like) reaches the step from the host
+    # environment whether the Dockerfile declared it or not.
     for k in PREDEFINED_ARGS:
         v = os.environ.get(k, "")
         if v:
             env[k] = v
 
-    # Declared ARGs in this stage.
     for k in stage.declared_args:
         if k in stage.args and not _refuse_host_exec(engine, k):
             env[k] = stage.args[k]
 
-    # ENVs always win.
     for k, v in stage.env.items():
         if _refuse_host_exec(engine, k):
             continue

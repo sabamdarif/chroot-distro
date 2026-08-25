@@ -1,4 +1,3 @@
-
 import pytest
 
 from chroot_distro.helpers import nvidia
@@ -51,13 +50,9 @@ def test_detect_guest_lib_dirs_lib32_override(tmp_path):
 def test_host_lib_remap_multiarch():
     lib64, lib32 = "/usr/lib64/", "/usr/lib32/"
     assert (
-        nvidia._host_lib_to_guest_path("/usr/lib/x86_64-linux-gnu/libcuda.so", lib64, lib32)
-        == "/usr/lib64/libcuda.so"
+        nvidia._host_lib_to_guest_path("/usr/lib/x86_64-linux-gnu/libcuda.so", lib64, lib32) == "/usr/lib64/libcuda.so"
     )
-    assert (
-        nvidia._host_lib_to_guest_path("/usr/lib/i386-linux-gnu/libcuda.so", lib64, lib32)
-        == "/usr/lib32/libcuda.so"
-    )
+    assert nvidia._host_lib_to_guest_path("/usr/lib/i386-linux-gnu/libcuda.so", lib64, lib32) == "/usr/lib32/libcuda.so"
 
 
 def test_host_lib_remap_rpm():

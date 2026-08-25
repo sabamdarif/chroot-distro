@@ -81,8 +81,6 @@ def test_tmpfs_size_reject_falls_back(tmp_path, monkeypatch):
     monkeypatch.setattr(mount_manager, "is_mounted", lambda target, holder=None: False)
     monkeypatch.setattr(mount_manager, "mount_filesystem", fake_mount_filesystem)
 
-    sm = SpecialMount(
-        fstype="tmpfs", source="tmpfs", target="/dev/shm", options="size=256M,mode=1777", optional=True
-    )
+    sm = SpecialMount(fstype="tmpfs", source="tmpfs", target="/dev/shm", options="size=256M,mode=1777", optional=True)
     assert mount_manager.apply_special_mount(str(tmp_path), sm) is True
     assert attempts == ["size=256M,mode=1777", "mode=1777"]

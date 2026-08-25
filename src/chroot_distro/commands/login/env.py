@@ -1,3 +1,35 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
+"""Decide the environment a session runs with, and read the image's own.
+
+Layering is fixed: everything derived (the image's Env, host variables, session
+defaults) is computed first and `apply_user_env` puts `--env` and `CD_ENV` on top
+last, so an explicit request always wins. `user_env_keys` is how the rest of the
+login knows which names the caller set, since nothing derived afterwards may
+overwrite one.
+
+`IMAGE_ENV_BLOCKED` is the one thing the image does not get to decide. A display,
+sound, D-Bus or GPU variable belongs to the session that is starting now, and a
+value baked into the image would point the guest at a socket or device that is not
+this host's.
+
+`inject_env_profile` exists because exec is not the last word: a login shell
+sources the guest's `/etc/profile`, which pins PATH and whatever else the distro
+sets *after* the session env was handed over, and profile.d runs later still. The
+snippet is therefore the only place a value can be made to stick.
+`_PROFILE_INJECT_SKIP` keeps per-session names (HOME, USER, TERM, the display set)
+out of a file that outlives the session, `force_keys` re-admits the ones the caller
+asked for by name, and `is_sensitive_env_key` keeps a secret out of it entirely:
+the snippet is a mode 0600 file in the guest, not a variable that dies with the
+process. A `run` writes nothing there, so its `--env` cannot leak into a later
+login.
+
+The `read_manifest_*` readers take the same view of `manifest.json` as
+`build_engine/engine.py` takes of a pulled config: every field is checked against
+the type OCI says it has, and a wrong one reads as absent rather than reaching the
+session as itself.
+"""
+
 import contextlib
 import json
 import logging
@@ -34,7 +66,7 @@ IMAGE_ENV_BLOCKED = frozenset(
         "PULSE_SERVER",
         "TERM",
         "COLORTERM",
-        # Display / Wayland / Sound / D-Bus — session-specific, from host
+        # Display, Wayland, sound and D-Bus: session-specific, from the host.
         "DISPLAY",
         "WAYLAND_DISPLAY",
         "XAUTHORITY",
@@ -43,7 +75,7 @@ IMAGE_ENV_BLOCKED = frozenset(
         "XDG_SESSION_TYPE",
         "XDG_CURRENT_DESKTOP",
         "DESKTOP_SESSION",
-        # NVIDIA / GPU — set at login time based on auto-detection
+        # NVIDIA and GPU: set at login time from auto-detection.
         "GALLIUM_DRIVER",
         "MESA_D3D12_DEFAULT_DEVICE_TYPE",
         "LIBGL_ALWAYS_SOFTWARE",
@@ -65,7 +97,7 @@ _PROFILE_INJECT_SKIP = frozenset(
         "PATH",
         "LD_PRELOAD",
         "LD_LIBRARY_PATH",
-        # Display / Wayland / Sound / D-Bus — per-session, not for profile
+        # Display, Wayland, sound and D-Bus: per-session, not for the profile.
         "DISPLAY",
         "WAYLAND_DISPLAY",
         "XAUTHORITY",
@@ -75,7 +107,7 @@ _PROFILE_INJECT_SKIP = frozenset(
         "XDG_SESSION_TYPE",
         "XDG_CURRENT_DESKTOP",
         "DESKTOP_SESSION",
-        # NVIDIA / GPU — per-session, set by auto-detection
+        # NVIDIA and GPU: per-session, set by auto-detection.
         "GALLIUM_DRIVER",
         "MESA_D3D12_DEFAULT_DEVICE_TYPE",
         "LIBGL_ALWAYS_SOFTWARE",
@@ -193,7 +225,7 @@ def inject_env_profile(
     (and whatever else the distro pins) *after* the session env is handed to
     ``exec``; profile.d runs later, so exporting there is what makes a value
     stick. *force_keys* are exported even when listed in
-    _PROFILE_INJECT_SKIP — the caller asked for them explicitly.
+    _PROFILE_INJECT_SKIP, since the caller asked for them explicitly.
 
     *append_termux_bin* prepends a case-guarded PATH append of the host
     ``TERMUX_PREFIX/bin`` so guest tools can invoke host Termux utilities

@@ -1,3 +1,16 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
+"""Rename an installed container.
+
+The whole container directory is moved with a single `os.rename`, so `rename`
+refuses to run while anything is using the container: an active session would
+keep executing against a path that no longer exists, and a live mount under the
+old rootfs would still be listed in /proc/mounts under a name nothing resolves.
+Both container names are locked, ordered by name so two concurrent renames of
+the same pair cannot deadlock. Per-container state under `data/<name>/` is keyed
+by name, so a renamed container starts from a clean session count.
+"""
+
 import os
 import sys
 
@@ -38,13 +51,11 @@ def command_rename(args) -> None:
         ContainerLock(first, exclusive=True, command="rename"),
         ContainerLock(second, exclusive=True, command="rename"),
     ):
-        # 1. Active sessions check on orig
         active_pids = session.get_active_chroot_pids(orig)
         if active_pids:
             crit_error(f"Cannot rename container '{orig}': It has active sessions (PIDs: {active_pids}).")
             sys.exit(1)
 
-        # 2. Mount check on orig
         try:
             mount_manager.ensure_no_mounts(orig_rootfs)
         except Exception as e:

@@ -1,15 +1,28 @@
-"""idmapped mount support (Linux 5.12+) for Tier B user-namespace isolation.
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
+"""idmapped mounts (Linux 5.12+), so a user namespace needs no chown of the rootfs.
 
-An *idmapped mount* attaches a uid/gid translation to a mount without touching
-the underlying filesystem. Tier B uses it so a rootfs owned by host uid 0 stays
-usable inside a container whose user namespace maps container uid 0 to an
-unprivileged host subordinate uid (e.g. 100000) — no ``chown -R`` required.
+An idmapped mount carries a uid/gid translation of its own, attached to the mount
+rather than written into the filesystem. Tier B isolation uses it so a rootfs owned
+by host uid 0 stays usable inside a container whose user namespace maps container
+uid 0 to an unprivileged subordinate uid: without it, every install would have to
+`chown -R` the whole tree to match, twice, once each way.
 
-The three syscalls involved (``open_tree``, ``move_mount``, ``mount_setattr``)
-have no glibc wrappers, so they are issued directly via ``syscall(2)``. Their
-numbers are in the architecture-synchronised range (>= 424), i.e. identical on
-x86_64, aarch64, arm and x86, so a single set of constants is correct
-everywhere Linux runs.
+open_tree(2), move_mount(2) and mount_setattr(2) have no glibc wrappers, so they go
+straight through syscall(2). Their numbers are in the architecture-synchronised
+range (>= 424), identical on x86_64, aarch64, arm and x86, which is why one set of
+constants is correct everywhere Linux runs.
+
+`idmapped_mounts_supported` probes rather than checks a version, and the probe has
+to be a real one: a user namespace's `/proc/<pid>/ns/user` only carries a mapping
+once uid_map and gid_map are written from outside, so the check forks a child, maps
+it, clones a detached tmpfs and attaches the namespace as an idmap. Everything it
+touches is disposable, and any failure (ENOSYS or EINVAL on an old kernel, EPERM in
+a restricted environment) is reported as unsupported.
+
+`make_idmapped_tree` hands back a *detached* mount fd. The caller owns it: nothing
+is visible in the tree until it is move_mount'ed into place, and the descriptor has
+to be closed either way.
 """
 
 from __future__ import annotations
@@ -23,12 +36,11 @@ from chroot_distro.syscalls._libc import get_libc
 
 log = logging.getLogger(__name__)
 
-# ── Syscall numbers (arch-synchronised, >= 424) ──────────────────────────────
+# Every syscall number from 424 up is the same on all architectures.
 __NR_open_tree = 428
 __NR_move_mount = 429
 __NR_mount_setattr = 442
 
-# ── Flags ────────────────────────────────────────────────────────────────────
 OPEN_TREE_CLONE = 0x00000001
 OPEN_TREE_CLOEXEC = 0o2000000  # O_CLOEXEC
 AT_EMPTY_PATH = 0x1000
@@ -64,7 +76,7 @@ def _syscall_libc() -> ctypes.CDLL:
 
 
 def open_tree(dfd: int, path: str, flags: int) -> int:
-    """``open_tree(2)`` — return an fd referring to a (clone of a) mount tree."""
+    """``open_tree(2)``: return an fd referring to a (clone of a) mount tree."""
     libc = _syscall_libc()
     fd = libc.syscall(
         ctypes.c_long(__NR_open_tree),
@@ -76,7 +88,7 @@ def open_tree(dfd: int, path: str, flags: int) -> int:
 
 
 def move_mount(from_dfd: int, from_path: str, to_dfd: int, to_path: str, flags: int) -> None:
-    """``move_mount(2)`` — attach a detached mount tree at a new location."""
+    """``move_mount(2)``: attach a detached mount tree at a new location."""
     libc = _syscall_libc()
     result = libc.syscall(
         ctypes.c_long(__NR_move_mount),
@@ -90,9 +102,9 @@ def move_mount(from_dfd: int, from_path: str, to_dfd: int, to_path: str, flags: 
 
 
 def mount_setattr(dfd: int, path: str, flags: int, attr: MountAttr) -> None:
-    """``mount_setattr(2)`` — change mount attributes (here: attach an idmap).
+    """``mount_setattr(2)``: change mount attributes (here, attach an idmap).
 
-    Note: ``MOUNT_ATTR_IDMAP`` cannot be combined with ``AT_RECURSIVE`` — the
+    Note: ``MOUNT_ATTR_IDMAP`` cannot be combined with ``AT_RECURSIVE``: the
     kernel does not support setting an idmap recursively.
     """
     libc = _syscall_libc()
@@ -177,7 +189,7 @@ def make_idmapped_tree(source: str, userns_fd: int, *, recursive: bool = True) -
     """Return a detached, idmapped clone of the mount at *source*.
 
     The caller is responsible for ``move_mount``-ing the returned fd into place
-    and closing it. The idmap is taken from *userns_fd* — a file descriptor for
+    and closing it. The idmap is taken from *userns_fd*, a file descriptor for
     a ``/proc/<pid>/ns/user`` whose mapping defines how the filesystem's uids
     are translated for this mount.
     """

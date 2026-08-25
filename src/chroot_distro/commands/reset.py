@@ -1,3 +1,19 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
+"""`chroot-distro reset`: delete the rootfs and install the same image again.
+
+`manifest.json` is what makes this possible, so a container installed from a plain
+tarball is refused: `image_ref` and `arch` come from that file and go to
+`command_install` under the existing name. Nothing else about the container is
+touched, so its name and lock survive the round trip.
+
+Sessions and mounts are checked under an exclusive `ContainerLock` and a live one
+aborts, rather than the rootfs going away under a running shell. Removal is
+`remove.py`'s `_remove_path`; a tree it cannot finish is reported, swept once more
+best-effort, and then installed over, because the install writes the same paths
+again anyway.
+"""
+
 import contextlib
 import json
 import os
@@ -44,13 +60,11 @@ def command_reset(args) -> None:
         sys.exit(1)
 
     with ContainerLock(container_name, exclusive=True, command="reset"):
-        # 1. Active sessions check
         active_pids = session.get_active_chroot_pids(container_name)
         if active_pids:
             crit_error(f"Cannot reset container '{container_name}': It has active sessions (PIDs: {active_pids}).")
             sys.exit(1)
 
-        # 2. Mount safety check
         try:
             mount_manager.ensure_no_mounts(rootfs_dir)
         except Exception as e:

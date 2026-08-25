@@ -1,7 +1,9 @@
-"""Token-bucket bandwidth limiter (PyLoad §5 algorithm).
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
+"""Token-bucket bandwidth limiter.
 
 A single :class:`TokenBucket` is shared across all download threads so
-that the *aggregate* throughput is capped at the configured rate — each
+that the *aggregate* throughput is capped at the configured rate: each
 individual thread does not need its own bucket.
 
 Setting *rate* to ``0`` disables throttling entirely (no-op).
@@ -28,24 +30,19 @@ class TokenBucket:
         self._last: float = time.monotonic()
         self._lock = threading.Lock()
 
-    # ------------------------------------------------------------------
     @property
     def rate(self) -> int:
         """Configured rate in bytes/sec (0 = unlimited)."""
         return self._rate
 
-    # ------------------------------------------------------------------
     def consume(self, nbytes: int) -> None:
         """Charge *nbytes* against the bucket, sleeping if over-budget.
 
-        Algorithm (from PyLoad §5):
-
-        1. Accumulate tokens proportional to elapsed time since last call.
-        2. Subtract *nbytes* from the bucket.
-        3. If the bucket goes negative we are downloading faster than the
-           configured rate — sleep for ``abs(tokens) / rate`` seconds.
-           The pause lets the TCP receive window fill, causing the sender
-           to slow down automatically.
+        Tokens accumulate in proportion to the time since the last call.
+        A negative bucket means the download is running faster than the
+        configured rate, so it sleeps for ``abs(tokens) / rate`` seconds:
+        the pause lets the TCP receive window fill, which slows the sender
+        down on its own.
         """
         if self._rate <= 0:
             return

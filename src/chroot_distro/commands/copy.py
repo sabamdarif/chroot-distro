@@ -1,9 +1,11 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
 """Copy and move files between host paths and installed containers.
 
 Endpoints are `[container:]path` specs. A recursive copy recreates a directory
-tree the way `cp -a` does — numeric ownership, modes and timestamps carried
+tree the way `cp -a` does (numeric ownership, modes and timestamps carried
 across, symlinks preserved as symlinks, a sparsely stored file written back
-sparsely, hardlinks turned into independent copies — and
+sparsely, hardlinks turned into independent copies), and it
 merges into a destination tree that is already there, so running the same copy
 twice updates it instead of stopping on the first mkdir's EEXIST. `--move` keeps
 rename(2)'s rule instead and refuses a populated destination directory.
@@ -13,7 +15,7 @@ no component of either endpoint is resolved a second time and a symlink planted
 mid-transfer cannot redirect a write out of the container. An entry that cannot
 be read is reported and stepped over rather than ending the transfer, which is
 `cp -r`'s behaviour; the command then exits non-zero, and `--move` leaves the
-source in place because the copy it would be deleting is incomplete — including
+source in place because the copy it would be deleting is incomplete, including
 when the only thing missing is a device, FIFO or socket, which no tree this
 module writes carries across.
 
@@ -76,7 +78,7 @@ def _copy_tree_pinned(
     Returns (failures, skipped): entries that could not be copied, and
     device/FIFO/socket entries deliberately left out. Both are reported one by
     one and stepped over rather than ending the transfer (see
-    dirfd.copy_tree_at), so the caller has to ask — `--move` in particular must
+    dirfd.copy_tree_at), so the caller has to ask: `--move` in particular must
     remove nothing when either count is non-zero, since the source then holds
     the only copy of whatever did not make it across.
 
@@ -209,7 +211,7 @@ def _move_pinned(
     Returns the number of entries the fallback did not carry across. Nothing is
     removed from the source when that is non-zero: a move whose copy half
     skipped an entry would otherwise delete the only copy of it. Entries skipped
-    *by design* count here too — a device, FIFO or socket is left out of every
+    *by design* count here too: a device, FIFO or socket is left out of every
     tree this module writes, which is a warning during a copy but silent data
     loss during a move, and on Termux the common move (a rootfs onto /sdcard) is
     exactly the cross-device one.
@@ -230,9 +232,7 @@ def _move_pinned(
         dirfd.unlink_quietly(dest_pin.dir_fd, dest_pin.leaf)
 
     if stat.S_ISLNK(src_st.st_mode):
-        dirfd.copy_symlink_at(
-            src_pin.dir_fd, src_pin.leaf, dest_pin.dir_fd, dest_pin.leaf, src_st, owner=owner
-        )
+        dirfd.copy_symlink_at(src_pin.dir_fd, src_pin.leaf, dest_pin.dir_fd, dest_pin.leaf, src_st, owner=owner)
         os.unlink(src_pin.leaf, dir_fd=src_pin.dir_fd)
     elif stat.S_ISDIR(src_st.st_mode):
         failures, skipped = _copy_tree_pinned(src_pin, dest_pin, verbose, str(dest_pin), owner=owner)
@@ -246,17 +246,15 @@ def _move_pinned(
     return 0
 
 
-def _do_copy(
-    src: str, dest: str, verbose: bool, move_mode: bool, recursive: bool, chown: str | None = None
-) -> None:
+def _do_copy(src: str, dest: str, verbose: bool, move_mode: bool, recursive: bool, chown: str | None = None) -> None:
     """Resolve both endpoints, pin them, and run the copy or the move.
 
     A move acts on the entries themselves, so neither final component is
     dereferenced: rename(2) moves a symlink rather than what it points at, and
     replaces one sitting at the destination rather than writing through it, which
     is what mv does. A plain copy keeps cp's semantics and follows both. For the
-    same reason the existence probe is lexists() in move mode — a dangling
-    symlink is a perfectly good thing to move — and the readability probe is
+    same reason the existence probe is lexists() in move mode (a dangling
+    symlink is a perfectly good thing to move), and the readability probe is
     skipped for a symlink source, since nothing reads it and testing the target
     would reject a dangling or unreadable one for no reason.
 
@@ -273,8 +271,8 @@ def _do_copy(
     like any other and may itself be a symlink; mv moves inside the directory a
     destination *link* points at while leaving the link in place, so the question
     is asked of the target while dest_path keeps the name rename(2) acts on. Once
-    both ends are final — the earliest point at which a planted symlink can no
-    longer hide that they overlap — the overlap guard runs.
+    both ends are final, the earliest point at which a planted symlink can no
+    longer hide that they overlap, the overlap guard runs.
 
     Both endpoints are then pinned and the filesystem is addressed only through
     the pinned fds. The destination's missing parents are created by that same
@@ -310,9 +308,7 @@ def _do_copy(
 
     dest_target = resolve_container_path(dest) if move_mode else dest_path
     if os.path.isdir(dest_target):
-        dest_path = resolve_container_child(
-            dest, dest_target, os.path.basename(src_path), deref_leaf=not move_mode
-        )
+        dest_path = resolve_container_child(dest, dest_target, os.path.basename(src_path), deref_leaf=not move_mode)
 
     refuse_src_dest_overlap(src, src_path, dest, dest_path, deref_leaf=not move_mode)
 
@@ -336,9 +332,7 @@ def _do_copy(
                 failures = _move_pinned(src_pin, dest_pin, verbose, owner)
             elif src_is_dir:
                 log_info("Copying files, this may take a while...")
-                failures, _ = _copy_tree_pinned(
-                    src_pin, dest_pin, verbose, dest_path, merge=True, owner=owner
-                )
+                failures, _ = _copy_tree_pinned(src_pin, dest_pin, verbose, dest_path, merge=True, owner=owner)
             else:
                 log_info("Copying files, this may take a while...")
                 if verbose:

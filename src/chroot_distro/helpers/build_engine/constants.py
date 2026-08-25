@@ -1,3 +1,20 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
+"""Tables the engine consults before it dispatches an instruction.
+
+`PREDEFINED_ARGS` and `EXPANDS_VARS` say which ARG keys exist without a
+declaration and which instruction values are variable-expanded. Both follow
+Docker's documented behaviour and are not derived from anything here, so a
+difference from Docker is a difference in these sets.
+
+`needs_chroot` is asked once, before any step runs, so a Dockerfile with no RUN
+never pays for a chroot. It looks through an ONBUILD wrapper because the
+instruction one carries runs like any other.
+
+`is_host_exec_var` is the only policy in the file, and its own docstring is
+where the reason lives.
+"""
+
 import typing
 
 # Predefined ARG keys that are always visible without explicit
@@ -75,8 +92,8 @@ def is_host_exec_var(key: str) -> bool:
     reaches.
 
     The rule is about provenance, not about the name. A value the invoking
-    user set for *this* invocation -- a variable in their shell, `--build-arg`
-    on the command line -- is their own choice about their own command. A
+    user set for *this* invocation (a variable in their shell, `--build-arg` on
+    the command line) is their own choice about their own command. A
     value out of a file describing an image is not: an image's config is a
     stranger's outright, and an ENV line is a statement about the image,
     carried in a Dockerfile as often copied from upstream as written (Docker's

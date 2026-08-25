@@ -1,3 +1,44 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
+"""`chroot-distro login`: resolve a session, mount for it, and enter it.
+
+`commands/run.py` re-enters this file through `args._run_inner`, so this is the
+body of `run` as well, and `run_inner is not None` is the test throughout for "not
+an interactive login". Only a shared `ContainerLock` is taken, since concurrent
+sessions of one container are allowed.
+
+Order matters. Who and where is settled first (user, home, workdir, env, with
+precedence CLI flag > `CD_*` env > the image manifest), because the mount set
+depends on those answers; only then is the namespace and mount state built.
+`bindings.get_bindings` names the mounts and `helpers/isolation.py` applies them,
+so nothing here decides what a mount is.
+
+The session counter is the coordination mechanism. The first session writes
+resolv.conf, acquires the holder and applies every mount; a later one attaches to
+what is already there and can only warn that a flag it was given differs, since
+re-mounting under a live session is not on offer. Every exit path decrements under
+`session.lock`, and reaching zero unmounts, releases the holder and clears the
+isolation mode. `--detach` is the exception and leaves the count standing: the
+container stays mounted until `kill` or `unmount`.
+
+A Termux rootfs is a separate shape rather than a variant: the session runs
+`$PREFIX/bin/login` and takes its uid from the owner of the in-rootfs Termux home,
+because Termux executables are commonly mode 700 and a mismatched uid cannot run
+them.
+
+Isolation degrades rather than failing, twice over. A max-isolation setup that
+dies on an Android kernel (SELinux, usually) raises `_MaxIsolationFallback` and
+the login is retried once in the old isolated mode, and a kernel without
+CLONE_NEWNS gets chroot-only, each with a warning naming the protection lost.
+Because `--isolated` binds nothing at all, `--bind` and the `--shared-*` flags are
+reported as ignored rather than quietly dropped.
+
+Entering has four forms: `chroot_and_run` when there is no holder, waiting on a
+foreground holder that execs the command itself (entering one would hang the
+session forever), `enter_and_run_with_pty` into a sleeping holder, and
+`spawn_detached` for `--detach`.
+"""
+
 import contextlib
 import json
 import logging
@@ -188,7 +229,6 @@ def _resolve_login_user(rootfs: str, container_name: str, user_arg: str) -> dict
         home = "/"
         shell = "/bin/sh"
 
-    # Fetch supplementary groups
     gids = find_user_groups(rootfs, user_spec, gid)
 
     return {
@@ -228,7 +268,6 @@ def _check_arch_mismatch(container_path: str) -> None:
         host_arch = get_device_cpu_arch()
         if img_arch == host_arch:
             return
-        # Check binfmt_misc for cross-arch execution support.
         binfmt_dir = "/proc/sys/fs/binfmt_misc"
         if os.path.isdir(binfmt_dir):
             for entry in os.listdir(binfmt_dir):
@@ -237,7 +276,7 @@ def _check_arch_mismatch(container_path: str) -> None:
                 try:
                     with open(os.path.join(binfmt_dir, entry)) as fh:
                         if "enabled" in fh.read():
-                            return  # binfmt handler present
+                            return
                 except OSError:
                     continue
         warn(
@@ -271,8 +310,6 @@ def _build_termux_env(rootfs, container_path, extra_env, minimal, isolated, cont
             else:
                 env[key] = val
 
-    # Android system vars are inherited from the host only in the default
-    # mode; isolated and minimal sessions keep just the image's values.
     if IS_TERMUX and not isolated and not minimal:
         for var in ANDROID_HOST_ENV_VARS:
             val = os.environ.get(var, "")
@@ -313,8 +350,6 @@ def _build_normal_env(rootfs, container_path, login_user, login_home, extra_env,
             else:
                 env[key] = val
 
-    # Android system vars are inherited from the host only in the default
-    # mode; isolated and minimal sessions keep just the image's values.
     if IS_TERMUX and not isolated and not minimal:
         for var in ANDROID_HOST_ENV_VARS:
             val = os.environ.get(var, "")
@@ -347,7 +382,6 @@ def _check_shell_available(rootfs, container_path, login_shell, container_name):
     if shell_found:
         return login_shell
 
-    # Try the image manifest's Shell as a fallback before giving up.
     manifest_shell = read_manifest_shell(container_path)
     if manifest_shell:
         try:
@@ -428,7 +462,6 @@ def _translate_host_path_to_guest(host_path: str, rootfs: str, resolved_binds: l
 
     for src, dst in resolved_binds:
         src_norm = os.path.normpath(src)
-        # Check if host_path starts with src_norm.
         match = host_path == src_norm or host_path.startswith(src_norm + os.sep)
 
         if match and (best_match_src is None or len(src_norm) > len(best_match_src)):
@@ -456,7 +489,6 @@ def _command_login_inner_once(container_name: str, args) -> None:
     dist_type = _detect_dist_type(rootfs)
     container_path = container_dir(container_name)
 
-    # Warn early if the image architecture doesn't match the host CPU.
     _check_arch_mismatch(container_path)
 
     # Precedence: CLI flag > CD_* env > image default. Already resolved by
@@ -466,7 +498,6 @@ def _command_login_inner_once(container_name: str, args) -> None:
     if not getattr(args, "work_dir", None):
         args.work_dir = resolve_override(None, "CD_WORKDIR")
 
-    # Login user: --user/CD_USER wins, then image User, then "root".
     _explicit_user = getattr(args, "user", None)
     if _explicit_user is not None:
         login_user = _explicit_user
@@ -508,12 +539,10 @@ def _command_login_inner_once(container_name: str, args) -> None:
                 "Drop --isolated (or use CD_USE_NS=1 for namespace isolation "
                 "that keeps the default mounts) if you need them."
             )
-        # Force every host-path-sharing option off so nothing is exposed.
         use_shared_home = False
         shared_tmp = False
         shared_display = False
         args.bind = []
-    # Hostname is the container name (sanitised later).
     hostname_arg = container_name
 
     # Map both the container hostname and the live UTS name to 127.0.0.1 in
@@ -543,7 +572,7 @@ def _command_login_inner_once(container_name: str, args) -> None:
 
     # AMD/Intel: bind the host's ICD/loader-config descriptors read-only so
     # the container's own Mesa stack can enumerate /dev/dri. Driver .so files
-    # are NOT bound — shadowing the container's Mesa corrupts its loader.
+    # are NOT bound: shadowing the container's Mesa corrupts its loader.
     if not IS_TERMUX and not minimal and not max_isolation:
         existing_guest = {"/" + dst.strip("/") for dst in bind_options_map} | {
             "/" + bindings._split_bind_spec(spec)[1].strip("/") for spec in raw_custom_binds
@@ -568,7 +597,7 @@ def _command_login_inner_once(container_name: str, args) -> None:
             container_name=hostname_arg,
         )
 
-        # Create the guest's own cache dir (never bound from the host).
+        # Never bound from the host, so the guest needs its own.
         if IS_TERMUX and not skip_extra_mounts:
             os.makedirs(
                 os.path.join(rootfs, "data", "data", TERMUX_APP_PACKAGE, "cache"),
@@ -594,7 +623,6 @@ def _command_login_inner_once(container_name: str, args) -> None:
 
         login_home = TERMUX_HOME
 
-        # Supplementary groups come from the invoking user.
         invoking_uid = resolve_invoking_uid()
         try:
             import pwd
@@ -618,11 +646,10 @@ def _command_login_inner_once(container_name: str, args) -> None:
             try:
                 if IS_TERMUX:
                     if login_user == "root":
-                        # Keep root at 0:0 — remapping it to the Termux app
-                        # uid made the session run unprivileged (apt/dpkg
-                        # EACCES). Root reads the app-owned home fine via
-                        # CAP_DAC_OVERRIDE; this also repairs entries left
-                        # stale by older versions.
+                        # Keep root at 0:0: remapping it to the Termux app
+                        # uid makes the session run unprivileged (apt/dpkg
+                        # EACCES). Root still reads the app-owned home via
+                        # CAP_DAC_OVERRIDE.
                         set_passwd_uid_gid(rootfs, "root", 0, 0)
                         aligned = True
                     else:
@@ -705,7 +732,6 @@ def _command_login_inner_once(container_name: str, args) -> None:
 
         if not login_wd:
             login_wd = login_home
-            # If login home doesn't exist, try image WorkingDir as fallback.
             if login_wd and login_wd != "/":
                 wd_host = os.path.join(rootfs, login_wd.lstrip("/"))
                 if not os.path.isdir(wd_host):
@@ -740,10 +766,9 @@ def _command_login_inner_once(container_name: str, args) -> None:
             if net_gid not in groups:
                 groups.append(net_gid)
 
-    # Ensure Termux bin is always last in PATH so guest tools can
-    # invoke host Termux utilities. Skipped in --isolated and --minimal
-    # modes where TERMUX_PREFIX is not bound into the guest. Dedupes any
-    # existing occurrence first.
+    # Termux bin goes last in PATH so guest tools can still invoke host
+    # Termux utilities without shadowing the guest's own. Skipped where
+    # TERMUX_PREFIX is not bound into the guest.
     if IS_TERMUX and not skip_extra_mounts and not minimal:
         termux_bin = f"{TERMUX_PREFIX}/bin"
         components = [c for c in child_env.get("PATH", "").split(":") if c and c != termux_bin]
@@ -752,9 +777,8 @@ def _command_login_inner_once(container_name: str, args) -> None:
 
     # A login shell sources the guest's /etc/profile, which pins PATH (and
     # whatever else the distro sets) over the env handed to exec; re-export
-    # the caller's own values from profile.d, which runs last. Sessions that
-    # do not start a login shell keep today's behaviour so a `run` cannot
-    # leave its --env behind for later logins.
+    # the caller's own values from profile.d, which runs last. A `run` writes
+    # nothing there, so its --env cannot leak into later logins.
     session_profile = IS_TERMUX and dist_type == "normal" and not skip_extra_mounts and not minimal
     if session_profile or run_inner is None:
         force_keys = user_keys if run_inner is None else set()
@@ -848,7 +872,8 @@ def _command_login_inner_once(container_name: str, args) -> None:
     # Decide the effective namespace state up front: only the mount namespace
     # is mandatory; everything else warns and proceeds.
     use_namespaces = use_ns_requested and not minimal
-    has_userns = False  # userns active? decides cap drop later
+    # has_userns decides the capability drop further down.
+    has_userns = False
     if use_namespaces:
         probe_result = isolation.probe_isolation()
         if probe_result.missing_mandatory:
@@ -869,7 +894,6 @@ def _command_login_inner_once(container_name: str, args) -> None:
         else:
             has_userns = probe_result.has_userns
 
-    # 1. Resolve all bind mounts
     resolved_binds, rslave_targets = bindings.get_bindings(
         rootfs=rootfs,
         minimal=minimal,
@@ -889,11 +913,9 @@ def _command_login_inner_once(container_name: str, args) -> None:
         nvidia_integration=has_nvidia,
     )
 
-    # Translate login_wd from host path to guest path if applicable.
     if login_wd:
         login_wd = _translate_host_path_to_guest(login_wd, rootfs, resolved_binds)
 
-    # NVIDIA env vars; user-provided --env keys win.
     if has_nvidia:
         for key, val in nvidia_env_vars().items():
             if key not in user_keys:
@@ -938,7 +960,6 @@ def _command_login_inner_once(container_name: str, args) -> None:
         crit_error(str(exc))
         sys.exit(1)
 
-    # 2. Increment session counter and mount if first session
     with session.lock(container_name) as lock_fh:
         sess_count = session.increment(container_name, lock_fh=lock_fh)
         if sess_count == 1:
@@ -993,7 +1014,6 @@ def _command_login_inner_once(container_name: str, args) -> None:
                             container_name,
                             rootfs=rootfs if (max_isolation and use_namespaces) else None,
                         )
-                    # Record mode, make mounts private, set UTS hostname.
                     isolation.finalize_holder(holder, container_name, hostname=hostname_arg)
                 except NamespaceError as exc:
                     _abandon_holder_fds()
@@ -1015,10 +1035,8 @@ def _command_login_inner_once(container_name: str, args) -> None:
 
             if IS_TERMUX and not skip_extra_mounts and not minimal:
                 ensure_data_suid()
-            # Pre-clean stale mounts if any.
             with contextlib.suppress(Exception):
                 mount_manager.unmount_all(rootfs, holder=holder)
-            # Resolve {guest_path: options} to {resolved_target: options}.
             resolved_bind_options: dict[str, str] = {}
             for guest_dst, opts in bind_options_map.items():
                 try:
@@ -1027,8 +1045,8 @@ def _command_login_inner_once(container_name: str, args) -> None:
                     resolved_target = os.path.join(rootfs, guest_dst.lstrip("/"))
                 resolved_bind_options[os.path.realpath(resolved_target)] = opts
 
-            # Phase 1: bind mounts. best_effort_bind_sources() entries
-            # warn+skip on failure; anything else aborts.
+            # best_effort_bind_sources() entries warn+skip on failure;
+            # anything else aborts.
             try:
                 isolation.apply_bind_mounts(
                     rootfs,
@@ -1048,21 +1066,17 @@ def _command_login_inner_once(container_name: str, args) -> None:
                 crit_error(f"Failed to mount bindings: {e}")
                 sys.exit(1)
 
-            # Phase 1a: apply rslave propagation for display socket forwarding
             for rslave_path in rslave_targets:
                 mount_manager.make_rslave(rslave_path, holder=holder)
 
-            # Phase 1b: Termux's $PREFIX/tmp is mode 700, which breaks guest
-            # users like _apt; restore the standard world-writable sticky
-            # /tmp.
+            # Termux's $PREFIX/tmp is mode 700, which breaks guest users like
+            # _apt; restore the standard world-writable sticky /tmp.
             if IS_TERMUX and shared_tmp and dist_type != "termux":
                 chroot_tmp = os.path.join(rootfs, "tmp")
                 if os.path.isdir(chroot_tmp):
                     with contextlib.suppress(OSError):
                         os.chmod(chroot_tmp, 0o1777)  # lgtm[py/overly-permissive-file]
 
-            # Phase 2: special mounts — /proc, /sys, and under max isolation
-            # a fresh tmpfs /dev.
             try:
                 isolation.apply_special_mounts(
                     rootfs,
@@ -1086,11 +1100,9 @@ def _command_login_inner_once(container_name: str, args) -> None:
                 crit_error(f"Failed to apply special mounts: {e}")
                 sys.exit(1)
 
-            # Phase 3: NVIDIA ldconfig refresh
             if has_nvidia:
                 run_ldconfig_in_chroot(rootfs)
 
-            # Phase 4: Auto-create image-declared Volume directories
             for vol_path in read_manifest_volumes(container_path):
                 vol_host = os.path.join(rootfs, vol_path.lstrip("/"))
                 if not os.path.exists(vol_host):
@@ -1102,14 +1114,12 @@ def _command_login_inner_once(container_name: str, args) -> None:
                     except OSError:
                         log.debug("Could not create volume dir %s", vol_path)
 
-            # Phase 5: Inform about image-declared exposed ports
             exposed = read_manifest_exposed_ports(container_path)
             if exposed:
                 from chroot_distro.message import log_info
 
                 log_info(f"Image declares exposed ports: {', '.join(exposed)}")
 
-            # Phase 6: Persist the mount options used by this first session.
             session.save_mount_options(
                 container_name,
                 {
@@ -1122,7 +1132,7 @@ def _command_login_inner_once(container_name: str, args) -> None:
                 },
             )
 
-            # Trigger the holder to start execution.
+            # The foreground holder blocks on this pipe until the mounts exist.
             if pipe_w is not None:
                 try:
                     os.write(pipe_w, b"\n")
@@ -1143,7 +1153,6 @@ def _command_login_inner_once(container_name: str, args) -> None:
                 "isolated": max_isolation,
             }
             if stored is not None and stored != current_opts:
-                # Isolation-level mismatches are incompatible.
                 if current_opts["isolated"] != stored.get("isolated", False):
                     session.decrement(container_name, lock_fh=lock_fh)
                     crit_error(
@@ -1160,7 +1169,6 @@ def _command_login_inner_once(container_name: str, args) -> None:
                         f"namespace isolation (CD_USE_NS). The new session's "
                         f"namespace mode differs and will be ignored."
                     )
-                # Mount option differences: warn with specifics.
                 diff_flags: list[str] = []
                 for key, flag in (
                     ("shared_display", "--shared-display"),
@@ -1209,9 +1217,7 @@ def _command_login_inner_once(container_name: str, args) -> None:
                     sys.exit(1)
 
     if getattr(args, "get_chroot_cmd", False):
-        ns_prefix = (
-            ["nsenter", "--target", str(holder.pid), *holder.nsenter_flags] if holder is not None else None
-        )
+        ns_prefix = ["nsenter", "--target", str(holder.pid), *holder.nsenter_flags] if holder is not None else None
         print(format_get_chroot_cmd(child_env, chroot_display_argv(chroot_config, ns_prefix)))
 
         with session.lock(container_name) as lock_fh:
@@ -1246,7 +1252,6 @@ def _command_login_inner_once(container_name: str, args) -> None:
         )
         return
 
-    # Inner command's exit code, propagated to our own exit status.
     exit_code = 0
 
     # Only a foreground holder execs the command itself and exits through its
@@ -1339,7 +1344,7 @@ def _run_detached(
     """
     log_path = container_log_path(container_name)
     try:
-        log_fh = open(log_path, "ab")  # noqa: SIM115 — handed to the child.
+        log_fh = open(log_path, "ab")  # noqa: SIM115
     except OSError as exc:
         with session.lock(container_name) as lock_fh:
             sess_count = session.decrement(container_name, lock_fh=lock_fh)
@@ -1352,7 +1357,7 @@ def _run_detached(
         sys.exit(1)
 
     try:
-        devnull = open(os.devnull, "rb")  # noqa: SIM115 — handed to the child.
+        devnull = open(os.devnull, "rb")  # noqa: SIM115
     except OSError as exc:
         log_fh.close()
         crit_error(f"cannot open {os.devnull}: {exc}")

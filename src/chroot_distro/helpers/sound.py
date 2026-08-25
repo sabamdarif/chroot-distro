@@ -1,4 +1,15 @@
-"""Resolve host audio (PulseAudio/PipeWire) environment for chroot sessions."""
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
+"""The audio half of a session's display environment.
+
+Only `PULSE_SERVER` is resolved, and its `unix:/run/user/<uid>/pulse/native`
+fallback is applied only when that socket exists, so a guest is never pointed at
+a server that is not running. PipeWire needs no variable: its clients find
+`pipewire-0` under `XDG_RUNTIME_DIR`, which `display.py` sets and binds.
+
+Host values come through `x11.get_host_env_var`, so a session sudo dropped is
+still found.
+"""
 
 from __future__ import annotations
 
@@ -19,7 +30,7 @@ def resolve_sound_env() -> dict[str, str]:
     - ``PULSE_SERVER``: from host ``$PULSE_SERVER``, fallback to
       ``unix:/run/user/<uid>/pulse/native`` if the socket exists.
 
-    PipeWire does not need env vars — apps find the ``pipewire-0`` socket
+    PipeWire does not need env vars: apps find the ``pipewire-0`` socket
     automatically via XDG_RUNTIME_DIR.  We only need to ensure
     XDG_RUNTIME_DIR is set (handled by display.py).
     """
@@ -27,7 +38,6 @@ def resolve_sound_env() -> dict[str, str]:
     runtime = get_host_env_var("XDG_RUNTIME_DIR") or _runtime_dir(uid)
     env: dict[str, str] = {}
 
-    # PulseAudio
     pulse_server = get_host_env_var("PULSE_SERVER")
     if pulse_server:
         env["PULSE_SERVER"] = pulse_server

@@ -1,3 +1,23 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
+"""`chroot-distro list`: what is installed, how big it is, whether it is in use.
+
+No lock is taken. `list` runs unelevated on Termux, and `container_busy_status` reads
+a lock file's holder line instead of trying for the lock, so a busy container is
+reported without making anyone wait. The picture is a moment's snapshot, which is all
+a listing can be.
+
+A directory carrying the `.install-incomplete` marker is not a container: it is
+listed separately, with the two commands that resolve it, rather than being offered
+as usable.
+
+`_rootfs_size_bytes` is `du -sb -x` in Python, apparent sizes from lstat and pruning
+at a filesystem boundary, so a mount under the rootfs is not counted into the
+container's own size. `_ensure_manifest_readable` widens a manifest a rooted install
+left mode 0600, because the unelevated Termux run cannot otherwise read the image
+reference out of it, and nothing in that file is secret.
+"""
+
 import errno
 import json
 import os
@@ -32,7 +52,7 @@ def _iter_container_names() -> tuple[list[str], list[str]]:
     """Return (installed, incomplete) container names, each sorted.
 
     A directory carrying the .install-incomplete marker is a leftover from
-    an interrupted install — not an installed container. It is reported
+    an interrupted install, not an installed container. It is reported
     separately so `list` can mention it without presenting it as usable.
     """
     try:
@@ -73,7 +93,6 @@ def _rootfs_size_bytes(rootfs: str) -> int:
     for dirpath, dirnames, filenames in os.walk(rootfs, followlinks=False):
         # -x behavior: prune directories on different filesystems
         dirnames[:] = [d for d in dirnames if _same_device(os.path.join(dirpath, d), root_dev)]
-        # Count the directory entry itself
         try:
             total += os.lstat(dirpath).st_size
         except OSError as exc:

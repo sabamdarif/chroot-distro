@@ -1,3 +1,36 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
+"""The entry point: validate, decide whether root is needed, then dispatch.
+
+`main()` does the argument work argparse cannot, because users are shown the
+hand-written pages in `commands/help/` and never argparse's own text. So `-h` is
+intercepted before parsing, an unknown first word is rejected with the help page
+rather than a usage line, and `REQUIRED_ARGS` positionals are checked here (the check
+uses `not`, which also catches the empty list an `nargs="*"` positional produces).
+Unknown-argument detection reparses up to a `--` for `login` and `run`, since
+everything after it belongs to the guest command.
+
+Root policy is decided here and nowhere else. `help`, `search` and `daemon` never
+elevate; `daemon` additionally refuses to elevate itself, because it is started by an
+init system and self-elevation could recurse through the socket it serves. On Termux
+`list` and `ps` read only /proc and container metadata so they stay unprivileged, and
+`info` elevates only when root is already available. On Linux everything else
+elevates, because containers live in root's data dir and a rootless read would look in
+the wrong place.
+
+Startup latency is a feature, so imports are lazy: handlers are `"module:function"`
+strings resolved on dispatch, help pages and `elevate` are imported inside the branch
+that needs them, and `constants.PROGRAM_VERSION` resolves through a module `__getattr__`.
+Adding a top-level import here costs every invocation, including tab completion.
+
+Termux drops `LD_PRELOAD` and `LD_LIBRARY_PATH` from the environment first: the Termux
+shell sets a loader shim that must not follow this process into a chroot.
+
+Everything below is expected to fail by raising a `ChrootDistroError`, which becomes a
+one-line message and exit code 1. A bare `Exception` gets the same treatment with an
+"unexpected error" prefix, so no traceback ever reaches a user.
+"""
+
 import argparse
 import importlib
 import os
@@ -193,15 +226,11 @@ def main() -> None:
     if canonical != "list" and getattr(args, "quiet", False):
         set_quiet(True)
 
-    # Root check requirement:
-    # - In normal Linux: all commands require root except "help" and "search"
-    # - In Termux: all commands require root except "list", "ps", and "help"
-    # `search` is network-only and never needs root. `ps` and `list` only read
-    # /proc and container metadata, so they are exempt on Termux like `help`.
-    # `info` will run with root privileges if root is available (to read the
-    # kernel config) but falls back to rootless run if root is not available.
-    # On Linux containers are installed by root and live in root's data
-    # dir, so these commands still elevate there to read the right location.
+    # `search` is network-only. `list` and `ps` only read /proc and container
+    # metadata, so they are exempt on Termux; on Linux containers are installed
+    # by root and live in root's data dir, so they still elevate there to read
+    # the right location. `info` elevates only when root is available, for the
+    # kernel config, and runs rootless otherwise.
     if canonical == "daemon" and os.getuid() != 0:
         # The daemon is started by the init system and must already be
         # root; never self-elevate it (that could recurse through itself).
@@ -214,6 +243,7 @@ def main() -> None:
     elif IS_TERMUX:
         if canonical == "info":
             from chroot_distro.elevate import is_root_available
+
             requires_root = is_root_available()
         elif canonical not in ("list", "ps"):
             requires_root = True

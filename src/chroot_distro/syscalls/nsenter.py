@@ -1,29 +1,30 @@
-"""Wrap ``setns(2)`` for entering existing Linux namespaces.
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
+"""Join an existing process's namespaces with setns(2), in place of nsenter(1).
 
-This module provides pure-Python replacements for the ``nsenter(1)`` binary.
-Namespace file descriptors are opened from ``/proc/<pid>/ns/<name>`` and
-joined via :func:`~chroot_distro.syscalls._libc.py_setns`.
+A namespace is joined by opening `/proc/<pid>/ns/<name>` and handing that
+descriptor to setns(2). The whole of nsenter(1) this program needs is here, in
+four shapes: `enter_namespaces` moves the current process, `enter_and_exec` and
+`run_in_namespaces` fork and exec a command, and `call_in_namespaces` forks and
+runs a *Python* callable, which is what most callers actually want, since the work
+is a handful of syscalls and the only reason to leave this process was to be
+somewhere else when they run.
 
-The two-pass strategy in :func:`enter_namespaces` mirrors the approach used
-by ``util-linux nsenter.c``: the first pass silently attempts every non-user
-namespace (some may fail because the caller has not yet entered the user
-namespace), and the second pass enters any remaining namespaces, raising on
-error.
+The order matters, and one pass is not enough. Entering the mount or PID namespace
+of a process inside a user namespace fails until the user namespace itself has been
+joined, so `enter_namespaces` mirrors util-linux nsenter.c: pass 1 tries every
+non-user namespace and swallows the failures, pass 2 enters what is left, user
+namespace included, and raises. Every descriptor is opened before either pass, since
+`/proc/<pid>/ns/*` stops being reachable the moment the caller changes namespace.
 
-Functions
----------
-check_ns_accessible
-    Probe whether a namespace file can be opened.
-enter_namespaces
-    Join one or more namespaces of a running process.
-enter_and_exec
-    Fork, enter namespaces, and ``execvpe`` a command.
-run_in_namespaces
-    Higher-level wrapper returning :class:`subprocess.CompletedProcess`.
-call_in_namespaces
-    Fork, enter namespaces, and run a Python callable there.
-filter_accessible_namespaces
-    Return only the namespace bits whose ``/proc`` files are accessible.
+`call_in_namespaces` returns bytes down a pipe because *fn* runs in a forked copy:
+nothing it does to memory reaches the parent. The parent reads to EOF before
+reaping, or output larger than the pipe buffer leaves the child blocked in write(2)
+and never waited for.
+
+`filter_accessible_namespaces` exists so a caller can degrade instead of failing:
+whether a namespace file can be opened depends on the kernel, its config and the
+caller's privileges, not on a version number.
 """
 
 from __future__ import annotations
@@ -51,9 +52,8 @@ from chroot_distro.syscalls.capabilities import drop_bounding_caps
 
 log = logging.getLogger(__name__)
 
-# Ordered list of namespace types used for iteration.  User namespace is
-# placed last so that de-privileging happens after all other namespaces have
-# been entered (the common case for unprivileged containers).
+# User namespace last, so de-privileging happens only after every other
+# namespace has been entered.
 _NS_ORDER: list[int] = [
     CLONE_NEWNS,
     CLONE_NEWPID,
@@ -64,11 +64,6 @@ _NS_ORDER: list[int] = [
     CLONE_NEWTIME,
     CLONE_NEWUSER,
 ]
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 
 def _ns_path(pid: int, nstype: int) -> str:
@@ -85,11 +80,6 @@ def _ns_path(pid: int, nstype: int) -> str:
         KeyError: If *nstype* is not in :data:`NS_FILE_MAP`.
     """
     return f"/proc/{pid}/ns/{NS_FILE_MAP[nstype]}"
-
-
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
 
 
 def check_ns_accessible(pid: int, nstype: int) -> bool:
@@ -126,11 +116,11 @@ def enter_namespaces(target_pid: int, namespaces: int) -> None:
 
     A two-pass strategy (modeled on ``util-linux nsenter.c``) is used:
 
-    * **Pass 1** — attempt to enter every requested *non-user* namespace.
+    * **Pass 1** attempts to enter every requested *non-user* namespace.
       Errors are suppressed because some namespaces (e.g. mount, PID)
       may require the caller to be inside the target user namespace
       first.
-    * **Pass 2** — enter any namespaces that were not joined in pass 1,
+    * **Pass 2** enters any namespaces that were not joined in pass 1,
       including the user namespace.  Errors in this pass are fatal and
       result in an :class:`OSError`.
 
@@ -145,7 +135,6 @@ def enter_namespaces(target_pid: int, namespaces: int) -> None:
     Raises:
         OSError: If a namespace cannot be entered in pass 2.
     """
-    # Collect (nstype, fd) pairs for all requested namespaces.
     requested: list[int] = [ns for ns in _NS_ORDER if namespaces & ns]
     fds: dict[int, int] = {}
     try:
@@ -155,7 +144,6 @@ def enter_namespaces(target_pid: int, namespaces: int) -> None:
 
         entered: set[int] = set()
 
-        # Pass 1: non-user namespaces (suppress errors).
         for nstype in requested:
             if nstype == CLONE_NEWUSER:
                 continue
@@ -175,7 +163,6 @@ def enter_namespaces(target_pid: int, namespaces: int) -> None:
                     exc,
                 )
 
-        # Pass 2: remaining namespaces (errors are fatal).
         for nstype in requested:
             if nstype in entered:
                 continue
@@ -240,12 +227,10 @@ def enter_and_exec(
                 # new PID namespace.
                 inner_pid = os.fork()
                 if inner_pid != 0:
-                    # Middle process: wait for inner child and propagate
-                    # its exit code.
+                    # Middle process, whose only job is the exit code.
                     _, status = os.waitpid(inner_pid, 0)
                     os._exit(os.WEXITSTATUS(status) if os.WIFEXITED(status) else 128 + os.WTERMSIG(status))
 
-            # Innermost child (or direct child if no double-fork).
             os.execvpe(command[0], command, env if env is not None else os.environ)
         except BaseException:
             os._exit(127)
@@ -297,7 +282,6 @@ def run_in_namespaces(
         subprocess.TimeoutExpired: If *timeout* is exceeded.
         OSError: If forking or pipe creation fails.
     """
-    # Set up optional pipes.
     stdout_r: int | None = None
     stdout_w: int | None = None
     stderr_r: int | None = None
@@ -313,13 +297,10 @@ def run_in_namespaces(
         # --- child ---
         try:
             if capture_output:
-                # Redirect stdout/stderr to the write ends of the pipes.
                 assert stdout_w is not None
                 assert stderr_w is not None
                 os.dup2(stdout_w, 1)
                 os.dup2(stderr_w, 2)
-                # Close all pipe fds in the child (we only need 1 and 2
-                # now).
                 for fd in (stdout_r, stdout_w, stderr_r, stderr_w):
                     if fd is not None:
                         with contextlib.suppress(OSError):
@@ -331,8 +312,8 @@ def run_in_namespaces(
             os._exit(127)
     else:
         # --- parent ---
-        # Close write ends of pipes in the parent so we get EOF when the
-        # child exits.
+        # The parent's write ends have to go, or the reads below never see
+        # EOF when the child exits.
         if capture_output:
             assert stdout_w is not None
             assert stderr_w is not None
@@ -347,7 +328,7 @@ def run_in_namespaces(
 
         try:
             if timeout is not None:
-                # Install a SIGALRM handler to enforce the timeout.
+
                 def _alarm_handler(signum: int, frame: object) -> None:
                     nonlocal _timed_out
                     _timed_out = True
@@ -358,15 +339,14 @@ def run_in_namespaces(
             if capture_output:
                 assert stdout_r is not None
                 assert stderr_r is not None
-                # Read all data from the pipes.
+                # One pipe is drained before the other: the child can write to
+                # both at once, but the kernel buffers what is not read yet.
                 stdout_chunks: list[bytes] = []
                 stderr_chunks: list[bytes] = []
-                # We read from both pipes.  Since the child may produce
-                # output on both at the same time, we use a simple
-                # sequential read (the child's pipe buffer is finite and
-                # the kernel will buffer for us).
                 with open(stdout_r, "rb", closefd=True) as f_out:
-                    stdout_r = None  # Ownership transferred to file obj
+                    # The file object owns the fd now; the finally below must
+                    # not close it a second time.
+                    stdout_r = None
                     stdout_chunks.append(f_out.read())
                 with open(stderr_r, "rb", closefd=True) as f_err:
                     stderr_r = None
@@ -385,12 +365,11 @@ def run_in_namespaces(
             _, status = os.waitpid(child_pid, 0)
 
             if timeout is not None and old_handler is not None:
-                signal.alarm(0)  # Cancel pending alarm.
+                signal.alarm(0)
                 signal.signal(signal.SIGALRM, old_handler)
                 if _timed_out:
-                    # The alarm fired before waitpid returned—shouldn't
-                    # normally happen because SIGALRM interrupts waitpid,
-                    # but handle gracefully.
+                    # SIGALRM normally interrupts waitpid, so getting here
+                    # means the alarm fired first and the child is still up.
                     try:
                         os.kill(child_pid, signal.SIGKILL)
                         os.waitpid(child_pid, 0)
@@ -401,7 +380,6 @@ def run_in_namespaces(
             returncode = os.WEXITSTATUS(status) if os.WIFEXITED(status) else -os.WTERMSIG(status)
 
         except InterruptedError:
-            # waitpid was interrupted by SIGALRM (timeout path).
             try:
                 os.kill(child_pid, signal.SIGKILL)
                 os.waitpid(child_pid, 0)
@@ -413,7 +391,6 @@ def run_in_namespaces(
             raise subprocess.TimeoutExpired(command, float(timeout or 0)) from None
 
         finally:
-            # Ensure pipe fds are closed even on unexpected errors.
             for fd in (stdout_r, stderr_r):
                 if fd is not None:
                     with contextlib.suppress(OSError):
@@ -531,7 +508,7 @@ def enter_and_run_with_pty(
     Falls back to a plain fork+exec when stdin is not a tty.
 
     This replaces the old pattern of building an ``nsenter`` binary argv
-    and exec'ing it — everything is done via direct syscalls.
+    and exec'ing it: everything is done via direct syscalls.
 
     Returns the child's exit code (0-255).
     """

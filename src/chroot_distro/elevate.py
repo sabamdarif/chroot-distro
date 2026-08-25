@@ -1,3 +1,41 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
+"""Re-execute this program as root, by whatever mechanism the system offers.
+
+Root is assumed everywhere else in the tree, so this is the one place that gets
+it, and there is no unprivileged mode to degrade to. `elevate_or_die()` tries, in
+order: already root; the required file capabilities already present
+(REQUIRED_CAPS, checked through PR_CAP_AMBIENT rather than assumed);
+Termux `su`; the Linux daemon socket; then sudo, doas, pkexec or su.
+`_CHROOT_DISTRO_ELEVATING=1` in the child's environment is what turns a failed
+elevation into an error instead of an infinite re-exec.
+
+Crossing the boundary loses the environment, and that is what most of this file is
+about. Many sudoers policies strip it and ignore `sudo -E` outright, so every
+runtime variable that must survive is re-applied explicitly as an `env VAR=value`
+prefix: a new `CD_*` variable whose effect happens *after* elevation has to be
+added to `_FORWARDED_ENV_VARS`, or it will silently stop working under sudo.
+`_FORWARDED_DISPLAY_VARS` exists for the same reason on the display side, since
+doas, pkexec and su set no SUDO_UID and `helpers.x11.get_invoking_env()`'s
+process-tree walk then has nothing to find.
+
+A value that may hold a secret never goes in argv, which is world-readable through
+/proc/*/cmdline: `_SECRET_ENV_VARS` are written to a 0600 tempfile and its path
+forwarded as `CD_SECRET_FILE`, which the root side reads and unlinks. That path
+arrives as an ordinary `CD_*` variable the daemon forwards from a client, so
+`_load_secret_file` adopts only the two names the channel exists for; taking
+arbitrary keys from it would let a client set PATH or LD_PRELOAD on the root side.
+
+Termux is the other half. `su -c` from Magisk, KernelSU or APatch drops into a raw
+Android environment (toybox PATH, no writable HOME, no /usr/bin for a shebang to
+name), so `_termux_root_env_exports` builds a shell prelude that puts Termux's bin
+dirs first, sets LD_PRELOAD to libtermux-exec's loader shim, points HOME at a
+writable `~/.suroot` and TMPDIR at Termux's tmp, and restores the working
+directory `su` changed. `su` is the one binary this program calls for work it
+cannot do itself; the `shutil.which` probes in `_find_escalation_tool` are the
+other, for the same reason. Nothing else here may grow into a shell-out.
+"""
+
 import contextlib
 import logging
 import os
@@ -88,8 +126,10 @@ def is_root_available() -> bool:
         return "Termux does not supply tools" not in help_text and "No su program found" not in help_text
 
     from chroot_distro.daemon import SOCKET_PATH
+
     if os.environ.get("CD_NO_DAEMON") != "1" and os.path.exists(SOCKET_PATH):
         import socket
+
         conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
             conn.connect(SOCKET_PATH)
@@ -165,8 +205,8 @@ def get_reexec_argv() -> list[str]:
 
     args[0] = executable
 
-    # If the executable ends with .py, we run it with the current python interpreter
-    # to preserve virtualenv and shebang settings.
+    # A .py entry point has to go back through this interpreter, or the
+    # re-exec loses the virtualenv it was started from.
     if executable.endswith(".py"):
         return [sys.executable, *args]
 
@@ -175,7 +215,6 @@ def get_reexec_argv() -> list[str]:
 
 def _find_escalation_tool() -> list[str] | None:
     """Find the best escalation tool depending on the environment."""
-    # Try sudo -> doas -> pkexec -> su in order of preference.
     if shutil.which("sudo"):
         return ["sudo"] if IS_TERMUX else ["sudo", "-E"]
     if shutil.which("doas"):
@@ -188,17 +227,12 @@ def _find_escalation_tool() -> list[str] | None:
     return None
 
 
-# ---------------------------------------------------------------------------
-# Linux capability checking
-# ---------------------------------------------------------------------------
-
-# The minimum set of capabilities chroot-distro needs.
 REQUIRED_CAPS: tuple[int, ...] = (
     CAP_SYS_CHROOT,  # chroot(2)
     CAP_SYS_ADMIN,  # mount(2), umount2(2), unshare(2), setns(2)
-    CAP_SETUID,  # setuid(2) — switch to container user
+    CAP_SETUID,  # setuid(2), switch to container user
     CAP_SETGID,  # setgid(2), setgroups(2)
-    CAP_MKNOD,  # mknod(2) — create /dev nodes
+    CAP_MKNOD,  # mknod(2), create /dev nodes
     CAP_DAC_OVERRIDE,  # file access inside rootfs
 )
 
@@ -238,10 +272,6 @@ def has_required_capabilities() -> bool:
         return True
     return all(has_capability(cap) for cap in REQUIRED_CAPS)
 
-
-# ---------------------------------------------------------------------------
-# Termux: native `su` elevation (no external sudo/tsu wrapper needed)
-# ---------------------------------------------------------------------------
 
 # Known su binary locations on rooted Android (Magisk, KernelSU, APatch,
 # LineageOS su, older SuperSU layouts). Mirrors termux-sudo's search list.
@@ -354,7 +384,7 @@ def _elevate_termux() -> None:
             "Is this device rooted (Magisk, KernelSU, APatch)?"
         )
     # su changes the working directory; restore it on the root side like
-    # termux-sudo does (`cd -- $CURRENT_WORKING_DIR`).
+    # termux-sudo does (`cd -- "$CURRENT_WORKING_DIR"`).
     try:
         cwd = os.getcwd()
     except OSError:
@@ -407,11 +437,6 @@ def _elevate_termux() -> None:
         raise RootRequiredError(f"Failed to execute '{su}': {e}") from e
 
 
-# ---------------------------------------------------------------------------
-# Linux: group-gated daemon delegation (Docker-style, passwordless)
-# ---------------------------------------------------------------------------
-
-
 def _try_daemon_delegation() -> None:
     """Delegate to the root daemon socket when available.
 
@@ -448,20 +473,17 @@ def elevate_or_die() -> None:
     if is_root():
         return
 
-    # Phase 2: check if we have sufficient file capabilities.
     if has_required_capabilities():
-        log.debug("Running with file capabilities — elevation not required")
+        log.debug("Running with file capabilities, elevation not required")
         return
 
-    # Check loop sentinel
     if os.environ.get("_CHROOT_DISTRO_ELEVATING") == "1":
         raise RootRequiredError("Privilege elevation loop detected. The tool is still not running as root.")
 
     if IS_TERMUX:
         _elevate_termux()
-        return  # unreachable — _elevate_termux never returns on success
+        return  # unreachable: _elevate_termux never returns on success
 
-    # Passwordless path: the chroot-distro group + daemon socket.
     _try_daemon_delegation()
 
     tool_cmd = _find_escalation_tool()
@@ -472,7 +494,6 @@ def elevate_or_die() -> None:
             "operation run 'chroot-distro setup' once as root."
         )
 
-    # Set loop sentinel env var in the child environment
     os.environ["_CHROOT_DISTRO_ELEVATING"] = "1"
 
     reexec_argv = get_reexec_argv()
@@ -485,7 +506,7 @@ def elevate_or_die() -> None:
     env_assignments = ["_CHROOT_DISTRO_ELEVATING=1", *_forwarded_env_assignments()]
 
     # Secrets and guest env entries travel via a 0600 tempfile, not argv, to
-    # stay out of /proc/*/cmdline.  The root-side elevate_or_die() call reads
+    # stay out of /proc/*/cmdline. The root-side elevate_or_die() call reads
     # and unlinks the file before is_root() returns.
     secret_path = _write_secret_file()
     if secret_path:
@@ -500,7 +521,6 @@ def elevate_or_die() -> None:
     # silently drop CD_USE_NS and skip namespace isolation.
     env_prefix = ["env", *env_assignments] if env_assignments else []
 
-    # Construct the final command line
     if tool_cmd[-1] == "-c":
         # su -c "<command string>": the whole invocation is a single string.
         cmd_str = shlex.join([*env_prefix, *reexec_argv])

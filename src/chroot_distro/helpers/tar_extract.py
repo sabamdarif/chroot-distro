@@ -1,67 +1,59 @@
-# Architecture: one streaming tar -> rootfs extractor, shared by Docker layer
-# application and plain rootfs tarball installs. The two differ only in two
-# parameters:
-#
-#   strip             — leading path components to drop from each member name
-#                       (>0 only for plain rootfs tarballs whose entries live
-#                       under a wrapper directory).
-#   handle_whiteouts  — when True, OCI whiteouts (.wh.<name>, opaque
-#                       .wh..wh..opq) consume sibling entries; when False they
-#                       are written as ordinary members.
-#
-# Invariants the loop maintains:
-#
-#   - Block/char/FIFO entries are skipped.
-#   - A member with a ".." or empty component after *strip* is dropped, and so
-#     is one whose last component is ".", which names the directory the member
-#     already sits in rather than an entry: the writers would have acted on
-#     that directory. Interior "." components stay allowed, since OCI layers
-#     spell their paths "./foo" as a matter of course.
-#   - A whiteout deletes the name after its ".wh." prefix and that name is held
-#     to the same rule: ".wh..." spells "..", which is the extraction root's
-#     own parent for a whiteout at the top of a layer.
-#   - Every destination's parent is resolved through pre-existing symlink
-#     components with each hop clamped inside the rootfs (safe_resolve_parts):
-#     an absolute target re-roots at the rootfs and ".." can never ascend past
-#     it. Without this an earlier member could ship `evil -> /` and a later
-#     `evil/passwd` would be written through it onto the host. Re-rooting
-#     mirrors the guest's own view, where '/' is the rootfs, so a legitimate
-#     absolute symlink still lands in the right place inside it.
-#   - Resolving says where a member *belongs*; it does not make writing there
-#     safe, because it decides by name and everything that acted on the answer
-#     named it again — os.makedirs, os.remove, open(dest), os.chmod and
-#     os.utime each resolved the path afresh, so a component re-pointed between
-#     the resolve and the write sent the member wherever it then led. On Termux
-#     that is an ordinary process's reach: a container being installed lives
-#     under CONTAINERS_DIR, inside the prefix bound read-write into every
-#     non-isolated container. The extraction therefore takes a **descriptor**
-#     on the rootfs, re-walks each resolved parent off it with O_NOFOLLOW
-#     (dirfd.descend_at) and names every entry as (dir_fd, name). Regular files
-#     are created with O_EXCL (dirfd.open_new_at), which covers the one thing
-#     O_NOFOLLOW cannot: a hardlink left under a member's name is
-#     indistinguishable from an ordinary file, and a write through it would
-#     land on the inode it shares.
-#   - Parent descriptors are cached one deep (_Parents). A tar lists its members
-#     in tree order, so consecutive entries almost always share a parent and the
-#     descent costs about one openat per member — less than the full path
-#     resolution the kernel did per call before.
-#   - Hard-link targets (member.linkname) get the same filtering and clamped
-#     resolution as member.name, or a crafted archive could name
-#     "../../etc/shadow" and have the host's file copied into a member-defined
-#     destination inside the rootfs.
-#   - Hard links are deferred until every regular file has been written, then
-#     both endpoints are re-resolved (so a symlink planted by a *later* member
-#     cannot redirect either end) and copied, so the link source exists.
-#   - Directory mtimes are stamped last, since writing into a directory bumps
-#     its mtime, and directories get at least S_IRWXU so later members can be
-#     written into them whatever mode the archive recorded.
-#   - Progress counts compressed bytes consumed (ByteCounter), so the
-#     denominator is os.path.getsize() and no upfront scan is needed.
-#
-# The descriptor discipline is ported from proot-distro
-# (https://github.com/termux/proot-distro), created by Sylirre
-# <sylirre@termux.dev> for the Termux project and licensed GPL-3.0, then adapted
-# to this project's extractor, which also carries each member's ownership.
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
+"""Extract a tar stream into a rootfs, member by member, safely.
+
+One streaming extractor serves both Docker layer application and plain rootfs
+tarball installs; they differ only in `strip` (leading components to drop from
+each member name, >0 only for a tarball whose entries sit under a wrapper
+directory) and `handle_whiteouts` (when True, OCI whiteouts, `.wh.<name>` and
+opaque `.wh..wh..opq`, consume sibling entries instead of being written as
+ordinary members).
+
+An archive is a document this program did not write, so the loop filters before it
+writes. Block, char and FIFO entries are skipped. A member is dropped when a
+component after *strip* is empty or `..`, or when its last component is `.`, which
+names the directory the member already sits in rather than an entry of its own;
+interior `.` components stay, since OCI layers spell their paths `./foo` as a
+matter of course. A whiteout's target, the name after `.wh.`, is held to the same
+rule: `.wh...` spells `..`, which is the extraction root's own parent for a
+whiteout at the top of a layer. `member.linkname` is filtered and resolved exactly
+like `member.name`, or a crafted archive could name `../../etc/shadow` and have
+the host's file copied into a destination it chose inside the rootfs.
+
+Every destination's parent goes through `safe_resolve_parts`, which walks
+pre-existing symlink components with each hop clamped inside the rootfs: an
+absolute target re-roots at the rootfs, mirroring the guest's own view where `/`
+is the rootfs, so a legitimate absolute symlink still lands in the right place,
+and `..` can never ascend past it. Without this an earlier member shipping
+`evil -> /` would have a later `evil/passwd` written through it onto the host.
+
+Resolving says where a member *belongs*; it does not make writing there safe. It
+decides by name, and a component re-pointed between the resolve and the write
+sends the member wherever it then leads, which on Termux is an ordinary process's
+reach: a container being installed lives under CONTAINERS_DIR, inside the prefix
+bound read-write into every non-isolated container. The extraction therefore holds
+a *descriptor* on the rootfs, re-walks each resolved parent off it with O_NOFOLLOW
+(`dirfd.descend_at`) and names every entry as `(dir_fd, name)`. Regular files are
+created O_EXCL (`dirfd.open_new_at`), which covers the one thing O_NOFOLLOW
+cannot: a hardlink left under a member's name is indistinguishable from an
+ordinary file, and a write through it would land on the inode it shares.
+
+The order of the writes carries invariants of its own. Hard links are deferred
+until every regular file has been written, then both endpoints are re-resolved, so
+a symlink planted by a *later* member cannot redirect either end, and the link
+source exists by then. Directories get at least S_IRWXU whatever mode the archive
+recorded, so later members can be written into them, and their mtimes are stamped
+last, since writing into a directory bumps it. Parent descriptors are cached one
+deep (`_Parents`): a tar lists its members in tree order, so consecutive entries
+almost always share a parent and the descent costs about one openat per member.
+Progress counts compressed bytes consumed (`ByteCounter`), so the denominator is
+`os.path.getsize()` and no upfront scan is needed.
+
+The descriptor discipline is ported from proot-distro
+(https://github.com/termux/proot-distro), created by Sylirre
+<sylirre@termux.dev> for the Termux project and licensed GPL-3.0, then adapted to
+this project's extractor, which also carries each member's ownership.
+"""
 
 import contextlib
 import os
@@ -102,7 +94,7 @@ def extract_tar_to_rootfs(
     """
     total_size = os.path.getsize(archive_path)
     deferred_links: list = []  # (dest parts, src parts, uid, gid)
-    deferred_dirs: list = []  # (parts, mtime) — stamped after all writes
+    deferred_dirs: list = []  # (parts, mtime), stamped after all writes
     parents = _Parents(rootfs_fd)
 
     try:
@@ -122,12 +114,10 @@ def extract_tar_to_rootfs(
                     )
                     draw_bytes_bar(counter.count, total_size)
 
-        # All regular files written; now copy hard links. Both endpoints are
-        # re-resolved here (not at defer time) so a symlink planted by a later
-        # member can't redirect either the read source or the write dest
-        # outside the rootfs — and the answers are then walked off the rootfs
-        # descriptor, so neither end is opened by a name that could have
-        # changed meaning since.
+        # Both endpoints are re-resolved here rather than at defer time, so a
+        # symlink planted by a later member cannot redirect the read source or
+        # the write dest outside the rootfs, and each answer is walked off the
+        # rootfs descriptor rather than opened by name.
         for dest_parts, src_parts, uid, gid in deferred_links:
             _copy_hardlink(rootfs_fd, parents, dest_parts, src_parts, uid, gid)
 
@@ -203,9 +193,8 @@ def _copy_hardlink(rootfs_fd, parents, dest_parts, src_parts, uid, gid) -> None:
         except OSError:
             return
         if not stat.S_ISREG(st.st_mode):
-            # os.path.isfile() was the old test and it followed a link; a
-            # hard-link member naming a symlink has no content of its own to
-            # copy.
+            # The test must not follow the link: a hard-link member naming a
+            # symlink has no content of its own to copy.
             return
         try:
             dst_fd = parents.get(dest_resolved[:-1])
@@ -216,9 +205,6 @@ def _copy_hardlink(rootfs_fd, parents, dest_parts, src_parts, uid, gid) -> None:
             dirfd.copy_file_at(src_fd, src_resolved[-1], dst_fd, dest_resolved[-1], st, owner=(uid, gid))
     finally:
         os.close(src_fd)
-
-
-# ----- per-member dispatch -------------------------------------------------
 
 
 def _process_member(member, tf, rootfs_fd, parents, *, strip, handle_whiteouts, deferred_links, deferred_dirs):
@@ -235,12 +221,11 @@ def _process_member(member, tf, rootfs_fd, parents, *, strip, handle_whiteouts, 
     rel_path = "/".join(rel_parts)
     if not rel_path or rel_parts[-1] == os.curdir:
         # A trailing '.' names the directory the member already sits in rather
-        # than an entry of its own, and os.path.join keeps it in the path, so
-        # the writers below acted on that directory: a symlink member rmtree'd
-        # its whole contents before failing on EEXIST, and a regular one ended
-        # the extraction on EISDIR. Interior '.' components stay allowed — OCI
-        # layers spell their paths './foo' as a matter of course and
-        # safe_resolve_parts drops them on the way through.
+        # than an entry of its own, so writing it would act on that directory:
+        # a symlink member takes its whole contents with it. Interior '.'
+        # components stay allowed, since OCI layers spell their paths './foo'
+        # as a matter of course and safe_resolve_parts drops them on the way
+        # through.
         return
 
     # Resolve the destination's parent through any pre-existing symlink
@@ -267,7 +252,7 @@ def _process_member(member, tf, rootfs_fd, parents, *, strip, handle_whiteouts, 
 
     if member.isdir():
         # A symlink already occupying this name would make the mkdir (and the
-        # chmod/chown/utime below) act on its target, so drop it first —
+        # chmod/chown/utime below) act on its target, so drop it first:
         # overlay semantics replace a symlink with a real dir.
         try:
             st = dirfd.lstat_at(parent_fd, name)
@@ -278,9 +263,9 @@ def _process_member(member, tf, rootfs_fd, parents, *, strip, handle_whiteouts, 
         try:
             os.mkdir(name, 0o777, dir_fd=parent_fd)
         except FileExistsError:
-            # os.makedirs(exist_ok=True) tolerated an existing directory and
-            # nothing else; a plain file standing here still ends the
-            # extraction rather than being written around.
+            # An existing directory is tolerated and nothing else: a plain
+            # file standing here ends the extraction rather than being
+            # written around.
             existing = None
             with contextlib.suppress(OSError):
                 existing = dirfd.lstat_at(parent_fd, name)
@@ -316,7 +301,6 @@ def _apply_whiteout(parent_fd: int, basename: str) -> None:
     did not open itself.
     """
     if basename == ".wh..wh..opq":
-        # Opaque whiteout: clear everything inside the parent dir.
         try:
             entries = dirfd.listdir_at(parent_fd)
         except OSError:
@@ -325,19 +309,13 @@ def _apply_whiteout(parent_fd: int, basename: str) -> None:
             dirfd.rmtree_at(parent_fd, entry, force=True)
         return
     if basename.startswith(".wh."):
-        # Regular whiteout: delete the named sibling. What is deleted is the
-        # part after the prefix, and it has to name a sibling: `.wh...` slices
-        # to '..', which os.path.join left in the path and the removal then
-        # rmtree'd — the parent's parent, which for a whiteout at the top of a
-        # layer is one level *above* the extraction root, so a single such
-        # member emptied containers/<name>/, manifest and rootfs together.
-        # `.wh.` and `.wh..` slice to '' and '.', which name the parent itself
-        # and cost it its contents. None of the three names a sibling, so
-        # there is nothing for the whiteout to delete; the member is still
-        # consumed, since an entry called `.wh.*` is not one to write into the
-        # rootfs either. Naming the entry as (dir_fd, target) makes this
-        # structural: a component of a path is not something rmtree_at can be
-        # handed.
+        # What the whiteout deletes is the part after the prefix, and it has
+        # to name a sibling: `.wh...` slices to '..', which for a whiteout at
+        # the top of a layer is the extraction root's own parent, and `.wh.`
+        # and `.wh..` slice to '' and '.', which name the parent itself. None
+        # of the three names a sibling, so there is nothing to delete; the
+        # member is still consumed, since `.wh.*` is not an entry to write
+        # into the rootfs either.
         target = basename[4:]
         if target not in ("", os.curdir, os.pardir):
             dirfd.rmtree_at(parent_fd, target, force=True)
@@ -348,7 +326,7 @@ def _write_symlink(parent_fd, name, member) -> None:
 
     Whatever holds the name first goes through rmtree_at, which unlinks a
     symlink rather than traversing it and empties a directory an earlier layer
-    wrote however deep and however sealed the image made it — symlink(2) has no
+    wrote however deep and however sealed the image made it. symlink(2) has no
     O_TRUNC and would only report EEXIST.
     """
     if dirfd.exists_at(parent_fd, name):
@@ -408,7 +386,7 @@ def safe_resolve_parts_at(root_fd: int, parts: Sequence[str]) -> list[str] | Non
     instead of composed onto a root path, so the answer describes the tree
     below the descriptor the caller validated rather than below a name it would
     have to trust a second time. What comes back is still only where the entry
-    *belongs* — the components have to be re-walked with dirfd.descend_at()
+    *belongs*: the components have to be re-walked with dirfd.descend_at()
     before anything is written through them.
     """
     return safe_resolve_parts(None, parts, root_fd=root_fd)
@@ -436,7 +414,7 @@ def safe_resolve_parts(
     hardlink's source file.
 
     With *root_fd* the walk names each level relative to that descriptor and
-    *root* is unused — safe_resolve_parts_at() is the spelling for that, and it
+    *root* is unused. safe_resolve_parts_at() is the spelling for that, and it
     is what a caller holding a pinned root wants. Without it the levels are
     composed onto *root*, which is right for a tree this process made itself.
 
@@ -464,7 +442,7 @@ def safe_resolve_parts(
             else:
                 st = os.lstat(os.path.join(typing.cast(str, root), rel))
         except OSError:
-            # Doesn't exist yet (or unreadable) — safe to take as-is.
+            # Doesn't exist yet (or unreadable), so it is safe as-is.
             resolved.append(comp)
             continue
         if stat.S_ISLNK(st.st_mode):
@@ -493,7 +471,7 @@ def _write_regular(parent_fd, name, member, tf) -> None:
     open_new_at() creates a fresh inode with O_EXCL, unlinking whatever name
     was there first. That is what keeps the content inside the directory the
     walk opened even when the entry standing there is a *hardlink* to a file
-    elsewhere — O_NOFOLLOW cannot tell one from an ordinary file, and an
+    elsewhere: O_NOFOLLOW cannot tell one from an ordinary file, and an
     O_TRUNC write through it would land on the other inode. A directory in the
     way still ends the extraction, as open(dest, "wb") did on EISDIR.
     """

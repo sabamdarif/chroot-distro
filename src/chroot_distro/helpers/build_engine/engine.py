@@ -1,3 +1,37 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
+"""Drive a parsed Dockerfile: one stage per FROM, one handler per instruction.
+
+The engine keeps only what crosses a stage boundary, the global ARG scope, the
+named-stage map `COPY --from=` resolves against, and which stage is current;
+everything else a step does it does to the stage or to the rootfs on disk.
+
+A prescan runs first, so a `--target` naming no stage fails before anything is
+pulled. FROM is the one instruction the engine handles itself: it makes the
+stage's scratch tree off this run's scratch-root descriptor, takes the config
+from `scratch`, from an earlier stage or from a pulled image, seeds env, workdir,
+user and shell out of it, writes the stage's resolv.conf and hosts so a RUN can
+resolve a name, and fires the base image's ONBUILD triggers. Global ARGs start
+unset in a new stage and become visible again only when a bare `ARG NAME`
+re-declares one, which is Docker's rule and not an omission.
+
+`_adopt_image_config` is this module's trust boundary, and its own docstring is
+where the reasoning lives: a pulled config is a document this program did not
+write, every field of it is read back by a handler, so it is held to the type OCI
+says it is at the single point it is adopted.
+
+`firing_onbuild` is true only while a base image's triggers run, which is what
+lets `do_env` tell a stranger's ENV line from the Dockerfile author's. An ONBUILD
+in this Dockerfile records a trigger for whoever builds FROM the result and fires
+nothing here.
+
+Every instruction appends one history entry, with `created` pinned to the epoch
+so a rebuild produces the same config and `empty_layer` set when the handler grew
+no layer. The count of non-empty entries has to equal len(rootfs.diff_ids) or a
+registry renders the image's layers wrong, so the entry is written by the call
+that ran the handler rather than by each handler.
+"""
+
 import json
 import logging
 import os
@@ -70,7 +104,7 @@ def _adopt_image_config(image_config: typing.Any, image_ref: str) -> dict[str, t
     construction.
 
     The first is the LD_* filter over `Env`. An ENV line in the user's own
-    Dockerfile still reaches the image config -- it goes through do_env, which
+    Dockerfile still reaches the image config: it goes through do_env, which
     writes this same list afterwards, and what a Dockerfile says about the
     image it produces is its author's business. What no such name reaches from
     any source is the environment a RUN step is exec'd with, which run_step
@@ -78,13 +112,13 @@ def _adopt_image_config(image_config: typing.Any, image_ref: str) -> dict[str, t
     apply).
 
     The second is the shape. Every field below is read back by this module or
-    by a handler -- `User` and `Shell` decide what a RUN step runs and who as,
+    by a handler: `User` and `Shell` decide what a RUN step runs and who as,
     `WorkingDir` becomes its cwd, `OnBuild` is parsed as Dockerfile lines,
     `Env` seeds the stage, `Cmd` and `Entrypoint` are what `run` later
     executes, `Labels`, `ExposedPorts` and `Volumes` are merged into by their
     handlers, and `history` is appended to once per instruction. All of it is a
     registry's JSON, or a manifest-cache entry's, which on Termux sits under
-    the bound $TERMUX_PREFIX and is a guest's to compose -- and every consumer
+    the bound $TERMUX_PREFIX and is a guest's to compose. Every consumer
     subscripted it as the type OCI says it is: `"config": "x"` was an
     AttributeError at FROM, `"Labels": ["a"]` a ValueError in do_label,
     `"OnBuild": 5` a TypeError, `"history": null` an AttributeError at the
@@ -230,13 +264,11 @@ class BuildEngine:
         # ssh id -> agent socket path.
         self.secrets = dict(secrets or {})
         self.ssh_sockets = dict(ssh_sockets or {})
-        # Build-output renderer. Default preserves historic behaviour:
-        # plain step lines, nothing under --quiet.
         self.reporter: Reporter = reporter or (NullReporter() if quiet else PlainReporter())
-        self.stages: dict[str, Stage] = {}  # name -> Stage
+        self.stages: dict[str, Stage] = {}
         self.stages_by_idx: list[Stage] = []
         self.current: Stage | None = None
-        self.global_args: dict[str, str] = {}  # ARG declared before first FROM
+        self.global_args: dict[str, str] = {}
         self.declared_global: set[str] = set()
         self.ignore_patterns = load_dockerignore(self.build_dir)
         # LD_* names the Dockerfile set and the host-side chroot exec was
@@ -250,8 +282,6 @@ class BuildEngine:
         self._step_no = 0
         self._step_total = 0
 
-    # ----- public entry point ----------------------------------------------
-
     def run(self, instructions: list[dict[str, typing.Any]]) -> Stage:
         """Walk the instruction list and return the chosen stage."""
         self._prescan(instructions)
@@ -262,9 +292,7 @@ class BuildEngine:
             self._announce(instr)
             t0 = time.monotonic()
             self._dispatch(instr)
-            self.reporter.emit(
-                self._event("step_finished", instr, duration=time.monotonic() - t0)
-            )
+            self.reporter.emit(self._event("step_finished", instr, duration=time.monotonic() - t0))
             if self._stop_after:
                 break
 
@@ -277,8 +305,6 @@ class BuildEngine:
         """Release every stage's descriptors. Idempotent."""
         for stage in self.stages_by_idx:
             stage.close()
-
-    # ----- pre-scan --------------------------------------------------------
 
     def _prescan(self, instructions: list[dict[str, typing.Any]]) -> None:
         seen_from = False
@@ -309,9 +335,8 @@ class BuildEngine:
         """Expand variables for a FROM line using global ARGs only."""
         scope: dict[str, str | None] = {}
         if pre_scan:
-            # During pre-scan we only have CLI-supplied build args for
-            # global keys declared so far. Pre-scan happens before the
-            # user-arg merge; resolve from the raw map.
+            # Pre-scan runs before the user-arg merge, so the raw CLI map is
+            # all there is to resolve from.
             scope.update(self.user_build_args)
         else:
             scope.update(self.global_args)
@@ -326,8 +351,6 @@ class BuildEngine:
         scope.setdefault("BUILDOS", "linux")
         scope.setdefault("TARGETPLATFORM", f"linux/{self.target_arch_docker}")
         scope.setdefault("BUILDPLATFORM", f"linux/{self.host_arch_docker}")
-
-    # ----- step banner / events ---------------------------------------------
 
     def _stage_label(self) -> str:
         if self.current is None:
@@ -364,8 +387,6 @@ class BuildEngine:
         """Emit *text* as a log_line event (rendered via log_info by default)."""
         self.reporter.emit(BuildEvent(kind="log_line", text=text))
 
-    # ----- dispatcher + history -------------------------------------------
-
     def _dispatch(self, instr: dict[str, typing.Any]) -> None:
         name = instr["name"]
         if name == "FROM":
@@ -373,7 +394,6 @@ class BuildEngine:
             return
         if self.current is None:
             if name == "ARG":
-                # Global ARG: already captured by _prescan; no-op here.
                 return
             raise BuildError(f"Instruction '{name}' before any FROM at line {instr['lineno']}.")
         if name == "ONBUILD":
@@ -432,6 +452,7 @@ class BuildEngine:
         value = instr.get("value", "")
         if isinstance(value, str):
             new["value"] = expand_vars(value, env)
+
         def _expand_flag(v: typing.Any) -> typing.Any:
             if isinstance(v, str):
                 return expand_vars(v, env)
@@ -458,19 +479,14 @@ class BuildEngine:
             if v:
                 scope[k] = v
         self._set_arch_defaults(scope)
-        # ARG values declared in this stage so far.
         for k, v in self.current.args.items():
             scope[k] = v
-        # ENV always wins over ARG.
         for k, v in self.current.env.items():
             scope[k] = v
         return scope
 
-    # ----- FROM ------------------------------------------------------------
-
     def _do_from(self, instr: dict[str, typing.Any]) -> None:
-        # If --target was set and the current stage is the target, the
-        # next FROM marks the end of the build for this invocation.
+        # The FROM after the --target stage ends this invocation.
         if self.target_stage and self.current is not None and self.current.name == self.target_stage:
             self._stop_after = True
             return
@@ -543,7 +559,6 @@ class BuildEngine:
         except OSError as exc:
             log.warning("Failed to configure DNS for build stage: %s", exc)
 
-        # Fire ONBUILD triggers from the base image's config.
         base_onbuild = (stage.image_config.get("config") or {}).get("OnBuild") or []
         if base_onbuild:
             from chroot_distro.helpers.dockerfile import parse_dockerfile
@@ -646,8 +661,6 @@ class BuildEngine:
             stage.layers.append({"digest": digest, "size": size, "diff_id": diff_id})
         if stage.layers:
             stage.parent_layer_digest = stage.layers[-1]["digest"]
-
-    # ----- target stage resolution ----------------------------------------
 
     def _target(self) -> Stage:
         if self.target_stage:

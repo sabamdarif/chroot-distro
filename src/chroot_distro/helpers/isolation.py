@@ -1,28 +1,37 @@
-"""Shared Linux isolation (maximum-isolation namespace sessions).
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
+"""Compose namespaces plus chroot once, for every command that needs isolation.
 
-This module centralises the "isolation technology" used across ``login``,
-``run`` and ``build`` so every command applies the *same* namespace + chroot
-setup instead of each reimplementing it.
+`login`, `run` and `build` all want the same setup, so the holder bring-up, the
+bind-recursion rules, the special-mount set and the teardown live here rather than
+three times over. `login` composes the pieces inline because it also has a PTY, a
+richer bind set and session bookkeeping; `build` takes `max_isolation_session` or
+`namespace_session` whole.
 
-Two switches request isolation:
+Three levels, and the difference between them is the mount set, not the namespaces:
+the default keeps host mounts and no namespaces at all; `CD_USE_NS` turns the
+namespaces on and keeps the default mount set (`namespace_session`, holder not
+chrooted); `--isolated` or `CD_USE_ISOLATION` binds nothing from the host and
+chroots the holder (`max_isolation_session`). `CD_USE_ISOLATION` wins when both env
+vars are set, and `resolve_isolated` is the only place the flag and the env var are
+combined. `build` has no CLI flag, so for it the env vars are the whole interface.
 
-* the ``--isolated``/``--isolate`` flag on ``login``/``run`` (→ ``args.isolated``);
-* the ``CD_USE_ISOLATION`` environment variable, which forces maximum isolation
-  on regardless of the flag.
+What a bind needs is decided by `bind_is_recursive`, and each clause is a kernel or
+platform fact, not a preference: /run holds nested socket submounts, /apex is a
+tmpfs whose entries are separate mounts with the bionic linker under one of them,
+and inside a user namespace a non-recursive bind of /sys or /dev is refused outright
+because their locked submounts cannot be split off. A /dev bind is also made rslave
+straight away, or the devpts mounted into it next propagates back onto the host /dev.
 
-``CD_USE_ISOLATION`` is the env-var equivalent of ``--isolated`` (maximum
-isolation: bind nothing from the host, chroot the namespace holder). It is
-distinct from ``CD_USE_NS`` (see :func:`namespace.use_ns_env_enabled`), which
-only turns on namespaces while keeping the default mount set. ``build`` honours
-both env vars (it has no CLI flag): ``CD_USE_ISOLATION`` → maximum isolation via
-:func:`max_isolation_session`, ``CD_USE_NS`` → namespace-only mode via
-:func:`namespace_session`; ``CD_USE_ISOLATION`` wins when both are set.
+Failure policy is per source. A bind listed in *best_effort_sources* warns and is
+skipped, anything else re-raises, and a missing mount namespace is not an error at
+all: both session wrappers yield None so the caller runs unisolated rather than not
+at all. The fresh tmpfs /dev under maximum isolation is the same shape, since some
+Android kernels deny it under SELinux, and falling back to the container's own empty
+/dev directory is still not a host bind.
 
-The building blocks below are shared by ``login`` (which composes them inline
-with its richer bind set, PTY handling and session bookkeeping) and by the
-:func:`max_isolation_session` convenience wrapper used by ``build``. Keeping
-them here means the holder bring-up, the special-mount / fresh-``/dev`` logic
-and the bind-recursion rules live in exactly one place.
+`safe_hostname` exists because container names may hold underscores and hostnames
+may not, so the UTS hostname is filtered rather than the name restricted.
 """
 
 from __future__ import annotations
@@ -98,7 +107,7 @@ def bind_is_recursive(src: str, dst_real: str, run_root: str, *, use_userns: boo
     Recurse for /run and anything under it (nested socket submounts), for the
     WSL lib dir, and for the Android system partitions (nested mounts under a
     tmpfs). *run_root* is ``realpath(rootfs/run)``, computed once by the caller.
-    When *use_userns* is set, also recurse for /sys and /dev — a plain bind of
+    When *use_userns* is set, also recurse for /sys and /dev, since a plain bind of
     those is rejected inside a user namespace.
     """
     is_run = dst_real == run_root or dst_real.startswith(run_root + os.sep)
@@ -135,7 +144,6 @@ def apply_bind_mounts(
                 src,
                 dst,
                 holder=holder,
-                # Recurse for /run subtrees, WSL, Android partitions.
                 recursive=bind_is_recursive(src, dst_real, run_root, use_userns=use_userns),
                 options=opts_map.get(dst_real, ""),
                 # A stale MNT_LOCKED mount can shadow /dev without ptmx;
@@ -226,7 +234,7 @@ def apply_special_mounts(
         if is_maxiso_dev:
             # Best-effort under max isolation: if the kernel denies the fresh
             # tmpfs (SELinux on some Android kernels), fall back to the
-            # container's own empty /dev dir — still not a host bind.
+            # container's own empty /dev dir, which is still not a host bind.
             mounted = mount_manager.apply_special_mount(rootfs, sm, holder=holder, force_optional=True)
             if not mounted:
                 warn(
@@ -301,8 +309,8 @@ def max_isolation_session(
 
         write_resolv_conf(rootfs)
 
-        # Maximum isolation binds NOTHING from the host; this set is normally
-        # empty, but we honour whatever get_bindings returns for completeness.
+        # Maximum isolation binds nothing from the host, so this set is
+        # normally empty.
         resolved_binds, rslave_targets = bindings.get_bindings(
             rootfs=rootfs,
             minimal=minimal,
@@ -364,8 +372,8 @@ def namespace_session(
     use_userns = probe_result.has_userns
     holder: NamespaceHolder | None = None
     try:
-        # No rootfs= : the namespace-only holder is not chrooted (matches
-        # login's non-max path).
+        # No rootfs=, so the namespace-only holder is not chrooted, matching
+        # login's non-max path.
         holder = namespace.acquire_holder(container_key)
         finalize_holder(holder, container_key, hostname=hostname or container_key)
 

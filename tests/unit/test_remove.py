@@ -324,15 +324,17 @@ def test_remove_progress_bar(
         if on_remove:
             on_remove("/mock/containers/alpine/somefile")
         return True
+
     mock_remove_path.side_effect = fake_remove_path
 
     command_remove(args)
 
     # progress_active should have been checked, and draw_count_bar called
     mock_active.assert_called()
-    mock_draw_bar.assert_has_calls([
-        call(1, 20, label="Removing", unit="files"),
-        call(2, 20, label="Removing", unit="files"),
-    ])
+    mock_draw_bar.assert_has_calls(
+        [
+            call(1, 20, label="Removing", unit="files"),
+            call(2, 20, label="Removing", unit="files"),
+        ]
+    )
     mock_clear_bar.assert_called_once()
-

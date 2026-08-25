@@ -1,3 +1,26 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
+"""`chroot-distro kill`: stop everything in a container and tear its state down.
+
+Where `unmount` waits for the container lock, this takes it non-blocking and carries
+on without it. A container that has to be killed is one whose sessions are not
+cooperating, so a busy lock cannot be a reason to stop; it is retried once the
+processes are gone and released in the `finally`.
+
+The escalation is ordered, and mounts come before signals: standard unmount, lazy
+unmount, then the image's own StopSignal with SIGKILL after a grace period, then
+unmount and lazy again, then MNT_FORCE. Trying the mounts first means a session that
+merely finished is let go instead of killed. Only when MNT_FORCE also leaves
+something behind does the command fail, naming both the mounts and the PIDs.
+
+Every umount goes through the holder when one is alive, since a mount made inside
+its namespace is not visible from here. The session count, mount options, holder and
+isolation mode are cleared last, and only on success.
+
+The positional argument may be a PID from `ps`, resolved through the session
+registry, so a host PID owning no container is refused rather than signalled.
+"""
+
 import contextlib
 import json
 import os
@@ -105,21 +128,18 @@ def command_kill(args) -> None:
         log_info(f"Container '{container_name}' is busy (active sessions exist). Forcing cleanup...")
 
     try:
-        # Step 1: Try standard unmount
         active_mounts = mount_manager.get_active_mounts(rootfs_dir, holder=holder)
         if active_mounts:
             log_info("Attempting standard unmount of active mount points...")
             for m in active_mounts:
                 run_umount(m)
 
-        # Step 2: Try lazy unmount if mounts remain
         active_mounts = mount_manager.get_active_mounts(rootfs_dir, holder=holder)
         if active_mounts:
             log_info("Some mounts remain busy. Attempting lazy unmount...")
             for m in active_mounts:
                 run_umount(m, lazy=True)
 
-        # Step 3: Kill processes and unmount again if active PIDs or mounts remain
         active_pids = session.get_active_chroot_pids(container_name)
         active_mounts = mount_manager.get_active_mounts(rootfs_dir, holder=holder)
         if active_pids or active_mounts:
@@ -141,11 +161,9 @@ def command_kill(args) -> None:
                     if remaining:
                         warn(f"Some processes could not be killed: {remaining}")
 
-            # Now that processes have been signaled, attempt to acquire the exclusive lock
             if not acquired:
                 acquired = lock.acquire()
 
-            # Retry unmounting after killing processes
             active_mounts = mount_manager.get_active_mounts(rootfs_dir, holder=holder)
             if active_mounts:
                 log_info("Retrying standard unmount after killing processes...")
@@ -158,7 +176,6 @@ def command_kill(args) -> None:
                     for m in active_mounts:
                         run_umount(m, lazy=True)
 
-        # Step 4: Forceful unmount and detailed error if still failed
         active_mounts = mount_manager.get_active_mounts(rootfs_dir, holder=holder)
         if active_mounts:
             log_info("Some mounts still remain. Attempting forceful unmount...")
@@ -175,7 +192,6 @@ def command_kill(args) -> None:
                 )
                 sys.exit(1)
 
-        # Cleanup namespace and sessions
         session.reset(container_name)
         session.clear_mount_options(container_name)
         if holder is not None:

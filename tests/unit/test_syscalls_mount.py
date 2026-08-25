@@ -36,13 +36,10 @@ def test_parse_and_split_mount_options():
     assert flags == MS_RDONLY | MS_NOSUID | MS_NODEV
     assert data == ""
 
+
 @patch("chroot_distro.syscalls.mount.native_mount")
 def test_mount_filesystem_splits_options(mock_native_mount):
     mount_filesystem("proc", "/chroot/proc", "proc", options="hidepid=2,nosuid,nodev,noexec")
     mock_native_mount.assert_called_once_with(
-        "proc",
-        "/chroot/proc",
-        "proc",
-        MS_NOSUID | MS_NODEV | MS_NOEXEC,
-        "hidepid=2"
+        "proc", "/chroot/proc", "proc", MS_NOSUID | MS_NODEV | MS_NOEXEC, "hidepid=2"
     )

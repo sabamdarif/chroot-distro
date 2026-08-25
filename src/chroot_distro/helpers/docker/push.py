@@ -1,3 +1,34 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
+"""Upload a built image to a registry: blobs first, manifest last.
+
+`push_image` pushes what `build` already produced. The manifest cache is the source of
+truth, so an image can only be pushed under the exact `image_ref` and `arch` it was
+built as, and a layer blob missing from the local cache is refused with a rebuild hint
+rather than reconstructed.
+
+Ordering is the registry's rule, not a preference: a manifest naming a blob the registry
+does not hold is rejected, so every layer and the config go up first and the manifest
+last. Each blob is HEAD-checked first, which is how a re-push of a shared base costs
+nothing.
+
+The image config is re-serialised with `canonical_json` and its digest compared against
+the one the cached manifest claims *before* any upload starts. The registry verifies
+those bytes itself, so a corrupt cache is better caught here than after the layers are
+sent. `_strip_private_keys` drops the `_ct` key `pull` stashes in a manifest dict, which
+is internal bookkeeping and would change the bytes the digest is over.
+
+Two upload shapes, by size against `CD_PUSH_CHUNK_SIZE`. Below it, one PUT. At or above
+it, PATCH chunks where the registry's acknowledged `Range` wins over the local offset
+and a transient failure resumes from there, so a dropped connection costs one chunk and
+not the layer. The upload URL comes back in a `Location` header that registries spell
+absolute, root-relative or relative, hence `_resolve_upload_url`.
+
+Only transient failures retry. A 401 or 403 anywhere becomes `push_denied_msg`, which
+names whether credentials were supplied, since "denied" means different things with and
+without them.
+"""
+
 import hashlib
 import os
 import ssl
@@ -423,7 +454,7 @@ def push_image(image_ref: str, arch: str, insecure: bool = False) -> dict[str, t
     """Push a built image (resolved from the manifest cache) to its registry.
 
     The image must have been produced by `chroot-distro build` under
-    exactly this *image_ref* and *arch* — `build` stores the manifest
+    exactly this *image_ref* and *arch*; `build` stores the manifest
     in MANIFEST_CACHE_DIR and the layer + config blobs in
     LAYER_CACHE_DIR using the same digests we transmit here.
     """

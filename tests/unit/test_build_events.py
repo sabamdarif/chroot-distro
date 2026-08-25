@@ -97,9 +97,7 @@ def _ev(kind, **kw):
 
 
 def test_plain_step_started_snapshot(capsys):
-    PlainReporter().emit(
-        _ev("step_started", step_no=3, step_total=9, stage_name="builder", text="RUN echo hi")
-    )
+    PlainReporter().emit(_ev("step_started", step_no=3, step_total=9, stage_name="builder", text="RUN echo hi"))
     assert capsys.readouterr().err == "[*] Step 3/9 [builder]: RUN echo hi\n"
 
 

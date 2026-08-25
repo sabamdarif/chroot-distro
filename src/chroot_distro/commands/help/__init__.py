@@ -1,3 +1,14 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
+"""`help` as a command, plus the per-command `--help` renderers `cli` dispatches to.
+
+`HELP_COMMANDS` maps every key in `pages.HELP_PAGES` to a zero-argument function
+that renders that page, which is the form `cli.main` wants when it intercepts
+`--help`; a new page needs nothing added here. `command_help` is the front page,
+the one that is composed here rather than in `pages.py` because it mixes the
+`TOP_COMMANDS` table with quick-start and troubleshooting prose.
+"""
+
 from chroot_distro.commands.help.pages import HELP_PAGES, TOP_COMMANDS
 from chroot_distro.commands.help.render import (
     commands_block,

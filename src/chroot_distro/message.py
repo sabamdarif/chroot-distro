@@ -1,3 +1,28 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
+"""Every user-facing line this program writes, and the rules they all follow.
+
+Two of those rules are why nothing here should be replaced with a bare `print`.
+Everything goes to stderr, so stdout stays the command's own output and remains
+parseable when a caller pipes it. And every write is gated on
+`tty_safe_for_writes`, which answers False while another process holds stderr's
+TTY for interactive input: `termios.tcgetattr` with ECHO or ICANON cleared is a
+password prompt or a full-screen UI, and a progress bar drawn over one loses the
+prompt. `termios` is imported behind a guard because the test suite runs where
+there is none.
+
+Colours are resolved once at import (`C`), off a TTY check and `CD_FORCE_NO_COLORS`,
+so no caller has to ask; the tables are keyed by name so `C['BLUE']` is either the
+escape or the empty string. Quiet mode splits the two log levels: `log_info` goes
+silent under it, `log_error` never does. `msg` clears a partial progress line
+first, since `progress.py` leaves the cursor mid-line.
+
+`quote_path` is the escaping boundary for text this program did not choose, and
+its own docstring says what it defends against. Pass the untrusted name through
+it, never the assembled message: the colour codes above are control characters by
+definition.
+"""
+
 import os
 import sys
 from typing import Any
@@ -127,7 +152,7 @@ def log_info(text: str):
 
 
 def log_error(text: str):
-    """Emit a `[!] text` error line. Always shown — even under --quiet."""
+    """Emit a `[!] text` error line. Always shown, even under --quiet."""
     msg(f"{C['BLUE']}[{C['RED']}!{C['BLUE']}] {C['CYAN']}{text}{C['RST']}")
 
 
@@ -158,7 +183,7 @@ def quote_path(text: str) -> str:
     skip warning names the file it passed over, and an OSError carries the name
     it failed on. A name holding ESC repaints the terminal, hides the lines
     around it, or hands the emulator whatever sequence follows it, so nothing
-    below 0x20 — nor DEL — is allowed through literally. Backslash is escaped
+    below 0x20, nor DEL, is allowed through literally. Backslash is escaped
     too, so an escape this produced cannot be confused with those characters
     spelled out in a name.
 

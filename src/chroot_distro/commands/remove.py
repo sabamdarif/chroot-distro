@@ -1,3 +1,23 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
+"""`chroot-distro remove`: stop the container, unmount it, delete both its trees.
+
+Two trees go, not one: `containers/<name>/` and the per-container runtime state
+under `data/<name>/`. The lock file is unlinked only after the `ContainerLock`
+context has exited, since dropping it while the flock is still held would leave the
+next caller locking a file no one else can reach.
+
+Sessions end the way `unmount` ends them, SIGTERM and then SIGKILL after a grace
+period, and a container with a process or a mount still standing afterwards is
+refused rather than deleted from under it.
+
+`_remove_path` chmods as it descends, because a rootfs is guest content and a
+directory left mode 000 is otherwise undeletable, and it reports every entry it
+removed so `--verbose` and the count bar have something to show. `_count_files`
+pre-walks only when that bar will be drawn. `commands/reset.py` reuses
+`_remove_path` for the rootfs alone.
+"""
+
 import contextlib
 import os
 import signal
@@ -103,17 +123,14 @@ def _remove_one(container_name: str, verbose: bool) -> None:
         sys.exit(1)
 
     with ContainerLock(container_name, exclusive=True, command="remove"):
-        # 1. Kill active sessions/processes
         active_pids = session.get_active_chroot_pids(container_name)
         if active_pids:
             log_info(f"Stopping active sessions/processes in container '{container_name}' (PIDs: {active_pids})...")
 
-            # Send SIGTERM to all active chroot processes
             for pid in active_pids:
                 with contextlib.suppress(OSError):
                     os.kill(pid, signal.SIGTERM)
 
-            # Wait up to 2 seconds for processes to terminate
             start_time = time.time()
             while time.time() - start_time < 2.0:
                 remaining_pids = session.get_active_chroot_pids(container_name)
@@ -121,7 +138,6 @@ def _remove_one(container_name: str, verbose: bool) -> None:
                     break
                 time.sleep(0.1)
 
-            # Check if any remaining PIDs, send SIGKILL
             remaining_pids = session.get_active_chroot_pids(container_name)
             if remaining_pids:
                 log_info(f"Processes {remaining_pids} did not exit. Sending SIGKILL...")
@@ -129,7 +145,6 @@ def _remove_one(container_name: str, verbose: bool) -> None:
                     with contextlib.suppress(OSError):
                         os.kill(pid, signal.SIGKILL)
 
-                # Wait up to 1 second for SIGKILL to take effect
                 start_time = time.time()
                 while time.time() - start_time < 1.0:
                     remaining_pids = session.get_active_chroot_pids(container_name)
@@ -137,13 +152,11 @@ def _remove_one(container_name: str, verbose: bool) -> None:
                         break
                     time.sleep(0.1)
 
-        # Reset active session count to 0
         session.reset(container_name)
         session.clear_mount_options(container_name)
 
         holder = namespace.get_live_holder(container_name)
 
-        # 2. Unmount all nested mounts under rootfs
         with contextlib.suppress(Exception):
             mount_manager.unmount_all(rootfs_dir, holder=holder)
 
@@ -152,7 +165,6 @@ def _remove_one(container_name: str, verbose: bool) -> None:
             namespace.clear_isolation_mode(container_name)
             holder = None
 
-        # 3. Busy check: if active processes or mount points are still busy, don't remove and show error
         remaining_pids = session.get_active_chroot_pids(container_name)
         remaining_mounts = mount_manager.get_active_mounts(rootfs_dir)
         if remaining_pids or remaining_mounts:
@@ -198,7 +210,6 @@ def _remove_one(container_name: str, verbose: bool) -> None:
                 log_error("Finished with errors. Some files probably were not deleted.")
                 sys.exit(1)
 
-            # 4. Clean up the per-container data directory (sessions, isolation.mode, etc.)
             data_dir = os.path.join(RUNTIME_DIR, "data", container_name)
             if os.path.isdir(data_dir):
                 _remove_path(data_dir, on_remove)

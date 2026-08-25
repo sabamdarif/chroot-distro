@@ -1,3 +1,30 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
+"""`chroot-distro restore`: read a backup stream and rebuild one container from it.
+
+The archive is input this program did not write, and the shape of this file follows
+from that. Nothing destructive happens until a member that really will produce
+content arrives: `_clear_existing_rootfs` runs at that commit point and not before,
+the manifest is buffered and written only once a valid rootfs directory exists, and
+an archive holding no rootfs at all therefore leaves the installed container as it
+was.
+
+Members are mapped, never extracted by name. `_dest_path` accepts `<name>/rootfs/...`
+and the legacy `installed-rootfs/<name>/...` layout, refuses `..` and bare-root
+members, and puts the container name through `is_valid_name`, so an archive names a
+container but never a path. `_safe_dest` then clamps each write inside that
+container's directory through `tar_extract._safe_resolve`, which is what defeats a
+symlink an earlier member of the same archive planted; the last component is left
+unresolved so the entry itself is what is acted on, and only a hard link's read
+source resolves all the way.
+
+One container per archive: the first valid member fixes the target and takes its
+exclusive lock, and a member naming a second one ends the command. A hard link is
+extracted as a copy, and device nodes, fifos and anything else unexpected are
+skipped. A directory the archive wants unreadable is created wide and chmod'ed back
+in reverse order at the end, so extraction can still descend into it.
+"""
+
 import contextlib
 import os
 import shutil

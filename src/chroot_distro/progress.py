@@ -1,3 +1,26 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
+"""Progress bars, spinners and byte counters, all of them optional by construction.
+
+Every drawing function starts by asking `progress_active` (not quiet) and
+`message.tty_safe_for_writes`, and returns having written nothing when either
+says no, so a caller does not have to know whether output is wanted. That is the
+one invariant to keep when adding a bar here.
+
+A TTY gets the `[####----] NN%` line, redrawn in place. Anything else gets
+throttled whole lines instead, every 10% or every 10 MiB, because a redirected
+build or install log is the usual case and a bar redrawn per chunk fills it. The
+TTY path still coalesces on `REDRAW_THRESHOLD_BYTES` so a fast copy does not
+spend its time in write(2).
+
+`ByteCounter` wraps a file object rather than replacing it, tallying `read` and
+`readinto` and delegating everything else, so a tar or HTTP reader can be
+measured without knowing it is being measured. `AggregateByteProgress` is the
+one bar several download threads share: it holds a lock, and reports speed from
+a `_SPEED_WINDOW_SECS` sliding window of samples rather than an average since
+the start, which is what makes the figure track a stall.
+"""
+
 import contextlib
 import itertools
 import sys
@@ -210,18 +233,14 @@ def loading_line(
         clear_bar()
 
 
-# ---------------------------------------------------------------------------
-# Sliding-window speed tracker (PyLoad §4.4)
-# ---------------------------------------------------------------------------
-
-_SPEED_WINDOW_SECS = 3.0  # sliding window duration for speed calculation
+_SPEED_WINDOW_SECS = 3.0
 
 
 class AggregateByteProgress:
     """Thread-safe byte counter that drives one shared progress bar.
 
-    Tracks download speed via a 3-second sliding window of
-    ``(timestamp, cumulative_bytes)`` samples (PyLoad §4.4).
+    Tracks download speed over a 3-second sliding window of
+    ``(timestamp, cumulative_bytes)`` samples.
     """
 
     def __init__(self, total: int = 0, *, label: str = "") -> None:
@@ -230,10 +249,8 @@ class AggregateByteProgress:
         self._total = total
         self._label = label
         self._last_shown = 0
-        # Sliding window: deque of (monotonic_time, cumulative_bytes)
         self._samples: deque[tuple[float, int]] = deque()
         self._start_time = time.monotonic()
-        # Draw the initial 0% bar immediately so the user sees feedback
         draw_bytes_bar(0, total, label=label, noun="downloaded")
 
     def add(self, nbytes: int) -> None:
@@ -241,7 +258,6 @@ class AggregateByteProgress:
             self._done += nbytes
             now = time.monotonic()
             self._samples.append((now, self._done))
-            # Trim samples older than the window
             cutoff = now - _SPEED_WINDOW_SECS
             while self._samples and self._samples[0][0] < cutoff:
                 self._samples.popleft()

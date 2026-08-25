@@ -1,12 +1,17 @@
-"""``chroot-distro ps`` — list active container sessions.
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
+"""`chroot-distro ps`: list the container sessions that are alive right now.
 
-Lists active sessions reported by the session registry
-(:mod:`chroot_distro.helpers.session_registry`).  ``active_sessions()``
-already prunes dead entries, so this module only formats output.
-``--quiet`` prints one PID per line (to stdout, for piping into
-``kill``/``xargs``); the default renders a coloured
-PID/CONTAINER/TYPE/USER/UPTIME/COMMAND table to stderr, mirroring the
-style of ``command_list``.
+`session_registry.active_sessions` prunes dead entries itself, so the registry is
+taken as authoritative and this file only formats. What it adds is the untracked
+row: `containers_with_active_pids` scans /proc for processes chrooted into a
+container the registry knows nothing about, which is what a session whose parent
+died leaves behind. A container with any live tracked session owns all of its
+processes and never gets such a row, and a process descending from a tracked PID is
+dropped too, since a double-forked child reparented to init is not an orphan.
+
+`--quiet` prints bare PIDs to stdout so `kill` or `xargs` can consume them; the
+table goes to stderr, like every other human-facing output here.
 """
 
 from __future__ import annotations
@@ -35,8 +40,8 @@ def command_ps(args) -> None:
     # Containers that already have at least one live tracked session. Any
     # extra processes sharing such a container's rootfs are that session's
     # own children (e.g. a browser's helper processes, which double-fork and
-    # get reparented to init, breaking the /proc parent chain), not orphans —
-    # so we never report "untracked" rows for a container that is tracked.
+    # get reparented to init, breaking the /proc parent chain), not orphans,
+    # so a tracked container never gets an "untracked" row.
     tracked_containers: set[str] = {str(sess.get("container", "")) for sess in sessions}
 
     # Fallback: scan /proc/*/root for container processes not in the registry.
@@ -50,8 +55,8 @@ def command_ps(args) -> None:
     for cname, pids in untracked.items():
         # A container with a live tracked session owns all of its processes;
         # skip it entirely. Only containers with no tracked session at all can
-        # have genuine orphans — and there we still drop any process that
-        # descends from a tracked PID via the /proc parent chain.
+        # have genuine orphans, and even there a process descending from a
+        # tracked PID via the /proc parent chain is dropped.
         if cname in tracked_containers:
             continue
         orphan_pids = [p for p in pids if not has_tracked_ancestor(p, tracked_pids)]
@@ -59,10 +64,16 @@ def command_ps(args) -> None:
             all_untracked_pids.extend(str(p) for p in orphan_pids)
             count = len(orphan_pids)
             pid_label = str(orphan_pids[0]) if count == 1 else f"{orphan_pids[0]}+{count - 1}"
-            untracked_rows.append((
-                pid_label, cname, "untracked", "?", "?",
-                f"{count} process{'es' if count != 1 else ''}",
-            ))
+            untracked_rows.append(
+                (
+                    pid_label,
+                    cname,
+                    "untracked",
+                    "?",
+                    "?",
+                    f"{count} process{'es' if count != 1 else ''}",
+                )
+            )
 
     if quiet:
         for sess in sessions:
@@ -75,10 +86,7 @@ def command_ps(args) -> None:
     if not sessions and not untracked_rows:
         msg(f"{C['YELLOW']}No active sessions.{C['RST']}")
         msg()
-        msg(
-            f"{C['CYAN']}Start one with: "
-            f"{C['GREEN']}{PROGRAM_NAME} login <name>{C['RST']}"
-        )
+        msg(f"{C['CYAN']}Start one with: {C['GREEN']}{PROGRAM_NAME} login <name>{C['RST']}")
         msg()
         return
 
@@ -91,23 +99,22 @@ def command_ps(args) -> None:
         if sess.get("detached", False):
             kind = f"{kind}*"
             has_detached = True
-        rows.append((
-            str(sess.get("pid", "?")),
-            str(sess.get("container", "?")),
-            kind,
-            str(sess.get("user", "?")),
-            _fmt_uptime(now - sess.get("start_time", now)),
-            _fmt_command(sess.get("command")),
-        ))
+        rows.append(
+            (
+                str(sess.get("pid", "?")),
+                str(sess.get("container", "?")),
+                kind,
+                str(sess.get("user", "?")),
+                _fmt_uptime(now - sess.get("start_time", now)),
+                _fmt_command(sess.get("command")),
+            )
+        )
 
     rows.extend(untracked_rows)
 
     # Fixed-column widths are content-driven; COMMAND takes the rest of
     # the terminal width and is truncated if it overflows.
-    widths = [
-        max(len(_HEADERS[i]), *(len(r[i]) for r in rows))
-        for i in range(len(_HEADERS) - 1)
-    ]
+    widths = [max(len(_HEADERS[i]), *(len(r[i]) for r in rows)) for i in range(len(_HEADERS) - 1)]
     used = sum(widths) + _GAP * len(widths)
     cmd_width = max(len(_HEADERS[-1]), _table_width() - used)
 
@@ -121,8 +128,8 @@ def command_ps(args) -> None:
         if len(cmd) > cmd_width:
             cmd = cmd[: max(1, cmd_width - 1)] + "\u2026"
         is_untracked = r[2] == "untracked"
-        color = C['YELLOW'] if is_untracked else C['CYAN']
-        name_color = C['YELLOW'] if is_untracked else C['GREEN']
+        color = C["YELLOW"] if is_untracked else C["CYAN"]
+        name_color = C["YELLOW"] if is_untracked else C["GREEN"]
         cells = [
             f"{color}{r[0].ljust(widths[0])}{C['RST']}",
             f"{name_color}{r[1].ljust(widths[1])}{C['RST']}",

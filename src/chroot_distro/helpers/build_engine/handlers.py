@@ -1,3 +1,27 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
+"""The metadata instructions: everything that edits the image config.
+
+One `do_*` per instruction, dispatched through `HANDLERS`, each taking the engine
+and one parsed instruction record and mutating `engine.current`. ADD, COPY and
+RUN are the exceptions and live in their own modules, imported here only so the
+table is complete.
+
+Two handlers do more than write a dict. `do_workdir` creates the directory and
+emits a thin layer covering the ancestors it made, because the path has to exist
+when `install` later applies the image to a fresh rootfs; it resolves the guest
+path first and then creates and stamps each level off a descriptor, since an
+image shipping `/x -> /tmp/victim` would otherwise have `WORKDIR /x/sub` create
+and chown a directory on the *host*, and a base image's `ONBUILD WORKDIR`
+reaches that without the Dockerfile carrying the line at all. `do_env` drops an
+`LD_*` name when the ENV line came from a base image's ONBUILD trigger, and
+drops it from the built config too, so a container run from the image does not
+inherit it either.
+
+`do_entrypoint` clearing Cmd is Docker's rule and not an oversight: a Dockerfile
+wanting both puts CMD after ENTRYPOINT.
+"""
+
 import contextlib
 import json
 import logging
@@ -59,8 +83,7 @@ def do_env(engine: typing.Any, instr: dict[str, typing.Any]) -> None:
     """
     value = instr["value"]
     if instr["exec_form"]:
-        # ENV does not have an exec form in the spec; treat the
-        # parsed list as space-joined raw value.
+        # ENV has no exec form in the spec, so a parsed list is joined back up.
         value = " ".join(value)
     pairs = parse_kv_list(value)
     cfg = engine.current.image_config.setdefault("config", {})
@@ -212,34 +235,27 @@ def do_workdir(engine: typing.Any, instr: dict[str, typing.Any]) -> None:
     path = str(instr["value"]).strip()
     if not path:
         raise BuildError(f"WORKDIR with empty path at line {instr['lineno']}.")
-    # Normalised whether or not it is absolute. Only the relative branch used to
-    # be, so `WORKDIR /../../../x` carried its ".." into the host path below --
-    # and os.makedirs() then created that directory as many levels above the
-    # rootfs as the instruction asked for, anywhere the invoking user can write,
-    # with a chmod behind it; the layer picked up a matching "../x" arcname.
-    # ".." is resolved against the guest's "/" here, clamping at the image root
-    # the way a chroot does and the way Docker reads it.
+    # Normalised whether the path is absolute or not: an unnormalised
+    # `WORKDIR /../../../x` would carry its ".." into the host path below and
+    # create, and chmod, a directory that many levels above the rootfs. ".." is
+    # resolved against the guest's "/", clamping at the image root the way a
+    # chroot does and the way Docker reads it.
     path = os.path.normpath(os.path.join("/", engine.current.workdir or "/", path))
     engine.current.workdir = path
     cfg = engine.current.image_config.setdefault("config", {})
     cfg["WorkingDir"] = path
 
-    # Create the directory inside the rootfs and emit a thin layer that
-    # captures every newly-created ancestor, so the path also exists when the
-    # image is applied to a fresh rootfs by `install`.
-    #
-    # The path is resolved before anything is created and then created off a
-    # descriptor per level. os.makedirs(), os.chown() and os.chmod() address
-    # every level by name, so an image shipping `/x -> /tmp/victim` had
-    # `WORKDIR /x/sub` create -- and then hand over -- a directory on the
-    # *host*, outside the rootfs entirely; a base image's `ONBUILD WORKDIR`
-    # reaches that without the Dockerfile carrying the line at all. Refusing
-    # symlinked components is not an option, since `/var/run -> /run` ships in
-    # nearly every distro image: _safe_resolve follows each link but re-anchors
-    # an absolute target at the rootfs the way the guest's own view does, and
-    # makedirs_under then refuses a component planted after the resolve rather
-    # than following it. The arcnames name the resolved location, which is
-    # where the directories really landed.
+    # The path is resolved before anything is created, then created off a
+    # descriptor per level. Naming every level instead, the way os.makedirs()
+    # and os.chown() do, lets an image shipping `/x -> /tmp/victim` have
+    # `WORKDIR /x/sub` create and hand over a directory on the *host*, and a
+    # base image's `ONBUILD WORKDIR` reaches that without the Dockerfile
+    # carrying the line at all. Refusing symlinked components is not an option,
+    # since `/var/run -> /run` ships in nearly every distro image: safe_resolve
+    # follows each link but re-anchors an absolute target at the rootfs the way
+    # the guest's own view does, and makedirs_under refuses a component planted
+    # after the resolve rather than following it. The arcnames name the resolved
+    # location, which is where the directories really landed.
     rootfs = engine.current.rootfs_dir
     rootfs_fd = engine.current.rootfs_fd
     parts = safe_resolve_parts(rootfs, path.strip("/").split("/"), root_fd=rootfs_fd)
@@ -287,10 +303,8 @@ def do_entrypoint(engine: typing.Any, instr: dict[str, typing.Any]) -> None:
     """ENTRYPOINT [argv]: fixed argv that CMD/run-args are appended to."""
     cfg = engine.current.image_config.setdefault("config", {})
     cfg["Entrypoint"] = to_argv(instr, engine.current.shell)
-    # Docker semantics: setting ENTRYPOINT resets CMD (typically
-    # inherited from the base image). Users who want both put CMD
-    # *after* ENTRYPOINT in the Dockerfile, which our linear
-    # interpreter already handles correctly.
+    # Docker semantics: setting ENTRYPOINT resets the CMD inherited from the
+    # base image, so a Dockerfile wanting both puts CMD after ENTRYPOINT.
     cfg["Cmd"] = None
 
 
@@ -333,7 +347,7 @@ def do_healthcheck(engine: typing.Any, instr: dict[str, typing.Any]) -> None:
     """HEALTHCHECK [NONE|CMD ...]: record healthcheck cmd in image config.
 
     Accepted forms are HEALTHCHECK NONE (clears any inherited check)
-    or HEALTHCHECK [opts] CMD ... — opts like --interval are parsed
+    or HEALTHCHECK [opts] CMD ...; opts like --interval are parsed
     but not enforced under chroot-distro.
     """
     value = str(instr["value"]).strip()

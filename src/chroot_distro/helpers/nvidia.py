@@ -1,12 +1,35 @@
-"""NVIDIA GPU auto-detection and host-driver integration for chroot sessions.
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
+"""Host NVIDIA driver integration: what to bind, and what to set, for a GPU guest.
 
-This module mirrors the NVIDIA integration logic from distrobox-init
-(lines 2000-2181) but adapted for chroot-distro's Python-based architecture.
+Ported from the NVIDIA integration in distrobox's `distrobox-init`
+(https://github.com/89luca89/distrobox), created by Luca Di Maio and licensed
+GPL-3.0, then rewritten for chroot-distro's bind lists and path mapping.
 
-It automatically detects whether the host has an NVIDIA GPU (both native
-Linux and WSL2), locates driver libraries / config files / binaries /
-device nodes, and returns bind-mount lists + environment variables that
-the login command can apply to make the GPU work inside the chroot.
+A proprietary NVIDIA userspace has to match the kernel module exactly, so the
+guest cannot ship its own: the host's libraries, ICD descriptors and CLI tools
+are bound in, and `_host_lib_to_guest_path` remaps each one onto the library
+directory layout `_detect_guest_lib_dirs` found in the image (multiarch, lib64,
+or plain lib). WSL2 is the second supported shape, where the libraries live under
+`/usr/lib/wsl` and that whole directory is bound instead.
+
+Three exclusions are the load-bearing part, and each one is a guest that broke:
+
+* the vendor-neutral GLVND and GBM dispatch names (`_GLVND_NEUTRAL_BASENAMES`)
+  belong to the container's own stack and are never bound, since the host copies
+  are usually symlinks into vendor-specific targets and shadowing the guest's
+  real file corrupts its loader;
+* a zero-byte source is skipped, because binding one leaves a stub `ldconfig`
+  rejects, and a symlink is resolved so what lands in the guest is the file and
+  not a dangling name;
+* configuration is bound from an explicit list of known ICD and Xorg paths, never
+  from a walk of `/etc` matching the name "nvidia", which would carry unrelated
+  host files into the container.
+
+A guest path that already exists is left alone, since a parent bind may already
+provide it. `run_ldconfig_in_chroot` runs the *guest's* own `ldconfig` through
+`chroot_and_run` to refresh its cache after the binds, and stays non-fatal: an
+image without one simply keeps whatever cache it had.
 """
 
 from __future__ import annotations
@@ -18,11 +41,6 @@ import os
 from chroot_distro.syscalls.chroot import chroot_and_run
 
 log = logging.getLogger(__name__)
-
-
-# ---------------------------------------------------------------------------
-# Detection helpers
-# ---------------------------------------------------------------------------
 
 
 def is_wsl() -> bool:
@@ -43,19 +61,16 @@ def detect_nvidia_gpu() -> bool:
     2. ``/dev/dxg`` exists **and** NVIDIA libraries in ``/usr/lib/wsl/lib/`` (WSL2)
     3. Any ``libcuda*.so*`` or ``libnvidia*.so*`` found under ``/usr/lib*/``
     """
-    # 1. Native NVIDIA device nodes
     if os.path.exists("/dev/nvidia0"):
         log.debug("NVIDIA detected: /dev/nvidia0 exists")
         return True
 
-    # 2. WSL2 with NVIDIA
     if os.path.exists("/dev/dxg"):
         wsl_lib = "/usr/lib/wsl/lib"
         if os.path.isdir(wsl_lib) and any(f.startswith(("libcuda", "libnvidia")) for f in os.listdir(wsl_lib)):
             log.debug("NVIDIA detected: /dev/dxg + WSL libs present")
             return True
 
-    # 3. Libraries on native host
     for lib_dir in ("/usr/lib/x86_64-linux-gnu", "/usr/lib64", "/usr/lib"):
         if not os.path.isdir(lib_dir):
             continue
@@ -71,10 +86,6 @@ def detect_nvidia_gpu() -> bool:
 
     return False
 
-
-# ---------------------------------------------------------------------------
-# Device nodes
-# ---------------------------------------------------------------------------
 
 _NATIVE_NVIDIA_DEVICES = (
     "/dev/nvidia0",
@@ -103,16 +114,13 @@ def find_nvidia_device_nodes() -> list[tuple[str, str]]:
     """
     binds: list[tuple[str, str]] = []
 
-    # Native NVIDIA device nodes
     for dev in _NATIVE_NVIDIA_DEVICES:
         if os.path.exists(dev):
             binds.append((dev, dev))
 
-    # WSL2 DXG device
     if os.path.exists("/dev/dxg"):
         binds.append(("/dev/dxg", "/dev/dxg"))
 
-    # DRI render / card nodes (used by Mesa for GPU access)
     for pattern in _DRI_DEVICE_PATTERNS:
         for dev in sorted(glob.glob(pattern)):
             if os.path.exists(dev):
@@ -121,11 +129,6 @@ def find_nvidia_device_nodes() -> list[tuple[str, str]]:
     return binds
 
 
-# ---------------------------------------------------------------------------
-# Library discovery
-# ---------------------------------------------------------------------------
-
-# Patterns for NVIDIA shared-object files (case-insensitive matching)
 _NVIDIA_LIB_PATTERNS = (
     "*lib*nvidia*.so*",
     "*nvidia*.so*",
@@ -184,17 +187,15 @@ def _detect_guest_lib_dirs(rootfs: str) -> tuple[str, str]:
 def _host_lib_to_guest_path(host_path: str, lib64: str, lib32: str) -> str:
     """Map a host library path to the equivalent guest library path.
 
-    Follows the same remapping logic as distrobox-init lines 2137-2142.
+    Follows the same remapping distrobox-init does.
     """
     path = host_path
-    # Multi-arch → guest lib64
     path = path.replace("/usr/lib/x86_64-linux-gnu/", lib64)
     path = path.replace("/usr/lib/i386-linux-gnu/", lib32)
-    # RPM/Arch → guest lib64
     path = path.replace("/usr/lib64/", lib64)
     path = path.replace("/usr/lib32/", lib32)
-    # Catch-all: /usr/lib/ → lib32 (32-bit libs on multilib systems)
-    # Only apply if none of the above matched
+    # Nothing above matched, so this is a multilib host whose 32-bit libs
+    # live in a plain /usr/lib.
     if path == host_path:
         path = path.replace("/usr/lib/", lib32)
     return path
@@ -209,7 +210,6 @@ def find_nvidia_libraries(rootfs: str) -> list[tuple[str, str]]:
     binds: list[tuple[str, str]] = []
     seen_guests: set[str] = set()
 
-    # Scan all /usr/lib* directories on the host
     host_lib_dirs = set()
     for candidate in ("/usr/lib/x86_64-linux-gnu", "/usr/lib/i386-linux-gnu", "/usr/lib64", "/usr/lib32", "/usr/lib"):
         if os.path.isdir(candidate):
@@ -221,13 +221,11 @@ def find_nvidia_libraries(rootfs: str) -> list[tuple[str, str]]:
                 if not os.path.isfile(lib_path):
                     continue
 
-                # Never bind vendor-neutral GLVND dispatch libs: they belong
-                # to the container's own Mesa/GLVND stack and shadowing them
-                # corrupts its loader.
+                # The container's own GLVND stack owns these; see
+                # _GLVND_NEUTRAL_BASENAMES.
                 if _is_glvnd_neutral(lib_path):
                     continue
 
-                # Resolve symlinks to the actual file
                 real_path = lib_path
                 if os.path.islink(lib_path):
                     real_path = os.path.realpath(lib_path)
@@ -248,7 +246,7 @@ def find_nvidia_libraries(rootfs: str) -> list[tuple[str, str]]:
                     continue
                 seen_guests.add(guest_path)
 
-                # Skip if guest already has this file (e.g. from a parent bind mount)
+                # A parent bind mount may already provide it.
                 guest_abs = os.path.join(rootfs, guest_path.lstrip("/"))
                 if os.path.exists(guest_abs):
                     continue
@@ -256,11 +254,6 @@ def find_nvidia_libraries(rootfs: str) -> list[tuple[str, str]]:
                 binds.append((real_path, guest_path))
 
     return binds
-
-
-# ---------------------------------------------------------------------------
-# WSL2-specific libraries
-# ---------------------------------------------------------------------------
 
 
 def find_wsl_libraries(rootfs: str) -> list[tuple[str, str]]:
@@ -274,26 +267,19 @@ def find_wsl_libraries(rootfs: str) -> list[tuple[str, str]]:
     if not os.path.isdir(wsl_root):
         return []
 
-    # Bind the entire WSL root directory
     return [(wsl_root, wsl_root)]
-
-
-# ---------------------------------------------------------------------------
-# Config / ICD / binary discovery
-# ---------------------------------------------------------------------------
 
 
 def find_nvidia_configs() -> list[tuple[str, str]]:
     """Find NVIDIA configuration and ICD descriptor files on the host.
 
-    Returns ``(host_path, guest_path)`` pairs — guest paths equal host paths.
+    Returns ``(host_path, guest_path)`` pairs; guest paths equal host paths.
     """
     binds: list[tuple[str, str]] = []
 
-    # Specific ICD/EGL/Vulkan config files. Only these known paths are
-    # bound — never a full /etc walk matching on the name "nvidia", which
-    # would leak unrelated host files (logs, backups, credentials) into
-    # the container.
+    # Only these known ICD/EGL/Vulkan config paths are bound, never a full
+    # /etc walk matching on the name "nvidia", which would leak unrelated host
+    # files (logs, backups, credentials) into the container.
     config_globs = (
         "/usr/share/glvnd/egl_vendor.d/10_nvidia.json",
         "/usr/share/egl/egl_external_platform.d/10_nvidia_wayland.json",
@@ -343,11 +329,6 @@ def find_nvidia_binaries() -> list[tuple[str, str]]:
     return binds
 
 
-# ---------------------------------------------------------------------------
-# Environment variables
-# ---------------------------------------------------------------------------
-
-
 def nvidia_env_vars() -> dict[str, str]:
     """Return environment variables to enable GPU rendering.
 
@@ -361,16 +342,10 @@ def nvidia_env_vars() -> dict[str, str]:
         env["MESA_D3D12_DEFAULT_DEVICE_TYPE"] = "GPU"
         env["LIBGL_ALWAYS_SOFTWARE"] = "0"
     else:
-        # Native Linux with NVIDIA proprietary driver
         env["__NV_PRIME_RENDER_OFFLOAD"] = "1"
         env["__GLX_VENDOR_LIBRARY_NAME"] = "nvidia"
 
     return env
-
-
-# ---------------------------------------------------------------------------
-# ldconfig integration
-# ---------------------------------------------------------------------------
 
 
 def setup_ldconfig_for_wsl(rootfs: str) -> None:
@@ -425,11 +400,6 @@ def run_ldconfig_in_chroot(rootfs: str) -> None:
         log.debug("ldconfig failed: %s", str(result.stderr).strip())
 
 
-# ---------------------------------------------------------------------------
-# High-level API
-# ---------------------------------------------------------------------------
-
-
 def get_nvidia_integration(
     rootfs: str,
 ) -> tuple[list[tuple[str, str]], dict[str, str]]:
@@ -445,10 +415,8 @@ def get_nvidia_integration(
     binds: list[tuple[str, str]] = []
     env = nvidia_env_vars()
 
-    # 1. Device nodes
     binds.extend(find_nvidia_device_nodes())
 
-    # 2. Libraries
     if is_wsl():
         wsl_binds = find_wsl_libraries(rootfs)
         binds.extend(wsl_binds)
@@ -456,13 +424,10 @@ def get_nvidia_integration(
     else:
         binds.extend(find_nvidia_libraries(rootfs))
 
-    # 3. Config / ICD files
     binds.extend(find_nvidia_configs())
 
-    # 4. Binaries (nvidia-smi, etc.)
     binds.extend(find_nvidia_binaries())
 
-    # Deduplicate while preserving order
     seen: set[tuple[str, str]] = set()
     unique_binds: list[tuple[str, str]] = []
     for pair in binds:

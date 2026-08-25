@@ -1,3 +1,22 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
+"""Describe a chroot as data: who, where, and what to run.
+
+A session hands `syscalls/chroot.py` a `ChrootConfig` rather than a command line,
+so nothing here execs anything. `chroot_display_argv` and `format_get_chroot_cmd`
+render the equivalent GNU `chroot` invocation, and both exist only for
+`--get-chroot-cmd`: they are printed, never run.
+
+`build_chroot_config` is where the one piece of real behaviour lives. A workdir is
+applied by wrapping the command in `sh -c 'cd <dir>; exec ...'` instead of being
+passed as a chdir, because the path has to mean what it means inside the chroot.
+That needs a shell that the chroot can actually exec, so `_find_rootfs_shell`
+resolves candidates within the rootfs and refuses one that is only visible through
+a bind-mounted host `$PREFIX`. An image with no usable shell, and a `run` command
+(the image's own Entrypoint/Cmd, which may have no shell at all), start from `/`
+instead.
+"""
+
 import contextlib
 import logging
 import os
@@ -30,7 +49,7 @@ def _find_rootfs_shell(rootfs: str) -> str | None:
 
     Symlinks are resolved within the rootfs namespace (Alpine's
     ``/bin/sh → /bin/busybox``), and a shell only visible via a bind-mounted
-    host ``$PREFIX`` is rejected — the chroot could not exec it.
+    host ``$PREFIX`` is rejected: the chroot could not exec it.
     """
     rootfs_real = os.path.realpath(rootfs)
     for guest_path in ("/bin/sh", f"{TERMUX_PREFIX}/bin/sh", f"{TERMUX_PREFIX}/bin/bash"):

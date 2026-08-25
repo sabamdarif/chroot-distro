@@ -1,10 +1,12 @@
-"""High-level wrapper around the Linux ``umount2(2)`` syscall.
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
+"""Unmount a filesystem through umount2(2).
 
-This module provides a single function, :func:`native_umount`, that
-unmounts a filesystem with optional *lazy* or *force* semantics.
-
-String-to-bytes encoding is handled internally before delegating to
-:func:`chroot_distro.syscalls._libc.libc_umount2`.
+One function. `lazy` (MNT_DETACH) detaches the mount from the tree at once and
+lets the kernel clean it up when the last reference drops, which is what teardown
+after a session wants, since a process may still hold a file open under it.
+`force` (MNT_FORCE) aborts pending requests instead, and only means anything on a
+network filesystem.
 """
 
 from __future__ import annotations

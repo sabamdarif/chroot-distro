@@ -110,9 +110,7 @@ def test_materialise_dir_replaces_a_symlink_without_chmodding_its_target(tree):
     rootfs, outside = tree
     os.symlink(str(outside), str(rootfs / "etc"))
 
-    copy_step._materialise_files(
-        str(rootfs), {"etc": {"kind": "dir", "mode": 0o700, "uid": 0, "gid": 0, "mtime": 0}}
-    )
+    copy_step._materialise_files(str(rootfs), {"etc": {"kind": "dir", "mode": 0o700, "uid": 0, "gid": 0, "mtime": 0}})
 
     assert not (rootfs / "etc").is_symlink()
     assert stat.S_IMODE((rootfs / "etc").stat().st_mode) == 0o700

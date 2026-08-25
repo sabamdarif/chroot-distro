@@ -1,3 +1,22 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
+"""`chroot-distro run`: build the argv the image declares, then hand it to `login`.
+
+This file resolves a command and nothing else. It sets `args._run_inner` and calls
+`command_login`, so the session, mount and isolation path is all `login`'s, and
+`run_inner is not None` is what tells that code it is not an interactive login.
+
+Docker's Entrypoint/Cmd rules are the contract: `--entrypoint` replaces the
+Entrypoint and clears Cmd, trailing args after `--` replace Cmd and keep the
+Entrypoint, a shell-form Entrypoint embeds the whole command and ignores Cmd, and
+precedence for the user and the workdir is CLI flag, then `CD_*`, then the image.
+
+`manifest.json` is a document this program did not write, so every field is held to
+the type OCI says it has and a wrong one ends the command as a malformed image.
+Coercing would be worse than refusing: these four fields decide what runs, where,
+and as whom.
+"""
+
 import json
 import os
 import sys
@@ -27,9 +46,7 @@ def _read_image_config(container_name: str) -> dict:
 
 def _malformed(container_name: str, what: str) -> typing.NoReturn:
     """Report a manifest field this command cannot build a command out of."""
-    crit_error(
-        f"the image manifest for '{container_name}' declares a {what}; the image is malformed."
-    )
+    crit_error(f"the image manifest for '{container_name}' declares a {what}; the image is malformed.")
     sys.exit(1)
 
 
@@ -43,7 +60,7 @@ def _normalize_argv(val, key: str, container_name: str) -> tuple[list[str], bool
     - absent, JSON null or the empty string is "not set": ``([], False)``.
 
     Anything else is a malformed image and is refused. Coercing each item with
-    ``str()`` invented an argv out of whatever JSON held -- ``[5]`` ran ``5`` --
+    ``str()`` invented an argv out of whatever JSON held (``[5]`` ran ``5``),
     and dropping a field of another type quietly is worse still, since `run`
     would then execute a different command than the image names.
     """
@@ -61,7 +78,7 @@ def _string_field(img_cfg: dict, key: str, container_name: str) -> str:
 
     `WorkingDir` becomes the session's cwd and `User` the identity it resolves,
     so a value of another type used to reach an argv through an f-string and
-    name a directory -- or a user -- no image meant.
+    name a directory, or a user, no image meant.
     """
     value = img_cfg.get(key)
     if value is None:

@@ -1,9 +1,14 @@
-"""Pure-Python .Xauthority file parser and writer.
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
+"""The `.Xauthority` format, so X11 cookie handling needs no `xauth` binary.
 
-Replaces the external ``xauth`` binary for X11 cookie management.
-Implements the standard Xauthority binary format used by libXau.
+This exists for the pure-Python requirement: `x11.provision_guest_xauthority`
+needs the `xauth -f <src> extract <dst> <display>` behaviour, which is
+`extract_entries` here, and libXau's on-disk format is the whole of what that
+takes.
 
-Binary format (per entry, all multi-byte integers big-endian):
+Per entry, all multi-byte integers big-endian:
+
     family:         uint16
     address_length: uint16
     address:        bytes[address_length]
@@ -13,6 +18,17 @@ Binary format (per entry, all multi-byte integers big-endian):
     name:           bytes[name_length]     (auth protocol, e.g. b"MIT-MAGIC-COOKIE-1")
     data_length:    uint16
     data:           bytes[data_length]     (the cookie)
+
+A cookie file is written by the compositor or the X server, not by this program,
+so a short read ends the parse rather than producing an entry: `_read_entry`
+answers `None` on any truncation and `read_xauthority` keeps the valid entries
+that preceded it. A cookie is a secret, so `write_xauthority` creates the file
+0600 and renames it into place, never widening an existing file or leaving a
+half-written one.
+
+`match_display` follows libXau: a `FAMILY_WILD` entry matches anything, a
+`FAMILY_LOCAL` one matches on hostname (or an empty address, which some systems
+write) plus display number, and the screen after the dot is ignored.
 """
 
 from __future__ import annotations
@@ -27,8 +43,6 @@ from typing import BinaryIO
 
 log = logging.getLogger(__name__)
 
-# --- Family constants (match X11 protocol / libXau) -------------------------
-
 FAMILY_INTERNET: int = 0
 """IPv4 connection."""
 
@@ -39,13 +53,9 @@ FAMILY_INTERNET6: int = 6
 """IPv6 connection."""
 
 FAMILY_WILD: int = 65535
-"""Wildcard — matches any connection family."""
+"""Wildcard: matches any connection family."""
 
-# Struct format for a single big-endian uint16.
 _UINT16 = struct.Struct("!H")
-
-
-# --- Data model --------------------------------------------------------------
 
 
 @dataclasses.dataclass(slots=True)
@@ -66,9 +76,6 @@ class XauthEntry:
 
     data: bytes
     """Authentication data (the cookie)."""
-
-
-# --- Low-level I/O -----------------------------------------------------------
 
 
 def _read_uint16(fp: BinaryIO) -> int | None:
@@ -140,9 +147,6 @@ def _write_entry(fp: BinaryIO, entry: XauthEntry) -> None:
     fp.write(entry.data)
 
 
-# --- Public API ---------------------------------------------------------------
-
-
 def read_xauthority(path: str) -> list[XauthEntry]:
     """Read all entries from an ``.Xauthority`` file at *path*.
 
@@ -159,7 +163,7 @@ def read_xauthority(path: str) -> list[XauthEntry]:
                     break
                 entries.append(entry)
     except (OSError, ValueError) as exc:
-        # File missing, unreadable, or contains garbage — return what we have.
+        # File missing, unreadable, or garbage: return what we have.
         log.warning("Failed to read Xauthority file at %s: %s", path, exc)
     return entries
 
@@ -179,13 +183,9 @@ def write_xauthority(path: str, entries: list[XauthEntry]) -> None:
                 _write_entry(fp, entry)
         os.rename(tmp_path, path)
     except BaseException:
-        # Clean up the temporary file on any failure.
         with contextlib.suppress(OSError):
             os.unlink(tmp_path)
         raise
-
-
-# --- Display matching ---------------------------------------------------------
 
 
 def _parse_display(display: str) -> tuple[int, bytes]:
@@ -200,18 +200,15 @@ def _parse_display(display: str) -> tuple[int, bytes]:
 
     The screen number (after the dot) is always stripped.
     """
-    # Remove protocol prefix if present (e.g. "unix:0" → ":0")
     if display.startswith("unix:"):
         display = display[4:]  # keep the colon → ":0"
 
-    # Split at the colon that precedes the display number.
     colon = display.rfind(":")
     if colon == -1:
-        # Malformed — treat entire string as number "0".
+        # Malformed, so the whole string counts as display number "0".
         return FAMILY_LOCAL, b"0"
 
     number_part = display[colon + 1 :]
-    # Strip screen number: "0.0" → "0"
     dot = number_part.find(".")
     if dot != -1:
         number_part = number_part[:dot]

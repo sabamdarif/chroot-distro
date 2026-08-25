@@ -20,9 +20,7 @@ def rootfs(tmp_path, monkeypatch):
     root = tmp_path / "containers" / "distro" / "rootfs"
     (root / "etc").mkdir(parents=True)
     (root / "etc" / "passwd").write_text(
-        "root:x:0:0:root:/root:/bin/sh\n"
-        "app:x:1002:1500:app:/home/app:/bin/sh\n"
-        "broken:x:notanumber:1:broken:/:/bin/sh\n"
+        "root:x:0:0:root:/root:/bin/sh\napp:x:1002:1500:app:/home/app:/bin/sh\nbroken:x:notanumber:1:broken:/:/bin/sh\n"
     )
     (root / "etc" / "group").write_text("root:x:0:\nstaff:x:2000:\n")
     monkeypatch.setattr("chroot_distro.paths.CONTAINERS_DIR", str(tmp_path / "containers"))

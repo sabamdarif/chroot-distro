@@ -1,3 +1,44 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
+"""Advisory flock(2) locks that serialise commands against each other.
+
+Three namespaces, one class each: `ContainerLock` per container name,
+`BuildLock` per (image_ref, arch) pair hashed to a short key, `RunCacheLock` per
+build-cache key. Their files live under `locks/`, `locks/build/` and
+`locks/run-cache/` below RUNTIME_DIR. The first line of a lock file is
+`PID command`, which is what lets a conflict name the process holding it; it is
+written only once the flock is actually ours, since the file is opened O_CREAT
+without O_TRUNC and truncating earlier would wipe the holder's own line before
+the attempt that fails. Exclusive locks are re-entrant within one process, keyed
+by lock path in `_held_exclusive`.
+
+`locks/` is guest-writable on Termux (RUNTIME_DIR sits under the prefix bound
+read-write into every non-isolated container) and every name in it is
+predictable, so no lock file is ever addressed by path: the directories are
+descended O_NOFOLLOW one level at a time and the file is opened as
+`(dir_fd, name)` with a plain-file check. Nothing but this program writes there,
+so an entry that is not a plain file was planted, and it is dropped and the real
+lock made in its place. Following one instead would truncate the host file a
+symlink names, or block forever on a FIFO with no writer.
+
+Failing open or failing closed is decided per caller, and the difference is the
+point of having both `_open_lock_file` and `open_lock_file_at`. An ordinary
+refusal (read-only filesystem, no permission, a filesystem that ignores flock)
+means "carry on without a lock", so a missing lock never stops the program from
+running at all. A planted name that cannot be cleared is different: for a
+container or build lock it raises `_HostileLockError` and `acquire()` returns
+False, because passing it off as the ordinary case would leave every later
+command unsynchronised. `open_lock_file_at` is the same opening rules with the
+opposite policy, for the build-cache index's own lock, where losing the race
+costs a concurrent `record()`'s entry rather than a torn file, since the index is
+published through `atomic_write`.
+
+Everything a caller sees about a holder (`busy_locks`, `holder_hint`) is a
+cosmetic snapshot taken with a shared non-blocking probe. It is never consulted
+to decide whether a lock is granted: `acquire()` alone decides that, and never
+from a guess.
+"""
+
 import contextlib
 import errno
 import fcntl
@@ -50,7 +91,7 @@ def container_busy_status(name: str) -> str:
 def _pid_state(pid: int) -> str:
     """Return the single-letter process state from /proc/<pid>/stat, or ''.
 
-    'T' means stopped (job control, e.g. Ctrl+Z) — the process still holds
+    'T' means stopped (job control, e.g. Ctrl+Z): the process still holds
     its flocks but will never release them until resumed or killed.
     """
     try:
@@ -81,8 +122,8 @@ def _drop_planted(dir_fd: int, name: str) -> bool:
     """Remove whatever occupies *name* under dir_fd. True once the name is free.
 
     A directory needs rmdir and so only goes while it is empty, which is the one
-    shape of this that can stay in the way. Everything else -- a symlink, a
-    FIFO, a socket, a device node -- unlinks.
+    shape of this that can stay in the way. Everything else (a symlink, a FIFO,
+    a socket, a device node) unlinks.
     """
     try:
         os.unlink(name, dir_fd=dir_fd)
@@ -129,8 +170,8 @@ def _open_lock_subdir(dir_fd: int, name: str, path: str) -> int | None:
 def _locks_dir_fd(parts: tuple[str, ...], create: bool = False) -> int | None:
     """Open one of the lock directories. Descriptor, or None.
 
-    RUNTIME_DIR is the trust root -- this program's own state directory, named
-    the way every other module names it -- and every component below it is
+    RUNTIME_DIR is the trust root, this program's own state directory named the
+    way every other module names it, and every component below it is
     opened O_NOFOLLOW off the level above, so a `locks` (or `locks/build`)
     symlink a guest left behind sends nothing into a host directory. The root
     itself is still created by name: a first `install` on a machine that has
@@ -138,7 +179,7 @@ def _locks_dir_fd(parts: tuple[str, ...], create: bool = False) -> int | None:
     does not exist yet.
 
     Creating descends level by level so a planted level gets the same treatment
-    a planted lock file does -- replaced, or refused. Reading (`busy_locks`, a
+    a planted lock file does: replaced, or refused. Reading (`busy_locks`, a
     holder hint) makes nothing and simply gives up.
     """
     if not create:
@@ -173,8 +214,8 @@ def open_lock_file_at(dir_fd: int, name: str, path: str) -> int | None:
     are the same; the *policy* differs at one point. Here a name that cannot be
     cleared comes back as None, "carry on without a lock", because that is
     already what the caller does on a filesystem that ignores flock and what it
-    costs there is a concurrent `record()`'s entry, not a torn file -- the index
-    itself is published through `atomic_write`. A container lock is the other
+    costs there is a concurrent `record()`'s entry, not a torn file, since the
+    index itself is published through `atomic_write`. A container lock is the other
     way round and fails closed; see `acquire`.
     """
     try:
@@ -196,8 +237,8 @@ def _open_lock_file(dir_fd: int, name: str, path: str) -> int | None:
     directory under the name would be enough to run every later command
     unsynchronised.
 
-    None is that ordinary case -- a read-only filesystem, no permission -- which
-    has always meant "carry on without a lock" and still does.
+    None is that ordinary case (a read-only filesystem, no permission), which has
+    always meant "carry on without a lock" and still does.
     """
     flags = os.O_RDWR | os.O_CREAT
     try:
@@ -248,7 +289,7 @@ def _lock_info_at(dir_fd: int, name: str) -> str:
         return ""
     if _pid_state(pid) == "T":
         return (
-            f" (PID {pid}: {cmd} — suspended, e.g. by Ctrl+Z; "
+            f" (PID {pid}: {cmd}, suspended, e.g. by Ctrl+Z; "
             f"resume it with 'kill -CONT {pid}' or terminate it with 'kill {pid}')"
         )
     return f" (PID {pid}: {cmd})"
@@ -257,9 +298,9 @@ def _lock_info_at(dir_fd: int, name: str) -> str:
 def _hint_for(parts: tuple[str, ...], name: str) -> str:
     """Return the holder hint for the lock file *name* in one lock directory.
 
-    Cosmetic, so a lock directory that cannot be reached is simply no hint --
-    whether a lock is refused is decided in `acquire()`, which never falls back
-    to a guess.
+    Cosmetic, so a lock directory that cannot be reached is simply no hint.
+    Whether a lock is refused is decided in `acquire()`, which never falls back to
+    a guess.
     """
     dir_fd = _locks_dir_fd(parts)
     if dir_fd is None:
@@ -322,7 +363,7 @@ def busy_locks() -> list[tuple[str, str]]:
     `install` (and `reset`, through it) takes an exclusive ContainerLock, and
     `build` and `push` take an exclusive BuildLock. A RunCacheLock is only ever
     held by a build that already holds a BuildLock, so that directory adds
-    nothing. Shared holders -- a `login` session, a running `backup` -- do not
+    nothing. Shared holders (a `login` session, a running `backup`) do not
     answer the probe and are deliberately absent from the result: they never
     touch the cache.
 
@@ -372,11 +413,10 @@ class _FlockBase:
 
         Returns True on success (or when re-entrant / filesystem ignores
         flock). Returns False when blocked by another process, or when the lock
-        file's name is occupied by something this module cannot remove -- see
+        file's name is occupied by something this module cannot remove: see
         `open_lock_file_at`. __enter__ tells the two apart.
         """
         if self._lock_path in _held_exclusive:
-            # This process already holds an exclusive lock on this path.
             self._reentrant = True
             return True
 
@@ -384,7 +424,7 @@ class _FlockBase:
             dir_fd = _locks_dir_fd(self._dir_parts, create=True)
             if dir_fd is None:
                 log.warning("Could not create lock directory for '%s'. Proceeding unlocked.", self._lock_path)
-                return True  # Cannot create locks dir; proceed unlocked.
+                return True
             try:
                 # O_CREAT without O_TRUNC: opening with "w" here would wipe the
                 # holder's "PID command" line *before* the flock attempt, so a
@@ -399,7 +439,7 @@ class _FlockBase:
             return False
         if raw_fd is None:
             log.warning("Could not open/create lock file '%s'. Proceeding unlocked.", self._lock_path)
-            return True  # Cannot open/create lock file; proceed unlocked.
+            return True
 
         try:
             fd = os.fdopen(raw_fd, "r+")
@@ -422,7 +462,6 @@ class _FlockBase:
             fd.close()
             return exc.errno not in (errno.EACCES, errno.EAGAIN)
 
-        # Record PID + command in the file for diagnostic purposes.
         try:
             fd.truncate(0)
             fd.seek(0)

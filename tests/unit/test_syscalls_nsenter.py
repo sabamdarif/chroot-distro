@@ -44,9 +44,7 @@ def test_enter_and_exec_child_failure_returns_127():
 
 # ── run_in_namespaces: capture path with failing child ───────────────────────────
 def test_run_in_namespaces_capture_failure():
-    result = nsenter.run_in_namespaces(
-        2**30, CLONE_NEWNS, ["/bin/true"], capture_output=True, text=True
-    )
+    result = nsenter.run_in_namespaces(2**30, CLONE_NEWNS, ["/bin/true"], capture_output=True, text=True)
     assert isinstance(result, subprocess.CompletedProcess)
     assert result.returncode == 127
 

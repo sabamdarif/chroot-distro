@@ -1,18 +1,27 @@
-"""Per-session registry for the ``ps`` command.
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
+"""One file per live session, kept alive by the flock the session holds.
 
-Architecture: Each ``login`` or ``run`` session writes a JSON file under
-``SESSIONS_DIR/<pid>.json`` and holds an exclusive ``flock(2)`` on it for
-the lifetime of the session.  The ``ps`` command probes liveness with a
-shared, non-blocking flock: refusal means the session is alive; success
-means it is dead (the file is pruned on sight).
+`ps` and `kill` need to know which sessions exist, who started them and how, and
+`helpers/session.py`'s refcount cannot say. So each `login` or `run` writes
+`SESSIONS_DIR/<pid>.json` and holds an exclusive flock on it for as long as it runs.
 
-For interactive sessions the parent holds the flock fd open while it waits
-for the guest and closes it in the ``finally`` block.  For detached sessions
-the fd is handed to the child (``spawn_detached``'s *keep_fds*) so the lock
-survives the parent's exit.
+The flock *is* the liveness signal, which is the whole design: `ps` tries a shared
+non-blocking lock, and a refusal means the holder is alive while a success means it
+died and the file is pruned on sight. Nothing has to be cleaned up on a crash, because
+the kernel drops the lock when the process goes. The record is written to a temporary
+and renamed into place, since flock lives on the open file description rather than the
+name, so the rename publishes the file without losing the lock.
 
-Registration is strictly best-effort: any failure returns ``None`` and
-must never prevent a session from starting.
+A detached session outlives the process that started it, so the descriptor's
+close-on-exec is cleared and handed to the child through `spawn_detached`'s *keep_fds*.
+An interactive one keeps the handle in the parent and closes it in a `finally`. Either
+way the caller must hold the returned handle: dropping it releases the lock and the
+session reads as dead.
+
+Registration is best-effort throughout. Every failure returns None and is logged, never
+raised: a session missing from `ps` is a small loss, a session that refused to start
+because it could not be recorded is a large one.
 """
 
 from __future__ import annotations

@@ -1,8 +1,18 @@
-"""Shared libc handle, errno helper, and Python 3.10-3.11 backports.
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
+"""Single libc handle, the errno check every wrapper uses, and two backports.
 
-Every syscall module in this package imports its libc handle and error
-checking from here, ensuring a single ``ctypes.CDLL`` instance is reused
-across the process.
+One `ctypes.CDLL` is built per process with `use_errno=True`, under a lock, so
+`ctypes.get_errno()` reads the thread-local errno of the call that just returned
+and no module ends up holding a second handle. `check_syscall` turns the libc
+convention (-1 plus errno) into an OSError that names the raw syscall,
+`mount(2)` rather than `mount`, so a failure can never be read as the output of a
+command-line tool this program does not run. `libc_prctl` is the deliberate
+exception: prctl(2) returns meaningful non-negative values, so it hands the raw
+result back unchecked and the caller interprets it.
+
+os.unshare and os.setns arrived in Python 3.12. Below that they are called through
+ctypes here, so nothing above this file needs a version check.
 """
 
 from __future__ import annotations
@@ -13,10 +23,6 @@ import errno as _errno_mod
 import os
 import sys
 import threading
-
-# ---------------------------------------------------------------------------
-# Cached libc handle
-# ---------------------------------------------------------------------------
 
 _libc_lock = threading.Lock()
 _libc_handle: ctypes.CDLL | None = None
@@ -42,11 +48,6 @@ def get_libc() -> ctypes.CDLL:
         return _libc_handle
 
 
-# ---------------------------------------------------------------------------
-# errno helper
-# ---------------------------------------------------------------------------
-
-
 def check_syscall(result: int, func_name: str) -> None:
     """Raise :class:`OSError` if *result* indicates a failed syscall.
 
@@ -64,9 +65,7 @@ def check_syscall(result: int, func_name: str) -> None:
         raise OSError(err, f"{func_name}(2): {os.strerror(err)} ({code})")
 
 
-# ---------------------------------------------------------------------------
 # Python 3.10-3.11 backports for os.unshare / os.setns
-# ---------------------------------------------------------------------------
 
 if sys.version_info >= (3, 12):
     from os import setns as py_setns
@@ -84,11 +83,6 @@ else:
         libc = get_libc()
         result = libc.setns(ctypes.c_int(fd), ctypes.c_int(nstype))
         check_syscall(result, "setns")
-
-
-# ---------------------------------------------------------------------------
-# Linux syscall wrappers
-# ---------------------------------------------------------------------------
 
 
 def libc_mount(

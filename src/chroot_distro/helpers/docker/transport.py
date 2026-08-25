@@ -1,3 +1,39 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
+"""HTTP to a registry: the token dance, the TLS policy, and the errors both produce.
+
+Everything above this file talks to a registry through `get_auth_token`, which returns
+both a token and the base URL every later request for that image must use. Resolving
+the two together is the point: the scheme is not known until the registry has answered,
+so a caller that built its own URL would use the wrong one.
+
+Docker Hub takes a fixed token endpoint. Any other registry needs the full dance, and a
+public one is no exception: it answers 401 with a Bearer challenge naming the realm to
+ask, so the /v2/ probe happens even when no credentials exist. A registry that answers
+the probe outright needs no token, and an empty token is the normal result, not a
+failure.
+
+TLS is enforced by default and downgraded only on request. A handshake error that looks
+like a plaintext reply, or failing that an active HTTP re-probe, is what distinguishes
+"this registry is HTTP-only" from "this registry is unreachable", and only the first
+gets the `--allow-insecure` hint. With `--allow-insecure` the whole probe is retried
+over http; an untrusted certificate is reported as such and never silently accepted,
+since the insecure opener skips verification and so cannot produce that error at all.
+
+`AuthStrippingRedirectHandler` exists because Docker Hub redirects blob reads to
+pre-signed CDN URLs that answer 400 if a Bearer token comes with them, and urllib
+forwards every header across a redirect. Dropping Authorization on a cross-host hop is
+also the right thing for a credential regardless of what the CDN would do.
+
+`CD_DOCKER_AUTH` is `username:password` and nothing else: registry auth is a token
+exchange that needs Basic credentials, so a bare token has nowhere to go and is
+refused with that explanation rather than sent and failed. Only transient failures are
+retried; an HTTP status, the expected 401 included, goes straight to the caller, which
+is the only layer that knows whether it means "authenticate" or "does not exist". The
+`*_denied_msg` helpers phrase that difference for a user, and branch on whether
+credentials were supplied at all.
+"""
+
 import base64
 import json
 import os
@@ -88,7 +124,7 @@ def _http_registry_reachable(registry: str, timeout: float = 6.0) -> bool:
     conclusive plaintext signal (see is_plaintext_http_tls_error), to
     decide whether an HTTPS failure is because the registry is HTTP-only
     (so we can point the user at ``--allow-insecure``) rather than simply
-    unreachable. Any HTTP-level response — including 401/404 — confirms the
+    unreachable. Any HTTP-level response, 401 and 404 included, confirms the
     host speaks HTTP on that endpoint.
     """
     req = urllib.request.Request(f"http://{registry}/v2/", headers=_ua())
@@ -144,8 +180,8 @@ def _request_body(open_fn, req, what: str) -> bytes:
     """Open *req* via *open_fn* and return the full response body.
 
     Transient network failures are retried (same policy as the URL
-    downloader). HTTP errors — including the expected 401 that carries the
-    Bearer challenge — and deterministic TLS failures are not retried; they
+    downloader). HTTP errors, including the expected 401 that carries the
+    Bearer challenge, and deterministic TLS failures are not retried; they
     propagate to the caller, which knows how to handle them.
     """
 
@@ -159,7 +195,7 @@ def _request_body(open_fn, req, what: str) -> bytes:
 def env_basic_auth() -> str:
     """Return a Basic auth header value from CD_DOCKER_AUTH, or ''.
 
-    Accepts 'username:password' — the colon is the required separator.
+    Accepts 'username:password'; the colon is the required separator.
     """
     raw = os.environ.get("CD_DOCKER_AUTH", "")
     if not raw:
@@ -168,7 +204,7 @@ def env_basic_auth() -> str:
         raise RuntimeError(
             "CD_DOCKER_AUTH must be in 'username:password' format "
             "(e.g. 'myuser:mypassword' or 'myuser:ghp_xxx'). "
-            "A bare token without a username cannot be used — registry "
+            "A bare token without a username cannot be used: registry "
             "auth requires a token exchange with Basic credentials."
         )
     return "Basic " + base64.b64encode(raw.encode()).decode()
@@ -198,9 +234,9 @@ def get_auth_token(
         return token, REGISTRY_URL
 
     # Custom registry: probe /v2/ to resolve the scheme and discover the
-    # Bearer realm. Registries serving public images still require this dance —
-    # they answer 401 to unauthenticated requests and embed the token endpoint
-    # in the challenge.
+    # Bearer realm. A registry serving public images still requires the dance:
+    # it answers 401 to an unauthenticated request and embeds the token
+    # endpoint in the challenge.
     op = opener(insecure)
     scheme = "https"
     while True:
@@ -239,7 +275,7 @@ def get_auth_token(
                 raise RuntimeError(certificate_error_msg(registry)) from exc
             # The registry answered the HTTPS probe with plaintext (or only
             # responds over plain HTTP): it is HTTP-only. Two signals,
-            # cheapest first — the handshake error itself (WRONG_VERSION_NUMBER
+            # cheapest first: the handshake error itself (WRONG_VERSION_NUMBER
             # and friends), else an active HTTP re-probe.
             if scheme == "https" and (is_plaintext_http_tls_error(exc) or _http_registry_reachable(registry)):
                 if insecure:

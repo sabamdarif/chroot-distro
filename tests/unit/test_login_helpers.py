@@ -39,12 +39,7 @@ def test_can_fall_back_only_on_termux_max_isolation_once():
         # Eligible: Termux + max isolation + not yet retried.
         assert _can_fall_back_to_old_isolated(True, SimpleNamespace()) is True
         # Not eligible once the opt-out has been set (prevents a retry loop).
-        assert (
-            _can_fall_back_to_old_isolated(
-                True, SimpleNamespace(_disable_max_isolation=True)
-            )
-            is False
-        )
+        assert _can_fall_back_to_old_isolated(True, SimpleNamespace(_disable_max_isolation=True)) is False
         # Not eligible when max isolation is already off.
         assert _can_fall_back_to_old_isolated(False, SimpleNamespace()) is False
 
@@ -1182,29 +1177,25 @@ def test_translate_host_path_to_guest():
     ]
 
     # Exact match on longer/more specific bind mount
-    assert _translate_host_path_to_guest(
-        "/home/sabamdarif/Documents/Github/chroot-distro", rootfs, resolved_binds
-    ) == "/workspace"
+    assert (
+        _translate_host_path_to_guest("/home/sabamdarif/Documents/Github/chroot-distro", rootfs, resolved_binds)
+        == "/workspace"
+    )
 
     # Subpath match under longer/more specific bind mount
-    assert _translate_host_path_to_guest(
-        "/home/sabamdarif/Documents/Github/chroot-distro/src", rootfs, resolved_binds
-    ) == "/workspace/src"
+    assert (
+        _translate_host_path_to_guest("/home/sabamdarif/Documents/Github/chroot-distro/src", rootfs, resolved_binds)
+        == "/workspace/src"
+    )
 
     # Subpath match under less specific/home bind mount
-    assert _translate_host_path_to_guest(
-        "/home/sabamdarif/Downloads", rootfs, resolved_binds
-    ) == "/home/saba/Downloads"
+    assert _translate_host_path_to_guest("/home/sabamdarif/Downloads", rootfs, resolved_binds) == "/home/saba/Downloads"
 
     # No match
-    assert _translate_host_path_to_guest(
-        "/var/log", rootfs, resolved_binds
-    ) == "/var/log"
+    assert _translate_host_path_to_guest("/var/log", rootfs, resolved_binds) == "/var/log"
 
     # Exact match on home directory
-    assert _translate_host_path_to_guest(
-        "/home/sabamdarif", rootfs, resolved_binds
-    ) == "/home/saba"
+    assert _translate_host_path_to_guest("/home/sabamdarif", rootfs, resolved_binds) == "/home/saba"
 
 
 def test_resolve_override_flag_wins(monkeypatch):

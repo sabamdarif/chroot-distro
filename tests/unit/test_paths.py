@@ -109,6 +109,7 @@ def test_installed_containers_permission_denied(monkeypatch):
 
     with patch("logging.Logger.warning") as mock_warn:
         from chroot_distro.paths import installed_containers
+
         assert installed_containers() == []
         mock_warn.assert_called_once()
         assert "Permission denied: cannot read containers directory" in mock_warn.call_args[0][0]
@@ -182,9 +183,7 @@ def test_overlap_is_weighed_on_the_resolved_paths(rootfs):
     os.symlink("/data", rootfs / "backup")
 
     def check(src, dest, **kwargs):
-        refuse_src_dest_overlap(
-            src, resolve_container_path(src), dest, resolve_container_path(dest), **kwargs
-        )
+        refuse_src_dest_overlap(src, resolve_container_path(src), dest, resolve_container_path(dest), **kwargs)
 
     # A hardlinked pair is two names for one inode, which a string comparison
     # cannot see.
@@ -212,9 +211,7 @@ def test_resolve_container_child_walks_the_appended_name(rootfs):
     # The base name appended to a directory destination is a container path
     # component like any other, so it gets the same walk.
     assert resolve_container_child("distro:/opt", resolved, "f.txt") == str(rootfs / "opt" / "real")
-    assert resolve_container_child("distro:/opt", resolved, "f.txt", deref_leaf=False) == str(
-        rootfs / "opt" / "f.txt"
-    )
+    assert resolve_container_child("distro:/opt", resolved, "f.txt", deref_leaf=False) == str(rootfs / "opt" / "f.txt")
 
 
 def test_pin_path_refuses_a_component_that_became_a_symlink(rootfs, tmp_path):

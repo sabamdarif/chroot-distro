@@ -1,15 +1,33 @@
-"""Native ``chroot(2)`` implementation replacing the GNU chroot binary.
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
+"""Enter a chroot and become the target identity, in place of the chroot binary.
 
-This module provides two main entry points:
+Four entry points, differing only in what the caller wants back.
+`native_chroot` and `enter_chroot` act on the *current* process, so the caller is
+one that is about to exec or exit; `chroot_and_exec` and `chroot_and_run` fork
+first and return the child's exit code or its captured output, leaving the parent
+free to decrement the session count and tear the mounts down.
+`spawn_detached` forks a child meant to outlive this process.
 
-- :func:`native_chroot` — performs ``chroot`` + ``chdir`` + user/group
-  switching + ``execvp`` in the **current process** (replaces it).
-- :func:`chroot_and_exec` — forks first, performs the chroot+exec in the
-  child, and returns the child's exit code to the parent.
+The order of the identity change is coreutils' own and is not negotiable:
+chroot, chdir, then setgroups before setgid before setuid. Each of those can only
+be given up once, so a uid dropped early leaves the groups behind for good. A
+capability drop goes before all of them, while the process still has the privilege
+to perform it.
 
-Both are faithful ports of the behavior in GNU coreutils ``chroot.c``:
-the order of ``setgroups`` → ``setgid`` → ``setuid`` exactly matches
-the C implementation.
+Nothing here is handed a command line to a helper binary: a caller describes a
+chroot and this file enters it in the process it already has, which is what keeps
+the `chroot /proc/1/root` escape closed and what lets a build step or an isolation
+holder be forked the same way.
+
+`spawn_detached` clears close-on-exec on `keep_fds` deliberately: a caller passing
+a lock descriptor needs the flock to survive the exec, since that is what goes on
+signalling that the session is alive.
+
+`_try_exec` retries through the binary's own PT_INTERP when a direct execve fails
+with ENOENT or EACCES on a binary that plainly exists. That is an Android/Termux
+kernel quirk on the login path, not a missing file, and running the dynamic linker
+explicitly sidesteps it.
 """
 
 from __future__ import annotations
@@ -49,11 +67,11 @@ def native_chroot(
     This is a faithful port of GNU coreutils ``chroot.c``:
 
     1. ``chroot(newroot)``
-    2. ``chdir("/")`` — unless *skip_chdir* is True
-    3. ``setgroups(groups)`` — if *groups* is provided
-    4. ``setgid(gid)`` — if *gid* is provided
-    5. ``setuid(uid)`` — if *uid* is provided
-    6. ``os.execvp(command[0], command)`` — if *command* is provided
+    2. ``chdir("/")``, unless *skip_chdir* is True
+    3. ``setgroups(groups)``, if *groups* is provided
+    4. ``setgid(gid)``, if *gid* is provided
+    5. ``setuid(uid)``, if *uid* is provided
+    6. ``os.execvp(command[0], command)``, if *command* is provided
 
     .. note::
 
@@ -92,8 +110,8 @@ def native_chroot(
     if not skip_chdir:
         os.chdir("/")
 
-    # User/group switching — order matches coreutils chroot.c exactly:
-    # setgroups → setgid → setuid (must drop groups/gid before uid).
+    # Order matches coreutils chroot.c: setgroups, setgid, setuid. Groups and
+    # gid have to go before the uid, or the process can no longer drop them.
     if groups is not None:
         os.setgroups(groups)
 
@@ -370,11 +388,6 @@ def spawn_detached(
     return child_pid
 
 
-# ---------------------------------------------------------------------------
-# General-purpose PTY wrapper (for non-chroot commands like nsenter)
-# ---------------------------------------------------------------------------
-
-
 def run_with_pty(
     argv: list[str],
     *,
@@ -422,11 +435,6 @@ def run_with_pty(
     return _wait_for_child_with_signals(child_pid)
 
 
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
-
-
 def _copy_terminal_size(src_fd: int, dst_fd: int) -> None:
     """Copy the terminal window size from *src_fd* to *dst_fd*."""
     with contextlib.suppress(OSError):
@@ -439,8 +447,8 @@ def _setup_child_pty(master_fd: int, slave_fd: int) -> None:
 
     Called in the forked child *before* chroot/exec:
     1. Close the master (parent keeps it), when this child inherited one.
-    2. ``setsid()`` — become session leader.
-    3. ``TIOCSCTTY`` on the slave — make it the controlling terminal.
+    2. ``setsid()`` to become session leader.
+    3. ``TIOCSCTTY`` on the slave to make it the controlling terminal.
     4. Dup the slave to stdin/stdout/stderr.
     """
     if master_fd >= 0:
@@ -467,7 +475,6 @@ def _pty_relay(master_fd: int, child_pid: int, *, timeout: int | None = None) ->
     import termios
     import tty
 
-    # ── SIGWINCH: forward terminal resize to the child pty ──
     prev_winch: signal._HANDLER = signal.SIG_DFL
 
     def _on_winsize(_signum: int, _frame: object) -> None:
@@ -478,7 +485,6 @@ def _pty_relay(master_fd: int, child_pid: int, *, timeout: int | None = None) ->
     with contextlib.suppress(OSError, ValueError):
         prev_winch = signal.signal(signal.SIGWINCH, _on_winsize)
 
-    # ── SIGTERM/SIGHUP: forward to child so it can clean up ──
     prev_handlers: dict[signal.Signals, signal._HANDLER] = {}
 
     def _relay_sig(signum: int, _frame: object) -> None:
@@ -489,7 +495,6 @@ def _pty_relay(master_fd: int, child_pid: int, *, timeout: int | None = None) ->
         with contextlib.suppress(OSError, ValueError):
             prev_handlers[sig] = signal.signal(sig, _relay_sig)
 
-    # ── Set stdin to raw mode ──
     old_attrs: list[int | list[bytes | int]] | None = None
     try:
         old_attrs = termios.tcgetattr(0)
@@ -500,7 +505,6 @@ def _pty_relay(master_fd: int, child_pid: int, *, timeout: int | None = None) ->
     try:
         _pty_copy_loop(master_fd)
     finally:
-        # ── Restore terminal ──
         if old_attrs is not None:
             with contextlib.suppress(termios.error, OSError):
                 termios.tcsetattr(0, termios.TCSAFLUSH, old_attrs)
@@ -512,7 +516,6 @@ def _pty_relay(master_fd: int, child_pid: int, *, timeout: int | None = None) ->
             with contextlib.suppress(OSError, ValueError):
                 signal.signal(s, h)
 
-    # ── Reap child ──
     try:
         _, status = os.waitpid(child_pid, 0)
         return _decode_status(status)
@@ -576,7 +579,7 @@ def _wait_for_child_with_signals(pid: int, *, timeout: int | None = None) -> int
     try:
         returncode = _wait_for_child(pid, timeout=timeout)
     except BaseException:
-        # Parent is being torn down — ensure the child does not survive.
+        # The parent is being torn down, so the child must not survive it.
         _kill_child(pid)
         raise
     finally:
@@ -584,9 +587,6 @@ def _wait_for_child_with_signals(pid: int, *, timeout: int | None = None) -> int
             with contextlib.suppress(OSError, ValueError):
                 signal.signal(sig, handler)
 
-    # If the parent caught a relayed signal *and* the child has already
-    # exited, re-raise so the caller's cleanup (session teardown, mount
-    # cleanup) runs and the exit code reflects the signal.
     if received_signal and returncode >= 128:
         return returncode
 
@@ -643,7 +643,7 @@ def _decode_status(status: int) -> int:
         return os.WEXITSTATUS(status)
     if os.WIFSIGNALED(status):
         return 128 + os.WTERMSIG(status)
-    return 1  # Shouldn't happen, but be safe.
+    return 1
 
 
 def _read_all(fd: int) -> bytes:

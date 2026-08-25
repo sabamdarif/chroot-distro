@@ -1,12 +1,27 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
+"""CPU architecture: what the host is, what an image is, what a rootfs turned out to be.
+
+Three naming schemes meet here. This program's own (`aarch64`, `arm`, `i686`,
+`x86_64`, `riscv64`), `uname -m`'s (which spells 32-bit ARM `armv7l`, hence
+`ARCH_UNAME_M` for the guest's `uname` and the collapse of `armv7l`/`armv8l` to
+`arm` on the way in), and Docker's platform strings, which `normalize_arch`
+accepts bare or `linux/`-prefixed and answers `None` for rather than guessing.
+
+`detect_installed_arch` reads the `e_machine` field out of the first shell or
+busybox it finds in the rootfs, because that is ground truth: a container may
+have arrived from a tarball with no manifest, or from a manifest naming a
+platform the files do not match. `supports_32bit` asks the kernel through
+`personality(PER_LINUX32)` and puts the previous value back, since on arm64
+whether 32-bit userspace runs is a kernel build option and not something the
+machine name says.
+"""
+
 import ctypes
 import os
 import struct
 
 from chroot_distro.constants import TERMUX_PREFIX
-
-# ---------------------------------------------------------------------------
-# Host/Guest CPU architecture detection
-# ---------------------------------------------------------------------------
 
 
 def get_device_cpu_arch() -> str:
@@ -36,7 +51,7 @@ def supports_32bit() -> bool:
 
             if prev == -1:
                 return False
-            libc.personality(prev)  # restore
+            libc.personality(prev)
             return True
         except Exception:
             return False

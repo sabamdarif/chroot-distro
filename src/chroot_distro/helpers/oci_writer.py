@@ -1,3 +1,26 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
+"""Turn a finished build into the documents a registry, `docker load`, and `install` read.
+
+Three outputs, one source. `build_manifest_and_config` hashes the config with
+`canonical_json` and puts that digest in the manifest, so the descriptor describes the
+exact bytes that will be shipped; `history` comes from the engine verbatim, since it
+already appended one entry per dispatched instruction. `store_in_cache` writes under the
+same key `helpers/docker/cache.py` computes, which is the whole reason a `build`
+followed by an `install` of the same reference needs no network. `write_oci_archive`
+packages the layout as a tarball.
+
+The archive carries a Docker-legacy `manifest.json` beside the OCI layout, because
+`docker load` given only the layout falls back to a per-directory legacy import loop
+that misreads it. `oci-layout` is the first member so this program's own format probe
+recognises the archive on the entry it sees first. Every entry is written with mode
+0644, mtime 0 and uid/gid 0, so the same image packages to the same bytes.
+
+A manifest whose config digest disagrees with the bytes about to be written is corrected
+rather than published inconsistent, and a layer blob missing from the cache raises
+instead of yielding a truncated archive.
+"""
+
 import hashlib
 import json
 import os
@@ -32,7 +55,7 @@ def build_manifest_and_config(
     """Assemble the OCI image manifest and image config blobs.
 
     `image_config` is the in-progress config dict managed by the
-    build engine — its `history` array is taken verbatim (the engine
+    build engine: its `history` array is taken verbatim (the engine
     appends one entry per dispatched instruction so the count of
     non-empty-layer entries already matches len(layers)). `layers` is
     the ordered list of {"digest", "size", "diff_id"} entries for
@@ -79,11 +102,6 @@ def build_manifest_and_config(
     return manifest, config
 
 
-# ---------------------------------------------------------------------------
-# Variant A — store the manifest in dlcache so install can find it
-# ---------------------------------------------------------------------------
-
-
 def store_in_cache(
     image_ref: str,
     arch_name_pd: str,
@@ -108,10 +126,6 @@ def store_in_cache(
         json.dump(payload, fh, indent=2, sort_keys=True)
     return path
 
-
-# ---------------------------------------------------------------------------
-# Variant B — OCI image layout tarball
-# ---------------------------------------------------------------------------
 
 _TAR_MODES = {
     ".tar": "w",
@@ -159,12 +173,12 @@ def write_oci_archive(
     OCI layout is present.
 
     The archive is packed into the descriptor `atomic_write` staged rather than
-    into a second open of the temporary's name: the name is one this program
-    chose, but the directory it stands in is the user's -- `--output
-    /tmp/img.tar` stages the temporary in a world-writable directory, where
-    readdir names it for anyone sharing it -- and between the create and a
-    reopen it can be unlinked and replaced with a symlink, which the rename then
-    publishes over whatever it pointed at.
+    into a second open of the temporary's name. The name is one this program
+    chose, but the directory it stands in is the user's (`--output /tmp/img.tar`
+    stages the temporary in a world-writable directory, where readdir names it
+    for anyone sharing it), and between the create and a reopen it can be
+    unlinked and replaced with a symlink, which the rename then publishes over
+    whatever it pointed at.
     """
     mode = _detect_tar_mode(out_path)
     config_bytes = canonical_json(image_config)

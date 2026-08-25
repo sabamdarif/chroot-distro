@@ -1,13 +1,15 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
 """Resolve a `--chown USER[:GROUP]` spec into the numeric pair chown(2) takes.
 
 The names are looked up on the side the files land on, because the same name
 answers to a different number on each: a container destination is asked of its
 own `/etc/passwd` and `/etc/group`, a host destination of the host's. That is
-the whole point of the flag — without it a transfer carries the source's numbers
+the whole point of the flag: without it a transfer carries the source's numbers
 across, which name whoever happens to hold them on the other side.
 
 A number is accepted anywhere a name is and taken as it stands, so an id with no
-entry to its name — which an image-installed rootfs is full of — is still
+entry to its name, which an image-installed rootfs is full of, is still
 reachable. What cannot be guessed at is a *group* for a bare number, since there
 is no entry to read a primary group from; that is refused naming the spelling
 that works rather than silently using the uid as the gid.
@@ -90,9 +92,9 @@ def _guest_group(rootfs: str, container: str, group: str) -> int:
 def resolve_owner(spec: str, dest_spec: str) -> tuple[int, int]:
     """Turn `USER`, `USER:GROUP` or `:GROUP` into (uid, gid) for *dest_spec*.
 
-    With no group named — `arif` or `arif:` — the user's primary group stands
-    in, which is what chown(1) does with the same spellings. With no user named —
-    `:staff` — the group alone is changed and the uid comes back as -1, which
+    With no group named (`arif` or `arif:`) the user's primary group stands
+    in, which is what chown(1) does with the same spellings. With no user named
+    (`:staff`) the group alone is changed and the uid comes back as -1, which
     chown(2) reads as "leave this one alone".
     """
     user, sep, group = spec.partition(":")

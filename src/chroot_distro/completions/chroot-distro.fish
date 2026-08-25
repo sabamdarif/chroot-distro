@@ -32,7 +32,7 @@ function __chroot_distro_containers
 end
 
 # ---------------------------------------------------------------------------
-# Termux/Android detection — mirrors _detect_termux() in constants.py.
+# Termux/Android detection, mirroring _detect_termux() in constants.py.
 # Returns 0 (true) when at least two of three independent indicators match.
 # ---------------------------------------------------------------------------
 function __chroot_distro_is_termux

@@ -388,7 +388,8 @@ class TestDownloadFile:
             mock.patch("chroot_distro.constants.layer_download_workers", return_value=4),
             mock.patch("chroot_distro.helpers.download._probe_server", return_value=probe_result),
             mock.patch("urllib.request.build_opener", return_value=mock_opener_first),
-            mock.patch("chroot_distro.helpers.download._interruptible_sleep"),pytest.raises(Exception)
+            mock.patch("chroot_distro.helpers.download._interruptible_sleep"),
+            pytest.raises(Exception),
         ):
             download_file("http://example.com/output.tar", dest)
 

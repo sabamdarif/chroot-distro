@@ -1,3 +1,26 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
+"""The argparse tree, plus the two tables `cli.py` enforces by hand.
+
+One private sub-builder per command, all called from `build_parser`. Almost no
+`help=` text is set, deliberately: users are shown the hand-written pages in
+`commands/help/pages.py`, so argparse help here would be a second copy that drifts.
+Each sub-parser carries `_cd_command`, which is how `_CdArgumentParser.error` knows
+which page to render when a parse fails.
+
+`REQUIRED_ARGS` and `ALIAS_TO_CANONICAL` live here but are applied in `cli.py`.
+Positionals are declared with `nargs="*"` rather than as required, so a missing
+argument reaches `cli.py` as an empty list and can be reported with the command's own
+help page instead of argparse's usage line. Adding a command means adding to both
+tables, or its aliases resolve to nothing and its missing arguments are not caught.
+
+`login` and `run` take a guest command after a literal `--`. argparse cannot express
+that, so `_apply_post_separators` slices the tail into `login_cmd`/`run_args` and the
+`--` is trimmed out of the unknown-argument list, or `cli.py` would report the guest's
+own flags as unrecognised. `-V` defers the `importlib.metadata` lookup to use time, for
+the same startup-cost reason `cli.py` keeps its imports lazy.
+"""
+
 import argparse
 import sys
 from collections.abc import Sequence

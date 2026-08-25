@@ -214,6 +214,7 @@ def test_locking_oserror_warnings(lock_tree):
 # $TERMUX_PREFIX bound read-write into every non-isolated container -- and the
 # names in it come from the container name, so they are entirely predictable.
 
+
 def test_a_planted_symlink_is_replaced_not_followed(lock_tree, tmp_path):
     outside = tmp_path / "host-file"
     outside.write_text("KEEP")

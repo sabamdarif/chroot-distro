@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
 """Build output events and reporters.
 
 The engine emits :class:`BuildEvent` records; a reporter renders them.
@@ -68,7 +70,7 @@ class PlainReporter:
         elif ev.kind == "cache_hit":
             log_info(f"{C['GREEN']}CACHED{C['RST']}")
         elif ev.kind == "step_finished":
-            # ponytail: sub-0.1s steps (ENV, LABEL, …) skip the done line to
+            # Sub-0.1s steps (ENV, LABEL, …) skip the done line to
             # avoid doubling the output; drop the threshold if it misleads.
             if ev.duration is not None and ev.duration >= 0.1:
                 log_info(f"--> done ({ev.duration:.1f}s)")

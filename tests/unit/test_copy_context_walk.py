@@ -46,9 +46,7 @@ def _write(engine, rel, content="x"):
 
 def _copy(engine, src, dest, *, is_dir_dest=True, file_map=None):
     file_map = {} if file_map is None else file_map
-    copy_step._copy_from_context(
-        engine, src, dest, is_dir_dest, file_map, 0, 0, None, auto_extract=False
-    )
+    copy_step._copy_from_context(engine, src, dest, is_dir_dest, file_map, 0, 0, None, auto_extract=False)
     return file_map
 
 

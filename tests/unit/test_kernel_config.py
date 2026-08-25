@@ -190,11 +190,7 @@ def test_render_kernel_config_runtime_unknown_does_not_block():
 
 
 def test_render_kernel_config_all_present_is_ok():
-    full = "\n".join(
-        "CONFIG_" + flag.name + "=y"
-        for group in kc.KERNEL_FLAG_GROUPS
-        for flag in group.flags
-    )
+    full = "\n".join("CONFIG_" + flag.name + "=y" for group in kc.KERNEL_FLAG_GROUPS for flag in group.flags)
     lines: list[str] = []
     with (
         patch.object(info, "find_kernel_config", return_value=("/boot/config-test", full)),
@@ -208,6 +204,7 @@ def test_probe_flag_runtime_userns():
     # Case 1: max_user_namespaces exists and is > 0
     mock_file = mock_open(read_data="1000\n").return_value
     real_open = open
+
     def fake_open_present(path, *a, **k):
         if path == "/proc/sys/user/max_user_namespaces":
             return mock_file
@@ -218,11 +215,11 @@ def test_probe_flag_runtime_userns():
 
     # Case 2: max_user_namespaces exists and is 0
     mock_file_zero = mock_open(read_data="0\n").return_value
+
     def fake_open_absent(path, *a, **k):
         if path == "/proc/sys/user/max_user_namespaces":
             return mock_file_zero
         return real_open(path, *a, **k)
-
 
     with patch("builtins.open", side_effect=fake_open_absent):
         assert kc.probe_flag_runtime("USER_NS") == kc.PROBE_ABSENT
@@ -247,7 +244,6 @@ def test_probe_flag_runtime_userns():
         assert kc.probe_flag_runtime("USER_NS") == kc.PROBE_ABSENT
 
 
-
 # ── kernel_version_tuple / probe_devpts_multi_instance ─────────────────────────
 def test_kernel_version_tuple_parses_release():
     with patch.object(kc.os, "uname") as m:
@@ -268,7 +264,8 @@ def test_devpts_probe_modern_kernel_short_circuits():
 
 
 def test_devpts_probe_old_kernel_without_root_is_unknown():
-    with patch.object(kc, "kernel_version_tuple", return_value=(4, 4)), patch.object(
-        kc.os, "getuid", return_value=1000
+    with (
+        patch.object(kc, "kernel_version_tuple", return_value=(4, 4)),
+        patch.object(kc.os, "getuid", return_value=1000),
     ):
         assert kc.probe_devpts_multi_instance() == kc.PROBE_UNKNOWN

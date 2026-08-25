@@ -33,7 +33,8 @@ def test_open_tree_returns_fd():
 def test_open_tree_raises_on_error():
     with (
         patch.object(idmap, "_syscall_libc", return_value=_fake_libc(-1)),
-        patch("ctypes.get_errno", return_value=13),pytest.raises(OSError)
+        patch("ctypes.get_errno", return_value=13),
+        pytest.raises(OSError),
     ):
         idmap.open_tree(-100, "/mnt", 0)
 
@@ -46,7 +47,8 @@ def test_move_mount_ok():
 def test_move_mount_raises():
     with (
         patch.object(idmap, "_syscall_libc", return_value=_fake_libc(-1)),
-        patch("ctypes.get_errno", return_value=1),pytest.raises(OSError)
+        patch("ctypes.get_errno", return_value=1),
+        pytest.raises(OSError),
     ):
         idmap.move_mount(3, "", -100, "/dst", 0)
 
@@ -68,7 +70,8 @@ def test_make_idmapped_tree_closes_fd_on_setattr_error():
     with (
         patch.object(idmap, "open_tree", return_value=9),
         patch.object(idmap, "mount_setattr", side_effect=OSError(22, "EINVAL")),
-        patch("os.close") as mock_close,pytest.raises(OSError)
+        patch("os.close") as mock_close,
+        pytest.raises(OSError),
     ):
         idmap.make_idmapped_tree("/src", userns_fd=4)
     mock_close.assert_called_once_with(9)

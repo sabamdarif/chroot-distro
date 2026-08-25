@@ -1,4 +1,38 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
 """Path composition and safe resolution of `name:path` specs.
+
+Two unrelated jobs live here. The composition half (`container_dir`,
+`container_rootfs`, `container_manifest`, `container_log_path`,
+`installed_containers`) is the only place that knows how a container's files are
+laid out under CONTAINERS_DIR: nothing else may build those paths by hand. The
+resolution half is a trust boundary, and it is where the care goes.
+
+A `name:path` spec is user input naming an entry inside a rootfs a guest can
+write. `resolve_container_path` walks it with the guest's own semantics, *root*
+standing in for `/`, so a symlink the guest planted resolves the way the
+container sees it and cannot reach the host; `..` written in the spec is refused
+outright. `refuse_src_dest_overlap` then compares the two ends of a transfer
+after resolution, because a link on either side is enough to make a directory a
+copy of itself. `resolve_container_child` exists so the base name `copy` and
+`sync` append to a destination directory gets the same walk as one that was
+typed.
+
+Resolving says where an entry belongs; it does not make it safe to use. The path
+came back with no symlink components, but a guest can swap one in before the
+call that acts on it, so a caller re-walks those components with `pin_path` and
+works from the `(dir_fd, leaf)` a `PinnedPath` carries. That re-walk both detects
+the swap and pins the inode it validated. Handing the resolved string back to the
+kernel is the bug this file exists to prevent.
+
+`open_container_rootfs` is the entry to that world: `containers/<name>` is
+guest-writable on Termux, so it is descended with O_NOFOLLOW at every step rather
+than opened by composed path, and `container_is_installed` answers through the
+same walk. FileNotFoundError from either is an ordinary "not installed"; any
+other refusal is an entry this program did not create, and becomes
+`_unusable_storage`. ENOTDIR is ambiguous (an O_NOFOLLOW open declining a link,
+or a component that is simply not a directory), so a refusal is only reported as
+a race once the component has been confirmed to be a symlink.
 
 The chroot-semantics resolver, the overlap guard and the descriptor pins below
 are ported from proot-distro (https://github.com/termux/proot-distro), created
@@ -57,8 +91,8 @@ def container_incomplete_marker(name: str) -> str:
     The marker is created before the first byte of rootfs data is written
     and removed as the final step of a successful install. A rootfs that
     coexists with this marker is a leftover from an interrupted install
-    (Ctrl+C, SIGKILL, power loss, ...) and is safe to wipe and redo —
-    without it, "already exists" checks cannot distinguish a finished
+    (Ctrl+C, SIGKILL, power loss, ...) and is safe to wipe and redo. Without
+    it, "already exists" checks cannot distinguish a finished
     container from an aborted one.
     """
     return os.path.join(container_dir(name), ".install-incomplete")
@@ -69,7 +103,6 @@ def is_install_incomplete(name: str) -> bool:
     return os.path.isfile(container_incomplete_marker(name))
 
 
-
 def container_from_spec(spec: str) -> str | None:
     """Return the container name in a `name:path` spec, or None.
 
@@ -77,8 +110,8 @@ def container_from_spec(spec: str) -> str | None:
     directory separator, which is the rule scp and rsync use: `box:/etc` names a
     container, while `/tmp/a:b` and `./a:b` are host paths that happen to have a
     colon in the name. Treating every colon as a separator left such a path
-    unreachable — the whole prefix was taken for a container name and rejected as
-    invalid — with no spelling that could say otherwise. A bare `a:b` is still a
+    unreachable: the whole prefix was taken for a container name and rejected as
+    invalid, with no spelling that could say otherwise. A bare `a:b` is still a
     container spec, so a host file named that way in the current directory is
     addressed as `./a:b`, exactly as scp requires.
     """
@@ -103,8 +136,8 @@ def _resolve_within_root(root: str, rel_path: str, spec: str) -> str:
 
     Purely lexical normalisation is not enough here. os.path.normpath collapses
     `..` without looking at the filesystem, so a symlink planted inside the
-    rootfs — `escape -> /`, which is perfectly ordinary as seen from inside the
-    container — would pass a startswith(rootfs) check and then be followed by the
+    rootfs (`escape -> /`, which is perfectly ordinary as seen from inside the
+    container) would pass a startswith(rootfs) check and then be followed by the
     copy, reading from or writing to the host filesystem outside the container.
 
     The hop count mirrors the kernel's ELOOP limit, guarding against a link cycle
@@ -143,8 +176,8 @@ def _resolve_within_root(root: str, rel_path: str, spec: str) -> str:
 def _host_path(path: str, deref_leaf: bool) -> str:
     """Resolve a host path's symlinks, keeping the final name when asked.
 
-    Host paths are not walked component by component the way container ones are
-    — the host filesystem is not what the chroot walk defends against — but their
+    Host paths are not walked component by component the way container ones are,
+    since the host filesystem is not what the chroot walk defends against, but their
     links still decide what an operation touches, and two of those decisions have
     to come out right.
 
@@ -195,7 +228,7 @@ def open_container_rootfs(name: str, *, create: bool = False) -> int:
     unpack into has to be created the same way it is checked, and the
     descriptor it gets back is the one every member is then written beneath.
 
-    FileNotFoundError means the container, or its rootfs, is not there — an
+    FileNotFoundError means the container, or its rootfs, is not there, an
     ordinary answer, left to the caller. Any other refusal is an entry this
     program did not create.
     """
@@ -242,7 +275,7 @@ def resolve_container_path(spec: str, *, deref_leaf: bool = True) -> str:
     denying any escape (see _resolve_within_root).
 
     Pass deref_leaf=False for an operation that acts on the last component
-    *itself* rather than on what it names — `copy --move`, which renames the
+    *itself* rather than on what it names: `copy --move`, which renames the
     entry, as mv does. Only the parents then get the chroot walk. Without it,
     moving a container symlink would resolve to the link's target and move that
     instead, leaving the link behind and dangling.
@@ -278,7 +311,7 @@ def _overlap_path(spec: str, path: str, deref_leaf: bool) -> str:
     chroot walk has already resolved every component, and re-resolving those with
     *host* semantics would undo the very thing that walk is for. But the walk
     starts at a rootfs that was only ever composed lexically, and a symlink
-    *above* the rootfs — a symlinked HOME or ~/.local/share, ordinary enough —
+    *above* the rootfs (a symlinked HOME or ~/.local/share, ordinary enough)
     then left the two sides incomparable: `copy -r box:/data <the same directory
     named as a host path>` did not look like a directory copied into itself. So
     the prefix is resolved and the walked remainder, which realpath must not
@@ -313,7 +346,7 @@ def refuse_src_dest_overlap(
     interpreter's stack gave out and left a partial tree behind. A host link does
     the same from the other side, including one standing *as* an endpoint.
 
-    Source onto itself is refused for the reason cp refuses it too — the
+    Source onto itself is refused for the reason cp refuses it too: the
     destination is opened while the source is still being read, so the file comes
     out empty. The stat follows a final symlink only when the operation itself
     would, so `copy f link` is refused and `copy --move f link` renames, matching
@@ -355,7 +388,7 @@ def resolve_container_child(spec: str, resolved: str, child: str, *, deref_leaf:
     container content like any other and has to go through the same chroot walk as
     one written in the spec: `/dir/f` may itself be a symlink, and joining it
     literally would leave an unresolved link at the leaf, which the O_NOFOLLOW open
-    then refuses — failing an operation that succeeds when spelled `box:/dir/f`.
+    then refuses, failing an operation that succeeds when spelled `box:/dir/f`.
 
     deref_leaf carries the same meaning as in resolve_container_path, and for the
     same reason: `copy --move f box:/dir` renames onto `box:/dir/f` and must
@@ -413,13 +446,13 @@ def _descend(fd: int, part: str, create: bool) -> int:
     With create=True a missing component is made on the way down. The mkdir is
     relative to a directory fd the walk has already validated and the open that
     follows is O_NOFOLLOW, so a component created here is no more redirectable
-    than one that was already present — which is the whole reason the parents are
+    than one that was already present, which is the whole reason the parents are
     not made by path beforehand.
 
     A refusal is raised as _RefusedError only once the component has been confirmed to
-    be a symlink. ENOTDIR covers two unrelated things — the O_NOFOLLOW open
-    declining a link, and a component that is simply not a directory
-    (`copy x box:/etc/passwd/y`, a plain mistake) — and reporting the second as a
+    be a symlink. ENOTDIR covers two unrelated things, the O_NOFOLLOW open
+    declining a link and a component that is simply not a directory
+    (`copy x box:/etc/passwd/y`, a plain mistake), and reporting the second as a
     race would send the user hunting for an attack.
     """
     try:
@@ -446,14 +479,14 @@ def pin_path(spec: str, resolved: str, *, inside: bool = False, create: bool = F
     resolving and then using it are two steps: a process inside the container can
     swap a directory for a symlink in between, and the copy would follow it out to
     the host. Re-walking the components with O_NOFOLLOW closes that window twice
-    over — it *detects* the swap (a component that is now a symlink fails, and the
+    over: it *detects* the swap (a component that is now a symlink fails, and the
     command aborts) and it *pins* what it validated, since the returned fd keeps
     naming the same directory inode no matter what happens to the name.
 
     By default the *parent* is pinned and the final component is carried as `leaf`,
     which is what a caller operating on the path itself needs. Pass inside=True for
-    a path the caller only ever works *underneath* — sync's source and destination
-    roots — to walk the final component too and pin that directory itself.
+    a path the caller only ever works *underneath* (sync's source and destination
+    roots) to walk the final component too and pin that directory itself.
     inside=True therefore also *refuses* a root that has become a symlink, which
     the default cannot do: everything written below it would go straight through.
 
@@ -463,8 +496,8 @@ def pin_path(spec: str, resolved: str, *, inside: bool = False, create: bool = F
     symlink between the resolve and the call is followed, and directories land
     outside the container before the pin gets its chance to refuse.
 
-    A host path (no container prefix) is not walked component by component — the
-    host filesystem is not the threat — but its parent is still opened, so callers
+    A host path (no container prefix) is not walked component by component, since
+    the host filesystem is not the threat, but its parent is still opened, so callers
     get the same (dir_fd, leaf) pair either way.
     """
     name = container_from_spec(spec)
@@ -526,13 +559,15 @@ def installed_containers() -> list[str]:
     """
     try:
         return sorted(
-            e for e in os.listdir(CONTAINERS_DIR)
-            if os.path.isdir(container_rootfs(e)) and not is_install_incomplete(e)
+            e for e in os.listdir(CONTAINERS_DIR) if os.path.isdir(container_rootfs(e)) and not is_install_incomplete(e)
         )
     except OSError as exc:
         import errno
+
         if exc.errno in (errno.EACCES, errno.EPERM):
             import logging
-            logging.getLogger(__name__).warning("Permission denied: cannot read containers directory '%s'", CONTAINERS_DIR)
-        return []
 
+            logging.getLogger(__name__).warning(
+                "Permission denied: cannot read containers directory '%s'", CONTAINERS_DIR
+            )
+        return []

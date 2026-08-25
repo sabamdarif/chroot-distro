@@ -1,39 +1,40 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
 """Write a file by staging a sibling temporary and renaming it into place.
 
-The pattern lives in every cache, manifest, layer and state-file writer here, so
-it is centralised: one place resolves the destination directory, mints a
-process-unique temporary name so two concurrent writers cannot collide, and
-removes the temporary when the block exits unsuccessfully -- KeyboardInterrupt
-included, so a Ctrl-C never publishes half a file.
+Every cache, manifest, layer and state-file writer here goes through this, so one
+place resolves the destination directory, mints a process-unique temporary name
+so two concurrent writers cannot collide, and removes the temporary when the
+block exits unsuccessfully, KeyboardInterrupt included, so a Ctrl-C never
+publishes half a file.
 
 A destination inside this program's own state directories is reached through a
-descriptor. `os.makedirs(exist_ok=True)` accepts a symlink to a directory and
-`tempfile.mkstemp(dir=...)` then resolves the same name again, so a guest that
-leaves `cache/oci_layers -> <host dir>` behind has every blob written into that
-host directory and renamed into place there. RUNTIME_DIR and BASE_CACHE_DIR are
-guest-writable on Termux, where both sit under the $TERMUX_PREFIX bound
-read-write into every non-isolated container. The components below whichever
-root contains the destination are therefore walked one at a time with
-O_NOFOLLOW, the temporary is created O_EXCL off the descriptor that walk
+descriptor, never by path. `os.makedirs(exist_ok=True)` accepts a symlink to a
+directory and `tempfile.mkstemp(dir=...)` then resolves the same name again, so a
+guest that leaves `cache/oci_layers -> <host dir>` behind has every blob written
+into that host directory and renamed into place there; RUNTIME_DIR and
+BASE_CACHE_DIR are guest-writable on Termux, where both sit under the
+$TERMUX_PREFIX bound read-write into every non-isolated container. The components
+below whichever root contains the destination are therefore walked one at a time
+with O_NOFOLLOW, the temporary is created O_EXCL off the descriptor that walk
 validated, and the publishing rename runs `src_dir_fd`/`dst_dir_fd` on it. The
-final `os.replace` was never the hole -- rename(2) follows no symlink at either
-end -- the parents were.
+final `os.replace` was never the hole, since rename(2) follows no symlink at
+either end: the parents were.
 
 A path outside those roots is the user's own (`backup -o`, `build --output`) and
-keeps the plain behaviour: where the user points it is not this program's
+keeps the plain behaviour. Where the user points it is not this program's
 business.
 
-`publish_file` is the same ending without the beginning, for a writer whose
-final name cannot be known until its bytes exist -- a build's layer blob is named
-by the digest of its own content, so it is packed into the build's scratch
-directory and renamed into the cache afterwards. The destination directory is
-reached the same way.
+`publish_file` is the same ending without the beginning, for a writer whose final
+name cannot be known until its bytes exist: a build's layer blob is named by the
+digest of its own content, so it is packed into the build's scratch directory and
+renamed into the cache afterwards, through the same walk.
 
-The temporary's *path* is still what `atomic_replace`'s caller writes through,
-since it opens the file itself. That name is unpredictable and was just created,
-so nothing can be waiting under it, and a directory re-pointed in the window
-between strands those bytes under a random name and fails the rename rather than
-publishing them somewhere else.
+`atomic_replace` hands its caller the temporary's *path*, since that caller opens
+the file itself. The name is unpredictable and was just created, so nothing can
+be waiting under it, and a directory re-pointed in the window between strands
+those bytes under a random name and fails the rename rather than publishing them
+somewhere else.
 
 Ported from proot-distro (https://github.com/termux/proot-distro), created by
 Sylirre <sylirre@termux.dev> for the Termux project and licensed GPL-3.0, and
@@ -145,8 +146,7 @@ def _staged(path: str, suffix: str, mode: int | None) -> Iterator[tuple[int, str
     try:
         yield fd, tmp
         if mode is not None:
-            # mode is chosen by the caller for the destination file; this helper
-            # only applies it. The temp file was created 0o600 already.
+            # The caller picks the destination's mode; the temp file was 0o600.
             os.chmod(src, mode, dir_fd=dir_fd)  # lgtm[py/overly-permissive-file]
         os.replace(src, dst, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
         if dir_fd is None:
@@ -197,7 +197,7 @@ def atomic_write(
     Yields an open file handle (text or binary depending on *binary*).
     On successful exit the data is flushed and fsynced before the temp file
     is renamed into *path*, guaranteeing that the destination never contains
-    a partially-written file — even after a crash.
+    a partially-written file, even after a crash.
     """
     with _staged(path, suffix, mode) as (fd, _tmp):
         try:
@@ -206,9 +206,7 @@ def atomic_write(
                 fh.flush()
                 os.fsync(fh.fileno())
         except BaseException:
-            # fd is already closed by the open() context manager above
-            # (closefd=True), but if the open() itself failed we still need to
-            # close it.
+            # closefd=True already closed it, unless open() itself is what raised.
             with contextlib.suppress(OSError):
                 os.close(fd)
             raise

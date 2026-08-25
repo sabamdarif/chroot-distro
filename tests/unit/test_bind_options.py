@@ -60,9 +60,7 @@ def test_safe_mount_no_options_is_single_bind():
         patch.object(mm, "is_mounted", return_value=False),
     ):
         mm.safe_mount("/host/src", "/tmp/rootfs/mnt", holder=holder)
-    holder.do_bind_mount.assert_called_once_with(
-        "/host/src", "/tmp/rootfs/mnt", recursive=False, options=""
-    )
+    holder.do_bind_mount.assert_called_once_with("/host/src", "/tmp/rootfs/mnt", recursive=False, options="")
 
 
 def test_safe_mount_ro_issues_remount():
@@ -75,9 +73,7 @@ def test_safe_mount_ro_issues_remount():
         patch.object(mm, "is_mounted", return_value=False),
     ):
         mm.safe_mount("/host/src", "/tmp/rootfs/mnt", holder=holder, options="ro")
-    holder.do_bind_mount.assert_called_once_with(
-        "/host/src", "/tmp/rootfs/mnt", recursive=False, options="ro"
-    )
+    holder.do_bind_mount.assert_called_once_with("/host/src", "/tmp/rootfs/mnt", recursive=False, options="ro")
 
 
 def test_safe_mount_only_selinux_option_skips_remount():
@@ -90,9 +86,7 @@ def test_safe_mount_only_selinux_option_skips_remount():
         patch.object(mm, "is_mounted", return_value=False),
     ):
         mm.safe_mount("/host/src", "/tmp/rootfs/mnt", holder=holder, options="z")
-    holder.do_bind_mount.assert_called_once_with(
-        "/host/src", "/tmp/rootfs/mnt", recursive=False, options=""
-    )
+    holder.do_bind_mount.assert_called_once_with("/host/src", "/tmp/rootfs/mnt", recursive=False, options="")
 
 
 def test_safe_mount_recursive_ro_uses_rbind_remount():
@@ -105,6 +99,4 @@ def test_safe_mount_recursive_ro_uses_rbind_remount():
         patch.object(mm, "is_mounted", return_value=False),
     ):
         mm.safe_mount("/host/src", "/tmp/rootfs/mnt", holder=holder, recursive=True, options="ro")
-    holder.do_bind_mount.assert_called_once_with(
-        "/host/src", "/tmp/rootfs/mnt", recursive=True, options="ro"
-    )
+    holder.do_bind_mount.assert_called_once_with("/host/src", "/tmp/rootfs/mnt", recursive=True, options="ro")

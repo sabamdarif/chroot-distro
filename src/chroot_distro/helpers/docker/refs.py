@@ -1,3 +1,19 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
+"""Image reference parsing: the one place a user's string becomes (registry, repo, tag).
+
+A reference has no delimiter that says "this is a host", so the rule is Docker's own: a
+first component holding a dot or a colon is a registry, anything else is part of the
+repository. That is what makes `localhost:5000/foo` a registry and `myuser/img` a repo,
+and it is why the bare-name case gets `library/` prefixed only when no registry was
+found. `docker.io` and `index.docker.io` normalise to the empty string, so Docker Hub
+has exactly one spelling everywhere downstream.
+
+`ARCH_TO_DOCKER` maps a `uname -m` value to the (architecture, variant) pair a manifest
+list is matched against; `arm` carrying `v7` is the only variant that matters in
+practice. `derive_alias` picks the local container name from the last repo component.
+"""
+
 ARCH_TO_DOCKER = {
     "aarch64": ("arm64", ""),
     "arm": ("arm", "v7"),

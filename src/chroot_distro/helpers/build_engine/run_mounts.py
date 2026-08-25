@@ -1,8 +1,31 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
 """RUN --mount support (BuildKit syntax) on the existing mount machinery.
 
-Parses ``--mount=type=...`` flags on RUN instructions and applies them for
-the duration of one step via a context manager. Unsupported RUN flags are
-rejected loudly — never warned-and-ignored.
+Five types: bind, cache, tmpfs, secret, ssh. `run_mount_session` applies them
+for one step and tears them down in a `finally`, so a failed step leaves nothing
+mounted, no scratch copy behind and no cache lock held. Per-type readonly
+defaults are BuildKit's, and a flag or an option this program does not implement
+is a `BuildError` naming the line: warned-and-ignored would mean building
+something other than what the Dockerfile says. Validation runs before the
+build-cache lookup for the same reason, so a cache hit cannot smuggle an
+unsupported flag past it.
+
+A mount target is a guest path and a mount point is a name, which is where the
+care goes. `safe_mount` creates a missing target with a named makedirs and
+mount(2) resolves it again, and both follow a symlink standing there, so
+`--mount=target=/var/tmp/x` against an image shipping `var/tmp -> <host dir>`
+put the source outside the rootfs. `_host_target` resolves every component
+including the last and re-anchors an absolute link at the rootfs, which is the
+view the guest has of its own path, so `/var/run/...` still lands on `/run/...`.
+
+Writes are kept off anything the build did not mean to change: a rw bind and a
+`sharing=private` cache are bound from a throwaway copy under the scratch root,
+a `sharing=locked` cache takes a `RunCacheLock` so two builds do not write it at
+once, and a secret is copied to a 0400 file that teardown removes. Placeholders
+this module created for the mount points are removed deepest-first with rmdir,
+so an empty one does not leak into the layer diff (BuildKit excludes mount
+targets from layers) while whatever the step actually wrote into one is kept.
 """
 
 import contextlib
@@ -66,7 +89,7 @@ def validate_and_parse_run_flags(instr: dict[str, typing.Any]) -> list[RunMount]
             )
         if network not in ("host", "default"):
             raise BuildError(f"RUN --network={network} is not supported (line {lineno}).")
-        # host/default: host networking is what the step gets anyway — no-op.
+        # host/default: host networking is what the step gets anyway.
 
     if "security" in flags:
         raise BuildError(
@@ -153,11 +176,6 @@ def _parse_one_mount(spec: str, lineno: int) -> RunMount:
     return m
 
 
-# ---------------------------------------------------------------------------
-# Mount setup / teardown around one RUN step
-# ---------------------------------------------------------------------------
-
-
 def _host_target(rootfs: str, target_abs: str) -> str:
     """Resolve a guest target path to a host path clamped inside rootfs.
 
@@ -207,9 +225,9 @@ def _scratch_copy(src: str, scratch: str) -> str:
 def _remove_scratch(engine: typing.Any, parts: typing.Sequence[str]) -> None:
     """Remove the scratch copy *parts* names below the build's scratch root.
 
-    What a mount leaves there is a RUN step's own doing -- a rw bind of the
-    build context or of a pulled image, a private cache the step wrote into --
-    so the depth and the modes are the step's choice, not this program's.
+    What a mount leaves there is a RUN step's own doing (a rw bind of the build
+    context or of a pulled image, a private cache the step wrote into), so the
+    depth and the modes are the step's choice, not this program's.
     `shutil.rmtree(ignore_errors=True)` swallowed an OSError but not the
     RecursionError a tree deeper than the interpreter's limit raises, and this
     runs in the session's `finally`: a step that had otherwise succeeded ended
@@ -281,7 +299,7 @@ def _resolve_cache(
         lock.__enter__()
         locks.append(lock)
     elif m.sharing == "private":
-        # ponytail: private = throwaway copy, writes discarded; switch to a
+        # private = throwaway copy, writes discarded; switch to a
         # persist-back copy if private caches ever need to accumulate.
         parts = (f"runmount-cache-{n}",)
         scratch_names.append(parts)
@@ -321,7 +339,7 @@ def run_mount_session(
 
     Yields extra environment variables for the child (SSH_AUTH_SOCK).
     Teardown unmounts deepest-last-first, removes tmp secret/scratch
-    copies, and releases cache locks — also on step failure.
+    copies, and releases cache locks, also on step failure.
     """
     if not mounts:
         yield {}
@@ -366,9 +384,7 @@ def run_mount_session(
             else:  # ssh
                 sock = (getattr(engine, "ssh_sockets", None) or {}).get(m.id)
                 if sock is None:
-                    raise BuildError(
-                        f"RUN --mount=type=ssh (id={m.id}) requires --ssh on the build command line."
-                    )
+                    raise BuildError(f"RUN --mount=type=ssh (id={m.id}) requires --ssh on the build command line.")
                 if not target_abs:
                     target_abs = f"/run/buildkit/ssh_agent.{n}"
                 src, ro = sock, False

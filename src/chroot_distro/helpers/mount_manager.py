@@ -1,3 +1,48 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
+"""Every mount and unmount a container needs, and the policy for when one fails.
+
+Binds, special filesystems, /dev nodes, propagation changes and teardown all pass
+through here, so `syscalls/mount.py` stays a thin syscall wrapper and the decisions
+live in one file. Every function takes an optional *holder*: with one, the work is
+done inside that holder's mount namespace through `holder.do_*` or `holder.call`,
+because a mount made from the host's view is not the mount the guest sees, and a
+target on a tmpfs that only exists inside the namespace cannot even be created from
+outside.
+
+An existing mount at a target is normally trusted, since concurrent sessions share
+mounts, and the exceptions are what most of the code here is for. A mount left by a
+dead namespace is MNT_LOCKED, so umount2 refuses it with EINVAL and the only way past
+is to stack the right mount on top: `required_child` (`ptmx` for the /dev bind) and the
+devpts `ptmxmode=666` probe are how such a mount is recognised. Before stacking, the
+covered mount is made private, or the new mount propagates a copy onto the host
+original it shares a peer group with.
+
+The mount table is read, never guessed. `/proc/mounts` lists in mount order, so the
+*last* matching line is the visible top of a stack; paths in it are octal-escaped
+(`decode_mount_path`) and canonical, which is what lets the prefix scan skip a
+realpath per line on Android tables with hundreds of entries.
+
+Failures are graded rather than uniform. A refused unmount falls back to MNT_DETACH,
+and for the targets that routinely EBUSY on logout (`_BUSY_PRONE_BASENAMES`) that
+fallback is expected and stays at debug level. A special mount marked optional, or
+forced optional by the caller, returns False instead of raising. tmpfs options are
+retried simplest-last because Android kernels and SELinux reject `size=` and
+sometimes everything, and a bare tmpfs is better than no tmpfs. But
+`ensure_no_mounts` is the opposite and must stay that way: a leftover mount under a
+rootfs about to be deleted is host data, so it raises rather than proceed.
+
+Two platform-shaped paths. A single-instance devpts kernel has one global superblock,
+so a devpts mount(2) would reconfigure the host's /dev/pts until reboot, and the host
+instance is bound instead. Inside a user namespace mknod of a device node is EPERM
+even for root, so `create_dev_nodes` binds the host's real node over a stub, which the
+kernel does allow. `deep_clean_container_mounts` is the Termux endgame: stale mounts
+whose origin is another namespace (magiskd's, after `su --mount-master`) propagate in
+as locked slaves, and unmounting a slave never removes its master, so it forks a child
+per namespace, setns(2)s in and unmounts at the origin. The fork is not optional: the
+caller's own mount namespace must come back unchanged.
+"""
+
 from __future__ import annotations
 
 import contextlib
@@ -137,11 +182,10 @@ def safe_mount(
 
     source_is_dir = os.path.isdir(source_abs)
 
-    # Never bind a zero-byte regular file: doing so would create (or shadow)
-    # an empty target that masks a real library inside the rootfs, which
-    # makes ldconfig report "File ... is empty, not checked" on every
-    # package install. A genuine library is never zero bytes, so an empty
-    # source is always a broken/placeholder bind we must skip.
+    # Never bind a zero-byte regular file: it creates (or shadows) an empty
+    # target that masks a real library inside the rootfs, and ldconfig then
+    # reports "File ... is empty, not checked" on every package install. A
+    # genuine library is never zero bytes.
     if not source_is_dir and os.path.isfile(source_abs):
         try:
             if os.path.getsize(source_abs) == 0:
@@ -164,7 +208,7 @@ def safe_mount(
     if is_mounted(target, holder=holder):
         # Normally an existing mount is trusted (concurrent sessions share
         # mounts). But a stale mount from a dead namespace can shadow the
-        # target while missing what the guest needs — e.g. a leftover
+        # target while missing what the guest needs, e.g. a leftover
         # MNT_LOCKED tmpfs on /dev without a ptmx node, which umount2
         # cannot remove (EINVAL). When *required_child* is set, probe for
         # it and mount over the stale mount when it is missing.
@@ -190,7 +234,6 @@ def safe_mount(
                     os.remove(target)
             raise MountError(f"Failed to mount {source} to {target}: {e}") from e
     else:
-        # No holder, so mount(2) straight from this process.
         try:
             bind_mount(source_abs, target, recursive=recursive, options=kernel_options)
         except OSError as e:
@@ -221,7 +264,7 @@ def create_dev_nodes(
       how a privileged mount namespace without a user namespace works.
     * **bind** (*use_userns*): inside a user namespace the kernel forbids
       ``mknod`` of device nodes (EPERM) even for root, which would leave e.g.
-      ``/dev/null`` missing — a later shell redirect then creates a plain file
+      ``/dev/null`` missing, and a later shell redirect then creates a plain file
       in its place, breaking it for non-root users. So when a user namespace is
       active we instead **bind-mount the host's real device node** (``/dev/null``
       etc.) onto a stub in the tmpfs ``/dev``; binding an existing device node
@@ -236,8 +279,8 @@ def create_dev_nodes(
         if use_userns:
             # Bind the host's real device node over a stub in the tmpfs /dev.
             # The fresh tmpfs /dev lives inside the holder's mount namespace, so
-            # the stub target must be created there (not on the host view of the
-            # rootfs) before the bind — otherwise the mount target is missing.
+            # the stub target must be created there, not on the host view of
+            # the rootfs, or the bind has no mount target.
             source = os.path.join("/dev", name)
             if not os.path.exists(source):
                 log.debug("Skipping /dev/%s bind: host node %s missing", name, source)
@@ -266,7 +309,6 @@ def create_dev_nodes(
             if holder.call(_make_node) is None:
                 log.debug("Could not create device node %s in the holder's namespaces", host_path)
             continue
-        # No holder (no mount namespace): create directly on the host path.
         try:
             _make_node()
         except OSError as exc:
@@ -338,12 +380,11 @@ def safe_unmount(target: str, holder: NamespaceHolder | None = None) -> None:
             log.debug("Non-fatal: unmount of %s inside namespace failed: %s", target, e)
         return
 
-    # Direct syscall path — no holder.
     try:
         native_umount(target)
     except OSError as e:
         if e.errno in (errno.EINVAL, errno.ENOENT):
-            # EINVAL: "not mounted" — already gone. ENOENT: the mount point
+            # EINVAL: "not mounted", already gone. ENOENT: the mount point
             # vanished, e.g. a shared-propagation peer was removed when its
             # sibling was unmounted. Either way there is nothing to unmount.
             log.debug("umount reports '%s' is not mounted; treating as already unmounted.", target)
@@ -672,14 +713,13 @@ def apply_special_mount(rootfs: str, sm, holder: NamespaceHolder | None = None, 
         with contextlib.suppress(OSError):
             set_propagation(target, MS_PRIVATE)
 
-    # Build the list of option strings to try, simplest-last. Android's toybox
-    # `mount` and SELinux frequently reject tmpfs option strings (e.g. size=)
-    # with a non-zero exit and no stderr, so progressively strip options and,
-    # for tmpfs, finally try with none at all.
+    # Option strings are tried simplest-last: Android kernels and SELinux
+    # reject some tmpfs options (size= above all), so strip them one group at
+    # a time and, for tmpfs, finally try with none at all.
     option_attempts: list[str] = []
     if sm.options:
         option_attempts.append(sm.options)
-        # Drop size= (a common toybox/SELinux reject) but keep mode=.
+        # size= is the usual reject; keep mode=.
         reduced = ",".join(o for o in sm.options.split(",") if not o.strip().startswith("size="))
         if reduced and reduced != sm.options:
             option_attempts.append(reduced)
@@ -691,7 +731,6 @@ def apply_special_mount(rootfs: str, sm, holder: NamespaceHolder | None = None, 
     last_err = ""
     for opts in option_attempts:
         if holder is not None:
-            # Inside a namespace holder, use holder.do_mount_filesystem()
             try:
                 holder.do_mount_filesystem(sm.source, target, sm.fstype, options=opts)
                 log.debug("Mounted %s at %s (options=%r) via holder", sm.fstype, sm.target, opts)
@@ -700,7 +739,6 @@ def apply_special_mount(rootfs: str, sm, holder: NamespaceHolder | None = None, 
                 last_err = str(e)
                 log.debug("mount(2) of %s opts=%r failed via holder: %s", sm.fstype, opts, last_err)
         else:
-            # Direct syscall path.
             try:
                 mount_filesystem(sm.source, target, sm.fstype, options=opts)
                 log.debug("Mounted %s at %s (options=%r)", sm.fstype, sm.target, opts)

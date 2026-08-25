@@ -1,3 +1,15 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
+"""Push a locally built image to its registry.
+
+Argument work only: the tag is completed to `:latest` exactly the way `build` does so
+the short form works, the architecture is resolved, and the manifest cache is checked
+before any socket is opened, which catches a typoed tag without a network round trip.
+The `BuildLock` for this reference and architecture is held for the whole upload, so a
+concurrent build cannot replace the blobs being sent. `helpers/docker/push.py` does the
+work.
+"""
+
 import sys
 import typing
 import urllib.error

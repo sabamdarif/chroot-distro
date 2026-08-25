@@ -1,23 +1,28 @@
-"""Kernel build-config inspection for the `info` command.
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
+"""What the running kernel was built with, for the `info` report.
 
-Reads the running kernel's build configuration (``CONFIG_*`` options) and
-reports which of the features chroot-distro relies on are compiled in. The
-config-file discovery mirrors the approach used by the bundled
-``check-config.sh`` (and lxc-checkconfig): ``/proc/config.gz`` first, then the
-usual ``/boot`` / ``/usr/src`` fallbacks.
+`info` says whether isolation will work on this machine, and the answer is a
+kernel build option: without `CONFIG_PID_NS` there is no `--isolated`, and the
+program degrading quietly is exactly what a user then cannot explain. Only the
+options this program uses are checked, grouped by the feature each one powers,
+and the whole report is advisory: a missing required option explains a
+degradation, a missing optional one affects an extra.
 
-Only the options chroot-distro actually uses are checked, grouped by the
-feature each one powers:
+The config is read from `/proc/config.gz` first, then the usual `/boot` and
+`/usr/src` locations, with `CONFIG=<path>` as an override, the name every kernel
+config checker uses. A locked-down Android kernel ships none of them, which is
+why `probe_flag_runtime` exists: it asks the running kernel instead, through
+`/proc/self/ns/*`, `/proc/filesystems` and `/proc/mounts`, and answers `unknown`
+for anything it has no mapping for rather than guessing. An unreadable
+`/proc/filesystems` is kept distinct from a readable one that lacks the type, so
+"cannot tell" is never reported as "absent".
 
-* Namespace isolation (``--isolated`` and ``CD_USE_NS=1``): the mount/PID/UTS/
-  IPC namespaces plus the umbrella ``CONFIG_NAMESPACES``.
-* Pseudo-filesystems that every chroot login mounts (procfs, sysfs, devpts,
-  devtmpfs/tmpfs for the fresh ``/dev`` under maximum isolation).
-* Cgroups.
-
-The result is intentionally advisory: a missing *required* option explains why
-``--isolated`` / ``CD_USE_NS`` degrade on that kernel, while missing optional
-options only affect specific extras (e.g. Docker).
+`probe_devpts_multi_instance` is the one probe that acts: below 4.7 it mounts a
+scratch `newinstance` devpts and looks for host ptys, because a vendor config can
+contradict itself and the mount is the authority. It needs root, unmounts and
+removes the scratch directory in a `finally`, and goes through the `syscalls`
+wrappers like everything else.
 """
 
 import contextlib
@@ -103,7 +108,6 @@ KERNEL_FLAG_GROUPS: tuple[KernelFlagGroup, ...] = (
     ),
 )
 
-# Config file locations to try, in order. Mirrors check-config.sh.
 _CANDIDATE_PATHS = (
     "/proc/config.gz",
     "/boot/config-{release}",
@@ -144,7 +148,7 @@ def find_kernel_config() -> tuple[str | None, str | None]:
     Returns ``(path, text)``; both are None when no config could be read
     (common on locked-down Android kernels that ship no ``/proc/config.gz``).
     """
-    # Allow an explicit override, matching check-config.sh's CONFIG env var.
+    # CONFIG=<path> is the conventional override name among kernel config checkers.
     override = os.environ.get("CONFIG")
     candidates = ([override] if override else []) + _candidate_config_paths()
     for path in candidates:
@@ -172,7 +176,7 @@ def probe_devpts_multi_instance() -> str:
     """Whether each devpts mount is its own instance.
 
     >= 4.7 always is (symbol removed in 4.9). Older kernels: mount a scratch
-    'newinstance' devpts — empty means per-mount instances, host ptys visible
+    'newinstance' devpts: empty means per-mount instances, host ptys visible
     means the single shared instance. Vendor config.gz can contradict itself,
     so the mount probe is authoritative. Needs root, else PROBE_UNKNOWN.
     """

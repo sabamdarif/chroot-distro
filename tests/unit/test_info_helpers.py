@@ -59,9 +59,7 @@ def test_userns_knob_caps_absent(monkeypatch):
 # ── _free_disk ───────────────────────────────────────────────────────────────────
 def test_free_disk_warns_under_1gib(monkeypatch):
     monkeypatch.setattr("os.path.exists", lambda p: True)
-    monkeypatch.setattr(
-        info.shutil, "disk_usage", lambda p: SimpleNamespace(total=100 << 30, free=512 << 20, used=0)
-    )
+    monkeypatch.setattr(info.shutil, "disk_usage", lambda p: SimpleNamespace(total=100 << 30, free=512 << 20, used=0))
     value, level = info._free_disk("/data")
     assert level == "warn"
     assert "free of" in value
@@ -69,9 +67,7 @@ def test_free_disk_warns_under_1gib(monkeypatch):
 
 def test_free_disk_info_when_ample(monkeypatch):
     monkeypatch.setattr("os.path.exists", lambda p: True)
-    monkeypatch.setattr(
-        info.shutil, "disk_usage", lambda p: SimpleNamespace(total=100 << 30, free=50 << 30, used=0)
-    )
+    monkeypatch.setattr(info.shutil, "disk_usage", lambda p: SimpleNamespace(total=100 << 30, free=50 << 30, used=0))
     _value, level = info._free_disk("/data")
     assert level == "info"
 

@@ -1,3 +1,20 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
+"""`chroot-distro unmount`: end a container's sessions and drop its mounts.
+
+The exclusive `ContainerLock` is waited for rather than forced, which is the whole
+difference from `kill`: this is the orderly path, and a caller who cannot wait wants
+that command instead. Inside the lock the order is fixed: SIGTERM the chrooted
+processes, SIGKILL whatever outlives the grace period, zero the session count, then
+unmount.
+
+`mount_manager.unmount_all` does the unmounting, through the holder when one is
+alive, because a mount made inside its namespace cannot be seen from here. The
+holder and the isolation mode are released after it, never while a mount still
+depends on them. On Termux a deep sweep follows, for the mounts an earlier
+`su --mount-master` left in another namespace.
+"""
+
 import contextlib
 import os
 import signal
@@ -25,8 +42,6 @@ def command_unmount(args) -> None:
         sys.exit(1)
 
     with ContainerLock(container_name, exclusive=True, command="unmount"):
-        # 1. Stop anything still running inside the container: SIGTERM, then
-        # SIGKILL whatever refuses to exit.
         active_pids = session.get_active_chroot_pids(container_name)
         if active_pids:
             log_info(f"Stopping active sessions/processes in container '{container_name}' (PIDs: {active_pids})...")
@@ -61,14 +76,12 @@ def command_unmount(args) -> None:
                 if remaining_pids:
                     warn(f"Some processes could not be stopped: {remaining_pids}")
 
-        # 2. Reset session bookkeeping
         log_info(f"Setting active sessions count for '{container_name}' to 0.")
         session.reset(container_name)
         session.clear_mount_options(container_name)
 
         holder = namespace.get_live_holder(container_name)
 
-        # 3. Unmount everything under rootfs
         log_info("Unmounting active mount points under rootfs...")
         try:
             mount_manager.unmount_all(rootfs_dir, holder=holder)
@@ -81,9 +94,9 @@ def command_unmount(args) -> None:
             namespace.clear_isolation_mode(container_name)
             holder = None
 
-        # 4. Termux: mounts made by an earlier `su --mount-master` live in the
-        # global namespace and reach us as slave copies that cannot be
-        # unmounted locally — remove them at the source so it propagates.
+        # Termux: mounts made by an earlier `su --mount-master` live in the
+        # global namespace and reach this process as slave copies that cannot
+        # be unmounted locally, so they go at the source and propagate.
         if IS_TERMUX:
             log_info("Cleaning stale container mounts in other mount namespaces...")
             mount_manager.deep_clean_container_mounts(container_name)

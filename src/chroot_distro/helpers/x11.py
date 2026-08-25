@@ -1,4 +1,29 @@
-"""Resolve host X11 display environment for chroot sessions."""
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
+"""The host X11 session, recovered from under sudo, and a cookie the guest can read.
+
+Two problems shape this file. The first is that the program self-elevates, so by
+the time it runs, `DISPLAY` and `XAUTHORITY` are whatever root has, which is
+usually nothing: `resolve_invoking_uid` takes `SUDO_UID` over the current uid,
+and `get_invoking_env` walks up `/proc/<pid>` to the first process owned by that
+uid and reads its `environ`, cached for the run. Every lookup here goes through
+`get_host_env_var`, so the current environment wins and the recovered one only
+fills gaps.
+
+The second is that root can read an auth file the guest uid cannot, so handing
+the guest a bind of the host cookie is not enough.
+`provision_guest_xauthority` copies only the entries matching this display into
+`GUEST_XAUTHORITY_PATH` inside the rootfs, chowned to the guest uid and chmod
+0600, and removes the file again on any failure rather than leaving a partial
+cookie. The path is under `/var/tmp` deliberately: nothing binds over it.
+
+An auth path is only ever used when `_is_safe_auth_path` accepts it, meaning the
+realpath sits under the invoking user's home or `/run/user/<uid>`, since the value
+arrives from another process's environment. A file already inside the runtime dir
+needs no bind of its own, because that directory is bound as a whole.
+`_discover_runtime_xauthority` covers a Wayland session that sets no `XAUTHORITY`
+at all, taking the newest of the Xwayland auth files the compositors write there.
+"""
 
 from __future__ import annotations
 

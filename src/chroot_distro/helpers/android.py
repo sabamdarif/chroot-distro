@@ -1,3 +1,30 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
+"""The Android-side adjustments a guest needs on Termux, and nothing on Linux.
+
+Every entry point here returns immediately when `IS_TERMUX` is false, so a caller
+does not have to ask.
+
+Android carries its permissions in supplementary group ids, so a guest whose
+`/etc/group` has never heard of them gets no network, no bluetooth and no audio
+no matter what it is allowed to do: `configure_android_rootfs` adds the
+`ANDROID_GROUPS` ids and puts `root` in each. `_apt` is handled separately
+because apt on Debian and Ubuntu drops to that account to fetch, so `aid_inet`
+becomes its primary group and its state directories are chowned to it.
+
+Both account files are reached through `rootfs.guest_etc_path`, never joined:
+termux-docker images ship `/etc/group` and `/etc/passwd` as absolute symlinks
+into `/system/etc`, which resolve on the host to a read-only filesystem and
+would fail the write with EROFS.
+
+`termux_home_owner_ids` takes the app uid from the ownership of `TERMUX_HOME`
+rather than `getuid()`, which is 0 by the time this runs. `ensure_data_suid`
+clears nosuid, nodev and noexec from the host `/data`, which `sudo` in the guest
+and apt's gpgv under `--shared-tmp` both need; a remount replaces the whole VFS
+flag word, so the flags in force are read back from `/proc/mounts` first and the
+filesystem's own options are passed through untouched.
+"""
+
 import logging
 import os
 
@@ -109,7 +136,6 @@ def configure_android_rootfs(rootfs: str) -> None:
     if not os.path.exists(group_path):
         return
 
-    # 1. Read existing groups
     existing_groups = {}
     try:
         with open(group_path) as f:
@@ -120,7 +146,6 @@ def configure_android_rootfs(rootfs: str) -> None:
     except OSError:
         return
 
-    # 1.5 Check if _apt exists in passwd
     has_apt = False
     passwd_path = guest_etc_path(rootfs, "/etc/passwd")
     if os.path.exists(passwd_path):
@@ -133,7 +158,6 @@ def configure_android_rootfs(rootfs: str) -> None:
         except OSError as exc:
             log.warning("Failed to read /etc/passwd in setup_android_permissions: %s", exc)
 
-    # 2. Add missing Android groups or append root (and _apt) to them
     modified = False
     for gname, gid in ANDROID_GROUPS.items():
         if gname not in existing_groups:
@@ -144,7 +168,6 @@ def configure_android_rootfs(rootfs: str) -> None:
             existing_groups[gname] = [gname, "x", str(gid), ",".join(users)]
             modified = True
         else:
-            # Group exists, ensure root and _apt are in user list
             parts = existing_groups[gname]
             users = parts[3].split(",") if len(parts) > 3 and parts[3] else []
             group_modified = False
@@ -170,11 +193,9 @@ def configure_android_rootfs(rootfs: str) -> None:
         except OSError as exc:
             log.warning("Failed to write /etc/group in setup_android_permissions: %s", exc)
 
-    # 3. Add aid_inet/aid_net_raw to default user add config (etc/adduser.conf)
     adduser_conf = os.path.join(rootfs, "etc", "adduser.conf")
     if os.path.exists(adduser_conf):
         try:
-            # Check if EXTRA_GROUPS is already configured
             has_extra_groups = False
             with open(adduser_conf) as f:
                 for line in f:
@@ -187,13 +208,13 @@ def configure_android_rootfs(rootfs: str) -> None:
         except OSError as exc:
             log.warning("Failed to configure adduser.conf in setup_android_permissions: %s", exc)
 
-    # 4. _apt permission fix for Debian/Ubuntu based distros
+    # apt on Debian/Ubuntu runs as _apt, which needs network access: make
+    # aid_inet (3003) its primary group and let it own its own state dirs.
     if has_apt and os.path.exists(passwd_path):
         try:
-            # 4a. Update _apt's primary GID to 3003 (aid_inet) in /etc/passwd
             passwd_lines = []
             passwd_modified = False
-            _apt_uid = 100  # Default fallback
+            _apt_uid = 100
             with open(passwd_path) as f:
                 for raw_line in f:
                     parts = raw_line.rstrip("\n").split(":")
@@ -209,7 +230,6 @@ def configure_android_rootfs(rootfs: str) -> None:
                 with open(passwd_path, "w") as f:
                     f.writelines(passwd_lines)
 
-            # 4b. Chown apt directories
             for apt_dir in ("var/lib/apt", "var/cache/apt"):
                 full_apt_dir = os.path.join(rootfs, apt_dir)
                 if os.path.exists(full_apt_dir):

@@ -1,7 +1,25 @@
-"""Unified display environment resolver for chroot sessions.
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
+"""One display environment for a session, and the host paths it needs bound.
 
-Aggregates X11, Wayland, sound, and D-Bus env vars from the host
-into a single interface used by the login command.
+`resolve_display_env` merges X11, Wayland, sound and D-Bus into a single dict,
+first writer winning with X11 written first, so a variable a real X11 session
+resolved is never overwritten by a Wayland or PulseAudio fallback. Nothing here
+decides whether a passthrough is wanted; `login` asks for it.
+
+`resolve_display_socket_binds` binds the invoking user's whole
+`XDG_RUNTIME_DIR` (`/run/user/<uid>`) as one directory rather than the host
+`/run`, which would expose NetworkManager, systemd-notify and every other
+unrelated runtime socket, and rather than the individual socket files, which are
+recreated by their servers and would leave a stale bind behind. The directory's
+own ownership and modes come along, so the guest uid can traverse it, and the
+caller binds it recursively with rslave so a socket created later still appears.
+
+A D-Bus session socket living outside the runtime dir is added on its own, and
+the system bus socket is bound at its real path with the usual `/var/run -> /run`
+symlink resolved, so it lands at `/run/dbus/system_bus_socket` in the guest. Only
+paths that exist are returned, runtime dir first so a nested fallback is bound
+after the directory that contains it.
 """
 
 from __future__ import annotations
@@ -126,25 +144,21 @@ def resolve_display_env() -> tuple[dict[str, str], list[str]]:
     - D-Bus env (DBUS_SESSION_BUS_ADDRESS)
 
     Returns:
-        (env_dict, bind_paths) — env_dict maps var names to values,
+        (env_dict, bind_paths): env_dict maps var names to values,
         bind_paths lists host paths that must be bind-mounted for X11 auth.
     """
-    # X11 (existing, returns env + bind paths)
     env, bind_paths = resolve_host_x11_env()
 
-    # Wayland
     wayland_env = resolve_wayland_env()
     for key, val in wayland_env.items():
         if key not in env:
             env[key] = val
 
-    # Sound
     sound_env = resolve_sound_env()
     for key, val in sound_env.items():
         if key not in env:
             env[key] = val
 
-    # D-Bus
     dbus_env = _resolve_dbus_env()
     for key, val in dbus_env.items():
         if key not in env:

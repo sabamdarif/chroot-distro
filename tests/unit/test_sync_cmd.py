@@ -357,9 +357,7 @@ def test_command_sync_holds_the_container_lock_while_it_runs(rootfs, tmp_path, m
     monkeypatch.setattr("chroot_distro.locking.LOCKS_DIR", str(locks))
     src = _tree(tmp_path / "src")
 
-    command_sync(
-        Namespace(source=str(src), destination="distro:/mirror", verbose=False, checksum=False, delete=True)
-    )
+    command_sync(Namespace(source=str(src), destination="distro:/mirror", verbose=False, checksum=False, delete=True))
 
     assert (rootfs / "mirror" / "sub" / "b.txt").read_text() == "beta"
     assert os.listdir(locks) == ["distro.lock"]

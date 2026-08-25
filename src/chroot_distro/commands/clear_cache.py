@@ -1,10 +1,16 @@
-"""Empty the download cache, or drop only the build cache.
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
+"""`chroot-distro clear-cache`: empty the download cache, or drop the build cache.
 
 Two deletion targets behind one command. The default takes the whole cache
-directory; `--build-cache` takes the per-instruction build index and then the
-layer blobs that nothing else names, so the downloaded base images -- the most
-expensive thing here to re-acquire, and on a metered connection the wrong thing
-to throw away -- stay where they are.
+directory; `--build-cache` takes the per-instruction build index and then the layer
+blobs that nothing else names, so the downloaded base images stay where they are.
+Those are the most expensive thing here to re-acquire, and on a metered connection
+the wrong thing to throw away.
+
+`--build-cache` refuses to run while any other command holds a lock: a build in
+progress has recorded steps whose layers this would unpin, and it names them in the
+image it stores last of all.
 """
 
 import contextlib
@@ -78,11 +84,6 @@ def command_clear_cache(args) -> None:
     log_info(f"Reclaimed {fmt_size(total)} of disk space.")
 
 
-# ---------------------------------------------------------------------------
-# --build-cache
-# ---------------------------------------------------------------------------
-
-
 def _sweep_build_cache(args) -> None:
     """Drop the build index, then the layer blobs nothing else references.
 
@@ -93,7 +94,7 @@ def _sweep_build_cache(args) -> None:
     direction that matters.
 
     The index is never read, only unlinked, which is what makes the flag work on
-    one too corrupt to parse -- among the reasons to reach for it. What survives
+    one too corrupt to parse, among the reasons to reach for it. What survives
     is what a cached image lists, including every layer of an image a build
     produced, so what actually goes is the build's own bookkeeping, the
     intermediates no image kept (multi-stage stages, the output of steps rebuilt

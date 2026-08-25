@@ -1,3 +1,13 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
+"""OCI and Docker media type strings, plus the canonical JSON both specs hash over.
+
+Both manifest formats are accepted on pull, so the strings are needed in pairs. A
+digest is taken over the exact bytes, so `canonical_json` (sorted keys, no whitespace)
+is what a manifest or config must be serialised with: re-encoding a document any other
+way changes its digest and the registry rejects it.
+"""
+
 import json
 
 

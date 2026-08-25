@@ -28,21 +28,26 @@ def mock_sessions_dir(tmp_path, monkeypatch):
 
     # Redefine _session_path to use the new tmp_path
     global _session_path
+
     def new_session_path(pid):
         return os.path.join(str(tmp_path), f"{pid}.json")
+
     _session_path = new_session_path
 
 
-def _make_live(pid, container, kind="run", command=None, user="root",
-               start_time=1.0, detached=False):
+def _make_live(pid, container, kind="run", command=None, user="root", start_time=1.0, detached=False):
     """Create a session file and hold its exclusive lock via a live fd."""
     os.makedirs(constants.SESSIONS_DIR, exist_ok=True)
     fd = open(_session_path(pid), "w")
     json.dump(
         {
-            "pid": pid, "container": container, "kind": kind,
-            "command": command or ["sh"], "user": user,
-            "start_time": start_time, "detached": detached,
+            "pid": pid,
+            "container": container,
+            "kind": kind,
+            "command": command or ["sh"],
+            "user": user,
+            "start_time": start_time,
+            "detached": detached,
         },
         fd,
     )
@@ -55,10 +60,13 @@ def _make_live(pid, container, kind="run", command=None, user="root",
 # register_session / active_sessions lifecycle
 # ---------------------------------------------------------------------------
 
+
 def test_register_then_listed_then_pruned_on_close():
     handle = session_registry.register_session(
-        container="ubuntu", kind="login",
-        command_argv=["/bin/bash", "-l"], user="root",
+        container="ubuntu",
+        kind="login",
+        command_argv=["/bin/bash", "-l"],
+        user="root",
     )
     assert handle is not None
     try:
@@ -84,7 +92,10 @@ def test_register_then_listed_then_pruned_on_close():
 
 def test_register_is_inheritable():
     handle = session_registry.register_session(
-        container="x", kind="run", command_argv=["x"], user="root",
+        container="x",
+        kind="run",
+        command_argv=["x"],
+        user="root",
     )
     assert handle is not None
     try:
@@ -97,8 +108,10 @@ def test_register_is_inheritable():
 
 def test_register_detached():
     handle = session_registry.register_session(
-        container="ubuntu", kind="run",
-        command_argv=["nginx"], user="root",
+        container="ubuntu",
+        kind="run",
+        command_argv=["nginx"],
+        user="root",
         detached=True,
     )
     assert handle is not None
@@ -115,8 +128,15 @@ def test_dead_session_file_is_pruned():
     path = _session_path(999999)
     with open(path, "w") as fh:
         json.dump(
-            {"pid": 999999, "container": "ghost", "kind": "login",
-             "command": ["sh"], "user": "root", "start_time": 0.0, "detached": False},
+            {
+                "pid": 999999,
+                "container": "ghost",
+                "kind": "login",
+                "command": ["sh"],
+                "user": "root",
+                "start_time": 0.0,
+                "detached": False,
+            },
             fh,
         )
     # No process holds the lock → treated as dead and removed.
@@ -143,14 +163,21 @@ def test_live_and_dead_mixed():
     dead_path = _session_path(456456)
     with open(dead_path, "w") as fh:
         json.dump(
-            {"pid": 456456, "container": "dead-one", "kind": "run",
-             "command": ["x"], "user": "root", "start_time": 0.0, "detached": False},
+            {
+                "pid": 456456,
+                "container": "dead-one",
+                "kind": "run",
+                "command": ["x"],
+                "user": "root",
+                "start_time": 0.0,
+                "detached": False,
+            },
             fh,
         )
     try:
         sessions = session_registry.active_sessions()
         assert [s["container"] for s in sessions] == ["live-one"]
-        assert not os.path.exists(dead_path)        # dead pruned
+        assert not os.path.exists(dead_path)  # dead pruned
         assert os.path.exists(_session_path(123123))  # live kept
     finally:
         live.close()
@@ -179,6 +206,7 @@ def test_corrupt_session_file_does_not_crash():
 # Formatting helpers
 # ---------------------------------------------------------------------------
 
+
 def test_fmt_uptime():
     assert _fmt_uptime(-5) == "0m00s"
     assert _fmt_uptime(0) == "0m00s"
@@ -202,6 +230,7 @@ def test_fmt_command():
 # command_ps dispatch
 # ---------------------------------------------------------------------------
 
+
 def test_command_ps_quiet_empty(capsys):
     command_ps(SimpleNamespace(quiet=True))
     assert capsys.readouterr().out == ""
@@ -221,14 +250,16 @@ def test_command_ps_quiet_lists_pids(capsys):
 
 def test_command_ps_table_contains_fields(capsys):
     fd = _make_live(
-        424242, "ubuntu", kind="login",
-        command=["/bin/bash", "-l"], user="alice",
+        424242,
+        "ubuntu",
+        kind="login",
+        command=["/bin/bash", "-l"],
+        user="alice",
     )
     try:
         command_ps(SimpleNamespace(quiet=False))
         err = capsys.readouterr().err
-        for token in ("PID", "CONTAINER", "COMMAND",
-                      "424242", "ubuntu", "login", "alice", "/bin/bash"):
+        for token in ("PID", "CONTAINER", "COMMAND", "424242", "ubuntu", "login", "alice", "/bin/bash"):
             assert token in err
     finally:
         fd.close()
@@ -241,13 +272,19 @@ def test_command_ps_table_empty(capsys):
 
 def test_command_ps_table_with_detached_session(capsys):
     fd1 = _make_live(
-        12345, "ubuntu", kind="login",
-        command=["/bin/bash", "-l"], user="root",
+        12345,
+        "ubuntu",
+        kind="login",
+        command=["/bin/bash", "-l"],
+        user="root",
         detached=False,
     )
     fd2 = _make_live(
-        12388, "debian", kind="run",
-        command=["nginx", "-g", "daemon off;"], user="root",
+        12388,
+        "debian",
+        kind="run",
+        command=["nginx", "-g", "daemon off;"],
+        user="root",
         detached=True,
     )
     try:
@@ -301,9 +338,7 @@ def test_register_session_makedirs_fails():
         raise OSError("Permission denied")
 
     with patch("os.makedirs", mock_makedirs), patch("logging.Logger.warning") as mock_warn:
-        res = session_registry.register_session(
-            container="ubuntu", kind="login", command_argv=["bash"], user="root"
-        )
+        res = session_registry.register_session(container="ubuntu", kind="login", command_argv=["bash"], user="root")
         assert res is None
         mock_warn.assert_called_once()
         assert "Failed to create sessions directory" in mock_warn.call_args[0][0]
@@ -313,10 +348,12 @@ def test_register_session_open_fails():
     def mock_open(*args, **kwargs):
         raise OSError("Permission denied")
 
-    with patch("os.makedirs", lambda *a, **k: None), patch("builtins.open", mock_open), patch("logging.Logger.warning") as mock_warn:
-        res = session_registry.register_session(
-            container="ubuntu", kind="login", command_argv=["bash"], user="root"
-        )
+    with (
+        patch("os.makedirs", lambda *a, **k: None),
+        patch("builtins.open", mock_open),
+        patch("logging.Logger.warning") as mock_warn,
+    ):
+        res = session_registry.register_session(container="ubuntu", kind="login", command_argv=["bash"], user="root")
         assert res is None
         mock_warn.assert_called_once()
         assert "Failed to create temporary session file" in mock_warn.call_args[0][0]
@@ -327,9 +364,7 @@ def test_register_session_flock_fails(tmp_path):
         raise OSError("Flock failed")
 
     with patch("fcntl.flock", mock_flock), patch("logging.Logger.warning") as mock_warn:
-        res = session_registry.register_session(
-            container="ubuntu", kind="login", command_argv=["bash"], user="root"
-        )
+        res = session_registry.register_session(container="ubuntu", kind="login", command_argv=["bash"], user="root")
         assert res is None
         mock_warn.assert_called_once()
         assert "Failed to flock session file" in mock_warn.call_args[0][0]

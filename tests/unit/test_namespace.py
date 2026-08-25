@@ -94,6 +94,7 @@ def test_probe_namespace_support_reports_missing(mock_probe):
 def test_probe_and_report_namespaces_tiered(mock_probe, mock_userns_ok, mock_idmap):
     # Simulate a kernel that supports mount, pid, uts, ipc but NOT user or cgroup.
     from chroot_distro.syscalls._constants import CLONE_NEWUSER
+
     mock_probe.return_value = CLONE_NEWNS | CLONE_NEWPID | CLONE_NEWUTS | CLONE_NEWIPC
     result = ns.probe_and_report_namespaces()
     assert result.missing_mandatory == 0
@@ -104,10 +105,7 @@ def test_probe_and_report_namespaces_tiered(mock_probe, mock_userns_ok, mock_idm
     assert result.isolation_tier == ns.ISOLATION_TIER_CAPDROP
 
     # Full flags, userns mounts work, no idmapped mounts -> Tier A (identity).
-    mock_probe.return_value = (
-        CLONE_NEWNS | CLONE_NEWPID | CLONE_NEWUTS | CLONE_NEWIPC
-        | CLONE_NEWUSER | CLONE_NEWCGROUP
-    )
+    mock_probe.return_value = CLONE_NEWNS | CLONE_NEWPID | CLONE_NEWUTS | CLONE_NEWIPC | CLONE_NEWUSER | CLONE_NEWCGROUP
     result = ns.probe_and_report_namespaces()
     assert result.missing_mandatory == 0
     assert result.missing_recommended == 0
@@ -246,6 +244,4 @@ def test_create_holder_success(mock_alive, mock_remove, mock_filter, mock_create
     assert holder.pid == 555
     assert holder.launcher_pid == 554
     assert holder.ns_flags == CLONE_NEWNS | CLONE_NEWPID
-    mock_create.assert_called_once_with(
-        CLONE_NEWNS | CLONE_NEWPID, rootfs="/tmp/rootfs", id_map=None, foreground=None
-    )
+    mock_create.assert_called_once_with(CLONE_NEWNS | CLONE_NEWPID, rootfs="/tmp/rootfs", id_map=None, foreground=None)

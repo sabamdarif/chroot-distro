@@ -1,18 +1,27 @@
-"""One-time passwordless setup (Docker's docker-group model).
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
+"""`chroot-distro setup`: the docker-group model, so no command asks for a password.
 
-On Linux this command (run once as root):
+Run once as root on Linux: create the `chroot-distro` system group, add the
+invoking user to it, install the daemon service for whichever init is running
+(systemd socket activation, OpenRC, runit, dinit, sysvinit), and start it.
+Membership takes effect at the next login, and `--uninstall` removes the service
+while leaving the group. On Termux the command refuses: there is no root init
+system to host a daemon, and reaching this point already triggered the one-time
+`su` grant, so nothing is left to set up.
 
-1. creates the ``chroot-distro`` system group,
-2. adds the invoking user to it,
-3. detects the init system and installs + starts the daemon service
-   (systemd socket activation, OpenRC, runit, dinit, or sysvinit).
+This file is the documented exception to the no-binary rule, and it is host
+administration rather than container work: `groupadd`, `usermod` and the init
+tools own state no syscall reaches. Each has a busybox spelling tried next and a
+stdlib fallback last, editing `/etc/group` through a temporary that is chmod 0644
+before the rename, because every process on the system resolves groups from that
+file and one mode 0600 locks the host out of its own accounts.
 
-After re-logging in, group members run every chroot-distro command with
-no password prompt. ``--uninstall`` removes the service again.
-
-On Termux there is no root init system; reaching this command already
-triggered the one-time su grant from Magisk/KernelSU, so it only
-verifies and reports status.
+`_writable_by_non_root` is the check that has to happen before anything is
+written. The service re-executes this package as root, so a non-root owner or a
+group or other write bit anywhere along the path to it turns the unit into a
+local privilege escalation; the same walk catches a `pip install --user` tree,
+which root's Python could not import at all.
 """
 
 import argparse
@@ -121,11 +130,6 @@ esac
 """
 
 
-# ---------------------------------------------------------------------------
-# Group management (stdlib fallbacks when shadow-utils is absent)
-# ---------------------------------------------------------------------------
-
-
 def _free_system_gid() -> int:
     used = {g.gr_gid for g in grp.getgrall()}
     for gid in range(999, 99, -1):
@@ -228,11 +232,6 @@ def _invoking_user(explicit: str | None) -> str | None:
     return None
 
 
-# ---------------------------------------------------------------------------
-# Init system detection and service installation
-# ---------------------------------------------------------------------------
-
-
 def _detect_init() -> str:
     if os.path.isdir("/run/systemd/system"):
         return "systemd"
@@ -276,13 +275,13 @@ def _install_service(init: str) -> None:
         _run_quiet(["systemctl", "daemon-reload"])
         if not _run_quiet(["systemctl", "enable", "--now", "chroot-distro.socket"]):
             warn(
-                "could not enable chroot-distro.socket — enable it manually with: systemctl enable --now chroot-distro.socket"
+                "could not enable chroot-distro.socket; enable it manually with: systemctl enable --now chroot-distro.socket"
             )
     elif init == "openrc":
         _write(_OPENRC_PATH, _OPENRC_SCRIPT.replace("@PYTHON@", sys.executable), mode=0o755)
         _run_quiet(["rc-update", "add", "chroot-distro", "default"])
         if not _run_quiet(["rc-service", "chroot-distro", "start"]):
-            warn("could not start the service — start it manually with: rc-service chroot-distro start")
+            warn("could not start the service; start it manually with: rc-service chroot-distro start")
     elif init == "runit":
         os.makedirs(_RUNIT_DIR, exist_ok=True)
         _write(os.path.join(_RUNIT_DIR, "run"), _RUNIT_RUN.replace("@CMD@", _DAEMON_CMD), mode=0o755)
@@ -292,11 +291,11 @@ def _install_service(init: str) -> None:
             if not os.path.islink(link) and not os.path.exists(link):
                 os.symlink(_RUNIT_DIR, link)
         else:
-            warn(f"runit service directory not found — link it manually: ln -s {_RUNIT_DIR} /var/service/")
+            warn(f"runit service directory not found; link it manually: ln -s {_RUNIT_DIR} /var/service/")
     elif init == "dinit":
         _write(_DINIT_PATH, _DINIT_SERVICE.replace("@CMD@", _DAEMON_CMD))
         if not _run_quiet(["dinitctl", "enable", "chroot-distro"]):
-            warn("could not enable the dinit service — enable it manually with: dinitctl enable chroot-distro")
+            warn("could not enable the dinit service; enable it manually with: dinitctl enable chroot-distro")
     elif init == "sysvinit":
         _write(_SYSV_PATH, _SYSV_SCRIPT.replace("@CMD@", _DAEMON_CMD), mode=0o755)
         if shutil.which("update-rc.d"):
@@ -334,11 +333,6 @@ def _uninstall_service() -> None:
     with contextlib.suppress(OSError):
         os.unlink(SOCKET_PATH)
     _run_quiet(["systemctl", "daemon-reload"])
-
-
-# ---------------------------------------------------------------------------
-# Command entry point
-# ---------------------------------------------------------------------------
 
 
 def command_setup(args: argparse.Namespace) -> None:
@@ -387,7 +381,7 @@ def command_setup(args: argparse.Namespace) -> None:
         _add_user_to_group(username)
         log_info(f"User '{username}' added to the '{GROUP_NAME}' group.")
     else:
-        warn(f"could not detect the invoking user — add yours manually: usermod -aG {GROUP_NAME} <username>")
+        warn(f"could not detect the invoking user; add yours manually: usermod -aG {GROUP_NAME} <username>")
 
     init = _detect_init()
     log_info(f"Detected init system: {init}")
@@ -400,9 +394,9 @@ def command_setup(args: argparse.Namespace) -> None:
     if os.path.exists(SOCKET_PATH):
         log_info(f"Daemon socket is live at {SOCKET_PATH}.")
     else:
-        warn("daemon socket not up yet — it will be created when the service starts.")
+        warn("daemon socket not up yet; it will be created when the service starts.")
 
     msg()
     log_info("Setup complete. Log out and back in (or run 'newgrp chroot-distro')")
     log_info("so your new group membership takes effect. After that, chroot-distro")
-    log_info("commands run without any password prompt — like the docker group.")
+    log_info("commands run without any password prompt, like the docker group.")

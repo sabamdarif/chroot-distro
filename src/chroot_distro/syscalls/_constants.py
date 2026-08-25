@@ -1,15 +1,25 @@
-"""Linux kernel constants for mount, namespace, capability, and device operations.
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
+"""Linux kernel constants, copied from the headers that define them.
 
-All values are taken from the Linux kernel headers (``<sys/mount.h>``,
-``<linux/sched.h>``, ``<linux/capability.h>``) and are stable across
-kernel versions.  They are architecture-independent integers.
+Mount and umount2 flags, clone/unshare/setns namespace flags, capability numbers,
+prctl options, and the stat mode bit for a character device: architecture
+independent integers, stable across kernel versions. Every block names the header
+it came from, so a new value is checked against the same source rather than
+guessed.
+
+The namespace maps are here because they are part of the same table. `NS_FILE_MAP`
+gives the /proc/<pid>/ns/<name> filename for a CLONE_* flag, and the two reverse
+maps translate between flags and CLI-style strings, which the namespace holder's
+state files still store.
+
+Nothing here is computed. A value that needs a runtime probe belongs in the module
+that probes for it.
 """
 
 from __future__ import annotations
 
-# ---------------------------------------------------------------------------
-# mount(2) flags — from <sys/mount.h>
-# ---------------------------------------------------------------------------
+# mount(2) flags, from <sys/mount.h>
 
 MS_RDONLY: int = 1
 """Mount read-only."""
@@ -86,9 +96,7 @@ MS_STRICTATIME: int = 1 << 24
 MS_LAZYTIME: int = 1 << 25
 """Update the in-memory timestamps only, deferring disk writes."""
 
-# ---------------------------------------------------------------------------
-# umount2(2) flags — from <sys/mount.h>
-# ---------------------------------------------------------------------------
+# umount2(2) flags, from <sys/mount.h>
 
 MNT_FORCE: int = 1
 """Force unmount (abort pending requests)."""
@@ -102,9 +110,7 @@ MNT_EXPIRE: int = 4
 UMOUNT_NOFOLLOW: int = 8
 """Don't follow symlinks when unmounting."""
 
-# ---------------------------------------------------------------------------
-# clone / unshare / setns namespace flags — from <linux/sched.h>
-# ---------------------------------------------------------------------------
+# clone / unshare / setns namespace flags, from <linux/sched.h>
 
 CLONE_NEWTIME: int = 0x00000080
 """New time namespace."""
@@ -133,9 +139,7 @@ CLONE_NEWPID: int = 0x20000000
 CLONE_NEWNET: int = 0x40000000
 """New network namespace."""
 
-# ---------------------------------------------------------------------------
 # Mapping from CLONE_* flags to /proc/<pid>/ns/<name> filenames
-# ---------------------------------------------------------------------------
 
 NS_FILE_MAP: dict[int, str] = {
     CLONE_NEWNS: "mnt",
@@ -179,16 +183,12 @@ _CLONE_TO_CLI_FLAG: dict[int, str] = {
     CLONE_NEWCGROUP: "--cgroup",
 }
 
-# ---------------------------------------------------------------------------
-# stat(2) mode flag for character devices — from <sys/stat.h>
-# ---------------------------------------------------------------------------
+# stat(2) mode flag for character devices, from <sys/stat.h>
 
 S_IFCHR: int = 0o020000
 """Character device."""
 
-# ---------------------------------------------------------------------------
-# Linux capabilities — from <linux/capability.h>
-# ---------------------------------------------------------------------------
+# Linux capabilities, from <linux/capability.h>
 
 CAP_DAC_OVERRIDE: int = 1
 """Override file DAC (read/write/execute) permission checks."""
@@ -238,9 +238,7 @@ PR_CAPBSET_READ: int = 23
 PR_CAPBSET_DROP: int = 24
 """Drop a capability from the bounding set (irreversible)."""
 
-# ---------------------------------------------------------------------------
-# prctl(2) constants — from <linux/prctl.h>
-# ---------------------------------------------------------------------------
+# prctl(2) constants, from <linux/prctl.h>
 
 PR_SET_KEEPCAPS: int = 8
 """Keep capabilities across UID transitions."""
@@ -259,11 +257,6 @@ PR_CAP_AMBIENT_LOWER: int = 3
 
 PR_CAP_AMBIENT_CLEAR_ALL: int = 4
 """Clear the entire ambient capability set."""
-
-
-# ---------------------------------------------------------------------------
-# Helpers for backward-compatible state file parsing
-# ---------------------------------------------------------------------------
 
 
 def cli_flags_to_bitmask(flags: list[str]) -> int:

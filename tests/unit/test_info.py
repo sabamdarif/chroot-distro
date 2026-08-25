@@ -205,6 +205,7 @@ def test_userns_enabled_states():
     # Case 1: max_user_namespaces exists and is > 0
     mock_file = mock_open(read_data="1\n").return_value
     real_open = open
+
     def fake_open_present(path, *a, **k):
         if path == "/proc/sys/user/max_user_namespaces":
             return mock_file
@@ -215,11 +216,11 @@ def test_userns_enabled_states():
 
     # Case 2: max_user_namespaces exists and is 0
     mock_file_zero = mock_open(read_data="0\n").return_value
+
     def fake_open_absent(path, *a, **k):
         if path == "/proc/sys/user/max_user_namespaces":
             return mock_file_zero
         return real_open(path, *a, **k)
-
 
     with patch("builtins.open", side_effect=fake_open_absent):
         assert info._userns_enabled() is False
@@ -232,21 +233,21 @@ def test_userns_enabled_states():
 
     with (
         patch("builtins.open", side_effect=fake_open_error),
-        patch.object(info, "probe_flag_runtime", return_value="present")
+        patch.object(info, "probe_flag_runtime", return_value="present"),
     ):
         assert info._userns_enabled() is True
 
     # Case 4: max_user_namespaces is missing/unreadable, and probe says absent
     with (
         patch("builtins.open", side_effect=fake_open_error),
-        patch.object(info, "probe_flag_runtime", return_value="absent")
+        patch.object(info, "probe_flag_runtime", return_value="absent"),
     ):
         assert info._userns_enabled() is False
 
     # Case 5: max_user_namespaces is missing/unreadable, and probe says unknown
     with (
         patch("builtins.open", side_effect=fake_open_error),
-        patch.object(info, "probe_flag_runtime", return_value="unknown")
+        patch.object(info, "probe_flag_runtime", return_value="unknown"),
     ):
         assert info._userns_enabled() is None
 
@@ -319,4 +320,3 @@ def test_gather_capabilities_privilege_states():
         priv = next(c for c in caps if c.label == "Privileges")
         assert priv.level == "info"
         assert "can elevate via daemon socket" in priv.value
-

@@ -1,4 +1,43 @@
-"""Linux namespace isolation for --isolated sessions (Ubuntu-Chroot pattern)."""
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
+"""Namespace policy: what this host can isolate, and the process that holds it.
+
+Two things live here. `NamespaceHolder` is a long-lived process that keeps a
+session's namespaces open, since namespaces die with their last member and a
+`login` that ends would otherwise take them with it. Everything else is the
+decision of *which* namespaces to ask for, which the kernel answers and this file
+only records.
+
+Support is established by attempting it, never by a kernel version, because a
+CLONE_NEW* flag depends on the kernel config, the sysctls and the caller's
+privileges. CLONE_NEWUSER is probed even as real root, since an identity-mapped
+child user namespace still scopes capabilities away from host resources, but a
+user namespace that exists is not one that works: kernels have long EPERM'd proc
+and bind mounts inside one, so it is gated on a real mount smoke test through a
+disposable holder and dropped when that fails, with `userns_mounts_ok` left behind
+so the user can be told why.
+
+Three tiers come out of that: A is the identity-mapped user namespace, B adds a
+subordinate uid range with an idmapped rootfs, C is no user namespace and a
+capability-bounding-set drop instead. `_TIER_B_ROOTFS_IDMAP_READY` gates B off
+deliberately: the idmap syscalls and probe are in place, but the rootfs cannot yet
+be mounted idmapped inside the holder's chroot, and selecting the subordinate
+range without that would make a host-uid-0 rootfs appear as nobody inside the
+namespace, EOVERFLOW on every path.
+
+Holder state lives in `data/<name>/`. The pid file carries the process start time
+next to the PID, because a PID is reused and a recycled one would otherwise be
+joined as though it were the holder; a mismatch drops the state rather than
+trusting it. The flags file is a hex bitmask, and a file written before 2.9 holds
+unshare(1)-style strings instead, which is why the reverse maps in
+`syscalls/_constants.py` still exist.
+
+Work in the holder's view goes through `holder.call` and the `do_*` methods: a
+fork, setns(2), and then ordinary stdlib calls. Nothing execs a tool inside the
+guest, and nothing sets up a mount from the host's view of the tree.
+`nsenter_flags` is the one argv-shaped thing left, and it is only ever printed for
+`--get-chroot-cmd`.
+"""
 
 from __future__ import annotations
 
@@ -43,19 +82,16 @@ from chroot_distro.syscalls.unshare import (
 
 log = logging.getLogger(__name__)
 
-# ── Tiered namespace flags ───────────────────────────────────────────────────
-# Only mount namespace is truly mandatory — without it, mounts leak to the host.
+# Only the mount namespace is truly mandatory: without it, mounts leak to the host.
 _MANDATORY_NS_FLAGS: int = CLONE_NEWNS
 
-# These provide significant security value and we strongly recommend them,
-# but the system can still function (with reduced isolation) without them.
+# Worth having, but a kernel without them still works at reduced isolation.
 _RECOMMENDED_NS_FLAGS: int = (
     CLONE_NEWPID  # Hides host processes, prevents cross-signal attacks
     | CLONE_NEWUTS  # Isolates hostname
     | CLONE_NEWIPC  # Isolates SysV IPC / POSIX message queues
 )
 
-# These provide additional security hardening when available.
 _ENHANCEMENT_NS_FLAGS: int = (
     CLONE_NEWUSER  # uid remapping, capability scoping
     | CLONE_NEWCGROUP  # Cgroup isolation
@@ -63,11 +99,11 @@ _ENHANCEMENT_NS_FLAGS: int = (
 
 _ALL_PROBE_FLAGS: int = _MANDATORY_NS_FLAGS | _RECOMMENDED_NS_FLAGS | _ENHANCEMENT_NS_FLAGS
 
-# Backward-compat aliases for callers that still use the old names.
 _REQUIRED_NS_FLAGS: int = _MANDATORY_NS_FLAGS | _RECOMMENDED_NS_FLAGS
 _OPTIONAL_NS_FLAGS: int = _ENHANCEMENT_NS_FLAGS
 
-# Backward-compat: the old code stored holder flags as CLI strings.
+# probe_namespace_support() and _FLAG_TO_NS_FILE speak unshare(1) long-flag
+# names, so the probe sets are strings rather than bits.
 _REQUIRED_PROBE_FLAGS = ("--mount",)
 _OPTIONAL_PROBE_FLAGS: tuple[str, ...] = ("--pid", "--uts", "--ipc", "--user", "--cgroup")
 
@@ -76,11 +112,10 @@ ISOLATION_MODE_HOST = "host"
 
 _TRUTHY_ENV_VALUES = frozenset({"1", "true", "yes", "on"})
 
-# ── User-namespace isolation tiers ───────────────────────────────────────────
-# See plans/02-isolation-namespace-security.md. Selected at runtime by probing.
-#   A: identity-mapped user namespace — scopes capabilities (fixes report #3).
-#   B: subordinate range + idmapped rootfs — also remaps uids (fixes #2, #7).
-#   C: no user namespace — capability-bounding-set drop only (legacy fallback).
+# Selected at runtime by probing.
+#   A: identity-mapped user namespace, which scopes capabilities.
+#   B: subordinate range plus idmapped rootfs, which also remaps uids.
+#   C: no user namespace, capability-bounding-set drop only.
 ISOLATION_TIER_REMAP = "B"
 ISOLATION_TIER_USERNS = "A"
 ISOLATION_TIER_CAPDROP = "C"
@@ -90,7 +125,7 @@ ISOLATION_TIER_CAPDROP = "C"
 # and validated, but mounting the rootfs idmapped inside the holder requires a
 # chroot-ordering handshake that is not yet implemented. Until then we detect
 # and *report* idmapped-mount availability but keep the applied map at the
-# identity Tier A — selecting the subordinate Tier B range without idmapping the
+# identity Tier A: selecting the subordinate Tier B range without idmapping the
 # rootfs would make the (host-uid-0) rootfs appear as nobody inside the userns
 # and break the container (EOVERFLOW on every path).
 _TIER_B_ROOTFS_IDMAP_READY = False
@@ -122,11 +157,11 @@ def _subid_base() -> int:
 def resolve_userns_map(tier: str) -> tuple[str, str]:
     """Return the ``(uid_map, gid_map)`` bodies to write for *tier*.
 
-    Tier A uses an identity range (container uid 0..N ⇒ host uid 0..N) so the
+    Tier A uses an identity range (container uid 0..N to host uid 0..N) so the
     root-owned rootfs stays usable while capabilities become namespace-scoped.
     Tier B maps container uid 0 to a subordinate host base (e.g. 100000) so a
     file created by container-root is owned by an unprivileged host uid; the
-    rootfs is kept usable via an idmapped mount (Phase 2), not a chown.
+    rootfs is kept usable via an idmapped mount, not a chown.
     """
     size = _USERNS_MAP_SIZE
     if tier == ISOLATION_TIER_REMAP:
@@ -137,7 +172,9 @@ def resolve_userns_map(tier: str) -> tuple[str, str]:
     return identity, identity
 
 
-# Android's toybox sleep rejects "infinity"; use a large finite value.
+# argv values a pre-namespace-holder release started its `sleep` holder with;
+# _is_legacy_sleep_holder() recognises such a process so an old holder left
+# behind by an upgrade is still adopted and killed.
 HOLDER_SLEEP_SECONDS = "2147483647"
 _LEGACY_HOLDER_SLEEP_ARG = "infinity"
 _HOLDER_SLEEP_ARGS = frozenset({HOLDER_SLEEP_SECONDS, _LEGACY_HOLDER_SLEEP_ARG})
@@ -155,9 +192,6 @@ def should_use_namespaces(isolated: bool) -> bool:
 
 class NamespaceError(ChrootDistroError):
     """Raised when namespace setup or execution fails."""
-
-
-# ── State file helpers ───────────────────────────────────────────────────────
 
 
 def _container_data_dir(container_name: str) -> str:
@@ -187,9 +221,6 @@ def holder_is_max_isolation(container_name: str) -> bool:
     return os.path.isfile(_holder_maxiso_file(container_name))
 
 
-# ── Namespace probing ───────────────────────────────────────────────────────
-
-
 @dataclass
 class NamespaceProbeResult:
     """Result of probing kernel namespace support."""
@@ -201,10 +232,10 @@ class NamespaceProbeResult:
     """If nonzero, isolation truly cannot work (mount NS missing)."""
 
     missing_recommended: int
-    """Significant security gaps — warn loudly but proceed."""
+    """Significant security gaps: warn loudly but proceed."""
 
     missing_enhancements: int
-    """Nice-to-have features — warn informatively."""
+    """Nice-to-have features: warn informatively."""
 
     warnings: list[str]
     """Human-readable warning messages for missing namespaces."""
@@ -213,7 +244,7 @@ class NamespaceProbeResult:
     """False when ``unshare(CLONE_NEWUSER)`` works but mounts inside it are
     rejected (kernel EPERMs proc/bind under a userns). In that case
     ``CLONE_NEWUSER`` is dropped from :attr:`supported` and we fall back to
-    the capability-drop tier — this flag lets the caller explain why."""
+    the capability-drop tier, and this flag lets the caller explain why."""
 
     idmapped_mounts: bool = False
     """True when the kernel supports idmapped mounts (Linux 5.12+), enabling
@@ -241,8 +272,7 @@ class NamespaceProbeResult:
 def probe_and_report_namespaces() -> NamespaceProbeResult:
     """Probe all namespace types and build a structured report.
 
-    Replaces the old all-or-nothing probe. Returns a
-    :class:`NamespaceProbeResult` with per-tier breakdown and
+    Returns a :class:`NamespaceProbeResult` with a per-tier breakdown and
     human-readable warnings for anything missing.
     """
     from chroot_distro.helpers.isolation_warnings import format_isolation_warnings
@@ -250,10 +280,9 @@ def probe_and_report_namespaces() -> NamespaceProbeResult:
     # Even as real root, an identity-mapped *child* user namespace still scopes
     # capabilities (a cap held there cannot act on host/init-userns resources),
     # so we always probe CLONE_NEWUSER. It is only usable, though, if the kernel
-    # also permits the container's mounts inside a userns — historically it does
-    # not (proc/sysfs EPERM), which is exactly what broke --isolated before. We
-    # therefore gate CLONE_NEWUSER on a mount smoke test and, when it fails, drop
-    # to the capability-drop tier while recording why.
+    # also permits the container's mounts inside a userns, which historically
+    # it does not (proc/sysfs EPERM). CLONE_NEWUSER is therefore gated on a
+    # mount smoke test, dropping to the capability-drop tier when it fails.
     supported = _probe_ns_support(_ALL_PROBE_FLAGS)
 
     userns_mounts_ok = True
@@ -298,7 +327,7 @@ def _userns_mount_probe_inner() -> bool:
     import tempfile
 
     flags = CLONE_NEWUSER | CLONE_NEWNS | CLONE_NEWPID
-    id_map = resolve_userns_map(ISOLATION_TIER_USERNS)  # identity range
+    id_map = resolve_userns_map(ISOLATION_TIER_USERNS)
     try:
         holder_pid = create_holder_process(flags, id_map=id_map).holder
     except (OSError, RuntimeError):
@@ -327,7 +356,7 @@ def _probe_userns_mounts_real() -> bool:
 
     Some kernels allow ``unshare(CLONE_NEWUSER)`` but then reject the
     container's ``proc``/bind mounts inside it (notably SELinux-restricted
-    Android) — the failure that makes ``--isolated`` "mount nothing" once user
+    Android), the failure that makes ``--isolated`` "mount nothing" once user
     namespaces are on. This reproduces the *exact* production flow: a disposable
     holder from :func:`create_holder_process` (proper PID 1 + identity uid/gid
     map), then a fresh-proc mount and a bind mount through
@@ -421,9 +450,6 @@ def probe_namespace_support(flags: tuple[str, ...] = _REQUIRED_PROBE_FLAGS) -> l
     return missing
 
 
-# ── Isolation mode persistence ───────────────────────────────────────────────
-
-
 def read_isolation_mode(container_name: str) -> str | None:
     path = _isolation_mode_file(container_name)
     if not os.path.isfile(path):
@@ -444,9 +470,6 @@ def write_isolation_mode(container_name: str, mode: str) -> None:
 def clear_isolation_mode(container_name: str) -> None:
     with contextlib.suppress(OSError):
         os.remove(_isolation_mode_file(container_name))
-
-
-# ── Process helpers ──────────────────────────────────────────────────────────
 
 
 def _pid_alive(pid: int) -> bool:
@@ -509,12 +532,12 @@ def _read_holder_pid(container_name: str) -> int | None:
 def _read_holder_flags(container_name: str) -> int:
     """Read the holder's namespace flags as a bitmask.
 
-    Handles backward compatibility: old state files store CLI-style strings
-    (``--mount --pid ...``), new ones store hex bitmasks (``0x2c020000``).
+    A state file written before 2.9 holds CLI-style strings
+    (``--mount --pid ...``) instead of a hex bitmask (``0x2c020000``).
     """
     path = _holder_flags_file(container_name)
     if not os.path.isfile(path):
-        return CLONE_NEWNS  # minimal default
+        return CLONE_NEWNS
     try:
         with open(path) as fh:
             raw = fh.read().strip()
@@ -524,19 +547,17 @@ def _read_holder_flags(container_name: str) -> int:
     if not raw:
         return CLONE_NEWNS
 
-    # New format: hex bitmask
     if raw.startswith("0x"):
         try:
             return int(raw, 16)
         except ValueError:
             return CLONE_NEWNS
 
-    # Old format: space-separated CLI flags (backward compat)
     return cli_flags_to_bitmask(raw.split()) or CLONE_NEWNS
 
 
 def _write_holder_flags(container_name: str, flags: int) -> None:
-    """Write holder flags in the new hex bitmask format."""
+    """Write holder flags as a hex bitmask."""
     with open(_holder_flags_file(container_name), "w") as fh:
         fh.write(f"0x{flags:08x}")
 
@@ -611,9 +632,6 @@ def _read_proc_mounts() -> bytes:
         return fh.read()
 
 
-# ── NamespaceHolder ──────────────────────────────────────────────────────────
-
-
 @dataclass
 class NamespaceHolder:
     """A long-lived process holding mount/PID/UTS/IPC namespaces."""
@@ -644,9 +662,9 @@ class NamespaceHolder:
     def call(self, fn: Callable[[], bytes | None]) -> bytes | None:
         """Run *fn* inside this holder's namespaces, ``None`` if it failed.
 
-        The way to do filesystem work in the holder's view: what a coreutils
-        argv used to stand in for is a stdlib call, and this only moves it into
-        the right namespace. ``b""`` is a success that had nothing to say.
+        The way to do filesystem work in the holder's view: a stdlib call,
+        moved into the right namespace. ``b""`` is a success that had nothing
+        to say.
         """
         return call_in_namespaces(self.pid, self._live_ns_flags(), fn)
 
@@ -656,8 +674,6 @@ class NamespaceHolder:
         if data is None:
             return ""
         return data.decode("utf-8", errors="replace")
-
-    # ── Native mount/umount operations inside the holder's namespaces ──
 
     def do_bind_mount(
         self,
@@ -708,7 +724,6 @@ class NamespaceHolder:
                 native_umount(target, lazy=lazy, force=force)
                 os._exit(0)
             except Exception:
-                # Try lazy unmount as fallback
                 if not lazy:
                     try:
                         native_umount(target, lazy=True, force=force)
@@ -782,16 +797,12 @@ class NamespaceHolder:
             raise OSError(f"set_propagation({target}, {propagation:#x}) failed in namespace")
 
 
-# ── Holder lifecycle ─────────────────────────────────────────────────────────
-
-
 def get_live_holder(container_name: str) -> NamespaceHolder | None:
     """Return an active holder for the container, or None."""
     pid = _read_holder_pid(container_name)
     if pid is None:
         return None
     flags = _read_holder_flags(container_name)
-    # Drop any namespace whose /proc/<pid>/ns/<name> file is not openable.
     flags = filter_accessible_namespaces(pid, flags)
     if not (flags & CLONE_NEWNS):
         log.debug("Holder %d has no accessible mount namespace; treating as dead", pid)
@@ -848,12 +859,10 @@ def _create_holder(
             "restrict this."
         ) from exc
 
-    # Verify the holder is alive.
     if not _pid_alive(holder_pid):
         _remove_holder_state(container_name)
         raise NamespaceError("Namespace holder process exited immediately after creation.")
 
-    # Filter to only accessible namespaces.
     flags = filter_accessible_namespaces(holder_pid, flags)
     if not (flags & CLONE_NEWNS):
         with contextlib.suppress(OSError):
@@ -864,7 +873,6 @@ def _create_holder(
             "(/proc/<pid>/ns/mnt missing); isolation cannot proceed."
         )
 
-    # Persist state.
     start_time = _get_process_start_time(holder_pid)
     with open(pid_file, "w") as fh:
         if start_time is not None:
@@ -925,8 +933,7 @@ def release_holder(container_name: str) -> None:
 def make_mount_private(holder: NamespaceHolder) -> bool:
     """Set mount propagation private inside the holder's mount namespace.
 
-    Uses native syscalls instead of running ``mount --make-rprivate /``.
-    Falls back through rprivate → private → rslave.
+    Falls back through rprivate, private, then rslave.
     """
     for propagation in (MS_REC | MS_PRIVATE, MS_PRIVATE, MS_REC | MS_SLAVE):
         try:

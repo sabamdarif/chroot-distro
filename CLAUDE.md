@@ -1,9 +1,4 @@
-# CLAUDE.md
-
-Guidance for coding agents working in this repository. `AGENTS.md` is a symlink
-to this file, so Claude Code and other agents read the same instructions.
-
-## Project Overview
+## chroot-distro
 
 **chroot-distro** is a lightweight Linux container management utility that runs
 real Linux distributions inside Termux (rooted Android) or regular Linux using
@@ -11,6 +6,9 @@ native kernel features (`chroot`, `mount`, namespaces). It downloads Docker/OCI
 images, builds images from Dockerfiles, and manages container lifecycles, all
 without Docker or Podman. It needs Python 3.10+ (CI tests 3.10 through 3.14;
 `.python-version` pins 3.12 for local dev), a Linux kernel, and root access.
+GPL-3.0-only; the files ported from
+[proot-distro](https://github.com/termux/proot-distro) say so in their docstring,
+and a new port must too.
 
 ### Hard requirements
 
@@ -22,7 +20,7 @@ works:
   this program can do itself: not as a primary path, not as a fallback, not
   "just for this one case". Where a binary call is still in the tree it is a
   debt to remove, not a pattern to copy: prefer deleting the call over keeping
-  it alive. `shutil.which` for a *capability report* (`commands/info.py`) is
+  it alive. `shutil.which` for a _capability report_ (`commands/info.py`) is
   fine; `shutil.which` to then exec the thing is not.
 - **No third-party runtime dependencies.** Stdlib only, plus `backports-zstd`
   below Python 3.14. Dev-only tooling (ruff, mypy, pyright, pytest) does not
@@ -31,18 +29,24 @@ works:
   equal targets; a feature that only works on one is incomplete. See
   [Platform Differences](#platform-differences).
 - **Root is assumed.** The program elevates itself (`elevate.py`) rather than
-  degrading to an unprivileged mode.
+  degrading to an unprivileged mode. In Linux it depend on chroot-distro.socket for root privileges
+  or if it isn't enabled then it must be run with sudo else it will show an error.
+  And it case of termux it uses su, also that's the only binary it called.
 
 ## How to Work Here
+
 ### Output style
-No narration: don't explain what you're checking, why, or what you found;
-no reasoning trace, no tool-call list. Work silently: speak only for a
-blocking question or a 1-2 line status, e.g.:
+
+No narration: don't explain what you're checking and why.
+No reasoning trace, no tool-call list. Work silently: speak only for a
+blocking questions or or any important finding that might need users attention
+or user should know about it, in a 1-2 line status, e.g.:
 `tasks 1-5 (engine) done, tasks 6-13 (commands, tests, frontend) remain.`
 
 Never use an em dash (or `--` standing in for one) in a sentence, anywhere:
 replies, comments, commit messages, docs. A comma, a colon, parentheses or two
-sentences always say it.
+sentences always say it. Older code predates the rule; fix what you touch, don't
+sweep the tree.
 
 ### YAGNI
 
@@ -50,6 +54,7 @@ Default to the laziest solution that actually works, and write nothing that is
 not needed. This governs code, comments and commit messages alike.
 
 Stop at the first rung that holds:
+
 1. does this need to exist at all (skip speculative work);
 2. does this repo already have a helper or pattern for it;
 3. does the stdlib do it;
@@ -65,30 +70,52 @@ If it takes a paragraph to justify, do not do it. A workaround that needs a
 long explanation to look acceptable is the wrong workaround, so fix the code
 instead. The length of the justification is the signal.
 
-**Comments.** A comment exists to save the next contributor time. Write one
-only when the code cannot say it itself: an invariant, a reason a safe-looking
-line is not safe, a kernel or platform quirk. Keep it atop the function or
-class, never inline. Never restate what the line does, never narrate a change,
-never add one because a function looks bare. Deleting a comment that says
-nothing is an improvement.
-
-**Commit messages.** A subject line, and a short body only if the change needs
-one, saying what changed and why in a few sentences. Not an essay: no
-bullet-by-bullet tour of the diff, no restating the code in prose, no recap of
-the reasoning that got there. If the body runs long, the change is too big for
-one commit or the message is padded. Someone has to read it.
-
 Never skimp on: input validation at trust boundaries, error handling that
 prevents data loss, security, or anything explicitly requested. Being lazy is
 about not adding; it is never about dropping a check.
 
+#### Comments
+
+A comment exists to save the next contributor time. Write one only when the
+code cannot say it itself: an invariant, a reason a safe-looking line is not
+safe, a kernel or platform quirk. Keep it atop the function or class, never
+inline. Never restate what the line does, never narrate a change, never add
+one because a function looks bare. Deleting a comment that says nothing is an
+improvement.
+
+#### Commit messages
+
+A subject line, and a short body only if the change needs one, saying what
+changed and why in a few sentences. Not an essay: no bullet-by-bullet tour of
+the diff, no restating the code in prose, no recap of the reasoning that got
+there. If the body runs long, the change is too big for one commit or the
+message is padded. Someone has to read it.
+
+#### This file
+
+Same rules, and it is loaded into every request, so a line that does not
+change what an agent does is pure cost. Record the invariant, not the bug that
+taught it: why one commit did what it did belongs in that commit, and why a
+line is the way it is belongs on the line. Hard cap 1000 lines, and going near
+it means something has been described that the code already says.
+
 ### Coding rules
-- Keep the runtime dependency-free (stdlib only, plus `backports-zstd` below Python 3.14).
+
 - Be careful with unrequested destructive actions (deletions, force-pushes, overwrites).
 - Keep comments in sync with the code they sit on; a stale comment is worse than none.
 - When referencing anything in comments or commits, make sure the thing you're referencing is valid in a way that other users/contributors seeing this on their own system can understand and access: don't reference anything that only exists on your system or is only accessible to you.
 - Tests: focused, not slop. Skip smoke/regression tests that only confirm a deletion.
-- Untrusted input is everywhere: image layers, tar members, Dockerfiles, `name:path` specs. Resolve paths against the rootfs with the existing helpers (`paths.resolve_container_path`, `tar_extract._safe_resolve`, `login/passwd.resolve_rootfs_path`) instead of joining strings, and never let a symlink decide where a write lands.
+- Untrusted input is everywhere: image layers, tar members, Dockerfiles, `name:path` specs. Resolve a guest path with the existing helpers (`paths.resolve_container_path`, `tar_extract.safe_resolve_parts`, `login/passwd.resolve_rootfs_path`) instead of joining strings, and see [Paths and descriptors](#paths-and-descriptors) for what to do with the result.
+- License header on every Python file in the package: an SPDX line, a copyright
+  line, then the module docstring. `plans/module-headers.md` has the exact form.
+- The module docstring is where a file's own documentation lives: what it owns,
+  the invariants a caller must not break, the quirk that shaped it. It is part of
+  the code, so a change that moves behaviour updates it in the same commit; a
+  header describing what the file used to do is worse than none.
+- Fix a wrong header whenever you are in the file, even where your change did not
+  touch what it got wrong. Reading enough of a file to change it is the only thing
+  that catches a header that has drifted, so a stale line found there is repaired
+  there, not left for a commit that happens to need it.
 - Indentation follows `.editorconfig`: tabs in shell scripts and completions, 4 spaces in Python, YAML and Markdown.
 - Commits follow [Conventional Commits](https://www.conventionalcommits.org):
   `type(scope): subject`, e.g. `fix(build): ...`, `feat(clear-cache): ...`,
@@ -98,19 +125,14 @@ about not adding; it is never about dropping a check.
   comma-separated). A bare `scope: subject` with no type is not acceptable.
 
 ### Build, test, lint
-```bash
-# Before committing or installing: run all checks
-./check-before-commit.sh
-# This script runs: ruff check, pyright, mypy, and pytest with coverage
-# All checks must pass before committing changes
 
+```bash
+./check-before-commit.sh                 # ruff, pyright, mypy, pytest+coverage; all must pass
 uv sync                                  # create/refresh .venv with dev deps
 uv run pytest tests/unit/test_cli.py     # one test file
 uv run pytest tests/unit/test_cli.py::test_name -x   # one test
 uv run ruff check --fix src/chroot_distro
-
-# Install locally for testing
-pip install -e .
+pip install -e .                         # install locally for testing
 ```
 
 Lint and type checks target `src/chroot_distro` only; `tests/` is not checked.
@@ -154,243 +176,237 @@ selection and namespace), `CD_SUBID_BASE` (user-namespace subid base),
 
 ## Architecture
 
-Three layers, each depending only on the ones above it:
+Three layers, each depending only on the ones to its right:
 
 `commands/` (CLI behaviour) -> `helpers/` (policy, orchestration) -> `syscalls/` (raw kernel calls)
 
-Kernel operations go through the ctypes wrappers in `syscalls/`; `nsenter(1)`
-and `unshare(1)` are fully reimplemented there (`syscalls/nsenter.py`,
-`syscalls/unshare.py`) and nothing new may exec a binary to reach the kernel.
+Every `.py` file under `src/chroot_distro/` carries a license header and a module
+docstring saying what that file owns, the invariants a caller must not break, and
+the platform quirks that shaped it. The tables below are only the index into those
+headers, one row per file: find the files a task touches, read their headers, then
+change them.
+
+Kernel operations go through the ctypes wrappers in `syscalls/`; `chroot(1)`,
+`mount(1)`, `umount(1)`, `unshare(1)` and `nsenter(1)` are fully reimplemented
+there and nothing new may exec a binary to reach the kernel.
 
 No container work execs a binary. A chroot is described by a `ChrootConfig`
 (`commands/login/chroot_cmd.build_chroot_config`) and entered by
 `syscalls.chroot.enter_chroot` / `chroot_and_run` in the child itself, after
 setns(2) and the capability drop, so the holder is handed a config rather than a
-command line and `build_engine/run_step.py` forks the step the same way. The
-argv forms that remain (`chroot_display_argv`, `NamespaceHolder.nsenter_flags`)
-are only ever printed, for `--get-chroot-cmd`.
+command line and `build_engine/run_step.py` forks the step the same way. The argv
+forms that remain (`chroot_display_argv`, `NamespaceHolder.nsenter_flags`) are only
+ever printed, for `--get-chroot-cmd`.
 
 The exception is host administration, not container work: `elevate.py`
-(`sudo`/`doas`/`pkexec`/`su`) and `commands/setup.py` (`groupadd`/`usermod` and
-the init-system tools) drive other programs' own state, which no syscall
-replaces. `commands/info.py` calling `shutil.which` to *report* whether a tool
-exists is a capability probe, not a call.
+(`sudo`/`doas`/`pkexec`/`su`) and `commands/setup.py` (`groupadd`/`usermod` and the
+init-system tools) drive other programs' own state, which no syscall replaces.
+`commands/info.py` calling `shutil.which` to _report_ whether a tool exists is a
+capability probe, not a call.
 
 ### Entry point and dispatch
-- `cli.py` `main()`: environment sanity, per-command help, unknown-command
-  rejection, required-arg checks, root policy, then dispatch.
-- `parser.py`: argparse tree plus `ALIAS_TO_CANONICAL` (short aliases such as
-  `ls`, `sh`, `rm`) and `REQUIRED_ARGS` (positional checks enforced by `cli.py`,
-  not argparse, so the custom help page can be shown).
-- `cli._COMMAND_HANDLERS` maps a canonical command to a `"module:function"`
-  string, imported on dispatch. Startup latency matters, so imports stay lazy
-  (`constants.__getattr__` defers the `importlib.metadata` version lookup, help
-  pages are imported only when rendered). Keep new code out of import time.
-- Root policy lives in `cli.main`: `help`/`search`/`daemon` never elevate, and
-  on Termux `list`/`ps` are exempt too (`info` elevates only if root is available).
+
+| File                        | Owns                                                     |
+| --------------------------- | -------------------------------------------------------- |
+| `cli.py`                    | validate, decide whether root is needed, dispatch        |
+| `parser.py`                 | the argparse tree, `ALIAS_TO_CANONICAL`, `REQUIRED_ARGS` |
+| `constants.py`              | roots, platform detection, the `CD_*` readers            |
+| `exceptions.py`             | the expected-failure tree                                |
+| `names.py`                  | the container-name rule                                  |
+| `commands/help/pages.py`    | the text of every help page                              |
+| `commands/help/render.py`   | width-clamped rendering to stderr                        |
+| `commands/help/__init__.py` | `HELP_COMMANDS`, plus the front page                     |
+| `__init__.py`               | `__version__`, resolved only when asked for              |
+| `__main__.py`               | `python -m chroot_distro`                                |
+
+### Paths and descriptors
+
+`dirfd.py` is the primitive, and three rules cover why most of the filesystem code
+goes through it:
+
+- **Resolve a name once.** A helper says where an entry belongs
+  (`tar_extract.safe_resolve_parts`, `paths.resolve_container_path`), then the
+  caller re-walks those components and acts on `(dir_fd, name)`. Handing the
+  resolved path back to the kernel is the bug the walk exists to prevent.
+- **Pin a root you will use twice.** A rootfs, a stage, a cache dir: hold the
+  descriptor for the length of the operation and address everything beneath it from
+  there. That includes teardown: a tree a guest or a build step wrote picks its own
+  depth and modes, so `shutil.rmtree` is the wrong tool for one (`ignore_errors`
+  swallows an `OSError`, not the `RecursionError` a deep tree raises).
+- **Fixed names under a guest-reachable root are walked, not joined.** `locks/`,
+  `cache/oci_layers`, `cache/build_cache_index.json`, `build-tmp`: a symlink planted
+  under a name this program picks must not redirect a write, so a planted entry is
+  refused or dropped rather than followed.
+
+| File                     | Owns                                                       |
+| ------------------------ | ---------------------------------------------------------- |
+| `dirfd.py`               | openat(2) walks, guarded opens, the bounded `Levels` stack |
+| `paths.py`               | per-container path composition, `name:path` resolution     |
+| `atomic.py`              | staged temporary plus rename, for every state file         |
+| `helpers/tar_extract.py` | one streaming extractor for layers and rootfs tarballs     |
 
 ### Root and elevation
-`elevate.py` `elevate_or_die()` tries, in order: already root, sufficient file
-capabilities, Termux `su`, the Linux daemon socket, then `sudo`/`doas`/`pkexec`/`su`.
-Notes that matter when touching it:
-- Many sudoers policies drop the environment, so runtime `CD_*` and display vars
-  are re-applied explicitly through an `env VAR=value` prefix
-  (`_FORWARDED_ENV_VARS`, `_FORWARDED_DISPLAY_VARS`). A new `CD_*` var that must
-  work post-elevation has to be added to one of those tuples.
-- Secrets (`CD_DOCKER_AUTH`, `CD_ENV`) travel in a 0600 tempfile referenced by
-  `CD_SECRET_FILE`, never in argv, which is world-readable via `/proc/*/cmdline`.
-- `_CHROOT_DISTRO_ELEVATING=1` is the elevation-loop sentinel.
-- `daemon.py` holds both the client and the server: a root-owned Unix socket at
-  `/run/chroot-distro.sock`, group-gated on `chroot-distro`, peers authenticated
-  with `SO_PEERCRED`, client stdio passed via `SCM_RIGHTS` so interactive
-  `login` works. `commands/setup.py` creates the group and installs the service
-  for systemd, OpenRC, runit, dinit, or sysvinit.
+
+| File                     | Owns                                                                     |
+| ------------------------ | ------------------------------------------------------------------------ |
+| `elevate.py`             | re-exec as root: caps, Termux `su`, the socket, then sudo/doas/pkexec/su |
+| `daemon.py`              | the group-gated socket, its client, and the forked root child            |
+| `commands/daemon_cmd.py` | the init system's entry point                                            |
+| `commands/setup.py`      | the group, the service for five init systems, `--uninstall`              |
 
 ### Session lifecycle (`login`, `run`, `build`)
-Four independent pieces of state, all under the runtime dir:
-- `locking.py`: `flock`-based `ContainerLock` / `BuildLock` / `RunCacheLock`. The
-  lock file's first line is `PID command` so a conflict can name the holder;
-  exclusive locks are re-entrant within one process. Every lock file is addressed
-  as `(dir_fd, name)`: `locks/` is guest-writable on Termux and its names are
-  predictable, so `_locks_dir_fd` walks down from `RUNTIME_DIR` with `O_NOFOLLOW`
-  and `open_lock_file_at` refuses anything that is not a plain file. Nothing else
-  writes there, so a planted entry is dropped and the real lock made in its
-  place; one that cannot be dropped fails closed (`_HostileLockError`) instead of
-  proceeding unlocked.
-- `helpers/session.py`: per-container session refcount, self-healing by scanning
-  `/proc/*/root` for processes actually chrooted into the rootfs.
-- `helpers/session_registry.py`: one JSON file per session, kept alive by an
-  exclusive `flock`. `ps` probes liveness with a shared non-blocking lock and
-  prunes dead files.
-- `helpers/mount_manager.py`: bind/special mounts, `/dev` node creation,
-  propagation changes, and teardown (including a deep sweep for leaked mounts).
 
-### Isolation modes
-`helpers/isolation.py` is the single place that composes namespaces plus chroot,
-shared by `login`, `run` and `build`:
-- default: shared mounts, no namespaces;
-- `CD_USE_NS`: namespaces on, default mount set kept;
-- `--isolated` / `CD_USE_ISOLATION`: maximum isolation, bind nothing from the host.
+| File                           | Owns                                                        |
+| ------------------------------ | ----------------------------------------------------------- |
+| `locking.py`                   | `ContainerLock`, `BuildLock`, `RunCacheLock`                |
+| `helpers/session.py`           | the per-container session refcount                          |
+| `helpers/session_registry.py`  | one JSON file per live session                              |
+| `helpers/mount_manager.py`     | every mount, unmount, `/dev` node and propagation change    |
+| `commands/login/__init__.py`   | resolve a session, mount for it, enter it                   |
+| `commands/login/bindings.py`   | name the mounts a session needs, mount nothing              |
+| `commands/login/chroot_cmd.py` | `ChrootConfig`, and the argv only `--get-chroot-cmd` prints |
+| `commands/login/env.py`        | the environment a session runs with                         |
+| `commands/login/passwd.py`     | the guest's account databases, and `resolve_rootfs_path`    |
+| `commands/run.py`              | Entrypoint/Cmd resolution, then `login`                     |
+| `commands/ps.py`               | list the sessions that are alive now                        |
+| `commands/kill.py`             | stop everything in a container, tear the state down         |
+| `commands/unmount.py`          | the orderly end: signal, zero, unmount                      |
 
-`helpers/namespace.py` owns `NamespaceHolder`, a long-lived holder process that
-keeps the namespaces alive between sessions (pid/flags state under
-`data/<name>/`), plus kernel capability probes and tiered flag fallbacks.
-The holder is forked and unshared in this process
-(`syscalls/unshare.create_holder_process`, returning a `HolderPids`, and the
-holder is a grandchild under `CLONE_NEWPID` so it can be PID 1); given a
-*rootfs* it chroots itself, which closes the `chroot /proc/1/root` escape. Under
-max isolation the hardened mount set `login/bindings.py` names (procfs with
-`hidepid=2`, read-only sysfs, tmpfs `/dev`, devpts, `/dev/shm`) is made from
-inside that namespace, `mount_manager` reaching it through `holder.call` and
-`holder.do_*`, so nothing execs a tool in the guest and no mount is set up from
-the host's view. `helpers/max_iso_holder.py` is the old standalone PID 1 for
-this, run as `python3 -m`; nothing in `src/` executes or imports it any more.
-`syscalls/capabilities.py` drops dangerous bounding-set capabilities when user
-namespaces are unavailable (opt out with `CD_NO_CAP_DROP=1`).
+### Isolation and namespaces
 
-### Image pull and install
-`helpers/docker/`: `refs.py` (parse image refs, arch mapping) -> `transport.py`
-(auth tokens, retries, TLS error messages) -> `pull.py` (manifest/platform
-resolution) -> `layers.py` + `download.py` (parallel, segmented, resumable,
-rate-limited blob downloads) -> `cache.py` (content-addressed layer/manifest
-cache). Layers land in the rootfs through `helpers/tar_extract.py`, which
-enforces path-escape and whiteout safety. `commands/install_local.py` handles
-plain tarballs and OCI archive layouts.
+Three levels, and the difference between them is the mount set, not the
+namespaces: default keeps host mounts and no namespaces; `CD_USE_NS` turns the
+namespaces on and keeps the default mount set; `--isolated` or `CD_USE_ISOLATION`
+binds nothing from the host and chroots the holder. `build` has no flag for it, so
+there the env vars are the whole interface.
+
+| File                            | Owns                                                                |
+| ------------------------------- | ------------------------------------------------------------------- |
+| `helpers/isolation.py`          | compose namespaces plus chroot, for all three callers               |
+| `helpers/isolation_warnings.py` | turn a missing namespace into advice                                |
+| `helpers/namespace.py`          | which namespaces this host can give, and the holder that keeps them |
+| `helpers/max_iso_holder.py`     | nothing live: superseded standalone PID 1                           |
+| `syscalls/__init__.py`          | the constant re-exports                                             |
+| `syscalls/_constants.py`        | kernel constants and the namespace maps                             |
+| `syscalls/_libc.py`             | the one libc handle, `check_syscall`, two backports                 |
+| `syscalls/mount.py`             | binds, filesystem mounts, propagation changes                       |
+| `syscalls/umount.py`            | umount2(2)                                                          |
+| `syscalls/chroot.py`            | four ways to enter a chroot, plus `spawn_detached`                  |
+| `syscalls/unshare.py`           | make namespaces, and hold them open                                 |
+| `syscalls/nsenter.py`           | join namespaces with setns(2)                                       |
+| `syscalls/idmap.py`             | idmapped mounts, so no rootfs needs chowning                        |
+| `syscalls/capabilities.py`      | drop the bounding-set capabilities a guest must not keep            |
+
+### Image pull, push and install
 
 Every install writes `containers/<name>/manifest.json` with `image_ref`, `arch`,
-`manifest`, and `image_config`. That file is the source of truth for `reset`,
-`run` (Entrypoint/Cmd), `push`, and the guest env defaults read by
-`commands/login/env.py`.
+`manifest` and `image_config`. That file is the source of truth for `reset`, `run`
+(Entrypoint/Cmd), `push`, `diff` and the guest env defaults in
+`commands/login/env.py`, and it is a document this program wrote but only half
+chose, so every consumer holds its fields to the type OCI gives them.
+
+| File                          | Owns                                                       |
+| ----------------------------- | ---------------------------------------------------------- |
+| `helpers/docker/__init__.py`  | the registry client's public names                         |
+| `helpers/docker/refs.py`      | a user's string to (registry, repo, tag)                   |
+| `helpers/docker/media.py`     | media type strings, `canonical_json`                       |
+| `helpers/docker/transport.py` | tokens, TLS policy, the errors both produce                |
+| `helpers/docker/pull.py`      | reference to one platform's manifest, then fill the rootfs |
+| `helpers/docker/layers.py`    | fetch one blob, apply one layer                            |
+| `helpers/docker/cache.py`     | the blob and manifest caches                               |
+| `helpers/docker/push.py`      | upload blobs first, manifest last                          |
+| `helpers/download.py`         | retry policy, TLS diagnosis, the segmented downloader      |
+| `rate_limit.py`               | one token bucket shared by every download thread           |
+| `helpers/oci_writer.py`       | manifest, config and OCI archive out of a finished build   |
+| `helpers/layer_diff.py`       | what changed, packed as an OCI layer                       |
+| `commands/install.py`         | install from a registry, a URL or a local archive          |
+| `commands/install_local.py`   | a plain tarball or an OCI layout on disk                   |
+| `commands/push.py`            | argument work, then `helpers/docker/push.py`               |
+| `commands/search.py`          | Docker Hub search                                          |
 
 ### Build pipeline
-`helpers/dockerfile.py` parses to instruction dicts (heredocs, flags, escape
-directive, variable expansion). `helpers/build_engine/` executes them:
-`engine.py` drives one `stage.Stage` per `FROM`, `handlers.py` implements the
-metadata instructions, `run_step.py` runs `RUN` under chroot (optionally inside
-an isolation holder), `copy_step.py` implements `COPY`/`ADD`, `run_mounts.py`
-implements `RUN --mount` (BuildKit syntax; unsupported flags are rejected, never
-silently ignored), `events.py` renders progress (`--progress plain|tty|rawjson`).
-`helpers/layer_diff.py` snapshots and diffs the rootfs into layer tars,
-`helpers/oci_writer.py` writes the manifest/config into the cache so `push` and
-`install` can consume the result, and `helpers/build_cache.py` caches steps by
-recipe hash (index and lock reached by an `O_NOFOLLOW` walk down to the cache
-directory, so a planted entry under either fixed name is refused rather than
-read, and a lock name that cannot be cleared records the step unlocked instead
-of failing the build). How much of the index a build will read is its own
-choice too: the file holds one record per cached step, so the read is capped at
-`_MAX_INDEX_BYTES` (16 MiB) counted off the bytes actually drawn, and an entry
-holding more raises rather than yielding a prefix, because half a JSON document
-parses as no index at all, and `record()` would then write over entries it had merely
-declined to finish reading. A finished layer is renamed into the cache through
-`atomic.publish_file`, and the scratch root a build assembles its stages in is
-created with `mkdirat` off an `O_NOFOLLOW` walk down to `RUNTIME_DIR/build-tmp`
-(falling back to `/tmp`), then removed under that same descriptor, so neither a
-planted `oci_layers` nor a planted `build-tmp` can redirect a build's output.
-A `RUN --mount` scratch copy goes the same way at the end of the step
-(`run_mounts._remove_scratch`, recording the names below the scratch root rather
-than a path): the tree is what the step wrote, so its depth and its modes are
-the step's choice, and `shutil.rmtree(ignore_errors=True)` swallowed an OSError
-but not the RecursionError a deep tree raises, in a teardown that runs after the
-step has already succeeded.
-Both halves of a step address the stage rootfs by descriptor rather than by the
-name they resolved: `tar_extract.safe_resolve_parts` says where a `COPY`/`ADD`
-entry belongs and `copy_step._materialise_entry` re-walks those components with
-`O_NOFOLLOW` to write it as `(dir_fd, name)`, while `layer_diff.snapshot` walks
-on descriptors and `_add_entry` takes its parent from `_ParentFds` and sizes a
-file from the fstat of the descriptor it reads.
-The stage rootfs itself is pinned the same way. `commands/build._make_build_tmp`
-hands back the scratch root's path *and* a descriptor on it, `engine`
-`_make_stage_dirs` makes `stage-N/rootfs` off that descriptor, and a `Stage`
-carries both fds (its own directory and its rootfs) for the length of the build.
-Every consumer takes one as an optional keyword (`snapshot`, `write_layer_tar`,
-`_materialise_files`, `_copy_from_rootfs`, `resolve_chown`,
-`resolve_user_for_chroot`, `do_workdir`, `write_resolv_conf`/`write_hosts`),
-so production always passes it and a test working on a tree it made itself keeps
-the path form. `RUN` closes the last of it in the forked child
-(`run_step._fork_step`): it fchdirs onto the pinned descriptor and hands
-`enter_chroot` `os.curdir`, so chroot(2) resolves its argument against the inode
-the build validated, and it happens after the namespaces are joined and before
-the exec. The path stays for what only a path can express: messages, bind
-sources, and the `--mount=from=` bind that reaches mount(2) as a string anyway.
-The rest of the scratch root goes with it, being the same class of name: the ADD
-spool (`copy_step._Spool`, creating each file `O_EXCL` off the directory's fd)
-and a `COPY --from` image's throwaway tree are both made and read through
-descriptors from `_open_scratch_dir`.
-The *source* side is the same bargain: `copy_step._SourceTree` is the one way a
-`COPY`/`ADD` source is located, resolving the spec beneath the build context or
-the stage rootfs with `safe_resolve_parts` (so `..` is refused and a symlink out
-re-anchors at the tree root), and a `file` entry then carries the tree it was
-found under plus the components below it. Both consumers open it through
-`layer_diff.MapSources`, which re-walks those components with `O_NOFOLLOW`, so
-nothing reads a source by name a second time. `_add_directory_tree` walks an
-explicit stack of directory descriptors bounded by `dirfd.Levels` instead of
-`os.walk`, and `ADD`'s auto-extract sniffs and unpacks through one descriptor on
-the archive (`parsing.is_tar_header` takes the bytes, not a name). A directory is
-descended without a `.dockerignore` check on purpose: `dockerignore._match`
-prefix-matches, so a pattern on a directory already covers its children, and a
-`!` line re-including one of them only survives if the walk goes in.
-An `ADD <url>` is held to the length its response declared: there is no digest to
-check a download against here, so a body ending short of its `Content-Length`
-used to be published as the whole file, and `_copy_url` refuses it (the header
-itself is read by `_declared_length`, which answers "none declared" for one it
-cannot parse, as http.client does). `_Spool.stream` returns the byte count for
-that comparison. The same net catches `http.client.HTTPException`, since the
-family http.client raises for a body cut mid-chunk is not an `OSError` and left
-`build` as a traceback.
 
-A base image's config is a document this program did not write, and every field
-is read back as the type OCI says it is (`User` and `Shell` decide what a RUN
-step runs and who as, `WorkingDir` becomes its cwd, `OnBuild` is parsed as
-Dockerfile lines, the rest are merged into by their handlers and published in
-the produced image). `engine._adopt_image_config` is the one place a pulled
-config is taken on: it holds each field to its shape and refuses a wrong type
-with a `BuildError` naming it, treats a null as absent rather than as a value,
-rewrites `ExposedPorts`/`Volumes` down to their key sets, reads a null label as
-`""`, and takes a non-int layer `size` in the manifest as 0. The environment a
-RUN step is handed goes the same way: `constants.is_host_exec_var` names what a
-loader reads out of it (the `LD_*` prefix) and both Dockerfile-owned sources are
-refused it: an `ENV` line or a declared `ARG`'s value never reaches
-`run_step._build_child_env`'s output, and an `ENV` fired by the base image's
-ONBUILD triggers (`engine.firing_onbuild`, checked in `handlers.do_env`) is
-dropped outright, being a stranger's line rather than the author's. What the
-user's own environment says still reaches the exec, since they chose this command
-line; a value the Dockerfile set still stands in the image config, which is what
-it was a statement about. The step's own exec happens after chroot(2), so this is
-provenance and not a host-loader escape: what the Dockerfile's author wrote
-about the image is not a line the image's own base or a stranger's ONBUILD gets
-to add to the loader's environment.
+Most of this subsystem's care is [Paths and descriptors](#paths-and-descriptors):
+`commands/build._make_build_tmp` returns the scratch root's path plus descriptors
+on it and on its parent, a `Stage` carries fds for its own directory and its
+rootfs, and every consumer takes one as an optional keyword (production passes it,
+a test working on a tree it made itself keeps the path form). A path stays for what
+only a path can express: messages, bind sources, and the `--mount=from=` bind that
+reaches mount(2) as a string.
 
-### Cross-cutting
-- `atomic.py`: every state file write goes through `atomic_write` /
-  `atomic_replace` (tempfile, fsync, rename) so a crash never leaves half a file.
-  A destination inside `RUNTIME_DIR` or `BASE_CACHE_DIR` has the components below
-  that root walked one at a time with `O_NOFOLLOW` and its temporary created
-  `O_EXCL` off the descriptor, so a `cache/oci_layers -> <host dir>` a guest left
-  behind cannot redirect the write; a path the *user* named (`backup -o`,
-  `build --output`) keeps the plain behaviour. Which is why an archive is packed
-  into the descriptor `atomic_write` staged rather than into a second open of the
-  temporary's name (`oci_writer.write_oci_archive`): the name is this program's,
-  but the directory is the user's, and between the create and a reopen the
-  temporary can be unlinked and replaced with a symlink that the rename then
-  publishes over whatever it pointed at. `atomic_replace` yields the path, so it
-  is for a destination whose writer needs one.
-- `message.py` (colors, `--quiet`) and `progress.py` (byte/count bars, spinners)
-  for all user-facing output. `build_engine/events.py` is the exception, since
-  build output has its own reporters.
-- `exceptions.py`: raise a `ChrootDistroError` subclass for expected failures.
-  `cli.main` turns it into a clean one-line error and exit code 1.
-- `helpers/display.py` aggregates X11/Wayland/audio/D-Bus passthrough
-  (`x11.py`, `wayland.py`, `sound.py`, `xauthority.py` implements the
-  `.Xauthority` format so no `xauth` binary is needed).
-  `helpers/nvidia.py` and `helpers/gpu.py` auto-detect GPU drivers and ICDs.
-- `helpers/android.py`, `arch.py`, `names.py`, `rate_limit.py` are small focused
-  utilities (Termux ownership/`/data` remount, CPU arch detection and ELF probing,
-  container-name validation, shared token-bucket bandwidth limiter).
-- Python < 3.14 gets `tarfile`/zstd from `backports.zstd`. Follow the existing
-  `if sys.version_info >= (3, 14):` import pattern when adding a tar user.
+Two trust boundaries are the build's own, and each file's header carries the
+reasoning: a base image's config is adopted at exactly one point
+(`engine._adopt_image_config`), and a dynamic loader takes orders from nobody but
+the caller (`build_engine/constants.is_host_exec_var`, applied in
+`run_step._build_child_env` and `handlers.do_env`).
+
+| File                                   | Owns                                                   |
+| -------------------------------------- | ------------------------------------------------------ |
+| `helpers/dockerfile.py`                | Dockerfile text to instruction records                 |
+| `helpers/build_cache.py`               | step results keyed by recipe hash                      |
+| `helpers/build_engine/__init__.py`     | the engine's surface                                   |
+| `helpers/build_engine/constants.py`    | the tables consulted before dispatch                   |
+| `helpers/build_engine/errors.py`       | the exception that ends a build                        |
+| `helpers/build_engine/parsing.py`      | one instruction's value text to a handler's pieces     |
+| `helpers/build_engine/stage.py`        | the per-FROM state                                     |
+| `helpers/build_engine/events.py`       | build events and the three reporters                   |
+| `helpers/build_engine/dockerignore.py` | `.dockerignore` loading and matching                   |
+| `helpers/build_engine/engine.py`       | one stage per FROM, one handler per instruction        |
+| `helpers/build_engine/handlers.py`     | every instruction that edits the image config          |
+| `helpers/build_engine/run_step.py`     | run one RUN, pack the delta                            |
+| `helpers/build_engine/run_mounts.py`   | `RUN --mount`, all five types                          |
+| `helpers/build_engine/users.py`        | a USER or `--chown` name against the image's databases |
+| `helpers/build_engine/copy_step.py`    | COPY and ADD: locate, write, pack                      |
+| `commands/build.py`                    | validate, run the engine, publish                      |
+| `commands/diff.py`                     | what a rootfs holds that its image did not             |
+
+### Container lifecycle and file transfer
+
+| File                      | Owns                                              |
+| ------------------------- | ------------------------------------------------- |
+| `commands/list_cmd.py`    | what is installed, its size, whether it is busy   |
+| `commands/remove.py`      | stop, unmount, delete both trees                  |
+| `commands/rename.py`      | one `os.rename` of the container directory        |
+| `commands/reset.py`       | delete the rootfs, install the same image again   |
+| `commands/backup.py`      | write a container out as a tar stream             |
+| `commands/restore.py`     | rebuild one container from a backup stream        |
+| `commands/clear_cache.py` | empty the download cache, or drop the build cache |
+| `commands/copy.py`        | copy or move between host paths and containers    |
+| `commands/sync.py`        | mirror a tree, optionally pruning orphans         |
+
+### Display, hardware and platform integration
+
+| File                        | Owns                                                      |
+| --------------------------- | --------------------------------------------------------- |
+| `helpers/display.py`        | one display environment, and the paths to bind for it     |
+| `helpers/x11.py`            | the host X11 session, and a cookie the guest can read     |
+| `helpers/wayland.py`        | the Wayland half                                          |
+| `helpers/sound.py`          | the audio half                                            |
+| `helpers/xauthority.py`     | the `.Xauthority` format, so no `xauth` binary is needed  |
+| `helpers/gpu.py`            | ICD and loader descriptors for the Mesa stack             |
+| `helpers/nvidia.py`         | the proprietary driver's libraries, ICDs and tools        |
+| `helpers/android.py`        | the Termux-side fixups, and nothing on Linux              |
+| `helpers/rootfs.py`         | the guest `/etc` files this program writes                |
+| `helpers/owner.py`          | a `--chown` spec to the numeric pair                      |
+| `arch.py`                   | host arch, image arch, and what a rootfs turned out to be |
+| `commands/info.py`          | one report a bug can be filed with                        |
+| `commands/kernel_config.py` | what the running kernel was built with                    |
+
+### Output and shared utilities
+
+| File                  | Owns                                              |
+| --------------------- | ------------------------------------------------- |
+| `message.py`          | every user-facing line, and the rules they follow |
+| `progress.py`         | bars, spinners, byte counters                     |
+| `helpers/__init__.py` | nothing: a marker module                          |
+
+Python below 3.14 gets `tarfile` with zstd from `backports.zstd`. Follow the
+existing `if sys.version_info >= (3, 14):` import pattern when adding a tar user.
 
 ### Adding or changing a command
+
 Four places, all required:
+
 1. a sub-builder in `parser.py` (plus `ALIAS_TO_CANONICAL` / `REQUIRED_ARGS`),
 2. an entry in `cli._COMMAND_HANDLERS` pointing at `commands/<name>.py`,
 3. a hand-written help page in `commands/help/pages.py` (argparse help text is
@@ -398,7 +414,9 @@ Four places, all required:
 4. the three completion scripts in `src/chroot_distro/completions/`.
 
 ## Platform Differences
+
 **Termux (Android):**
+
 - Uses `su` from root manager (Magisk/KernelSU/APatch)
 - No daemon, every command elevates via `su`
 - The root side needs a Termux-aware prelude (PATH, `LD_PRELOAD=/data/data/com.termux/files/usr/lib/libtermux-exec-ld-preload.so`,
@@ -409,6 +427,7 @@ Four places, all required:
   cache, storage) live in `commands/login/bindings.py`
 
 **Regular Linux:**
+
 - Daemon-based (socket `/run/chroot-distro.sock`) after `setup`
 - Falls back to `sudo` if daemon not running
 - Containers live in root's XDG dirs

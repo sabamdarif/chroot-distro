@@ -117,7 +117,7 @@ def test_mode_dispatches_to_right_session(tmp_path, mode, used, unused):
             return False
 
     with (
-        patch.object(isolation, used, _Session) ,
+        patch.object(isolation, used, _Session),
         patch.object(isolation, unused) as other,
     ):
         rc, run_plain, run_in_holder = _dispatch(engine, _stage(tmp_path))

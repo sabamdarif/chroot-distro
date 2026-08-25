@@ -1,3 +1,7 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
+"""Re-exports for the registry client, so callers import one name, not five modules."""
+
 from chroot_distro.helpers.docker.cache import (
     all_layers_cached,
     layer_cache_path,

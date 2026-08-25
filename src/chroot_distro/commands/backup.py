@@ -1,3 +1,25 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
+"""`chroot-distro backup`: write a container out as a tar stream `restore` reads.
+
+The archive holds `<name>/manifest.json` and `<name>/rootfs/...`, so the container's
+name and its image identity travel with the files and `restore` needs to be told
+nothing. Ownership is flattened to 0:0 in the tar headers, since the uids in a rootfs
+mean nothing on another machine, and device nodes, fifos and sockets are dropped
+because a session mounts and creates /dev itself.
+
+Only a shared `ContainerLock` is taken, but a container with a live session or an
+active mount is refused: a rootfs still being written to would be archived
+half-consistent. `_fix_permissions` then widens owner read, plus execute on
+directories, across the live rootfs, so no entry can refuse the walk that follows.
+
+Compression comes from the output extension unless `--compression` names one, and
+`.tar.lz`/`.tar.lz4` are refused rather than quietly written as plain tar. With no
+`--output` the archive is streamed (`w|`) to stdout, which is refused on a tty. A
+half-written output file is removed on error and on Ctrl-C, so a failed backup does
+not sit there looking like an archive.
+"""
+
 import contextlib
 import os
 import stat
@@ -197,13 +219,11 @@ def command_backup(args) -> None:
         compression = _COMPRESSION_ARG_MAP[compression_arg] if compression_arg is not None else ""
 
     with ContainerLock(container_name, exclusive=False, command="backup"):
-        # 1. Active sessions safety check
         active_pids = session.get_active_chroot_pids(container_name)
         if active_pids:
             crit_error(f"Cannot backup container '{container_name}': It has active sessions (PIDs: {active_pids}).")
             sys.exit(1)
 
-        # 2. Mount safety check: ensure no active mounts exist under rootfs
         mounts = mount_manager.get_active_mounts(rootfs_dir)
         if mounts:
             crit_error(f"Cannot backup container '{container_name}': Active mounts detected under rootfs: {mounts}.")

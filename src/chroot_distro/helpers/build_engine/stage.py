@@ -1,3 +1,17 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
+"""The per-FROM state a build carries from one instruction to the next.
+
+One `Stage` per FROM, and the only thing an instruction handler mutates: the
+engine keeps the list, `copy_step` reads another stage's rootfs out of it for
+`COPY --from`, and `layer_diff` packs from its descriptors. The class docstring
+says what the fields hold.
+
+`close()` releases the two descriptors. The engine closes every stage it
+registered, and a stage that fails while its base is being set up closes itself,
+since the engine's list does not know about it yet.
+"""
+
 import contextlib
 import os
 import typing

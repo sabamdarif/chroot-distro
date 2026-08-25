@@ -203,7 +203,10 @@ def test_android_host_vars_survive_elevation():
     system vars the guest needs for `am`/termux-api are forwarded explicitly."""
     from chroot_distro.elevate import _termux_root_env_exports
 
-    android = {"BOOTCLASSPATH": "/apex/com.android.art/javalib/core-oj.jar", "ANDROID_ART_ROOT": "/apex/com.android.art"}
+    android = {
+        "BOOTCLASSPATH": "/apex/com.android.art/javalib/core-oj.jar",
+        "ANDROID_ART_ROOT": "/apex/com.android.art",
+    }
     with patch.dict("os.environ", android, clear=True):
         assignments = _forwarded_env_assignments()
         with patch("os.makedirs"):
@@ -285,7 +288,10 @@ def test_elevate_termux_stub_su():
         patch("chroot_distro.elevate.is_root", return_value=False),
         patch("chroot_distro.elevate.IS_TERMUX", True),
         patch("chroot_distro.elevate._find_termux_su", return_value="/data/data/com.termux/files/usr/bin/su"),
-        patch("chroot_distro.elevate._su_help_text", return_value="No su program found on this device. Termux does not supply tools for rooting"),
+        patch(
+            "chroot_distro.elevate._su_help_text",
+            return_value="No su program found on this device. Termux does not supply tools for rooting",
+        ),
         pytest.raises(RootRequiredError, match="the 'su' command on this device is a Termux stub"),
     ):
         elevate_or_die()
@@ -293,12 +299,14 @@ def test_elevate_termux_stub_su():
 
 def test_is_root_available_already_root():
     from chroot_distro.elevate import is_root_available
+
     with patch("chroot_distro.elevate.is_root", return_value=True):
         assert is_root_available() is True
 
 
 def test_is_root_available_has_caps():
     from chroot_distro.elevate import is_root_available
+
     with (
         patch("chroot_distro.elevate.is_root", return_value=False),
         patch("chroot_distro.elevate.has_required_capabilities", return_value=True),
@@ -309,6 +317,7 @@ def test_is_root_available_has_caps():
 @patch("chroot_distro.elevate.IS_TERMUX", True)
 def test_is_root_available_termux():
     from chroot_distro.elevate import is_root_available
+
     # 1. su is found and works
     with (
         patch("chroot_distro.elevate.is_root", return_value=False),
@@ -331,7 +340,10 @@ def test_is_root_available_termux():
         patch("chroot_distro.elevate.is_root", return_value=False),
         patch("chroot_distro.elevate.has_required_capabilities", return_value=False),
         patch("chroot_distro.elevate._find_termux_su", return_value="/system/bin/su"),
-        patch("chroot_distro.elevate._su_help_text", return_value="No su program found on this device. Termux does not supply tools for rooting"),
+        patch(
+            "chroot_distro.elevate._su_help_text",
+            return_value="No su program found on this device. Termux does not supply tools for rooting",
+        ),
     ):
         assert is_root_available() is False
 

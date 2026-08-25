@@ -1,3 +1,32 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
+"""Where things live, which platform this is, and the env vars that tune both.
+
+Imported by nearly everything, so it stays cheap and stays free of package imports.
+`PROGRAM_VERSION` is served through a module `__getattr__` because the
+`importlib.metadata` scan behind it is slow enough to show up on every invocation,
+including tab completion.
+
+`IS_TERMUX` decides the whole path layout and is detected, not configured: two of three
+independent indicators (an Android platform marker, a Termux app env var, a readable
+`TERMUX__PREFIX`) must agree, so a single stray variable cannot send containers to the
+wrong tree. Termux keeps everything under `$PREFIX/var/lib`; Linux splits data and
+cache across the XDG dirs. Every other path here is derived from those two roots, and
+per-container paths belong in `paths.py`, never composed by a caller.
+
+The `CD_*` readers (`layer_download_workers`, `download_max_retries`,
+`download_rate_limit`) are functions rather than constants so a value set after import
+still counts, and each clamps rather than validates: a bad or out-of-range value falls
+back to the default instead of failing a command over an environment variable.
+
+`os.umask(0o022)` runs at import, before any file this program creates. It is here
+because it has to happen once, first, and every entry point already imports this
+module.
+
+`ANDROID_HOST_ENV_VARS` sits here rather than in `commands/login/env.py` because
+`elevate.py` must carry the same list across `su`, and one list cannot be two.
+"""
+
 import os
 import platform
 
@@ -7,7 +36,8 @@ CANONICAL_PROGRAM_NAME = "Chroot-Distro"
 
 
 def __getattr__(name: str) -> str:
-    # keeps the slow importlib.metadata scan off the startup path.
+    """PROGRAM_VERSION, resolved lazily to keep the slow importlib.metadata
+    scan off the startup path."""
     if name != "PROGRAM_VERSION":
         raise AttributeError(name)
     from importlib.metadata import PackageNotFoundError, version
@@ -19,11 +49,8 @@ def __getattr__(name: str) -> str:
     globals()["PROGRAM_VERSION"] = value
     return value
 
-os.umask(0o022)
 
-# ---------------------------------------------------------------------------
-# Termux / Android detection
-# ---------------------------------------------------------------------------
+os.umask(0o022)
 
 TERMUX_APP_PACKAGE = os.environ.get("TERMUX_APP__PACKAGE_NAME", "com.termux")
 TERMUX_HOME = os.environ.get("TERMUX__HOME", f"/data/data/{TERMUX_APP_PACKAGE}/files/home")
@@ -46,10 +73,6 @@ def _detect_termux() -> bool:
 
 IS_TERMUX: bool = _detect_termux()
 
-# ---------------------------------------------------------------------------
-# Paths
-# ---------------------------------------------------------------------------
-
 if IS_TERMUX:
     RUNTIME_DIR = os.path.join(TERMUX_PREFIX, "var", "lib", PROGRAM_NAME)
     BASE_CACHE_DIR = os.path.join(RUNTIME_DIR, "cache")
@@ -64,10 +87,6 @@ SESSIONS_DIR = os.path.join(RUNTIME_DIR, "sessions")
 LOCKS_DIR = os.path.join(RUNTIME_DIR, "locks")
 LAYER_CACHE_DIR = os.path.join(BASE_CACHE_DIR, "oci_layers")
 MANIFEST_CACHE_DIR = os.path.join(BASE_CACHE_DIR, "oci_manifests")
-
-# ---------------------------------------------------------------------------
-# Defaults
-# ---------------------------------------------------------------------------
 
 DEFAULT_PRIMARY_NS = "8.8.8.8"
 DEFAULT_SECONDARY_NS = "8.8.4.4"
@@ -92,8 +111,8 @@ def layer_download_workers() -> int:
     return max(1, min(count, MAX_LAYER_DOWNLOAD_WORKERS))
 
 
-# — segmented download (per-file multi-connection) —
-MIN_SEGMENT_BYTES = 4 * 1024 * 1024  # 4 MiB — don't split below this per segment
+# Segmented download (per-file multi-connection)
+MIN_SEGMENT_BYTES = 4 * 1024 * 1024
 
 DEFAULT_DOWNLOAD_MAX_RETRIES = 3
 MAX_DOWNLOAD_RETRIES = 20

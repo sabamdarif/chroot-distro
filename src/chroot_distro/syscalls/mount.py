@@ -1,14 +1,22 @@
-"""High-level wrappers around the Linux ``mount(2)`` syscall.
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
+"""Bind mounts, filesystem mounts and propagation changes, through mount(2).
 
-This module provides ergonomic Python functions for the most common mount
-operations used when setting up a chroot environment:
+The whole of mount(1) this program needs, in three shapes: a bind mount that
+mirrors a host path into a rootfs, a filesystem mount for the pseudo-filesystems
+a container expects (proc, sysfs, devpts, tmpfs), and a propagation change that
+decides whether mount events cross a namespace boundary.
 
-* **bind mounts** — mirroring a host directory into the chroot
-* **filesystem mounts** — mounting pseudo-filesystems (proc, sysfs, …)
-* **propagation changes** — isolating mount events between namespaces
+An option string is split, not just parsed. mount(2) takes generic VFS options as
+*flags* and everything else as the filesystem's own *data*, and a token in the
+wrong argument is either ignored or an EINVAL, so `_parse_and_split_mount_options`
+sorts each token by whether `_OPTION_FLAG_MAP` knows it and hands the rest on as
+data. `tmpfs size=64m` is why: it means nothing as a flag and everything as data.
 
-All functions accept native Python strings and handle encoding internally
-before delegating to :func:`chroot_distro.syscalls._libc.libc_mount`.
+A bind mount cannot apply options in one call. mount(2) ignores everything but
+MS_BIND and MS_REC on the initial bind, so `readonly` and any flag options are
+applied by an immediate MS_REMOUNT|MS_BIND pass, carrying MS_REC again when the
+bind was recursive, or a submount stays writable under a read-only parent.
 """
 
 from __future__ import annotations
@@ -36,9 +44,6 @@ from chroot_distro.syscalls._constants import (
 )
 from chroot_distro.syscalls._libc import libc_mount
 
-# Re-export propagation constants so callers can do
-#   from chroot_distro.syscalls.mount import MS_PRIVATE
-# without touching _constants directly.
 __all__ = [
     "MS_BIND",
     "MS_NODEV",
@@ -55,10 +60,6 @@ __all__ = [
     "native_mount",
     "set_propagation",
 ]
-
-# ---------------------------------------------------------------------------
-# Option-string → flag-bit mapping (used by _parse_mount_options)
-# ---------------------------------------------------------------------------
 
 # Every VFS option name the kernel prints in the option field of
 # /proc/mounts, so an option string read back from there translates whole and
@@ -84,11 +85,6 @@ _OPTION_FLAG_MAP: dict[str, int] = {
 }
 
 
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
-
-
 def _encode(value: str | None) -> bytes | None:
     """Encode a string to UTF-8 bytes, passing ``None`` through unchanged."""
     return value.encode() if value is not None else None
@@ -98,7 +94,7 @@ def _parse_mount_options(options: str) -> int:
     """Parse a comma-separated mount option string into a flag bitmask.
 
     Options named in :data:`_OPTION_FLAG_MAP` are mapped to their ``MS_*``
-    constants.  Unknown options (e.g. ``"size=64m"``) are silently ignored — they
+    constants.  Unknown options (e.g. ``"size=64m"``) are silently ignored: they
     belong in the *data* argument of ``mount(2)``, not the *flags*.
 
     Args:
@@ -142,11 +138,6 @@ def _parse_and_split_mount_options(options: str, initial_flags: int = 0) -> tupl
         else:
             data_tokens.append(token)
     return flags, ",".join(data_tokens)
-
-
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
 
 
 def native_mount(
@@ -205,7 +196,7 @@ def bind_mount(
         target: The mount-point where *source* will appear.
         recursive: If ``True``, all sub-mounts under *source* are also
             replicated (``MS_REC``).
-        readonly: Convenience flag — equivalent to passing ``"ro"`` in
+        readonly: Convenience flag, equivalent to passing ``"ro"`` in
             *options*.
         options: Comma-separated mount options applied via a remount
             after the initial bind.  Recognised tokens are the generic VFS
@@ -218,14 +209,12 @@ def bind_mount(
     Example:
         >>> bind_mount("/dev", "/chroot/dev", recursive=True, readonly=True)
     """
-    # Step 1: initial bind mount
     bind_flags = MS_BIND
     if recursive:
         bind_flags |= MS_REC
 
     native_mount(source, target, None, bind_flags, None)
 
-    # Step 2: optional remount to apply extra flags (ro, nosuid, …)
     extra_flags = _parse_mount_options(options)
     if readonly:
         extra_flags |= MS_RDONLY

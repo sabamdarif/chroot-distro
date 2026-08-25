@@ -1,3 +1,32 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
+"""The guest's own account databases, and the path resolver the login shares.
+
+`resolve_rootfs_path` is the part that matters beyond this file. It resolves an
+absolute guest path the way the guest would: each component followed inside the
+rootfs, an absolute link target re-anchored at the rootfs, `..` collapsed so no
+walk climbs above it, and a bounded hop count for a link loop. It answers with a
+path, so it decides *where* something is and nothing more; where a hostile tree
+could race that answer, the descriptor walk in `dirfd.py` is the tool, not this.
+
+The databases read here are the image's, never the host's: a `--user` name, a
+group, a home and a shell mean what the container's `/etc/passwd` and `/etc/group`
+say they mean, and `pwd.getpwnam` would answer with whatever the host happens to
+have under the same name. `resolve_host_home` is the deliberate exception, since
+`--shared-home` needs a host directory to bind: it prefers the invoking account
+(`SUDO_USER`, the real uid, `LOGNAME`) even for a root login, because the program
+self-elevates through sudo and `$HOME` is `/root` by then.
+
+The writers exist for `--shared-home`, where the guest user has to own the files
+under a bind-mounted host home. `set_passwd_uid_gid` keeps `/etc/shadow` in step,
+`release_passwd_uid_conflicts` moves whoever else held the uid off it, and
+`sync_passwd_to_path_owner` never hands root a borrowed uid, repairing a root entry
+that a previous Termux `--shared-home` left non-zero instead: `/root` on disk stays
+root-owned, so the next plain login would fail with EACCES on `$HOME`. Each of them
+reports whether it changed anything, because the caller has to re-resolve the user
+when it did.
+"""
+
 import contextlib
 import errno
 import logging
@@ -299,7 +328,7 @@ def sync_passwd_to_path_owner(
     except OSError:
         return False
     if username == "root":
-        # Never reassign root's uid/gid to a bind-mount owner — but a past
+        # Never reassign root's uid/gid to a bind-mount owner, but a past
         # Termux --shared-home login may have left root with a non-zero uid
         # (the guest runs as the Termux app uid while /root on disk stays
         # root-owned, breaking the next plain login with EACCES on $HOME).

@@ -1,3 +1,19 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
+"""`.dockerignore` loading and matching.
+
+Approximate on purpose, and the approximation is written down rather than
+worked around: `**` collapses to `*`, and a pattern prefix-matches, so naming a
+directory covers everything under it. That prefix rule is what lets
+`copy_step`'s walk enter an ignored directory anyway, since a `!` line
+re-including one of its children only survives if the walk goes in.
+
+A missing file means no patterns, and an unreadable one warns and also means no
+patterns: ignoring nothing copies too much, which the user can see, where
+ignoring everything would quietly produce an image missing its files.
+`Dockerfile` and `.dockerignore` are never ignored, matching Docker.
+"""
+
 import fnmatch
 import glob as _glob
 import logging

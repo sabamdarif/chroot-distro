@@ -1,26 +1,19 @@
-"""Self-contained maximum-isolation namespace holder.
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
+"""Superseded standalone PID 1 for maximum isolation. Nothing in `src/` uses it.
 
-This module is executed via ``python3 -m chroot_distro.helpers.max_iso_holder``
-(or ``python3 <path>``) *inside* the new PID/mount/UTS/IPC namespace created by
-``unshare``. Running as PID 1 of that namespace, it:
+It was meant to be run as `python3 -m chroot_distro.helpers.max_iso_holder` inside a
+namespace someone else had already created, taking its configuration as JSON on argv,
+making the mount tree private, chrooting the rootfs, mounting the hardened set
+(procfs with hidepid=2, read-only sysfs, tmpfs /dev with the minimal nodes,
+newinstance devpts, tmpfs /dev/shm) from inside, then signalling a ready fd and
+sleeping forever. `syscalls/unshare.create_holder_process` plus `holder.call` does all
+of that without a second interpreter and without a command line, so this file has no
+importer or caller left; only `tests/unit/test_max_iso_holder.py` still touches it.
 
-1. makes the mount tree private (so nothing propagates back to the host),
-2. chroots into the container rootfs (so PID 1's root is inside the
-   container, closing the ``chroot /proc/1/root`` escape),
-3. mounts a fresh procfs (hidepid=2), a read-only sysfs, a fresh tmpfs /dev
-   with the minimal character devices, a newinstance devpts and a tmpfs
-   /dev/shm — all from *inside* the namespace, so the parent never has to
-   ``nsenter`` in to set up mounts (which is unreliable on some Android
-   kernels whose per-namespace ns files cannot be opened),
-4. signals readiness to the parent over a pipe (fd given by --ready-fd),
-5. sleeps for effectively forever, keeping the namespaces alive.
-
-It is intentionally dependency-free (stdlib only) and uses the ``mount(2)``
-syscall via ctypes plus ``os.mknod`` so it needs no external binaries inside
-the rootfs.
-
-Configuration is passed as JSON on argv (``--config <json>``) to avoid any
-quoting/escaping pitfalls.
+Do not extend it and do not copy from it: the live path is `helpers/namespace.py` and
+`helpers/isolation.py`. It also carries its own `ctypes` mount wrapper, predating
+`syscalls/mount.py`, which is the kind of duplication the layering exists to prevent.
 """
 
 from __future__ import annotations
@@ -152,7 +145,6 @@ def setup(config: dict) -> None:
         except OSError as exc:
             log.warning("Failed to create /dev/ptmx symlink: %s", exc)
 
-    # Fresh /dev/shm.
     try:
         os.makedirs("/dev/shm", exist_ok=True)
         _mount(libc, "tmpfs", "/dev/shm", "tmpfs", MS_NOSUID | MS_NODEV, "size=256M,mode=1777")

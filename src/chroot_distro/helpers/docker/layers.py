@@ -1,3 +1,38 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
+"""Fetch one layer blob into the content-addressed cache, and apply one into a rootfs.
+
+`download_blob` is the only writer of the layer cache, and the digest is what makes
+that safe: the file at `layer_cache_path(digest)` is either the verified bytes for that
+digest or absent. The bytes are hashed as they land and compared *inside* the
+`atomic_replace` block, so a mismatch raises before the rename publishes anything, and
+an existing cache file is returned untouched. Only sha256 is accepted, and a digest
+naming any other algorithm is refused rather than trusted unverified.
+
+Two download shapes. With `connections > 1` the blob is probed for Range support and
+split into segments downloaded in parallel, each into its own `.chunkN.tmp`, with a
+`.chunks.json` recording the split so an interrupted download resumes instead of
+restarting; a segment file already on disk counts toward the progress bar. Anything
+that makes that impossible (no Range support, one segment, a failed worker) raises
+`_FallbackToSingleError` and the single-connection path runs, which is a fallback in
+speed only: it verifies the same way.
+
+A bearer token is attached to a segment request only when the probe's final URL is on
+the same host as the original. Redirected CDN URLs are pre-signed and reject the
+header, and a credential must not follow a redirect off the registry regardless.
+
+SIGINT is handled rather than left to unwind. The signal handler sets the shared abort
+event and closes every live response, because a worker blocked in `read()` on a socket
+does not notice a cancelled future, and the pool would otherwise be joined at exit
+while the download continued.
+
+`apply_layer` extracts into a rootfs *descriptor*, never a path, so no name between the
+caller's validation of the tree and the last byte written is resolved twice; whiteout
+handling is on, because a layer's deletions are as much of its content as its files.
+The segmented machinery is shared with `helpers/download.py` rather than duplicated,
+which is why several of its private names are imported here.
+"""
+
 import contextlib
 import functools
 import hashlib
@@ -42,12 +77,11 @@ log = logging.getLogger(__name__)
 _MAX_RETRIES = 3
 _RETRY_BACKOFF = (2, 5, 10)  # seconds to wait between retries
 
-# Read buffer size per I/O call — 256 KiB balances syscall overhead
-# against memory use and gives threads more time between lock
-# acquisitions on the shared progress counter.
+# 256 KiB per I/O call balances syscall overhead against memory use and gives
+# threads more time between lock acquisitions on the shared progress counter.
 _READ_CHUNK = 262144
 
-# Errors worth retrying — transient network / SSL issues.
+# Transient network and SSL issues, all worth retrying.
 _RETRYABLE = (
     ssl.SSLError,
     ConnectionResetError,
@@ -182,7 +216,6 @@ def download_blob(
                 progress = byte_progress or AggregateByteProgress(probe.content_length, label=expected_hex[:12])
                 prev_sigint = signal.getsignal(signal.SIGINT)
                 try:
-                    # Pre-fill byte progress with already downloaded bytes
                     already_downloaded = 0
                     for seg in segments:
                         if os.path.isfile(seg.tmp_path):
@@ -247,7 +280,8 @@ def download_blob(
                                 out.flush()
                                 os.fsync(out.fileno())
 
-                            # Verify the temp file BEFORE replacing dest
+                            # Still inside the atomic_replace block, so a digest
+                            # mismatch raises before the rename publishes it.
                             hasher = hashlib.sha256()
                             with open(tmp, "rb") as fh_verify:
                                 for chunk in iter(lambda: fh_verify.read(262144), b""):
@@ -321,7 +355,6 @@ def download_blob(
                                 unsent = 0
                         else:
                             draw_bytes_bar(downloaded, total, noun="downloaded")
-                    # flush remaining unsent bytes
                     if byte_progress is not None and unsent:
                         byte_progress.add(unsent)
                     fh.flush()

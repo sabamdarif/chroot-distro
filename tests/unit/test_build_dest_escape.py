@@ -198,6 +198,7 @@ def test_materialise_tar_dir_member_lands_inside_the_rootfs(tmp_path):
 # safe_mount() makes the mountpoint with a named makedirs first, which accepts
 # a symlink to a directory.
 
+
 def test_mount_point_through_a_symlinked_leaf_stays_inside(tmp_path):
     rootfs = tmp_path / "rootfs"
     rootfs.mkdir()

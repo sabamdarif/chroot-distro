@@ -1,3 +1,19 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
+"""`chroot-distro diff`: what a container's rootfs holds that its image did not.
+
+The image side is reconstructed from a baseline recorded under the container
+directory, which `clear-cache` does not touch, so a diff keeps working after the
+layer tars are gone. The blobs are only read when no valid baseline exists yet,
+and a container whose layers *and* baseline are both missing is told so rather
+than shown a diff against nothing.
+
+`_EXCLUDED_TOP` drops the top-level directories that are mounts at login time and
+never image content, so the output is the user's own changes, as `docker diff`
+reads. Only a shared `ContainerLock` is taken: this reads, and the snapshot is of
+whatever the rootfs holds while it runs.
+"""
+
 import json
 import os
 import sys
@@ -67,8 +83,8 @@ def command_diff(args) -> None:
 
         # The cached baseline (kept under the container dir, which survives
         # 'clear-cache') lets us reconstruct the image without the raw layer
-        # tars. Only require the layer blobs when no valid baseline exists —
-        # otherwise 'clear-cache' would needlessly break 'diff'.
+        # tars. The layer blobs are only required when no valid baseline
+        # exists, or 'clear-cache' would needlessly break 'diff'.
         layer_paths = [layer_cache_path(d) for d in digests]
         if not baseline_cache_is_valid(baseline_cache, digests):
             missing = [d for d, p in zip(digests, layer_paths, strict=False) if not os.path.isfile(p)]

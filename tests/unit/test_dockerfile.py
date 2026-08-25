@@ -80,10 +80,7 @@ COPY --chmod="0755" file.sh /usr/bin/
 
 
 def test_parse_dockerfile_repeated_mount_flags_collected():
-    content = (
-        "RUN --mount=type=cache,target=/a --mount=type=tmpfs,target=/b "
-        "--network=host make\n"
-    )
+    content = "RUN --mount=type=cache,target=/a --mount=type=tmpfs,target=/b --network=host make\n"
     _, instructions = parse_dockerfile(content)
     (instr,) = instructions
     assert instr["flags"]["mount"] == ["type=cache,target=/a", "type=tmpfs,target=/b"]

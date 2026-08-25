@@ -1,3 +1,32 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
+"""`chroot-distro build`: validate the request, run the engine, publish the result.
+
+Everything the command can refuse is refused before anything is created or
+fetched: an unreadable or unparsable Dockerfile, an unknown `--override-arch`, an
+`--install-as` name already in use, a malformed tag, an output file that already
+exists. A build that was going to be rejected therefore leaves behind no scratch
+tree, no cache entry and no half-written archive.
+
+One exclusive `BuildLock` per tag is held for the whole build, taken in lock-path
+order so two concurrent builds with overlapping but differently spelled tag sets
+cannot deadlock each other.
+
+A `BuildError` or an `OSError` out of the engine is a build failure and ends as
+one quoted line rather than a traceback: the engine's walks report a per-entry
+failure and carry on, so an OSError that reaches here is a walk losing its
+footing, not a bug. Anything else is left to `cli.main`.
+
+`_make_build_tmp` is where this file's care goes and its own docstring says why.
+It returns the scratch root's path plus descriptors on the root and on the
+directory holding it; the stage rootfs trees, the ADD spool and every
+`COPY --from` tree are made off the root descriptor, and the teardown removes the
+root under the parent descriptor rather than resolving `build-tmp` again.
+
+RUN steps have no isolation flag here: the mode comes from `CD_USE_ISOLATION` or
+`CD_USE_NS` alone.
+"""
+
 import contextlib
 import os
 import re
@@ -36,10 +65,6 @@ from chroot_distro.names import is_valid_name, require_valid_name
 from chroot_distro.paths import container_is_installed
 from chroot_distro.progress import fmt_size
 
-# ---------------------------------------------------------------------------
-# Top-level command
-# ---------------------------------------------------------------------------
-
 
 def command_build(args: typing.Any) -> None:
     """Implements `chroot-distro build`."""
@@ -72,7 +97,6 @@ def command_build(args: typing.Any) -> None:
     verbose = bool(getattr(args, "verbose", False))
     quiet = bool(getattr(args, "quiet", False))
 
-    # ----- resolve build context + Dockerfile -----
     build_dir = os.path.abspath(os.path.expanduser(build_path))
     if dockerfile_path is None:
         dockerfile = os.path.join(build_dir, "Dockerfile")
@@ -89,7 +113,6 @@ def command_build(args: typing.Any) -> None:
         crit_error(f"required file '{dockerfile}' does not exist.")
         sys.exit(1)
 
-    # ----- read + parse Dockerfile -----
     try:
         if dockerfile == "-":
             text = sys.stdin.read()
@@ -110,7 +133,6 @@ def command_build(args: typing.Any) -> None:
         crit_error("no instructions in Dockerfile.")
         sys.exit(1)
 
-    # ----- target architecture -----
     if override_arch:
         target_arch = normalize_arch(override_arch)
         if target_arch is None:
@@ -119,7 +141,6 @@ def command_build(args: typing.Any) -> None:
     else:
         target_arch = get_device_cpu_arch()
 
-    # ----- Validate install-as container name -----
     if install_as:
         require_valid_name(install_as, kind="--install-as value")
 
@@ -131,7 +152,6 @@ def command_build(args: typing.Any) -> None:
             )
             sys.exit(1)
 
-    # ----- determine the canonical tag set -----
     if not tags:
         derived = _derive_tag_from_path(build_dir, dockerfile)
         if not derived:
@@ -152,7 +172,6 @@ def command_build(args: typing.Any) -> None:
     tags = [_with_explicit_tag(t) for t in tags]
     primary_tag = tags[0]
 
-    # ----- refuse to overwrite existing output files -----
     for out_file in outputs:
         out_abs = os.path.abspath(os.path.expanduser(out_file))
         if os.path.exists(out_abs):
@@ -171,7 +190,6 @@ def command_build(args: typing.Any) -> None:
         for lock in build_locks:
             lock_stack.enter_context(lock)
 
-        # ----- run the build -----
         tmp_root, tmp_parent_fd, tmp_root_fd = _make_build_tmp()
 
         engine: BuildEngine | None = None
@@ -217,7 +235,6 @@ def command_build(args: typing.Any) -> None:
                 log_error(f"Build failed: {quote_path(exc.strerror or str(exc))}")
                 sys.exit(1)
 
-            # ----- assemble manifest + image_config -----
             arch_docker = ARCH_TO_DOCKER.get(target_arch, (target_arch, ""))[0]
             manifest, image_config = build_manifest_and_config(
                 final_stage.image_config,
@@ -225,8 +242,8 @@ def command_build(args: typing.Any) -> None:
                 arch_docker,
             )
 
-            # Write the manifest cache for every tag so each can be
-            # installed offline by name.
+            # One manifest cache entry per tag, so each can be installed
+            # offline by name.
             for t in tags:
                 try:
                     store_in_cache(t, target_arch, manifest, image_config)
@@ -234,7 +251,6 @@ def command_build(args: typing.Any) -> None:
                     log_error(f"Cannot write manifest cache for '{t}': {exc}")
                     sys.exit(1)
 
-            # OCI tarball outputs.
             for out_file in outputs:
                 out_abs = os.path.abspath(os.path.expanduser(out_file))
                 try:
@@ -245,7 +261,6 @@ def command_build(args: typing.Any) -> None:
                     log_error(f"Cannot write '{out_file}': {exc}")
                     sys.exit(1)
 
-            # Build summary.
             if not quiet:
                 total_size = sum(layer["size"] for layer in final_stage.layers)
                 log_info("Build complete.")
@@ -256,12 +271,9 @@ def command_build(args: typing.Any) -> None:
                 )
                 msg()
 
-            # Optional --install-as: install the built image as a
-            # container directly.
             if install_as:
                 _install_as_container(install_as, primary_tag, target_arch, quiet)
 
-            # Final hint when no --output and no --install-as were given.
             if not outputs and not install_as and not quiet:
                 msg(f"{C['CYAN']}Install with: {C['GREEN']}{PROGRAM_NAME} install {primary_tag}{C['RST']}")
                 msg()
@@ -276,11 +288,6 @@ def command_build(args: typing.Any) -> None:
             with contextlib.suppress(OSError):
                 os.close(tmp_root_fd)
             _remove_build_tmp(tmp_root, tmp_parent_fd)
-
-
-# ---------------------------------------------------------------------------
-# helpers
-# ---------------------------------------------------------------------------
 
 
 def _make_build_tmp() -> tuple[str, int, int]:

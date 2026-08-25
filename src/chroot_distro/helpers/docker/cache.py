@@ -1,3 +1,26 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
+"""The content-addressed blob cache and the manifest cache, addressed by name.
+
+A digest arrives inside a registry document and then becomes a filename, so
+`validate_digest` guards every path this module builds: the algorithm and hex form are
+checked before `:` is rewritten to `_`, and a malformed digest raises instead of
+reaching the filesystem. `layer_cache_path` is therefore the same path for the same
+blob from any image, which is what lets two images share a layer.
+
+The manifest key is a sha256 of the canonical `registry/repo:tag_arch` string, so a
+reference has one spelling per architecture no matter how the user typed it. The key is
+over the *tag*, not a digest, so re-pulling a moved tag overwrites the entry, which is
+the intended behaviour.
+
+`load_manifest_cache` reports any failure as a miss, because a re-fetch is always
+correct. `referenced_blob_digests` is the opposite and fails closed: it returns the
+paths it could not parse alongside the digests it found, and a caller pruning the layer
+cache has to stop on a non-empty *unreadable* rather than read it as an absence of
+references. Only `<key>.json` entries are read, since an `atomic_write` temporary is
+half a file by definition.
+"""
+
 import hashlib
 import json
 import os
@@ -7,7 +30,6 @@ from chroot_distro.atomic import atomic_write
 from chroot_distro.constants import LAYER_CACHE_DIR, MANIFEST_CACHE_DIR
 from chroot_distro.helpers.docker.refs import parse_image_ref
 
-# OCI digest grammar
 _DIGEST_RE = re.compile(r"^[A-Za-z0-9]+(?:[+_.\-][A-Za-z0-9]+)*:[A-Fa-f0-9]+$")
 
 
@@ -61,10 +83,10 @@ def load_manifest_cache(image_ref: str, arch: str):
 def referenced_blob_digests() -> tuple[set[str], list[str]]:
     """Return (digests, unreadable) covering every cached image's blobs.
 
-    *digests* is every blob digest the manifest cache names -- the layers and
+    *digests* is every blob digest the manifest cache names (the layers and
     the config descriptor, so an entry stays covered if a config blob ever
-    reaches the layer cache as well. *unreadable* lists the entry paths that
-    could not be parsed.
+    reaches the layer cache as well). *unreadable* lists the entry paths
+    that could not be parsed.
 
     A caller pruning the layer cache has to treat a non-empty *unreadable* as a
     reason to stop rather than as an absence of references: one truncated

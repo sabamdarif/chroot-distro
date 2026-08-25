@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
 """Mirror a source path onto a destination path, optionally pruning orphans.
 
 Change detection compares type, size and modification time, or a CRC32 digest
@@ -7,7 +9,7 @@ as the source itself is followed, hardlinks become independent copies, and
 special files (block, char, FIFO, socket) are skipped inside a tree with a
 warning and refused as the whole source. Numeric ownership, modes and timestamps
 are preserved for directories as well as files, and one that changed on its own
-is applied without rewriting the content — unless the destination carries a
+is applied without rewriting the content, unless the destination carries a
 second link, the one case where that would touch an inode this command did not
 create (see `_refresh_file_metadata`). A sparsely stored source is
 written back sparsely. With `--delete`, destination entries the source has no
@@ -17,7 +19,7 @@ at all when the source could not be listed.
 
 An entry that cannot be read or written is reported and stepped over, so one bad
 file does not cost the rest of the tree, and the command exits non-zero when any
-were — the way rsync does. That holds for every kind of entry: a directory that
+were, the way rsync does. That holds for every kind of entry: a directory that
 cannot be created, a symlink the destination filesystem will not hold (vfat, and
 so /sdcard), and an orphan `--delete` cannot remove.
 
@@ -83,7 +85,7 @@ class _Ctx:
     happened, and the command reports the transfer incomplete.
 
     `failures` counts entries that could not be read or written. Counted rather
-    than fatal — one entry must not abandon the rest of the tree — but the
+    than fatal, since one entry must not abandon the rest of the tree, but the
     command still exits non-zero, as rsync does for the same.
 
     `owner` is the pair `--chown` resolved on the destination side, or None to
@@ -297,9 +299,7 @@ def _sync_symlink(
     return True
 
 
-def _wanted_ids(
-    src_st: os.stat_result, dst_st: os.stat_result, owner: tuple[int, int] | None
-) -> tuple[int, int]:
+def _wanted_ids(src_st: os.stat_result, dst_st: os.stat_result, owner: tuple[int, int] | None) -> tuple[int, int]:
     """The (uid, gid) the destination entry should end up with.
 
     `--chown :staff` names a group and no user, which reaches here as -1 for the
@@ -320,8 +320,8 @@ def _refresh_file_metadata(
     Returns _META_OK when there was nothing to do, _META_FIXED when the entry was
     corrected in place, or _META_REWRITE to ask the caller for a full rewrite.
 
-    _needs_update compares type, size and mtime — never permissions or ownership
-    — so a `chmod +x` or a `chown` with no other change would leave the
+    _needs_update compares type, size and mtime, never permissions or ownership,
+    so a `chmod +x` or a `chown` with no other change would leave the
     destination on the old mode for good, and `--checksum` would leave the times
     behind in the same way.
 
@@ -389,14 +389,14 @@ def _sync_file(
     """Copy a regular file, preserving its owner, mode and mtime.
 
     Returns True when the destination now matches the source, False when the entry
-    was left as it was — which is what tells `--delete` to keep its hands off the
+    was left as it was, which is what tells `--delete` to keep its hands off the
     destination.
 
     Writes a sibling temp file and renames it into place, so a partial write never
     leaves the destination corrupt and an existing symlink at the destination name
     is replaced rather than written through. The temp file is created O_EXCL
     (dirfd.open_new_at), so a name already standing there is removed rather than
-    written into — it may be a hardlink to a file outside the container, which
+    written into: it may be a hardlink to a file outside the container, which
     nothing about the entry would show.
 
     A directory standing where the source has a regular file is refused, as rsync
@@ -500,7 +500,7 @@ def _collect_rels(src_fd: int, rel: str, ctx: _Ctx) -> None:
     is not this command's decision, and recursing would turn one deeper than the
     interpreter's limit into a traceback (see dirfd.copy_tree_at).
 
-    Frame layout: [fd, None, rel, pending subdirectory names, owned] — the shape
+    Frame layout: [fd, None, rel, pending subdirectory names, owned], the shape
     dirfd.close_frames expects.
     """
     stack: list[list[Any]] = [[src_fd, None, rel, None, False]]
@@ -654,10 +654,7 @@ def _mirror_at(src_fd: int, dst_fd: int, rel: str, ctx: _Ctx) -> None:
                 sub_src = dirfd.opendir_at(sfd, name)
             except OSError as exc:
                 if dirfd.is_refusal(exc):
-                    warn(
-                        f"source '{ctx.src_shown(child)}' changed to a symlink "
-                        f"during the transfer, skipping."
-                    )
+                    warn(f"source '{ctx.src_shown(child)}' changed to a symlink during the transfer, skipping.")
                 ctx.note_failure(child)
                 continue
             levels.push([sub_src, None, child, None, True])
@@ -695,7 +692,7 @@ def _collect_extras_at(dst_fd: int, rel: str, ctx: _Ctx, extras: list[tuple[str,
 
     An extra directory is captured whole and not descended into; a symlink is
     captured as a plain entry so it is unlinked rather than walked, which the
-    lstat guarantees — S_ISDIR is already false for one. Subtrees the mirror pass
+    lstat guarantees, S_ISDIR being already false for one. Subtrees the mirror pass
     could not write are left alone (ctx.skipped_rels).
 
     Frame layout: [fd, None, rel, pending names, owned].
@@ -832,13 +829,11 @@ def command_sync(args) -> None:
         _do_sync(src, dest, verbose, use_checksum, delete, chown)
 
 
-def _do_sync(
-    src: str, dest: str, verbose: bool, use_checksum: bool, delete: bool, chown: str | None = None
-) -> None:
+def _do_sync(src: str, dest: str, verbose: bool, use_checksum: bool, delete: bool, chown: str | None = None) -> None:
     """Resolve and pin both roots, then mirror the source onto the destination.
 
-    Both endpoints come back with their own final component resolved — the
-    container side by the chroot walk, the host side by realpath — so
+    Both endpoints come back with their own final component resolved, the
+    container side by the chroot walk and the host side by realpath, so
     `sync /sdcard box:/x` transfers the directory `/sdcard` points at and a
     destination link is written where it leads, as rsync and cp both do. Links
     *within* the tree are preserved either way; only the endpoints are followed.

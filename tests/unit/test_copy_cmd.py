@@ -220,9 +220,7 @@ def test_a_cross_device_move_copies_then_removes(rootfs, tmp_path, monkeypatch):
     assert not src.exists()
 
 
-def test_a_cross_device_move_keeps_the_source_when_an_entry_did_not_make_it(
-    rootfs, tmp_path, monkeypatch, capsys
-):
+def test_a_cross_device_move_keeps_the_source_when_an_entry_did_not_make_it(rootfs, tmp_path, monkeypatch, capsys):
     """A FIFO is a warning during a copy but silent data loss during a move."""
     src = tmp_path / "tree"
     src.mkdir()

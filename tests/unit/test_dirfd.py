@@ -486,6 +486,7 @@ def test_rmtree_at_reports_each_removal_and_each_failure(tmp_path, monkeypatch):
 
 def test_rmtree_at_without_on_error_still_raises(tmp_path, monkeypatch):
     _tree(tmp_path / "root")
+
     def refuse(_dir_fd, name, _is_dir, _force):
         raise OSError(errno.EPERM, os.strerror(errno.EPERM), name)
 

@@ -275,7 +275,9 @@ def test_a_copy_from_image_is_pulled_into_the_scratch_descriptor(scratch, monkey
     monkeypatch.setattr(
         copy_step,
         "pull_image",
-        lambda _ref, rootfs_fd, _arch: open(os.open("pulled", os.O_CREAT | os.O_WRONLY, dir_fd=rootfs_fd), "wb").close(),
+        lambda _ref, rootfs_fd, _arch: open(
+            os.open("pulled", os.O_CREAT | os.O_WRONLY, dir_fd=rootfs_fd), "wb"
+        ).close(),
     )
     engine = SimpleNamespace(tmp_root=str(root), tmp_root_fd=fd, quiet=True, target_arch_pd="x86_64")
     moved = _repoint(root, decoy)

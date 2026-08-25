@@ -1,3 +1,12 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
+"""Search Docker Hub for images.
+
+Hub's search endpoint is not part of the registry API, so this command is Hub-only by
+construction and there is nothing to generalise to other registries. Read-only and
+unauthenticated, which is why `cli.main` never elevates it.
+"""
+
 import json
 import sys
 import urllib.error

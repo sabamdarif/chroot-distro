@@ -1,4 +1,17 @@
-"""Resolve host Wayland display environment for chroot sessions."""
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
+"""The Wayland half of a session's display environment.
+
+`WAYLAND_DISPLAY` gets a `wayland-0` fallback only when that socket actually
+exists in the runtime dir: naming a compositor that is not there would make a
+toolkit try Wayland and fail instead of falling back to X11. The session
+metadata (`XDG_SESSION_TYPE`, `XDG_CURRENT_DESKTOP`, `DESKTOP_SESSION`) is
+forwarded with no fallback at all, since a guess there is a guess about the
+host's desktop.
+
+The host values come through `x11.get_host_env_var`, so a session sudo dropped
+is still found. `display.py` merges the result.
+"""
 
 from __future__ import annotations
 
@@ -31,16 +44,14 @@ def resolve_wayland_env() -> dict[str, str]:
     runtime = get_host_env_var("XDG_RUNTIME_DIR") or _runtime_dir(uid)
     env: dict[str, str] = {}
 
-    # Wayland display
     wayland_display = get_host_env_var("WAYLAND_DISPLAY")
     if wayland_display:
         env["WAYLAND_DISPLAY"] = wayland_display
     else:
-        # Fallback: check if default wayland-0 socket exists
         if _wayland_socket_exists(runtime, "wayland-0"):
             env["WAYLAND_DISPLAY"] = "wayland-0"
 
-    # Session metadata — forward from host, no fallback
+    # Session metadata is forwarded from the host with no fallback.
     for var in ("XDG_SESSION_TYPE", "XDG_CURRENT_DESKTOP", "DESKTOP_SESSION"):
         val = get_host_env_var(var)
         if val:

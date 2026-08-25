@@ -1,3 +1,27 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
+"""`chroot-distro info`: one report a bug can be filed with, and nothing changed.
+
+Read-only from end to end: every value is read, probed or computed, never
+written. The command elevates when root is available, since `/proc/config.gz` and
+the data directories are root-owned, and stays useful without it by falling back
+to the runtime probes in `commands/kernel_config.py`.
+
+This is the file where `shutil.which` is a capability report rather than a call:
+`_detect_escalation_tool` says which of sudo, doas, pkexec or su exists so the
+Privileges line can name it, and nothing here execs what it finds. The isolation
+tier comes from `namespace.probe_and_report_namespaces`, the same probe `login`
+uses, so the report and the real run cannot disagree.
+
+The per-image findings are the point of the analysis section: an empty rootfs, a
+missing `manifest.json` (which is what makes `reset`, `diff` and `run`
+unavailable), or an arch that needs emulation, which is then cross-checked
+against whether a QEMU binfmt handler is actually registered.
+`_has_rootfs_structure` stays lenient on purpose, since a distroless image
+legitimately ships no `/etc`, and a directory left over from an interrupted
+install is not listed as an image at all.
+"""
+
 import ctypes
 import json
 import os
@@ -63,7 +87,7 @@ class _Capability:
 
     label: str
     value: str
-    level: str = "info"  # "ok" | "warn" | "bad" | "info" — picks glyph + color
+    level: str = "info"  # "ok", "warn", "bad" or "info": picks glyph and color
 
 
 @dataclass
@@ -331,9 +355,9 @@ def _isolation_tier_status() -> tuple[str, str] | None:
     if result.missing_mandatory:
         return "unavailable (no mount namespace on this kernel)", "warn"
     descriptions = {
-        "B": "B — full user-namespace remap (container uids remapped, capabilities scoped)",
-        "A": "A — user namespace active (capabilities scoped; uids not remapped)",
-        "C": "C — capability-drop only (no user namespace; container root == host root)",
+        "B": "B: full user-namespace remap (container uids remapped, capabilities scoped)",
+        "A": "A: user namespace active (capabilities scoped; uids not remapped)",
+        "C": "C: capability-drop only (no user namespace; container root == host root)",
     }
     levels = {"B": "ok", "A": "ok", "C": "warn"}
     tier = result.isolation_tier

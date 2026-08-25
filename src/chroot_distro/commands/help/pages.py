@@ -1,3 +1,22 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
+"""The text of every help page, written by hand because argparse's is never shown.
+
+`cli.main` intercepts `--help` and an unknown command before argparse gets to
+print anything, so the sub-parsers in `parser.py` carry no user-visible help and
+this file is the only description of a flag a user will read. Adding a flag there
+without adding it here ships it undocumented.
+
+`HELP_PAGES` is keyed by canonical command name, the same keys
+`parser.ALIAS_TO_CANONICAL` resolves to, and every value is data for
+`render.render_page`: `usage`, optional `aliases`, `summary`, `options` as
+`(name, description)` pairs, `examples` as shell lines, and `footer` blocks of
+`title`/`intro`/`bullets`/`examples`. Nothing here formats or wraps; widths are
+`render.py`'s business. `TOP_COMMANDS` is the command list on the front page, in
+the order a user meets them rather than alphabetically, and a third element in a
+row is the red warning shown beside it.
+"""
+
 import typing
 
 from chroot_distro.constants import (

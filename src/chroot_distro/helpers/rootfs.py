@@ -1,3 +1,32 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
+"""The guest `/etc` files this program writes, and the one safe way to reach them.
+
+DNS and hosts are written at install time and patched at login, because a guest
+resolving nothing is a guest that looks broken. `host_nameservers` skips the
+loopback stubs (`127.0.0.53` and friends), which answer only for a daemon in the
+host's network namespace, and reads systemd-resolved's upstream file instead;
+with nothing usable found, the two public defaults from `constants` stand in.
+`ensure_hosts_entry` adds the running hostname at login, which `sudo` and
+anything else that reverse-resolves needs and which install time could not know.
+
+Everything below the rootfs is image content, including `etc` itself, so both
+writers go through `_open_etc` plus `_replace_at`: the directory is opened
+`O_NOFOLLOW` off a pinned rootfs descriptor, an `etc` that is a symlink is
+refused rather than followed (it would aim the write at a host directory, since
+this runs outside the chroot), the old entry is unlinked instead of truncated so
+a symlink under the name goes with it, and the create is `O_EXCL` so whatever
+reappears under the name is not adopted. Mode comes from the descriptor, not the
+umask, because the guest reads both files unprivileged.
+
+`guest_etc_path` is the other half of that, for the files this module does not
+own: it resolves a guest path *within* the rootfs, so an absolute symlink into
+`/system/etc` (termux-docker ships `/etc/passwd` and `/etc/group` that way)
+reaches the container's file instead of Android's read-only one.
+`register_android_ids` is the install-time Termux fixup, adding the invoking
+app's uid and its supplementary group ids to the four account files.
+"""
+
 import contextlib
 import grp
 import logging
@@ -58,7 +87,8 @@ def _read_resolv_nameservers(path: str) -> list[str]:
     if servers:
         return servers
 
-    # systemd-resolved stub (127.0.0.53) — read upstream servers instead.
+    # The systemd-resolved stub (127.0.0.53) is no use to a guest, so the
+    # upstream servers are read instead.
     if "127.0.0.53" in content and os.path.isfile(_SYSTEMD_UPSTREAM_RESOLV):
         try:
             with open(_SYSTEMD_UPSTREAM_RESOLV) as fh:
@@ -83,11 +113,11 @@ def _open_etc(rootfs: str, root_fd: int | None) -> int | None:
     a symlink aims both writers here at whatever directory the link names,
     and since they run outside the chroot that can be a host directory.
     None covers a missing `etc`, one that is a link, and one that is not a
-    directory -- every caller already treats the fixups as best-effort.
+    directory; every caller already treats the fixups as best-effort.
 
     *root_fd* is the rootfs when the caller has pinned it. `build` has one
     per stage, and the rootfs there is a name inside the build's scratch
-    tree, which anything running as the invoking user can re-point --
+    tree, which anything running as the invoking user can re-point,
     including a process a previous RUN step left behind.
     """
     own_fd = None
@@ -113,9 +143,9 @@ def _replace_at(etc_fd: int, name: str, content: str) -> None:
 
     The old entry is unlinked rather than truncated, so a symlink standing
     under the name is removed instead of written through, and the create is
-    O_EXCL, so whatever reappears under the name is not adopted either -- a
+    O_EXCL, so whatever reappears under the name is not adopted either (a
     hard link to a host file being the case nothing about the entry could
-    reveal.
+    reveal).
     """
     mode = stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IROTH
     dirfd.unlink_quietly(etc_fd, name)

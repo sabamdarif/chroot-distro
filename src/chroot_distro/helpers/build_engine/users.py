@@ -1,7 +1,24 @@
-# Resolve user and group names against the rootfs's own /etc/passwd and
-# /etc/group. Both files are image content, and so is every directory
-# component leading to them, so the lookup follows the path the way the guest
-# would see it rather than the way the host resolves a name.
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
+"""Resolve a user or group name against the rootfs's own /etc/passwd and /etc/group.
+
+Never the host's databases: a USER line or a `--chown` spec names an identity
+that exists in the image, and `pwd.getpwnam` would answer with whatever the host
+happens to have under that name.
+
+Both files are image content, and so is every directory component leading to
+them, so the walk follows the path the way the guest sees it: one descriptor per
+level, an absolute symlink target re-anchored at the rootfs, `..` clamped there
+the way a chroot clamps it, and the hop count bounded. Anything that is not a
+regular file, or that leads out, reads as absent.
+
+Nothing bounds how large an image's passwd file is, so the read is capped and a
+line the cap cut in half is dropped rather than parsed.
+
+Every failure falls back to the caller's default: uid 0 for a USER, and the
+resolved uid for a group that was not named. A name this lookup cannot find
+therefore builds as root rather than failing the build.
+"""
 
 import contextlib
 import logging
@@ -18,8 +35,8 @@ _MAX_SYMLINK_HOPS = 40
 
 # Nothing bounds how large an image's passwd or group file is, and the whole
 # point of reading it is that it was not written by us. A megabyte is thousands
-# of entries; past that the file is not a passwd file, and reading it -- or one
-# arbitrarily long line of it -- into memory is how a build gets killed rather
+# of entries; past that the file is not a passwd file, and reading it (or one
+# arbitrarily long line of it) into memory is how a build gets killed rather
 # than failed.
 _MAX_ID_FILE_BYTES = 1 << 20
 
@@ -27,7 +44,7 @@ _MAX_ID_FILE_BYTES = 1 << 20
 def _open_guest_file(rootfs_dir: str, guest_path: str, root_fd: int | None = None) -> typing.IO[str] | None:
     """Open the absolute guest path *guest_path* under *rootfs_dir*.
 
-    Returns a text-mode file object for a regular file, or None -- the path
+    Returns a text-mode file object for a regular file, or None when the path
     does not exist, names something other than a regular file, or leads out of
     the rootfs. Undecodable bytes are replaced rather than raised: the content
     is the image's, and a UnicodeDecodeError is not an OSError, so no caller's

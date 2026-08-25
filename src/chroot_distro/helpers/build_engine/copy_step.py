@@ -1,11 +1,37 @@
-# No file_map entry ever holds content in memory. A file_map covers a whole
-# instruction at once, so ADD used to read an entire URL response — and then
-# every regular member of an auto-extracted archive, all of them live at the
-# same time — into RAM, and one instruction could take the build process out.
-# Content that does not already exist as a file is spooled into a directory off
-# engine.tmp_root and referenced by (that directory's descriptor, name), which is
-# where it was headed anyway: the instruction both materialises it into the
-# rootfs and packs it into a layer, and tmp_root is removed when the build ends.
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
+"""COPY and ADD: locate the sources, write them into the rootfs, pack the layer.
+
+One instruction builds one `file_map`, an arcname to entry mapping describing
+what the rootfs should hold, and that map is both materialised on disk
+(`_materialise_files`) and packed into the layer (`layer_diff.write_files_layer`),
+so the tree and the image record cannot drift apart.
+
+No file_map entry ever holds content in memory. One file_map covers a whole
+instruction, so a URL response body, or every regular member of an
+auto-extracted archive, would all be live at once and one instruction could take
+the build process out. Content that does not already exist as a file is spooled
+into a directory off engine.tmp_root and referenced by (that directory's
+descriptor, name), which is where it was headed anyway, and tmp_root is removed
+when the build ends.
+
+Three source kinds, decided per operand: a URL (ADD only), the build context, and
+another rootfs (`--from`: an earlier stage, or an image pulled into a throwaway
+tree). None of the three is a tree this build wrote, so `_SourceTree` is the only
+way one is located. It resolves a spec to components with each hop clamped inside
+the tree, then hands back descriptors walked down O_NOFOLLOW rather than the path
+it resolved. The last component is left unresolved deliberately, because COPY
+copies a symlink as a symlink instead of reading through it.
+
+The write side re-walks for the same reason, and also leaves its last component
+alone, so every kind drops a link standing at the name before writing: an ADD'd
+tar shipping `etc -> <host dir>` and then an `etc/passwd` member is the case that
+buys.
+
+Flags are an allow-list. `--link` is refused as BuildKit-only and `--checksum`
+and `--keep-git-dir` as unimplemented, never ignored, since each one changes what
+the instruction is meant to produce.
+"""
 
 import contextlib
 import hashlib
@@ -49,7 +75,6 @@ from chroot_distro.helpers.layer_diff import MapSources, write_files_layer
 from chroot_distro.helpers.tar_extract import safe_resolve_parts
 from chroot_distro.message import log_info
 
-# Chunk size for spooling, the same one tar_extract streams with.
 _SPOOL_CHUNK = 1 << 17
 
 
@@ -57,7 +82,7 @@ class _SourceTree:
     """The tree one COPY/ADD reads its sources out of.
 
     The build context, another stage's rootfs, or an image pulled for
-    COPY --from — trees this program did not write, whose symlinks are therefore
+    COPY --from: trees this program did not write, whose symlinks are therefore
     whoever wrote them's choice.
 
     `resolve()` answers where a source spec lands with tar_extract's clamped
@@ -75,9 +100,9 @@ class _SourceTree:
     root with O_NOFOLLOW instead, and the entries recorded in a file_map carry
     (root, components) so the reads that come later can do the same.
 
-    *root_fd* is the tree when the caller has pinned it -- a build stage's
+    *root_fd* is the tree when the caller has pinned it (a build stage's
     rootfs, which is a name inside the build's scratch tree and so re-pointable
-    by anything running as the invoking user. The walk then starts from that
+    by anything running as the invoking user). The walk then starts from that
     inode and the entries carry it, so neither the enumeration nor the read
     resolves the tree's own name a second time.
     """
@@ -143,7 +168,7 @@ def _spec_parts(src: str) -> list[str] | None:
 
     A leading '/' is dropped: Docker reads both spellings as relative to the
     source tree's own root. A `..` written in the spec is refused rather than
-    clamped — the same rule the [name:]path resolver applies to a container
+    clamped, the same rule the [name:]path resolver applies to a container
     path, and the same answer Docker gives for a source outside the build
     context.
     """
@@ -249,7 +274,7 @@ def _file_entry(
     `src` is the joined form, for a message that has to name the source; nothing
     reads through it. The bytes come from a walk of `rel` down from `root`
     (layer_diff.MapSources), and `size` is what the enumeration measured, which
-    is all the progress bar's denominator needs — the pack sizes each file off
+    is all the progress bar's denominator needs; the pack sizes each file off
     the descriptor it reads.
 
     `root_fd` is the descriptor that walk starts from when the caller has one,
@@ -286,7 +311,7 @@ def _spool_entry(
     consumers read it from: layer_diff's "file" kind takes an entry's mode,
     uid and gid from the dict but its mtime from the file on disk. The value
     came out of an archive header or off the clock, so it can be any number
-    at all -- os.utime() raises OverflowError, not OSError, on one the
+    at all: os.utime() raises OverflowError, not OSError, on one the
     platform cannot store.
 
     The stamp and the size go through the spool descriptor, and the entry
@@ -328,7 +353,6 @@ def _do_copy_or_add(
     sources = tokens[:-1]
     dest = tokens[-1]
 
-    # Whitelist flags; reject everything else loudly (never silently ignore).
     allowed = {"chown", "chmod", "from"}
     if instr["name"] == "COPY":
         allowed.add("parents")
@@ -341,8 +365,7 @@ def _do_copy_or_add(
             raise BuildError(f"{instr['name']} --{k} is not supported yet (line {instr['lineno']}).")
         if k not in allowed:
             raise BuildError(
-                f"{instr['name']} --{k} is not supported (line {instr['lineno']}); "
-                f"refusing to silently ignore it."
+                f"{instr['name']} --{k} is not supported (line {instr['lineno']}); refusing to silently ignore it."
             )
     parents = "parents" in flags
 
@@ -445,7 +468,7 @@ def _pull_throwaway_image(engine: typing.Any, image_ref: str) -> tuple[str, int]
 
     The descriptor is the caller's to close. The name is resolved once, when the
     directory is created off the scratch root, and the emptiness check, the pull
-    and every read the instruction then makes go through the descriptor -- an
+    and every read the instruction then makes go through the descriptor: an
     image this build has no say over is what lands in there.
     """
     slot = hashlib.sha256(image_ref.encode()).hexdigest()[:16]
@@ -508,7 +531,7 @@ def _copy_from_context(
     concerned: `..` in the spec is refused outright, and a symlink leading out of
     the context re-anchors at its root, so what was `escape/secret` with
     `escape -> /` becomes plain `secret` and is reported missing if the context
-    holds no such file. That is what the daemon makes of a context symlink too —
+    holds no such file. That is what the daemon makes of a context symlink too:
     it only ever sees the unpacked context, never the host tree the link named.
     """
     tree = _SourceTree(engine.build_dir)
@@ -666,7 +689,7 @@ def _copy_url(
     Dockerfile asked for, and nothing downstream would notice: there is no
     digest to check an ADD against, so the short bytes went into the rootfs and
     into the layer `push` uploads under the name of the whole file. The framing
-    is why the check has to be here — a truncated *chunked* body raises
+    is why the check has to be here: a truncated *chunked* body raises
     IncompleteRead on its own, while a truncated **Content-Length** one raises
     nothing at all, CPython's HTTPResponse.read(amt) declining to for
     compatibility.
@@ -720,7 +743,7 @@ def _add_to_file_map(
     """Record the source *parts* names in *tree*, by what the lstat says.
 
     A symlink is copied as a symlink (never read through), a directory is walked,
-    and a regular file is recorded — or, for ADD, unpacked when it turns out to be
+    and a regular file is recorded, or, for ADD, unpacked when it turns out to be
     an archive. Devices, FIFOs and sockets are skipped, as they are everywhere
     else in the program.
     """
@@ -741,7 +764,6 @@ def _add_to_file_map(
         )
         return
     if stat.S_ISREG(st.st_mode):
-        # Auto-extract tar archives for ADD.
         if auto_extract:
             assert spool is not None
             if _extract_archive(tree, parts, dest, file_map, uid, gid, spool):
@@ -967,17 +989,16 @@ def _extract_tar_into_dest(
     """ADD auto-extract: stream the tar in *fobj* into dest as a tree.
 
     Returns how many members were recorded. Zero means the stream was not an
-    archive after all -- it failed on its very first header, or it held
-    nothing this records (an empty tar; one of nothing but devices, FIFOs and
-    traversal names) -- and the caller reads that as "copy the source
-    verbatim", which is what Docker does with a file its own archive probe
-    rejects. That matters because the sniff that gets a source here is a
-    signature and a signature is all it can be: gzip, bzip2 and xz magic say
-    "compressed", not "compressed *tar*", so a plain data.gz is
-    indistinguishable from a data.tar.gz until tarfile reads a header. A
-    failure *after* members were recorded is the other thing -- a real
-    archive, truncated or corrupt, with half of itself already in the
-    file_map -- and that ends the build naming the source.
+    archive after all: it failed on its very first header, or it held nothing
+    this records (an empty tar; one of nothing but devices, FIFOs and traversal
+    names). The caller reads that as "copy the source verbatim", which is what
+    Docker does with a file its own archive probe rejects. That matters because
+    the sniff that gets a source here is a signature and a signature is all it
+    can be: gzip, bzip2 and xz magic say "compressed", not "compressed *tar*",
+    so a plain data.gz is indistinguishable from a data.tar.gz until tarfile
+    reads a header. A failure *after* members were recorded is the other thing,
+    a real archive, truncated or corrupt, with half of itself already in the
+    file_map, and that ends the build naming the source.
 
     Every regular member is spooled to its own file. Reading them into the
     file_map instead meant the archive's entire uncompressed content sat in
@@ -992,9 +1013,9 @@ def _extract_tar_into_dest(
             for m in tf:
                 if m.isblk() or m.ischr() or m.isfifo():
                     continue
-                # Strip a literal leading './' prefix (not lstrip("./") — that
-                # would eat any combination of dots and slashes and silently
-                # neutralise './../foo' style traversal entries).
+                # Strip a literal leading './' prefix. lstrip("./") would eat
+                # any combination of dots and slashes and silently neutralise
+                # './../foo' style traversal entries.
                 rel = m.name
                 while rel.startswith("./"):
                     rel = rel[2:]
@@ -1068,7 +1089,7 @@ def _materialise_files(rootfs_dir: str, file_map: dict[str, typing.Any], *, root
     its children, so a symlink entry lands before anything written
     "through" it. The destination's parent is then resolved with
     safe_resolve_parts, which follows existing symlink components but
-    clamps each hop inside rootfs_dir — otherwise an ADD'd tar (or a
+    clamps each hop inside rootfs_dir. Otherwise an ADD'd tar (or a
     stage) could ship `evil -> /` followed by `evil/passwd` and the write
     would escape onto the host.
 
@@ -1076,15 +1097,15 @@ def _materialise_files(rootfs_dir: str, file_map: dict[str, typing.Any], *, root
     there safe on its own, because it decides that by name and everything
     afterwards used the answer by name too. os.makedirs(), os.remove(),
     shutil.copyfile() and os.chmod() all resolve the path again, so a
-    component re-pointed in between — by a background process an earlier
-    RUN left running, which nothing kills off Termux — sent the whole
+    component re-pointed in between, by a background process an earlier
+    RUN left running, which nothing kills off Termux, sent the whole
     instruction wherever the new link led. The parent is therefore
     re-walked off a descriptor (dirfd.opendir_under, O_NOFOLLOW per
     level, creating what is missing) and the entry itself is written as
     (dir_fd, name).
 
     The final component is deliberately not resolved, so we replace the
-    entry itself and never a same-named symlink's target -- which means
+    entry itself and never a same-named symlink's target, which means
     every kind has to drop a link standing there first, the directory
     branch included.
 
@@ -1133,8 +1154,8 @@ def _materialise_entry(
         # the chmod to whatever it points at. The parent is resolved with
         # clamping but the final component is deliberately left alone, so
         # `etc -> /home/user` in the image plus an ADD'd tar carrying an `etc/`
-        # member had that host directory chmod'ed to the member's mode -- and the
-        # tree then disagreed with the layer, which records a plain directory
+        # member would chmod that host directory to the member's mode, leaving
+        # the tree disagreeing with the layer, which records a plain directory
         # there. Overlay semantics replace a symlink with a real directory; the
         # tar extractor already drops it the same way (see tar_extract).
         try:
@@ -1155,7 +1176,7 @@ def _materialise_entry(
         os.symlink(entry["target"], name, dir_fd=dir_fd)
     elif kind == "file":
         # open_new_at is O_EXCL and drops a leftover rather than adopting it, so
-        # the bytes always land in a new inode inside this directory -- never
+        # the bytes always land in a new inode inside this directory, never
         # through a hardlink to somewhere else, which is the one thing O_NOFOLLOW
         # cannot refuse.
         mode = entry.get("mode", 0o644)

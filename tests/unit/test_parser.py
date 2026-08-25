@@ -129,9 +129,7 @@ def test_parser_login_has_no_entrypoint():
 
 def test_parser_build_secret_and_ssh():
     parser = build_parser()
-    args = parser.parse_args(
-        ["build", ".", "--secret", "id=tok,src=/tmp/tok", "--secret", "id=other", "--ssh"]
-    )
+    args = parser.parse_args(["build", ".", "--secret", "id=tok,src=/tmp/tok", "--secret", "id=other", "--ssh"])
     assert args.command == "build"
     assert args.secrets == ["id=tok,src=/tmp/tok", "id=other"]
     assert args.ssh == ["default"]

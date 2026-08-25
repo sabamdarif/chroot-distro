@@ -1,3 +1,23 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
+"""Extract a local archive into a rootfs: a plain tarball or an OCI image layout.
+
+The format is decided by streaming the first 500 members and looking for `oci-layout`,
+so a plain tarball is never indexed in full. A plain tarball's leading components are
+stripped by a vote (`detect_strip_count` scores each depth by how many entries put a
+known rootfs directory first), because tarballs are published both with and without a
+wrapper directory. An OCI archive is walked index to manifest to config, its layers
+cached under their digests and then applied in order.
+
+Every member read out of the outer archive must be a *regular* file, and that check is
+the point of this module: `tarfile.extractfile` follows hardlinks and symlinks within
+the archive, so a crafted outer tar could otherwise redirect `index.json` to a layer
+blob, or swap one image's layer for another's where no digest check would see it.
+
+The rootfs is a descriptor throughout, for the reason `commands/install.py` explains.
+A plain tarball returns None, since it carries no image metadata to record.
+"""
+
 import json
 import os
 import shutil

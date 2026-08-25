@@ -1,3 +1,24 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
+"""The help-page renderer: page data in, wrapped and coloured lines to stderr.
+
+Everything is drawn to a width `term_width` decides, because help is read on a
+phone as often as on a desktop: fds 2, 1 and 0 are tried in turn, then `$COLUMNS`,
+then a fallback, and the answer is clamped to `_MAX_WIDTH` so a maximised window
+does not produce lines nobody can follow. Below `NARROW_BREAKPOINT`, or whenever
+the description column would come out too thin to read, the two-column blocks
+(`options_block`, `commands_block`, `bullets_block`) fall back to a stacked form
+instead of squeezing.
+
+Wrapping keeps long words and hyphenated words whole, since the text is full of
+flags and paths that must stay copy-pasteable, and the column arithmetic counts
+visible characters only: the colour escapes come from `message.C` and are added
+after a line's width has been decided, never measured.
+
+`render_page` walks the dict shape `pages.py` defines and emits only the keys a
+page actually has, so a page needs no empty sections.
+"""
+
 import os
 import shutil
 import textwrap

@@ -1,3 +1,36 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
+"""Parse a Dockerfile into instruction records.
+
+Parsing only: nothing here executes, opens or resolves anything, and every
+value comes back as text. `helpers/build_engine/` decides what an instruction
+means, so a value this module cannot make sense of is returned rather than
+rejected. The two errors it does raise are structural, an unknown instruction
+name and an unterminated here-doc body, because neither leaves a record a
+consumer could act on.
+
+A Dockerfile is untrusted input, and three of its features change how the rest
+of the file is read, which is why they are settled here and not in the engine:
+the `escape` directive picks the continuation character (only a backslash or a
+backtick, anything else is dropped and the backslash assumed), the directive
+zone ends at the first line that is not a recognised `# key=value` (a duplicate
+key ends it too and becomes an ordinary comment), and a here-doc on ADD, COPY
+or RUN consumes raw lines up to its closing tag, so those lines are body and
+never instructions.
+
+Two record fields need a check before use. `value` is a list only when
+`exec_form` is true, which happens when the value parses as a JSON array of
+strings and never otherwise; `flags["mount"]` is a list only when the flag
+repeated, since `--mount` is the one repeatable flag and every other one is
+last-writer-wins. An ONBUILD record carries the wrapped inner record as its
+`value`.
+
+`expand_vars` keeps unset and empty distinct: a None in the env mapping means
+unset, which is what `${VAR-default}` and `${VAR+value}` test, while `:-` and
+`:+` test for a non-empty value. `:?` and `?` are bash-isms and expand as
+plain lookups.
+"""
+
 import json
 import logging
 import re
@@ -45,11 +78,6 @@ class DockerfileSyntaxError(Exception):
     """Raised when the Dockerfile cannot be parsed."""
 
 
-# ---------------------------------------------------------------------------
-# Top-level entry
-# ---------------------------------------------------------------------------
-
-
 def parse_dockerfile(text: str | bytes) -> tuple[dict[str, str], list[dict[str, typing.Any]]]:
     """Parse Dockerfile content into (directives, instructions).
 
@@ -85,10 +113,6 @@ def parse_dockerfile(text: str | bytes) -> tuple[dict[str, str], list[dict[str, 
     instructions = _parse_instructions(raw_lines, directive_end, escape_char)
     return directives, instructions
 
-
-# ---------------------------------------------------------------------------
-# Parser directives
-# ---------------------------------------------------------------------------
 
 _DIRECTIVE_RE = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+?)\s*$")
 
@@ -126,10 +150,6 @@ def _parse_directives(raw_lines: list[str]) -> tuple[dict[str, str], int]:
     return directives, idx
 
 
-# ---------------------------------------------------------------------------
-# Instruction tokenisation
-# ---------------------------------------------------------------------------
-
 # A flag at the start of a value, e.g. --from=builder or --chmod=755.
 # Flag values are non-space tokens; quoted values are handled by an
 # explicit pre-pass before this matcher runs.
@@ -156,7 +176,6 @@ def _parse_instructions(raw_lines: list[str], start_idx: int, escape_char: str) 
             continue
 
         if stripped.startswith("#"):
-            # Full-line comment.
             i += 1
             continue
 
@@ -165,11 +184,8 @@ def _parse_instructions(raw_lines: list[str], start_idx: int, escape_char: str) 
         accumulated_parts = [raw_line]
         cur = raw_line
         while _ends_with_escape(cur, escape_char):
-            # Strip the trailing escape character (and any trailing
-            # whitespace before it) from this segment.
             accumulated_parts[-1] = _strip_trailing_escape(accumulated_parts[-1], escape_char)
             i += 1
-            # Skip blank lines and comment lines.
             while i < n:
                 nxt = raw_lines[i]
                 nxt_lstripped = nxt.lstrip()
@@ -186,13 +202,11 @@ def _parse_instructions(raw_lines: list[str], start_idx: int, escape_char: str) 
             cur = raw_lines[i]
             accumulated_parts.append(cur)
 
-        # Logical line: join all parts with a single space.
         accumulated = " ".join(p.strip() for p in accumulated_parts).strip()
         if not accumulated:
             i += 1
             continue
 
-        # Split the first whitespace-delimited token as the instruction.
         m = re.match(r"^\s*(\S+)\s*(.*)$", accumulated)
         if not m:
             i += 1
@@ -203,12 +217,10 @@ def _parse_instructions(raw_lines: list[str], start_idx: int, escape_char: str) 
         if name not in _INSTRUCTIONS:
             raise DockerfileSyntaxError(f"Unknown instruction '{name}' at line {line_no}.")
 
-        # ONBUILD wraps another instruction. Parse the inner part
-        # recursively below.
+        # ONBUILD carries another instruction, which is recorded as an
+        # ordinary instruction and wrapped below.
         is_onbuild = name == "ONBUILD"
         if is_onbuild:
-            # Strip the inner instruction's name and parse the rest as
-            # a normal instruction record.
             inner_match = re.match(r"^\s*(\S+)\s*(.*)$", rest)
             if not inner_match:
                 raise DockerfileSyntaxError(f"ONBUILD without inner instruction at line {line_no}.")
@@ -332,14 +344,12 @@ def _parse_flags(text: str) -> tuple[dict[str, typing.Any], str]:
         if "=" in m.group(0):
             after_eq = m.group(0).split("=", 1)[1]
             if after_eq and after_eq[0] in ('"', "'"):
-                # Try shlex over a slice starting at the value char.
                 try:
                     rest_after = text[m.start() + m.group(0).index("=") + 1 :]
                     lex = shlex.shlex(rest_after, posix=True)
                     lex.whitespace_split = True
                     lex.commenters = ""
                     val = next(iter(lex))
-                    # Skip past the consumed token in the source.
                     consumed = m.start() + m.group(0).index("=") + 1 + _shlex_consumed_len(rest_after, val)
                     _record_flag(flags, key, val)
                     text = text[consumed:]
@@ -353,7 +363,6 @@ def _parse_flags(text: str) -> tuple[dict[str, typing.Any], str]:
 
 def _shlex_consumed_len(source: str, parsed_token: str) -> int:
     """Best-effort: count source bytes that shlex consumed for one token."""
-    # Find the original closing quote and step past trailing whitespace.
     if not source:
         return 0
     quote = source[0]
@@ -366,7 +375,6 @@ def _shlex_consumed_len(source: str, parsed_token: str) -> int:
                 continue
             i += 1
         return i + 1
-    # Unquoted: token ran until next whitespace.
     return len(parsed_token)
 
 
@@ -413,11 +421,6 @@ def _try_exec_form(value: str) -> tuple[bool, list[str] | None]:
     if not all(isinstance(x, str) for x in parsed):
         return False, None
     return True, parsed
-
-
-# ---------------------------------------------------------------------------
-# Variable expansion (used by build engine, not during parse)
-# ---------------------------------------------------------------------------
 
 
 def expand_vars(text: str, env: dict[str, str | None]) -> str:

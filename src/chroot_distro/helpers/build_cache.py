@@ -1,3 +1,34 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
+"""Remember what a build step produced, keyed by the recipe that produced it.
+
+One JSON index under `BASE_CACHE_DIR`, one entry per cached step, each naming a
+layer digest, its diff_id, its size and the image-config patch the step made.
+The bytes stay in the OCI layer cache, so an entry is a pointer and losing the
+index costs rebuild time and nothing else.
+
+`compute_recipe_hash` is what makes a hit safe, and it is the only part of this
+module that can be wrong in a way the user pays for. It chains the parent
+layer's digest, the instruction name, its flags, its value and every here-doc
+body, then whatever the caller passes as `extra_inputs` for the inputs the
+instruction text does not carry: the digests of the files a COPY reads, the env
+and ARG state a RUN can see. An input left out of that string is a stale layer
+served as a fresh one, silently.
+
+The index is a document this program wrote, but the entry standing under its
+name need not be: on Termux the cache is nested inside the `$PREFIX` that is
+bound read-write into every non-isolated container. So the directory is walked
+with O_NOFOLLOW rather than joined, the read is capped, and a read that could
+not finish is refused instead of parsed, because a prefix of a JSON document
+parses as no index at all and `record()` would then write over the entries it
+had merely declined to read.
+
+Only `record()` locks, because only it does a read-modify-write. `lookup()`
+reads and `discard_index()` unlinks without one: neither can observe a torn
+file, and where flock is unsupported the update falls back to last-writer-wins,
+which costs one entry.
+"""
+
 import contextlib
 import errno
 import fcntl
@@ -16,12 +47,12 @@ _INDEX_LOCK_PATH = _INDEX_PATH + ".lock"
 
 # What the index is allowed to cost to read.
 #
-# The document is this program's own -- one record per cached build step, a few
-# kilobytes -- but the file standing under its name is not: on Termux the cache
+# The document is this program's own (one record per cached build step, a few
+# kilobytes), but the file standing under its name is not: on Termux the cache
 # is nested inside the $PREFIX that is bound read-write into every non-isolated
 # container. A read that stops only at end of file lets whoever is in that
 # position decide how many bytes every `build` pulls into memory before finding
-# out the document is nonsense, and it need not even be nonsense -- a valid
+# out the document is nonsense, and it need not even be nonsense: a valid
 # index padded with whitespace parses, and is then resident. 16 MiB is orders of
 # magnitude above anything written here.
 _MAX_INDEX_BYTES = 16 * 1024 * 1024
@@ -52,7 +83,7 @@ def _index_dir_fd(*, create: bool = False) -> int:
     that has never cached one must not fail merely because the cache directory
     does not exist yet. Everything below it is opened off the level above with
     O_NOFOLLOW, so a component replaced by a symlink raises instead of sending
-    the index -- or the lock taken over it -- somewhere else. On Termux the
+    the index (or the lock taken over it) somewhere else. On Termux the
     cache sits under the $PREFIX that is bound read-write into every
     non-isolated container, which is what puts a guest in a position to try.
     """
@@ -80,7 +111,7 @@ def _index_lock() -> typing.Iterator[None]:
 
     The lock file is named to `locking`, which opens it under the descriptor
     and replaces anything standing there that is not a plain file. A name it
-    cannot clear -- like a directory it cannot reach -- ends in the unlocked
+    cannot clear (a directory it cannot reach, say) ends in the unlocked
     path rather than a refusal: the worst an unserialised `record()` costs is
     the other build's entry, and the file it publishes is written through
     `atomic_write` either way.
@@ -110,8 +141,8 @@ def _index_lock() -> typing.Iterator[None]:
 def _read_index() -> bytes:
     """Return the index's bytes, read through the walked descriptor.
 
-    Raises what the open raises. FileNotFoundError means what it says -- no
-    index yet -- and stays apart from every other failure, which is an entry
+    Raises what the open raises. FileNotFoundError means what it says, no
+    index yet, and stays apart from every other failure, which is an entry
     that is there and is not an index: a symlink O_NOFOLLOW refused, a FIFO, a
     directory. `_load_index` answers both with an empty index, but the read has
     no business being the thing that decides that.
@@ -199,7 +230,7 @@ def discard_index() -> tuple[bool, int]:
     the entries naming them are still on disk.
 
     No lock is taken. `record()` serialises the read-modify-write cycle it
-    performs, but an unlink is not one -- a concurrent `record()` either wrote
+    performs, but an unlink is not one: a concurrent `record()` either wrote
     before it and loses its entry, which is the point of the call, or writes
     afterwards and starts a fresh index. Neither outcome is a torn file, the
     same reason `lookup()` reads unlocked. The `.lock` file is left where it
@@ -207,7 +238,7 @@ def discard_index() -> tuple[bool, int]:
 
     The entry is stat'd and unlinked under the walked descriptor, and without
     following a final symlink, so what goes is whatever is standing in the
-    index's place -- which is the outcome the caller wants either way, since a
+    index's place, which is the outcome the caller wants either way, since a
     planted entry pins nothing.
     """
     name = os.path.basename(_INDEX_PATH)
@@ -252,11 +283,6 @@ def record(
             "created": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }
         _save_index(data)
-
-
-# ---------------------------------------------------------------------------
-# Recipe-hash construction
-# ---------------------------------------------------------------------------
 
 
 def _canonical_value(value: typing.Any) -> str:

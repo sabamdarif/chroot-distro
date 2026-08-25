@@ -24,6 +24,7 @@ if sys.platform != "linux":
 
     # Mock os features missing on Windows
     import os
+
     if not hasattr(os, "getuid"):
         os.getuid = lambda: 1000
     if not hasattr(os, "getgid"):
@@ -35,6 +36,7 @@ if sys.platform != "linux":
 
     # Mock signal features missing on Windows
     import signal
+
     for sig in ["SIGHUP", "SIGQUIT", "SIGKILL", "SIGUSR1", "SIGUSR2", "SIGALRM", "SIGCHLD"]:
         if not hasattr(signal, sig):
             setattr(signal, sig, 999)

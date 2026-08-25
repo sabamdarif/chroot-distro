@@ -1,3 +1,42 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
+"""Decide what a build step changed, and pack the change into an OCI layer.
+
+Two ways of asking what changed, and they are not interchangeable. `snapshot` walks a
+live rootfs and fingerprints a file as (size, mtime_ns, mode, crc32), where the CRC is
+only ever a tie-breaker: tuple equality short-circuits on size and mtime, so the hash is
+read for the cases those miss, a `touch -r` and a sub-second double write.
+`baseline_from_layers` instead replays cached layer tars, and a tar preserves nothing
+finer than a size and a symlink target, which is why `diff_against_baseline` compares
+conservatively. Handing a replayed baseline to `diff_snapshots` would report the whole
+image as modified.
+
+A deletion leaves no file to pack, so it becomes an OCI whiteout: `.wh.<name>` for one
+entry, `.wh..wh..opq` for a directory that survived with its contents gone. The replay
+reads the same two markers back.
+
+Descriptor discipline is most of this file's length, and the reason is that its output is
+published: `push` uploads a layer to a registry, so a host file that finds its way in
+leaves the machine. Every walk carries directory descriptors instead of names, `_ParentFds`
+re-walks a packed entry's parent with O_NOFOLLOW, `MapSources` re-walks the tree a
+file_map entry named, and a regular file's size comes off the fstat of the descriptor
+about to be read rather than an earlier lstat of the name, because tarfile writes exactly
+`tinfo.size` bytes from what it is handed. The window this closes is real: a process an
+earlier RUN left running, which off Termux nothing kills, can replace a component between
+the walk and the pack. One `_ParentFds` also spans both the size pre-pass and the pack,
+so the progress denominator and the packed bytes come out of the same directories.
+
+`_pack_stream` computes both digests in a single pass, the layer digest over the
+compressed bytes and the diff_id over the uncompressed tar, and stages through
+`atomic_write` because a layer's filename follows from the stage and layer index and is
+therefore guessable. Entries are written with uid/gid 0 and gzip mtime 0 so the same tree
+packs to the same bytes.
+
+The baseline cache is keyed by the ordered layer digests and is entirely best-effort: a
+valid entry means the layer blobs need not be present at all, which is what makes a diff
+still work after `clear-cache`.
+"""
+
 import contextlib
 import errno
 import gzip
@@ -69,15 +108,15 @@ class MapSources:
     """The directories a file_map's "file" entries are read out of.
 
     An entry does not name a path to open. It names the *tree* it was found in
-    — the build context, another stage's rootfs, an image pulled for
-    COPY --from, the build's own spool — and the components below it, and both
+    (the build context, another stage's rootfs, an image pulled for
+    COPY --from, the build's own spool) and the components below it, and both
     consumers (copy_step's materialiser and the packer below) re-walk those
     components from the root with O_NOFOLLOW before reading a byte.
 
     That is the difference between deciding where a source is and reading it.
     COPY/ADD enumerates a whole instruction first and consumes the map
     afterwards, twice, so between the lstat that recorded an entry and the read
-    that packs it a component can be replaced with a symlink — by a process an
+    that packs it a component can be replaced with a symlink, by a process an
     earlier RUN left running, which off Termux nothing kills, or simply by
     whoever else can write the tree. Resolving the name again then reads
     whatever it leads to now, and a layer is the worst place for a host file to
@@ -198,11 +237,6 @@ class _ParentFds:
             os.close(self._root_fd)
 
 
-# ---------------------------------------------------------------------------
-# Snapshot / diff
-# ---------------------------------------------------------------------------
-
-
 def snapshot(rootfs: str, *, rootfs_fd: int | None = None) -> dict[str, tuple[typing.Any, ...]]:
     """Return {rel_path: fingerprint_tuple} for every entry under rootfs.
 
@@ -217,7 +251,7 @@ def snapshot(rootfs: str, *, rootfs_fd: int | None = None) -> dict[str, tuple[ty
     so if `size` or `mtime_ns` between the before- and after-snapshot
     entries already differ, the file is flagged modified without
     consulting CRC32 at all. CRC32 is the tie-breaker for the corner
-    cases the (size, mtime) pair can't catch on its own — namely
+    cases the (size, mtime) pair can't catch on its own, namely
     `touch -r`-style mtime preservation and sub-second double-writes.
 
     The walk carries directory descriptors rather than paths: os.scandir on a
@@ -488,11 +522,6 @@ def _whiteout_paths(deleted: list[str], surviving_dirs: typing.Iterable[str]) ->
     return arcnames
 
 
-# ---------------------------------------------------------------------------
-# Streaming layer-tar writer + progress bar
-# ---------------------------------------------------------------------------
-
-
 class _ProgressHashTee:
     """File-like wrapper. write() forwards bytes to `fh`, updates `hasher`,
     accumulates a byte counter, and triggers an optional progress
@@ -551,7 +580,7 @@ def _pack_stream(
     The write goes through atomic_write rather than a `<out_path>.tmp` of our
     own: the layer's name is derived from the stage and layer index, so that
     temporary is entirely predictable, and a symlink standing under it had the
-    layer's bytes written through it -- and the link itself published into the
+    layer's bytes written through it, the link itself then published into the
     cache, where `push` reads it. atomic_write names its temporary
     unpredictably and creates it O_EXCL off a descriptor on the destination
     directory.
@@ -588,11 +617,6 @@ def _pack_stream(
     )
 
 
-# ---------------------------------------------------------------------------
-# Public layer writers
-# ---------------------------------------------------------------------------
-
-
 def write_layer_tar(
     rootfs: str,
     paths_to_pack: list[str],
@@ -617,8 +641,8 @@ def write_layer_tar(
     *rootfs_fd* is the rootfs when the caller has pinned it. The one
     _ParentFds is built before the size pre-pass and outlives it, so the
     sizes the progress bar is scaled to and the bytes that are packed come
-    out of the same directories -- the pre-pass used to lstat each entry by
-    its joined path, which is a second resolve of every name in the layer.
+    out of the same directories. The pre-pass used to lstat each entry by its
+    joined path, which is a second resolve of every name in the layer.
     """
     sorted_paths = sorted(paths_to_pack)
     try:
@@ -689,17 +713,12 @@ def write_files_layer(file_map: dict[str, typing.Any], out_path: str) -> tuple[s
     return _pack_stream(out_path, total, _populate)
 
 
-# ---------------------------------------------------------------------------
-# Per-entry tar emitters
-# ---------------------------------------------------------------------------
-
-
 def _add_entry(tf: tarfile.TarFile, parents: _ParentFds, rel: str) -> None:
     """Add the on-disk entry at <rootfs>/<rel> to the tar by arcname=rel.
 
     *parents* supplies the descriptor of the entry's parent directory, so every
     one of the calls below names the entry relative to a directory the walk
-    itself opened — see _ParentFds.
+    itself opened (see _ParentFds).
     """
     parent_rel, _, name = rel.rpartition("/")
     dir_fd = parents.open(parent_rel)
@@ -780,7 +799,7 @@ def _add_file_map_entry(
     """Add one file_map entry to the tar under *arcname*.
 
     A "file" entry's bytes come out of the descriptor *sources* opens for it,
-    and its size off that descriptor's own fstat — never off an lstat of a name
+    and its size off that descriptor's own fstat, never off an lstat of a name
     that is opened again afterwards. Its mode, uid and gid come from the entry
     (that is how COPY --chown and --chmod reach the layer) while its timestamp
     comes from the file, which is where ADD parks a spooled member's mtime.

@@ -1,3 +1,14 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
+"""The exception tree, whose only job is to mark a failure as expected.
+
+`cli.main` catches `ChrootDistroError` and turns it into one line plus exit code 1, so
+raising a subclass is how a command reports a condition a user can act on. Anything
+else escapes as an "unexpected error", which is the traceback path. Each class carries
+no state: the message is the whole payload.
+"""
+
+
 class ChrootDistroError(Exception):
     """Base class for all chroot-distro exceptions."""
 

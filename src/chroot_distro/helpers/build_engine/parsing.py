@@ -1,3 +1,21 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
+"""Turn one instruction's value text into the pieces a handler wants.
+
+Text work only, shared by the handlers so the same quoting rules apply
+everywhere: `split_arg` for `ARG K[=V]`, `split_operands` for the shell-form
+lists COPY, ADD, EXPOSE and VOLUME carry, `parse_kv_list` for ENV and LABEL
+(including the legacy `ENV KEY value` form), `to_argv` for CMD and ENTRYPOINT.
+
+Every ValueError shlex can raise becomes a `BuildError` naming the line, because
+`build` catches only BuildError and OSError and one mistyped quote would
+otherwise end the build in a traceback.
+
+`is_tar_header` sits here rather than with ADD because it is a signature test
+and nothing more: it takes bytes, not a name, so ADD's auto-extract sniffs the
+inode it already holds open.
+"""
+
 import shlex
 import typing
 

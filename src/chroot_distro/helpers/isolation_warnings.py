@@ -1,9 +1,23 @@
-"""Human-readable isolation status warnings.
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
+"""The table that turns a missing namespace into something a user can act on.
 
-Maps each missing ``CLONE_NEW*`` flag to its security impact, likely cause,
-and suggested fix.  Used by :func:`namespace.probe_and_report_namespaces` to
-produce user-facing output when ``--isolated`` runs with incomplete kernel
-support.
+`NAMESPACE_INFO` carries, per `CLONE_NEW*` bit, what an absent namespace costs, the
+kernel config option that provides it, and how to turn it on. Severity orders the
+output (critical first) and picks the prefix, so adding a namespace here is a data
+edit, not a code one.
+
+Two things are deliberately absent from the table. `CLONE_NEWNS` has no entry because
+it is mandatory: without it there is no isolation to describe, and the caller has
+already refused. A user namespace that exists but rejects mounts inside it is not
+reported as missing either, since the generic line would be a lie: the specific
+`USERNS_MOUNTS_REJECTED_WARNING` replaces it, and the CLONE_NEWUSER bit is cleared
+before formatting.
+
+Silence is the normal case: a working run prints nothing, and the tier line
+(`format_isolation_tier_line`) is for `info`, a diagnostics command, not for login.
+The tier strings are duplicated from `helpers/namespace.py` as plain strings on
+purpose, because `namespace` imports this module and the reverse would be a cycle.
 """
 
 from __future__ import annotations
@@ -99,7 +113,6 @@ def format_isolation_warnings(
     The warnings are ordered by severity (critical first).
     """
     lines: list[str] = []
-    # Process in severity order: critical -> high -> medium -> low
     severity_order = ("critical", "high", "medium", "low")
     all_missing = missing_recommended | missing_enhancements
 
@@ -128,7 +141,7 @@ def format_isolation_summary(supported: int) -> str:
     active: list[str] = []
     missing: list[str] = []
 
-    # Check mount NS first (it has no NamespaceInfo entry -- always mandatory).
+    # The mount namespace is mandatory, so it has no NAMESPACE_INFO entry.
     if supported & CLONE_NEWNS:
         active.append("mount")
 
@@ -156,7 +169,7 @@ def emit_isolation_warnings(
 
     When *userns_mounts_ok* is False the kernel supports ``CLONE_NEWUSER`` but
     rejects mounts inside a user namespace, so the generic "user namespace not
-    available" line would be misleading — it is replaced by a specific note.
+    available" line would be misleading, so it is replaced by a specific note.
     """
     enhancements = missing_enhancements
     if not userns_mounts_ok:
@@ -173,17 +186,15 @@ def emit_isolation_warnings(
     sys.stderr.write(summary + "\n")
 
 
-# ── Isolation tier reporting ─────────────────────────────────────────────────
-
 # Tier codes mirror chroot_distro.helpers.namespace.ISOLATION_TIER_* so the
 # login and info paths describe the same thing. Kept as plain strings here to
 # avoid importing namespace (which imports this module).
 _TIER_DESCRIPTIONS: dict[str, str] = {
-    "B": "full user-namespace isolation — container uids are remapped to an "
+    "B": "full user-namespace isolation: container uids are remapped to an "
     "unprivileged host range and capabilities are namespace-scoped",
-    "A": "user-namespace isolation — capabilities are namespace-scoped; "
+    "A": "user-namespace isolation: capabilities are namespace-scoped; "
     "container root still maps to host root (uids are not remapped)",
-    "C": "reduced isolation — no user namespace; dangerous capabilities are "
+    "C": "reduced isolation: no user namespace; dangerous capabilities are "
     "dropped from the bounding set instead (container root == host root)",
 }
 
@@ -198,7 +209,7 @@ def format_isolation_tier_line(tier: str) -> str:
     """Return a one-line description of isolation *tier* (A/B/C).
 
     Used by ``info`` (a diagnostics command where the detail is wanted). It is
-    intentionally *not* printed during a normal login — a working run stays
+    intentionally *not* printed during a normal login: a working run stays
     silent; only genuine gaps emit anything.
     """
     return f"Isolation tier {tier}: {_TIER_DESCRIPTIONS.get(tier, 'unknown')}"

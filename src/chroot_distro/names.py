@@ -1,3 +1,12 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
+"""The container-name rule, in one place, with the hint the error message uses.
+
+A name reaches the filesystem as a directory component under the data and cache
+roots, so it is validated before anything is built from it, `restore` included:
+an archive names a container, and this is what keeps that name from naming a path.
+"""
+
 import re
 
 from chroot_distro.exceptions import InvalidNameError

@@ -66,7 +66,6 @@ def test_main_login_requires_root():
         assert exc_info.value.code == 1
 
 
-
 @patch("chroot_distro.cli.IS_TERMUX", True)
 def test_main_termux_list_does_not_require_root():
     # In Termux, 'list' does not require root

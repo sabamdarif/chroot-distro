@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
 """Filesystem operations addressed by directory descriptor.
 
 Every walk here reaches an entry through openat(2) with O_NOFOLLOW off a pinned
@@ -161,7 +163,7 @@ def makedirs_under(root: str, parts: Sequence[str], mode: int | None = None) -> 
     Every level is made with mkdirat off the descriptor of the level above and
     reopened with O_NOFOLLOW, so a component that is a symlink is refused
     instead of followed. os.makedirs() addresses each level by its path, so a
-    link the image shipped -- or a guest planted -- sends the whole tree
+    link the image shipped (or a guest planted) sends the whole tree
     wherever it points, and the mode applied afterwards goes with it. That
     matters because these directories are made on the *host* side, with
     nothing confining the write.
@@ -170,8 +172,8 @@ def makedirs_under(root: str, parts: Sequence[str], mode: int | None = None) -> 
     that as "do not use this path" rather than falling back to the name.
 
     *mode* is applied to the leaf through its descriptor, never through its
-    name -- Linux has no AT_SYMLINK_NOFOLLOW for fchmodat(2), so a named chmod
-    is the very hole this is closing.
+    name: Linux has no AT_SYMLINK_NOFOLLOW for fchmodat(2), so a named chmod is
+    the very hole this is closing.
     """
     fd = opendir_under(root, parts, create=True, mode=mode)
     if fd is None:
@@ -189,7 +191,7 @@ def open_regular_at(dir_fd: int, name: str, flags: int, mode: int = 0o644) -> tu
     """Open *name* under dir_fd as a regular file. Returns (fd, stat).
 
     O_NOFOLLOW keeps a planted symlink from being followed but says nothing
-    about a named pipe, and opening one blocks until a peer appears — a peer a
+    about a named pipe, and opening one blocks until a peer appears, a peer a
     hostile guest simply never provides. O_NONBLOCK makes that open return
     instead, and the fstat that follows refuses every remaining type, so a
     device, a socket, or a pipe with a reader attached cannot be read or
@@ -231,7 +233,7 @@ def open_new_at(dir_fd: int, name: str, mode: int = 0o644, *, readable: bool = F
 
 
 def unlink_quietly(dir_fd: int, name: str) -> None:
-    """Remove *name* under dir_fd, ignoring failure — for temp-file cleanup."""
+    """Remove *name* under dir_fd, ignoring failure, for temp-file cleanup."""
     with contextlib.suppress(OSError):
         os.unlink(name, dir_fd=dir_fd)
 
@@ -278,7 +280,7 @@ def copy_metadata(
     """Apply src's owner, mode, timestamps and xattrs to the open dst fd.
 
     shutil.copystat() expressed against file descriptors, plus the ownership it
-    does not carry, so no path — and therefore no symlink — is involved.
+    does not carry, so no path (and therefore no symlink) is involved.
 
     Ownership is numeric: a transfer runs as root and the two ends may name
     different users for the same id anyway, so the uid and gid are carried
@@ -340,7 +342,7 @@ def _chmod_fd(fd: int, mode: int) -> bool:
     """Set *mode* on the inode *fd* refers to. True when it took.
 
     fchmod() covers an ordinary descriptor but fails with EBADF on an O_PATH
-    one — and O_PATH is what paths.pin_path() hands out — so the fallback names
+    one, and O_PATH is what paths.pin_path() hands out, so the fallback names
     the same descriptor through /proc, which works whatever the flags are.
     Both forms name a descriptor rather than a path, so neither can be
     redirected by a symlink appearing under the entry's name.
@@ -401,7 +403,7 @@ def _looks_sparse(st: os.stat_result) -> bool:
 
     st_blocks counts 512-byte units whatever the filesystem's own block size
     is. A compressing filesystem reports fewer blocks for a file with no holes
-    at all, which only costs the scan below — the copy is correct either way.
+    at all, which only costs the scan below; the copy is correct either way.
     """
     return st.st_blocks * 512 < st.st_size
 
@@ -419,8 +421,8 @@ def _data_extents(fd: int, size: int) -> list[tuple[int, int]] | None:
     SEEK_DATA / SEEK_HOLE give the hole map exactly, which reading cannot: a
     hole shorter than the copy buffer, or one not aligned to it, is
     indistinguishable from written zeros once read. Not every filesystem
-    implements them — some fail outright, and the generic kernel fallback
-    answers "it is all data" — so the caller checks the result against the
+    implements them: some fail outright, and the generic kernel fallback
+    answers "it is all data", so the caller checks the result against the
     file's length before trusting it.
     """
     if not _HAS_SEEK_HOLE:
@@ -492,8 +494,8 @@ def copy_data(src_fd: int, dst_fd: int, src_st: os.stat_result | None = None) ->
 
     Pass *src_st* to have a sparsely stored source copied hole for hole, so the
     destination takes the space the source actually occupied. Without it a
-    rootfs's /var/log/lastlog — sparse, and nominally enormous because its
-    length follows the highest uid on the system — is materialised in full.
+    rootfs's /var/log/lastlog (sparse, and nominally enormous because its
+    length follows the highest uid on the system) is materialised in full.
 
     The hole map is taken from the filesystem when it will give one, and the
     extents are only believed when they account for less than the file's
@@ -529,7 +531,7 @@ def copy_file_at(
     destination is always a new inode (see open_new_at) so neither is a
     hardlink.
 
-    Pass replace=True when the destination may already exist — a copy onto a
+    Pass replace=True when the destination may already exist, a copy onto a
     named file. The content then goes to a sibling temp file that is renamed
     into place, which also makes the write atomic: an interrupted copy leaves
     the old file rather than a truncated one. The cost is that a hardlinked
@@ -585,7 +587,7 @@ def copy_symlink_at(
 ) -> None:
     """Recreate a symlink at the destination, target verbatim.
 
-    Pass replace=True when the destination name may already be taken —
+    Pass replace=True when the destination name may already be taken:
     symlink(2) has no O_TRUNC and would only report EEXIST. The old name is
     unlinked first, which removes a *name* and never writes through what it
     held, so a hardlink to a file outside the container is not touched either.
@@ -641,7 +643,7 @@ class Levels:
     few holds a descriptor open for nothing but the moment the walk climbs back
     through it. How deep a tree goes is guest or image content like everything
     else in one, and one fd per level meant an EMFILE partway down a few
-    thousand levels — which a container can create in a second — against a soft
+    thousand levels, which a container can create in a second, against a soft
     limit of 1024 on Android and most distributions. So past
     MAX_OPEN_LEVELS live levels the shallowest is *parked*: its descriptors are
     closed and its identity kept, and it is reopened when the walk pops back
@@ -650,7 +652,7 @@ class Levels:
 
     Reopening is `openat(child, "..")`, which the kernel answers from the
     directory's own parent link rather than by resolving a name, so nothing a
-    guest plants can redirect it — but a directory it *moves* has a different
+    guest plants can redirect it. But a directory it *moves* has a different
     parent, and a walk that followed one would leave the tree it was pointed
     at. Every level is therefore checked against the (device, inode) taken when
     it was parked, and one that does not match raises ESTALE.
@@ -686,7 +688,7 @@ class Levels:
         """Remove the top level, reviving the one below it. Returns it.
 
         The revived descriptors come through the popped level's own, so this
-        must be called while it still holds them — before the walk does
+        must be called while it still holds them, before the walk does
         whatever it does with the level on the way out and closes them.
         """
         frame = self.stack.pop()
@@ -703,7 +705,7 @@ class Levels:
         """Drop the levels from *depth* up, closing what they hold.
 
         For a walk that abandons a level it had only half opened. The level
-        below is live by construction — see the class docstring — so nothing has
+        below is live by construction (see the class docstring), so nothing has
         to be revived through the frames being dropped.
         """
         close_frames(self.stack[depth:])
@@ -949,7 +951,7 @@ def chown_tree_at(
 
     Every id is set with lchown(2), so a symlink is given the owner rather than
     whatever it points at, and each level is descended through opendir_at, which
-    refuses a symlink outright — the walk cannot leave the tree it was handed.
+    refuses a symlink outright: the walk cannot leave the tree it was handed.
     The descent is an explicit stack for the reason copy_tree_at's is: how deep
     the tree goes is not this code's decision.
 
@@ -1036,7 +1038,7 @@ def _opendir_for_removal(dir_fd: int, name: str, st: os.stat_result, force: bool
     """Open the directory *name* under dir_fd so its contents can go.
 
     When the descent is refused and *force* is set, the entry itself is made
-    readable — through a descriptor, not through its name, see _make_readable_at.
+    readable through a descriptor, not through its name, see _make_readable_at.
     """
     try:
         return opendir_at(dir_fd, name)
@@ -1100,7 +1102,7 @@ def rmtree_at(
     *name*, which is "" for the root itself.
 
     Returns True when nothing of the tree is left. A directory whose contents did
-    not all go is not rmdir'ed — the ENOTEMPTY that would follow says nothing the
+    not all go is not rmdir'ed: the ENOTEMPTY that would follow says nothing the
     failure below it has not already said.
 
     Frame layout: [fd, None, own name, own rel, pending, emptied, owned]. The two
@@ -1109,7 +1111,7 @@ def rmtree_at(
     has gone, and it is what decides whether the level itself may be rmdir'ed.
     The directory a level is removed *from* is the level below it, taken from the
     stack rather than kept in the frame: a parked level has closed its
-    descriptors, so a copy of one made on the way down would name a closed fd —
+    descriptors, so a copy of one made on the way down would name a closed fd,
     or, once the number is reused, some other file entirely.
     """
     try:
