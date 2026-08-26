@@ -1372,3 +1372,68 @@ def test_format_get_chroot_cmd_termux_prefers_sudo_package():
     ):
         out = chroot_cmd.format_get_chroot_cmd({"PATH": "/usr/bin"}, ["/usr/bin/chroot", "/rootfs"])
     assert out.startswith("sudo env")
+
+
+def test_merge_bind_specs_unions_and_keeps_live_claim():
+    from chroot_distro.commands.login.bindings import merge_bind_specs
+
+    # A live spec stays as it is, a new destination is appended, an exact
+    # duplicate is not repeated, and a clash on the destination is dropped.
+    merged, dropped = merge_bind_specs(
+        ["/host/a:/mnt/a:ro", "/host/b:/mnt/b"],
+        ["/host/b:/mnt/b", "/host/c:/mnt/c", "/other:/mnt/a"],
+    )
+    assert merged == ["/host/a:/mnt/a:ro", "/host/b:/mnt/b", "/host/c:/mnt/c"]
+    assert dropped == ["/other:/mnt/a"]
+
+
+def test_merge_bind_specs_normalizes_destinations():
+    from chroot_distro.commands.login.bindings import merge_bind_specs
+
+    merged, dropped = merge_bind_specs(["/host/a:/mnt/a"], ["/other:/mnt/a/"])
+    assert merged == ["/host/a:/mnt/a"]
+    assert dropped == ["/other:/mnt/a/"]
+
+
+def test_merge_bind_specs_keeps_own_last_wins_within_one_session():
+    from chroot_distro.commands.login.bindings import merge_bind_specs
+
+    # get_bindings resolves an own-vs-own clash by letting the last one win, so
+    # both specs must survive the merge.
+    merged, dropped = merge_bind_specs([], ["/one:/mnt/a", "/two:/mnt/a"])
+    assert merged == ["/one:/mnt/a", "/two:/mnt/a"]
+    assert dropped == []
+
+
+def test_persistable_env_skips_secrets_and_malformed_names():
+    from chroot_distro.commands.login.env import persistable_env
+
+    assert persistable_env(
+        [
+            "FOO=bar",
+            "EMPTY=",
+            "GITHUB_TOKEN=abc",
+            "MY_API_KEY=abc",
+            "not a name=x",
+            "NOEQUALS",
+        ]
+    ) == {"FOO": "bar", "EMPTY": ""}
+
+
+def test_inherited_env_entries_skips_bad_keys_and_types():
+    from chroot_distro.commands.login.env import inherited_env_entries
+
+    assert inherited_env_entries({"FOO": "bar", "bad name": "x", "N": 1}) == ["FOO=bar"]
+    assert inherited_env_entries(None) == []
+    assert inherited_env_entries(["FOO=bar"]) == []
+
+
+def test_live_mount_options_requires_a_live_session(monkeypatch):
+    from chroot_distro.helpers import session as session_mod
+
+    monkeypatch.setattr(session_mod, "load_mount_options", lambda name: {"shared_home": True})
+    monkeypatch.setattr(session_mod, "get_active_chroot_pids", lambda name: [])
+    assert session_mod.live_mount_options("box") is None
+
+    monkeypatch.setattr(session_mod, "get_active_chroot_pids", lambda name: [123])
+    assert session_mod.live_mount_options("box") == {"shared_home": True}

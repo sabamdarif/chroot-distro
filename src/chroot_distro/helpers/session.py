@@ -19,10 +19,14 @@ kernel says, not one less than what the file said.
 chrooted itself. A browser helper a login spawned is a descendant of a tracked pid, so
 the /proc parent chain is walked up to init before anything is called an orphan.
 
-`mount_opts.json` records the options the *first* session mounted with, so a later
-session can tell it is joining a differently configured container instead of silently
-inheriting mounts it did not ask for. It is written once, at count one, and removed on
-the last teardown or by the self-heal above.
+`mount_opts.json` records the options the container is running with: the `--bind`
+specs, the `--shared-*` flags and the `--env` values a later session adopts through
+`live_mount_options`, so joining a live container gives the same view of it instead
+of a warning that a flag was ignored. Every session rewrites it with the union it
+applied, and it is removed on the last teardown or by the self-heal above. Only a
+record with a live process behind it may be adopted, which is what
+`live_mount_options` checks: a crashed session's record describes mounts that are
+about to be torn down and rebuilt.
 
 Session *identity* is not here: `helpers/session_registry.py` owns the per-session
 JSON files `ps` and `kill` work from. This file only counts.
@@ -268,6 +272,18 @@ def load_mount_options(name: str) -> dict[str, object] | None:
         return dict(data) if isinstance(data, dict) else None
     except (OSError, ValueError, json.JSONDecodeError):
         return None
+
+
+def live_mount_options(name: str) -> dict[str, object] | None:
+    """Return the saved options of a container that has a session running now.
+
+    ``None`` when nothing is chrooted into the rootfs: the record is then stale,
+    :func:`_increment_inner` is about to clear it, and the mounts it describes
+    are gone or about to be, so adopting it would ask for mounts nobody holds.
+    """
+    if not get_active_chroot_pids(name):
+        return None
+    return load_mount_options(name)
 
 
 def clear_mount_options(name: str) -> None:

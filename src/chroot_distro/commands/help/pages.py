@@ -509,6 +509,22 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
                 else []
             ),
             {
+                "title": "MULTIPLE SESSIONS",
+                "intro": (
+                    "Sessions of one container share its options. A session "
+                    "joining a container that already has one adopts its "
+                    "--bind mounts, its --shared-* directories and its --env "
+                    "values, and whatever it asks for beyond them is mounted "
+                    "into the running container, so a second login no longer "
+                    "needs an unmount to add a bind. A --bind whose "
+                    "destination the running container already fills from "
+                    "another source is reported and ignored. --isolated binds "
+                    "nothing at all, so requesting it while a non-isolated "
+                    "session runs is an error; CD_USE_NS cannot be added to a "
+                    "running container either, and a mismatch is a warning."
+                ),
+            },
+            {
                 "title": "ENVIRONMENT",
                 "intro": (
                     "CD_USE_NS=1 enables full Linux namespace isolation "

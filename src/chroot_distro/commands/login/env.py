@@ -8,6 +8,12 @@ last, so an explicit request always wins. `user_env_keys` is how the rest of the
 login knows which names the caller set, since nothing derived afterwards may
 overwrite one.
 
+`persistable_env` and `inherited_env_entries` are the two halves of handing that
+set to a session that starts later: an interactive login records what it was given
+in the container's options record, and a session joining a live container layers
+the record in *below* its own `--env`. A secret-shaped name is kept out of the
+record, which is a file, and a `run` reads it without adding to it.
+
 `IMAGE_ENV_BLOCKED` is the one thing the image does not get to decide. A display,
 sound, D-Bus or GPU variable belongs to the session that is starting now, and a
 value baked into the image would point the guest at a socket or device that is not
@@ -164,6 +170,37 @@ def apply_user_env(env: dict, extra_env: list[str]) -> None:
         key, _, val = entry.partition("=")
         if key:
             env[key] = val
+
+
+def persistable_env(entries: list[str]) -> dict[str, str]:
+    """Return the ``--env``/``CD_ENV`` entries a later session may inherit.
+
+    A malformed name is dropped and so is a secret-shaped one: this feeds
+    `helpers/session.py`'s options record, which on Termux lives under a
+    `$PREFIX` the default mount set binds into the guest.
+    """
+    persistable: dict[str, str] = {}
+    for entry in entries:
+        key, sep, val = entry.partition("=")
+        if not sep or not _VALID_ENV_KEY_RE.match(key) or is_sensitive_env_key(key):
+            continue
+        persistable[key] = val
+    return persistable
+
+
+def inherited_env_entries(stored: object) -> list[str]:
+    """Turn a stored ``custom_env`` mapping back into ``VAR=VALUE`` entries.
+
+    Layered before this session's own `--env`, so a value the caller gave by
+    hand still wins over the one it inherits.
+    """
+    if not isinstance(stored, dict):
+        return []
+    return [
+        f"{key}={val}"
+        for key, val in stored.items()
+        if isinstance(key, str) and isinstance(val, str) and _VALID_ENV_KEY_RE.match(key)
+    ]
 
 
 def read_manifest_env(container_dir: str) -> list:

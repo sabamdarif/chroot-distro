@@ -24,7 +24,10 @@ bind, the only /sys mount the kernel permits there.
 Every guest destination goes through `passwd.resolve_rootfs_path`, so a symlink
 the image ships cannot redirect a mount out of the rootfs. A custom `--bind` may
 override a default on a destination conflict (Docker's `--volume` semantics) but
-never `/dev`, `/proc`, `/sys` or anything under them. `best_effort_bind_sources`
+never `/dev`, `/proc`, `/sys` or anything under them. `merge_bind_specs` settles
+the same conflict between sessions rather than within one, and there the live
+container wins: its mount is already made, so a newcomer asking for that guest
+path from another source is told its spec is ignored. `best_effort_bind_sources`
 names the sources whose failure is a warning rather than an abort, all of them
 Android integration extras: some vendor kernels reject a single-file bind, and
 losing one costs only getprop or /sdcard inside the guest.
@@ -103,6 +106,29 @@ def parse_bind_options(custom_binds: list[str] | None) -> dict[str, str]:
         norm_dst = "/" + dst.strip("/")
         options_map[norm_dst] = opts
     return options_map
+
+
+def merge_bind_specs(live_specs: list[str], own_specs: list[str]) -> tuple[list[str], list[str]]:
+    """Union a live container's bind specs with this session's own.
+
+    Returns ``(merged, dropped)``. A live spec is kept verbatim, since its
+    mount already exists and cannot be re-made under a running session, so an
+    own spec asking for a guest destination a differing live spec holds is
+    dropped rather than merged: one path, one mount. Two own specs may still
+    share a destination, which get_bindings() resolves by letting the last win.
+    """
+    merged = list(live_specs)
+    claimed = {"/" + _split_bind_spec(spec)[1].strip("/"): spec for spec in live_specs}
+    dropped: list[str] = []
+    for spec in own_specs:
+        held = claimed.get("/" + _split_bind_spec(spec)[1].strip("/"))
+        if held == spec:
+            continue
+        if held is not None:
+            dropped.append(spec)
+            continue
+        merged.append(spec)
+    return merged, dropped
 
 
 @dataclass

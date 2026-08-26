@@ -14,12 +14,23 @@ depends on those answers; only then is the namespace and mount state built.
 so nothing here decides what a mount is.
 
 The session counter is the coordination mechanism. The first session writes
-resolv.conf, acquires the holder and applies every mount; a later one attaches to
-what is already there and can only warn that a flag it was given differs, since
-re-mounting under a live session is not on offer. Every exit path decrements under
-`session.lock`, and reaching zero unmounts, releases the holder and clears the
-isolation mode. `--detach` is the exception and leaves the count standing: the
-container stays mounted until `kill` or `unmount`.
+resolv.conf, acquires the holder and applies every mount; a later one joins what
+is already there. Every exit path decrements under `session.lock`, and reaching
+zero unmounts, releases the holder and clears the isolation mode. `--detach` is
+the exception and leaves the count standing: the container stays mounted until
+`kill` or `unmount`.
+
+Joining is a union, not a fresh setup. `session.live_mount_options` says what the
+container is running with, and this file adopts it (the `--shared-*` flags, the
+`--bind` specs and the recorded `--env`) before deriving anything from the flags,
+because `--shared-display` picks the display environment and the X11 cookie and
+`--shared-home` aligns the guest passwd. What this session adds on top is then
+mounted into the live container, but only the targets it lacks: an existing mount
+cannot be re-made, and the special mounts (`/proc`, devpts, the cgroup set) are
+already up. What no mount can reconcile stays refused: `--isolated` binds nothing
+and chroots the holder, so mixing it with a running session is an error, and a
+`CD_USE_NS` mismatch is a warning, since namespaces cannot be retrofitted onto
+a session that is already inside.
 
 A Termux rootfs is a separate shape rather than a variant: the session runs
 `$PREFIX/bin/login` and takes its uid from the owner of the in-rootfs Termux home,
@@ -60,7 +71,9 @@ from chroot_distro.commands.login.env import (
     ANDROID_HOST_ENV_VARS,
     IMAGE_ENV_BLOCKED,
     apply_user_env,
+    inherited_env_entries,
     inject_env_profile,
+    persistable_env,
     read_cd_env,
     read_manifest_env,
     read_manifest_exposed_ports,
@@ -554,11 +567,35 @@ def _command_login_inner_once(container_name: str, args) -> None:
             live_nodename = ""
         ensure_hosts_entry(rootfs, _safe_hostname(hostname_arg), live_nodename)
     raw_custom_binds = getattr(args, "bind", []) or []
+    # CD_ENV entries are layered first so a matching --env override wins.
+    extra_env = read_cd_env() + (getattr(args, "env", []) or [])
+
+    # A session joining a live container runs with what that container is
+    # already configured for, and what this session adds on top is mounted into
+    # it further down. Adoption happens here, before anything is derived from
+    # the flags: --shared-display picks the display env and the X11 cookie and
+    # --shared-home aligns the guest passwd, so a late adoption would leave the
+    # session's own view out of step with the container's real mounts.
+    live_opts = None if max_isolation else session.live_mount_options(container_name)
+    if live_opts is not None:
+        shared_display = shared_display or bool(live_opts.get("shared_display"))
+        shared_tmp = shared_tmp or bool(live_opts.get("shared_tmp"))
+        use_shared_home = use_shared_home or bool(live_opts.get("shared_home"))
+        stored_binds = live_opts.get("custom_binds")
+        raw_custom_binds, dropped_binds = bindings.merge_bind_specs(
+            [spec for spec in stored_binds if isinstance(spec, str)] if isinstance(stored_binds, list) else [],
+            raw_custom_binds,
+        )
+        if dropped_binds:
+            warn(
+                f"An active session of '{container_name}' already binds the same "
+                f"guest path from another source, so these are ignored: {', '.join(dropped_binds)}."
+            )
+        extra_env = inherited_env_entries(live_opts.get("custom_env")) + extra_env
+
     # Split off the ":options" field; get_bindings only takes host:guest.
     bind_options_map = bindings.parse_bind_options(raw_custom_binds)
     custom_binds = bindings.strip_bind_options(raw_custom_binds)
-    # CD_ENV entries are layered first so a matching --env override wins.
-    extra_env = read_cd_env() + (getattr(args, "env", []) or [])
     # Keys the caller set explicitly: nothing derived below may overwrite them.
     user_keys = user_env_keys(extra_env)
     login_cmd = getattr(args, "login_cmd", []) or []
@@ -949,6 +986,36 @@ def _command_login_inner_once(container_name: str, args) -> None:
         pipe_w = None
         master_fd = -1
 
+    resolved_bind_options: dict[str, str] = {}
+    for guest_dst, opts in bind_options_map.items():
+        try:
+            resolved_target = resolve_rootfs_path(rootfs, guest_dst)
+        except OSError:
+            resolved_target = os.path.join(rootfs, guest_dst.lstrip("/"))
+        resolved_bind_options[os.path.realpath(resolved_target)] = opts
+
+    if run_inner is not None or max_isolation:
+        # A `run` inherits the recorded env but never adds to it: --env given to
+        # one command must not reach a later login. An isolated session adopts
+        # nothing, so it has nothing to hand on either: a session that never
+        # reads the record never writes to it.
+        _stored_env = live_opts.get("custom_env") if live_opts is not None else None
+        session_env = _stored_env if isinstance(_stored_env, dict) else {}
+    else:
+        session_env = persistable_env(extra_env)
+
+    # What the container is configured for once this session is in: the union of
+    # what it was already running with and what this session brought.
+    current_opts: dict[str, object] = {
+        "shared_display": shared_display,
+        "shared_tmp": shared_tmp,
+        "shared_home": use_shared_home,
+        "custom_binds": sorted(raw_custom_binds),
+        "use_namespaces": use_namespaces,
+        "isolated": max_isolation,
+        "custom_env": session_env,
+    }
+
     try:
         host_mounts_exist = bool(mount_manager.get_active_mounts(rootfs))
         namespace.check_isolation_conflicts(
@@ -1037,14 +1104,6 @@ def _command_login_inner_once(container_name: str, args) -> None:
                 ensure_data_suid()
             with contextlib.suppress(Exception):
                 mount_manager.unmount_all(rootfs, holder=holder)
-            resolved_bind_options: dict[str, str] = {}
-            for guest_dst, opts in bind_options_map.items():
-                try:
-                    resolved_target = resolve_rootfs_path(rootfs, guest_dst)
-                except OSError:
-                    resolved_target = os.path.join(rootfs, guest_dst.lstrip("/"))
-                resolved_bind_options[os.path.realpath(resolved_target)] = opts
-
             # best_effort_bind_sources() entries warn+skip on failure;
             # anything else aborts.
             try:
@@ -1120,17 +1179,7 @@ def _command_login_inner_once(container_name: str, args) -> None:
 
                 log_info(f"Image declares exposed ports: {', '.join(exposed)}")
 
-            session.save_mount_options(
-                container_name,
-                {
-                    "shared_display": shared_display,
-                    "shared_tmp": shared_tmp,
-                    "shared_home": use_shared_home,
-                    "custom_binds": sorted(custom_binds),
-                    "use_namespaces": use_namespaces,
-                    "isolated": max_isolation,
-                },
-            )
+            session.save_mount_options(container_name, current_opts)
 
             # The foreground holder blocks on this pipe until the mounts exist.
             if pipe_w is not None:
@@ -1141,19 +1190,13 @@ def _command_login_inner_once(container_name: str, args) -> None:
                 except OSError as exc:
                     log.warning("Failed to trigger mount namespace holder process: %s", exc)
         else:
-            # Not the first session: mounts are NOT re-applied. Warn/error
-            # only when the requested options differ from the active ones.
-            stored = session.load_mount_options(container_name)
-            current_opts = {
-                "shared_display": shared_display,
-                "shared_tmp": shared_tmp,
-                "shared_home": use_shared_home,
-                "custom_binds": sorted(custom_binds),
-                "use_namespaces": use_namespaces,
-                "isolated": max_isolation,
-            }
-            if stored is not None and stored != current_opts:
-                if current_opts["isolated"] != stored.get("isolated", False):
+            # Not the first session: an existing mount cannot be re-made under a
+            # live session, so only the isolation level is refused and only what
+            # the container lacks is mounted (further down, once the holder that
+            # owns its mount namespace is known).
+            stored = live_opts if live_opts is not None else session.load_mount_options(container_name)
+            if stored is not None:
+                if max_isolation != bool(stored.get("isolated", False)):
                     session.decrement(container_name, lock_fh=lock_fh)
                     crit_error(
                         f"Container '{container_name}' has an active session "
@@ -1162,38 +1205,12 @@ def _command_login_inner_once(container_name: str, args) -> None:
                         f"Run '{PROGRAM_NAME} unmount {container_name}' first."
                     )
                     sys.exit(1)
-                if current_opts["use_namespaces"] != stored.get("use_namespaces", False):
+                if use_namespaces != bool(stored.get("use_namespaces", False)):
                     warn(
                         f"Container '{container_name}' has an active session "
                         f"{'with' if stored.get('use_namespaces') else 'without'} "
                         f"namespace isolation (CD_USE_NS). The new session's "
                         f"namespace mode differs and will be ignored."
-                    )
-                diff_flags: list[str] = []
-                for key, flag in (
-                    ("shared_display", "--shared-display"),
-                    ("shared_tmp", "--shared-tmp"),
-                    ("shared_home", "--shared-home"),
-                ):
-                    cur = current_opts.get(key, False)
-                    old = stored.get(key, False)
-                    if cur and not old:
-                        diff_flags.append(f"{flag} (requested but not in active session)")
-                    elif not cur and old:
-                        diff_flags.append(f"{flag} (active session has it, this one doesn't)")
-                _cur_raw = current_opts.get("custom_binds")
-                _old_raw = stored.get("custom_binds")
-                cur_binds: set[str] = set(_cur_raw) if isinstance(_cur_raw, list) else set()
-                old_binds: set[str] = set(_old_raw) if isinstance(_old_raw, list) else set()
-                if cur_binds != old_binds:
-                    diff_flags.append("--bind (different bind mounts)")
-                if diff_flags:
-                    warn(
-                        f"Container '{container_name}' is already mounted; "
-                        f"the following options differ from the active session "
-                        f"and are ignored: {', '.join(diff_flags)}. "
-                        f"Run '{PROGRAM_NAME} unmount {container_name}' and "
-                        f"log in again to apply them."
                     )
             if use_namespaces:
                 holder = namespace.get_live_holder(container_name)
@@ -1215,6 +1232,40 @@ def _command_login_inner_once(container_name: str, args) -> None:
                         f"log in again with --isolated."
                     )
                     sys.exit(1)
+
+            # Mount what this session asked for and the container does not have
+            # yet. Only the missing targets are passed: safe_mount is idempotent
+            # but /dev takes the required_child path, which would mount over a
+            # live guest's /dev. No special mounts here either, since /proc,
+            # devpts and the cgroup mounts are up and re-mounting would stack
+            # them on a single-pass unmount sweep.
+            try:
+                active_mounts = set(mount_manager.get_active_mounts(rootfs, holder=holder))
+            except Exception as exc:
+                log.debug("Could not read the container's active mounts: %s", exc)
+                active_mounts = set()
+            pending = [(src, dst) for src, dst in resolved_binds if os.path.realpath(dst) not in active_mounts]
+            if pending:
+                try:
+                    isolation.apply_bind_mounts(
+                        rootfs,
+                        pending,
+                        holder=holder,
+                        use_userns=has_userns,
+                        bind_options=resolved_bind_options,
+                        best_effort_sources=bindings.best_effort_bind_sources(),
+                    )
+                except Exception as exc:
+                    # Other sessions are using these mounts, so a failure here
+                    # cannot tear the container down; the session goes on with
+                    # what it did get.
+                    warn(f"Could not add every requested mount to the running container: {exc}")
+                pending_targets = {os.path.realpath(dst) for _src, dst in pending}
+                for rslave_path in rslave_targets:
+                    if os.path.realpath(rslave_path) in pending_targets:
+                        mount_manager.make_rslave(rslave_path, holder=holder)
+            # The union is what a third session inherits.
+            session.save_mount_options(container_name, current_opts)
 
     if getattr(args, "get_chroot_cmd", False):
         ns_prefix = ["nsenter", "--target", str(holder.pid), *holder.nsenter_flags] if holder is not None else None
