@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
+# Enforces the two message rules in CLAUDE.md that a staged diff cannot show: no em
+# dash anywhere in the message, and a body of at most 5 non-blank lines. Trailers
+# (Co-Authored-By and friends) are not prose, so they do not count toward the cap.
+# Inert until `git config core.hooksPath .githooks`, since git never clones hooks.
+
+set -e
+
+msg_file="$1"
+
+# Drop what git wrote itself: comment lines, and everything below the verbose diff.
+msg=$(sed '/^# ------------------------ >8/,$d' "$msg_file" | grep -v '^#' || true)
+
+if printf '%s' "$msg" | grep -qP '[\x{2014}\x{2013}]'; then
+	echo "commit-msg: em dash in the message. A comma, a colon or two sentences says it." >&2
+	exit 1
+fi
+
+body_lines=$(printf '%s\n' "$msg" | tail -n +2 | grep -v '^[A-Za-z][A-Za-z0-9-]*: ' |
+	grep -c '[^[:space:]]' || true)
+if [ "$body_lines" -gt 5 ]; then
+	echo "commit-msg: body is $body_lines lines, the cap is 5." >&2
+	echo "Split the commit, or cut the message down to what the subject cannot carry." >&2
+	exit 1
+fi

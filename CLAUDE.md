@@ -1,7 +1,7 @@
 ## chroot-distro
 
 **chroot-distro** is a lightweight Linux container management utility that runs
-real Linux distributions inside Termux (rooted Android) or regular Linux using
+real Linux distributions inside Termux (rooted Android) or regular Linux, using
 native kernel features (`chroot`, `mount`, namespaces). It downloads Docker/OCI
 images, builds images from Dockerfiles, and manages container lifecycles, all
 without Docker or Podman. It needs Python 3.10+ (CI tests 3.10 through 3.14;
@@ -10,45 +10,81 @@ GPL-3.0-only; the files ported from
 [proot-distro](https://github.com/termux/proot-distro) say so in their docstring,
 and a new port must too.
 
-### Hard requirements
+Each rule has exactly one home: behaviour in [How to Work Here](#how-to-work-here)
+and [YAGNI](#yagni), files in [Code conventions](#code-conventions), messages in
+[Commits](#commits), what checks them in [Build, test, lint](#build-test-lint).
+
+## Hard requirements
 
 These are not preferences. A change that breaks one of them is wrong even if it
 works:
 
 - **Pure Python, no binary calls.** Every kernel operation goes through the
-  ctypes/libc wrappers in `syscalls/`. Never shell out to a binary to do work
-  this program can do itself: not as a primary path, not as a fallback, not
-  "just for this one case". Where a binary call is still in the tree it is a
-  debt to remove, not a pattern to copy: prefer deleting the call over keeping
-  it alive. `shutil.which` for a _capability report_ (`commands/info.py`) is
-  fine; `shutil.which` to then exec the thing is not.
+  ctypes/libc wrappers in `syscalls/`, where `chroot(1)`, `mount(1)`, `umount(1)`,
+  `unshare(1)` and `nsenter(1)` are fully reimplemented. Never shell out to a
+  binary to do work this program can do itself: not as a primary path, not as a
+  fallback, not "just for this one case". Where a binary call is still in the tree
+  it is a debt to remove, not a pattern to copy: prefer deleting the call over
+  keeping it alive. The one carve-out is host administration, which drives another
+  program's own state and no syscall replaces: `elevate.py`
+  (`sudo`/`doas`/`pkexec`/`su`) and `commands/setup.py` (`groupadd`/`usermod` and
+  the init-system tools). `shutil.which` for a _capability report_
+  (`commands/info.py`) is a probe, not a call; `shutil.which` to then exec the
+  thing is not.
 - **No third-party runtime dependencies.** Stdlib only, plus `backports-zstd`
-  below Python 3.14. Dev-only tooling (ruff, mypy, pyright, pytest) does not
-  count.
+  below Python 3.14, which is how `tarfile` gets zstd: a new tar user follows the
+  existing `if sys.version_info >= (3, 14):` import pattern. Dev-only tooling
+  (ruff, mypy, pyright, pytest) does not count.
 - **Both platforms, always.** Termux on rooted Android and regular Linux are
-  equal targets; a feature that only works on one is incomplete. See
-  [Platform Differences](#platform-differences).
+  equal targets; a feature that only works on one is incomplete. Their differences
+  are in [Platform Differences](#platform-differences).
 - **Root is assumed.** The program elevates itself (`elevate.py`) rather than
-  degrading to an unprivileged mode. In Linux it depend on chroot-distro.socket for root privileges
-  or if it isn't enabled then it must be run with sudo else it will show an error.
-  And it case of termux it uses su, also that's the only binary it called.
+  degrading to an unprivileged mode, and it fails with an error rather than
+  running unprivileged when it cannot. How it reaches root differs per platform,
+  so that is in [Platform Differences](#platform-differences) too.
 
 ## How to Work Here
 
 ### Output style
 
-No narration: don't explain what you're checking and why.
-No reasoning trace, no tool-call list. Work silently: speak only for a
-blocking questions or or any important finding that might need users attention
-or user should know about it, in a 1-2 line status, e.g.:
+No narration: don't explain what you're checking or why. No reasoning trace,
+no tool-call list. Work silently: speak only for a blocking question or a
+finding the user genuinely needs to know, in a 1-2 line status, e.g.:
 `tasks 1-5 (engine) done, tasks 6-13 (commands, tests, frontend) remain.`
 
-Never use an em dash (or `--` standing in for one) in a sentence, anywhere:
-replies, comments, commit messages, docs. A comma, a colon, parentheses or two
-sentences always say it. Older code predates the rule; fix what you touch, don't
-sweep the tree.
+### Prose, everywhere
 
-### YAGNI
+Replies, comments, commit messages and docs all follow these two:
+
+- Never use an em dash (or `--` standing in for one) in a sentence. A comma, a
+  colon, parentheses or two sentences always say it. Older code predates the rule;
+  fix what you touch, don't sweep the tree.
+- Reference only what another contributor can reach as well: no path, host or link
+  that exists on this machine only or is private to one account.
+
+### Before you change anything
+
+For anything past a small fix, switch to plan mode before writing code. Research
+how this is solved idiomatically in Python and against the kernel API, not the
+first generic pattern that shows up: here that starts with the `syscalls/` and
+`helpers/` tables in [Architecture](#architecture), because most of what a feature
+needs is already wrapped. Then push on the candidate before writing it: why is it
+the best fit, what would be better, and what breaks it given pure Python, stdlib
+only, both platforms and root assumed. Only implement once it survives that.
+
+A destructive action (deletion, force-push, overwrite) is not part of a task that
+did not ask for one; confirm before taking it.
+
+### On long sessions
+
+This file does not decay with turn count, and it comes out of a compaction no
+weaker than it went in. If anything you recall from earlier in this session
+conflicts with what is written here, this file wins, not your summary of your own
+past behaviour. Before writing a comment, a commit message, or picking a
+solution, re-check against the rule itself, not against what you remember doing
+a few turns ago.
+
+## YAGNI
 
 Default to the laziest solution that actually works, and write nothing that is
 not needed. This governs code, comments and commit messages alike.
@@ -74,60 +110,69 @@ Never skimp on: input validation at trust boundaries, error handling that
 prevents data loss, security, or anything explicitly requested. Being lazy is
 about not adding; it is never about dropping a check.
 
-#### Comments
+## Code conventions
 
-A comment exists to save the next contributor time. Write one only when the
-code cannot say it itself: an invariant, a reason a safe-looking line is not
-safe, a kernel or platform quirk. Keep it atop the function or class, never
-inline. Never restate what the line does, never narrate a change, never add
-one because a function looks bare. Deleting a comment that says nothing is an
-improvement.
+- **Module size.** Don't write monolithic code, and don't shatter it either.
+  Modules exist so a task maps to a file fast, not so the tree becomes a thousand
+  files nobody can navigate.
+- **License header.** Every Python file in the package opens with an SPDX line, a
+  copyright line, then the module docstring. Shell scripts and the completions
+  carry the SPDX and copyright lines too, below the shebang or `#compdef` line that
+  has to come first.
+- **Module docstring.** This is where a file's own documentation lives: what it
+  owns, the invariants a caller must not break, the quirk that shaped it. It is
+  part of the code, so a change that moves behaviour updates it in the same commit;
+  a header describing what the file used to do is worse than none.
+- **Fix a wrong header where you find it.** Reading enough of a file to change it
+  is the only thing that catches a header that has drifted, so repair it there,
+  even where your change did not touch what it got wrong.
+- **Indentation** follows `.editorconfig`: tabs in shell scripts and completions,
+  4 spaces in Python, YAML and Markdown.
+- **Untrusted input is everywhere:** image layers, tar members, Dockerfiles,
+  `name:path` specs. Never join a guest path by hand;
+  [Paths and descriptors](#paths-and-descriptors) has the helpers that resolve one
+  and the rules for what to do with the result.
 
-#### Commit messages
+### Comments
 
-A subject line, and a short body only if the change needs one, saying what
-changed and why in a few sentences. Not an essay: no bullet-by-bullet tour of
-the diff, no restating the code in prose, no recap of the reasoning that got
-there. If the body runs long, the change is too big for one commit or the
-message is padded. Someone has to read it.
+Before writing a comment, check it against all four:
 
-#### This file
+- A comment exists to save the next contributor time, so keep it short and plain.
+- Does the code already say this? -> don't write it.
+- Am I describing a change I just made? -> that belongs in the commit, not here.
+- Would a future reader (human or agent) get this wrong without a note? -> only
+  if yes, write it: an invariant, a reason a safe-looking line is not safe, a
+  kernel or platform quirk.
 
-Same rules, and it is loaded into every request, so a line that does not
-change what an agent does is pure cost. Record the invariant, not the bug that
-taught it: why one commit did what it did belongs in that commit, and why a
-line is the way it is belongs on the line. Hard cap 1000 lines, and going near
-it means something has been described that the code already says.
+One line, two at most, atop the function or class. Never inline. A comment that
+fails this check gets deleted, not kept "just in case". A comment that has drifted
+from the code it sits on is worse than none, so fix it where you find it, like a
+wrong header.
 
-### Coding rules
+## Commits
 
-- Be careful with unrequested destructive actions (deletions, force-pushes, overwrites).
-- Keep comments in sync with the code they sit on; a stale comment is worse than none.
-- When referencing anything in comments or commits, make sure the thing you're referencing is valid in a way that other users/contributors seeing this on their own system can understand and access: don't reference anything that only exists on your system or is only accessible to you.
-- Tests: focused, not slop. Skip smoke/regression tests that only confirm a deletion.
-- Untrusted input is everywhere: image layers, tar members, Dockerfiles, `name:path` specs. Resolve a guest path with the existing helpers (`paths.resolve_container_path`, `tar_extract.safe_resolve_parts`, `login/passwd.resolve_rootfs_path`) instead of joining strings, and see [Paths and descriptors](#paths-and-descriptors) for what to do with the result.
-- License header on every Python file in the package: an SPDX line, a copyright
-  line, then the module docstring. `plans/module-headers.md` has the exact form.
-- The module docstring is where a file's own documentation lives: what it owns,
-  the invariants a caller must not break, the quirk that shaped it. It is part of
-  the code, so a change that moves behaviour updates it in the same commit; a
-  header describing what the file used to do is worse than none.
-- Fix a wrong header whenever you are in the file, even where your change did not
-  touch what it got wrong. Reading enough of a file to change it is the only thing
-  that catches a header that has drifted, so a stale line found there is repaired
-  there, not left for a commit that happens to need it.
-- Indentation follows `.editorconfig`: tabs in shell scripts and completions, 4 spaces in Python, YAML and Markdown.
-- Commits follow [Conventional Commits](https://www.conventionalcommits.org):
-  `type(scope): subject`, e.g. `fix(build): ...`, `feat(clear-cache): ...`,
-  `test(e2e): ...`. Pick the type from what the commit does (`fix`, `feat`,
-  `test`, `refactor`, `docs`, `chore`) and the scope from the subsystem touched
-  (`build`, `build-cache`, `run`, `locking`, `atomic`, `tar-extract`, or several
-  comma-separated). A bare `scope: subject` with no type is not acceptable.
+Commits follow [Conventional Commits](https://www.conventionalcommits.org):
+`type(scope): subject`, e.g. `fix(build): ...`, `feat(clear-cache): ...`,
+`test(e2e): ...`. Pick the type from what the commit does (`fix`, `feat`,
+`test`, `refactor`, `docs`, `chore`) and the scope from the subsystem touched
+(`build`, `build-cache`, `run`, `locking`, `atomic`, `tar-extract`, or several
+comma-separated). A bare `scope: subject` with no type is not acceptable.
 
-### Build, test, lint
+Before writing a body, check it against all three:
+
+- Does the subject line alone already say it? -> stop, no body.
+- Am I about to list the diff bullet-by-bullet? -> stop, that's not a body.
+- Am I recapping reasoning that already lives in a comment or this file? -> cut it.
+
+Only write a body if the subject truly can't carry the why, and then 2-3
+sentences at most: more than that means the commit is too big or the message is
+padded, so split the commit instead of padding.
+
+## Build, test, lint
 
 ```bash
-./check-before-commit.sh                 # ruff, pyright, mypy, pytest+coverage; all must pass
+./check-before-commit.sh                 # headers, em dash, hooks, ruff, pyright, mypy, pytest+coverage
+git config core.hooksPath .githooks      # once per clone: turns the commit-msg hook on
 uv sync                                  # create/refresh .venv with dev deps
 uv run pytest tests/unit/test_cli.py     # one test file
 uv run pytest tests/unit/test_cli.py::test_name -x   # one test
@@ -136,16 +181,32 @@ pip install -e .                         # install locally for testing
 ```
 
 Lint and type checks target `src/chroot_distro` only; `tests/` is not checked.
-Unit tests never need root: they monkeypatch syscalls and filesystem paths, and
+`cli.py`, `paths.py` and `constants.py` are held to stricter mypy settings
+(`disallow_untyped_defs`); keep them fully annotated.
+
+### Tests
+
+Focused, not slop: skip smoke/regression tests that only confirm a deletion. Unit
+tests never need root: they monkeypatch syscalls and filesystem paths, and
 `tests/conftest.py` stubs Linux-only modules (`fcntl`, `pwd`, `grp`, `termios`)
 so the suite also runs on non-Linux. Real end-to-end coverage (actual installs,
 logins, builds under `sudo`) lives in `.github/workflows/e2e-tests.yml` and does
 not run locally via pytest.
 
-`cli.py`, `paths.py` and `constants.py` are held to stricter mypy settings
-(`disallow_untyped_defs`); keep them fully annotated.
+### What the tooling enforces
 
-## What Is Already Documented
+Two of the rules above are checked, not left to compliance:
+
+- em dash: `check-before-commit.sh` greps the added lines of the staged diff and
+  fails on one, so stage before running it.
+- commit body: the `commit-msg` hook in `.githooks/` rejects a body over 5 lines,
+  and an em dash anywhere in the message. Git never clones hooks, so it only runs
+  after `git config core.hooksPath .githooks`, which the check script verifies.
+
+Comments cannot be enforced this cheaply, since no heuristic tells a needed
+invariant from clutter, so that one stays on the checklist above.
+
+## Documentation
 
 `README.md` is the user-facing reference, and it is the source of truth for
 anything a user can see. Read it there instead of re-deriving it, and update it
@@ -160,7 +221,9 @@ in the same change when behaviour moves:
 - [Limitations](README.md#limitations): what the program deliberately does not
   do.
 
-Two things live only here, because a user has no use for them.
+What lives here instead is what a contributor needs and a user has no use for, so
+anything in both is written in the README and referenced from here. Two such
+things:
 
 **Data-folder paths README omits:** `data/<name>/` (session count,
 `mount_opts.json`, holder pid/flags, `run.log`) and
@@ -174,35 +237,32 @@ capability bounding set), `CD_SU_PATH` / `CD_SU_MOUNT_MASTER=1` (Termux `su`
 selection and namespace), `CD_SUBID_BASE` (user-namespace subid base),
 `CD_PUSH_CHUNK_SIZE`, `CD_SECRET_FILE` (internal, set by `elevate.py`).
 
+### This file
+
+Every rule above applies to this file too, and it is loaded into every request,
+so a line that does not change what an agent does is pure cost. Record the
+invariant, not the bug that taught it: why one commit did what it did belongs in
+that commit, and why a line is the way it is belongs on the line. Hard cap 500
+lines, and going near it means something has been described that the code already
+says.
+
 ## Architecture
 
 Three layers, each depending only on the ones to its right:
 
 `commands/` (CLI behaviour) -> `helpers/` (policy, orchestration) -> `syscalls/` (raw kernel calls)
 
-Every `.py` file under `src/chroot_distro/` carries a license header and a module
-docstring saying what that file owns, the invariants a caller must not break, and
-the platform quirks that shaped it. The tables below are only the index into those
-headers, one row per file: find the files a task touches, read their headers, then
-change them.
+The tables below are one row per file, and they are only an index into the module
+docstrings: find the files a task touches, read their headers, then change them.
 
-Kernel operations go through the ctypes wrappers in `syscalls/`; `chroot(1)`,
-`mount(1)`, `umount(1)`, `unshare(1)` and `nsenter(1)` are fully reimplemented
-there and nothing new may exec a binary to reach the kernel.
-
-No container work execs a binary. A chroot is described by a `ChrootConfig`
+No container work execs a binary (see [Hard requirements](#hard-requirements)), so
+a chroot is described by a `ChrootConfig`
 (`commands/login/chroot_cmd.build_chroot_config`) and entered by
 `syscalls.chroot.enter_chroot` / `chroot_and_run` in the child itself, after
-setns(2) and the capability drop, so the holder is handed a config rather than a
-command line and `build_engine/run_step.py` forks the step the same way. The argv
+setns(2) and the capability drop: the holder is handed a config rather than a
+command line, and `build_engine/run_step.py` forks a step the same way. The argv
 forms that remain (`chroot_display_argv`, `NamespaceHolder.nsenter_flags`) are only
 ever printed, for `--get-chroot-cmd`.
-
-The exception is host administration, not container work: `elevate.py`
-(`sudo`/`doas`/`pkexec`/`su`) and `commands/setup.py` (`groupadd`/`usermod` and the
-init-system tools) drive other programs' own state, which no syscall replaces.
-`commands/info.py` calling `shutil.which` to _report_ whether a tool exists is a
-capability probe, not a call.
 
 ### Entry point and dispatch
 
@@ -225,7 +285,8 @@ capability probe, not a call.
 goes through it:
 
 - **Resolve a name once.** A helper says where an entry belongs
-  (`tar_extract.safe_resolve_parts`, `paths.resolve_container_path`), then the
+  (`tar_extract.safe_resolve_parts`, `paths.resolve_container_path`,
+  `login/passwd.resolve_rootfs_path`), then the
   caller re-walks those components and acts on `(dir_fd, name)`. Handing the
   resolved path back to the kernel is the bug the walk exists to prevent.
 - **Pin a root you will use twice.** A rootfs, a stage, a cache dir: hold the
@@ -400,9 +461,6 @@ the caller (`build_engine/constants.is_host_exec_var`, applied in
 | `progress.py`         | bars, spinners, byte counters                     |
 | `helpers/__init__.py` | nothing: a marker module                          |
 
-Python below 3.14 gets `tarfile` with zstd from `backports.zstd`. Follow the
-existing `if sys.version_info >= (3, 14):` import pattern when adding a tar user.
-
 ### Adding or changing a command
 
 Four places, all required:
@@ -417,7 +475,8 @@ Four places, all required:
 
 **Termux (Android):**
 
-- Uses `su` from root manager (Magisk/KernelSU/APatch)
+- Uses `su` from root manager (Magisk/KernelSU/APatch), the only binary called
+  to get root here
 - No daemon, every command elevates via `su`
 - The root side needs a Termux-aware prelude (PATH, `LD_PRELOAD=/data/data/com.termux/files/usr/lib/libtermux-exec-ld-preload.so`,
   writable HOME, TMPDIR); see `elevate._termux_root_env_exports`
@@ -429,6 +488,7 @@ Four places, all required:
 **Regular Linux:**
 
 - Daemon-based (socket `/run/chroot-distro.sock`) after `setup`
-- Falls back to `sudo` if daemon not running
+- Falls back to `sudo` if the daemon is not running, and errors out when neither
+  is available
 - Containers live in root's XDG dirs
 - GPU passthrough auto-detected (NVIDIA/AMD/Intel)

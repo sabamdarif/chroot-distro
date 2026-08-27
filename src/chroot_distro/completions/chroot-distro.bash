@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
 # Bash completion for chroot-distro
 #
 # Install system-wide:

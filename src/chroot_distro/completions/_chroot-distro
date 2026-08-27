@@ -1,4 +1,6 @@
 #compdef chroot-distro
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2025-2026 Md Arif
 #
 # Zsh completion for chroot-distro
 #
