@@ -47,6 +47,7 @@ for path in sorted(pathlib.Path("src/chroot_distro").rglob("*.py")):
 
 scripts = [pathlib.Path("check-before-commit.sh"), pathlib.Path(".githooks/commit-msg")]
 scripts += sorted(pathlib.Path("src/chroot_distro/completions").iterdir())
+scripts += sorted(pathlib.Path("tests/e2e").rglob("*.sh"))
 for path in scripts:
 	if SPDX not in path.read_text().splitlines()[:3]:
 		bad.append(f"{path}: no SPDX license header")

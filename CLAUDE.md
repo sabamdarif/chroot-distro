@@ -190,8 +190,9 @@ Focused, not slop: skip smoke/regression tests that only confirm a deletion. Uni
 tests never need root: they monkeypatch syscalls and filesystem paths, and
 `tests/conftest.py` stubs Linux-only modules (`fcntl`, `pwd`, `grp`, `termios`)
 so the suite also runs on non-Linux. Real end-to-end coverage (actual installs,
-logins, builds under `sudo`) lives in `.github/workflows/e2e-tests.yml` and does
-not run locally via pytest.
+logins, builds under `sudo`) is one shell script per test under `tests/e2e/`,
+which `tests/e2e/run-all.sh` runs in order for the e2e workflow: never pytest,
+and never out of order, since a script's header names the state it inherits.
 
 ### What the tooling enforces
 
