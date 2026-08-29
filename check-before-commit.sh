@@ -73,6 +73,23 @@ check_no_em_dash() {
 	fi
 }
 
+# ShellCheck reads only sh dialects, so the zsh and fish completions are out and
+# the bash one needs --shell, having no shebang. SC2024 is off because
+# `sudo cmd > /tmp/log` is the shape the e2e suite wants: the log is read back
+# unprivileged, and `| sudo tee` would hand it to root instead.
+check_shellcheck() {
+	if ! command -v shellcheck > /dev/null; then
+		echo "shellcheck not installed, install your platform's package for it"
+		return 1
+	fi
+	local files=(check-before-commit.sh .githooks/commit-msg
+		src/chroot_distro/completions/chroot-distro.bash)
+	while IFS= read -r script; do
+		files+=("$script")
+	done < <(find tests/e2e -name "*.sh" | sort)
+	shellcheck --shell=bash --exclude=SC2024 "${files[@]}"
+}
+
 # Git never clones hooks, so .githooks/commit-msg is inert until this points at it.
 check_git_hooks() {
 	if [ "$(git config core.hooksPath || true)" != ".githooks" ]; then
@@ -85,6 +102,7 @@ check_git_hooks() {
 run_check "No Em Dash (staged)" check_no_em_dash
 run_check "Git Hooks Installed" check_git_hooks
 run_check "License Headers" check_headers
+run_check "ShellCheck" check_shellcheck
 run_check "Ruff Check" uv run ruff check src/chroot_distro
 run_check "Pyright Type Check" uv run pyright src/chroot_distro
 run_check "Mypy Type Check" uv run mypy src/chroot_distro

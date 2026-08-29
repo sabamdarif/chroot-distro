@@ -171,7 +171,7 @@ padded, so split the commit instead of padding.
 ## Build, test, lint
 
 ```bash
-./check-before-commit.sh                 # headers, em dash, hooks, ruff, pyright, mypy, pytest+coverage
+./check-before-commit.sh                 # headers, em dash, hooks, shellcheck, ruff, pyright, mypy, pytest
 git config core.hooksPath .githooks      # once per clone: turns the commit-msg hook on
 uv sync                                  # create/refresh .venv with dev deps
 uv run pytest tests/unit/test_cli.py     # one test file
