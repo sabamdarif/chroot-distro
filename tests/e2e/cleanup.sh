@@ -20,12 +20,14 @@ sudo chroot-distro kill httpd 2>/dev/null || true
 pkill -f lying-server.py 2>/dev/null || true
 echo "=== Unmounting all containers ==="
 for name in httpd debian alpine alpine-test test-build test-build-adv \
-            test-build-out test-build-out2 test-build-add debian-sec; do
+            test-build-out test-build-out2 test-build-add debian-sec \
+            termux-docker; do
 	sudo chroot-distro unmount "$name" 2>/dev/null || true
 done
 echo "=== Removing all containers ==="
 for name in httpd debian alpine alpine-test test-build test-build-adv \
-            test-build-out test-build-out2 test-build-add debian-sec; do
+            test-build-out test-build-out2 test-build-add debian-sec \
+            termux-docker; do
 	sudo chroot-distro remove "$name" 2>/dev/null || true
 done
 echo "=== Final state ==="
