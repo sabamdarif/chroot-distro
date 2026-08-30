@@ -2,11 +2,15 @@ import struct
 from unittest.mock import MagicMock, patch
 
 from chroot_distro.arch import (
+    Platform,
     _elf_arch,
     detect_installed_arch,
     get_device_cpu_arch,
+    get_device_platform,
     needs_emulation,
     normalize_arch,
+    parse_platform,
+    platform_from_arch,
     supports_32bit,
 )
 
@@ -58,6 +62,43 @@ def test_normalize_arch():
     assert normalize_arch("linux/arm64") == "aarch64"
     assert normalize_arch("linux/amd64") == "x86_64"
     assert normalize_arch("unknown") is None
+
+
+def test_platform_parsing_and_round_trip():
+    cases = {
+        "linux/amd64": "x86_64",
+        "linux/arm64": "aarch64",
+        "linux/arm/v7": "arm",
+        "linux/386": "i686",
+        "linux/riscv64": "riscv64",
+        "amd64": "x86_64",
+        "aarch64": "aarch64",
+    }
+    for value, arch in cases.items():
+        platform = parse_platform(value)
+        assert isinstance(platform, Platform)
+        assert platform.to_arch() == arch
+        assert parse_platform(platform.format()) == platform
+
+    assert parse_platform("arm64").format() == "linux/arm64"
+    assert parse_platform("arm").format() == "linux/arm/v7"
+    assert parse_platform("linux/arm/v7").variant == "v7"
+    assert platform_from_arch("arm").format() == "linux/arm/v7"
+
+
+def test_platform_rejects_invalid_values():
+    for value in ("", "linux", "linux/unknown", "windows/amd64", "linux/amd64/v2", "linux/arm/v6", "linux//amd64"):
+        try:
+            parse_platform(value)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"expected ValueError for {value!r}")
+
+
+def test_get_device_platform(monkeypatch):
+    monkeypatch.setattr("chroot_distro.arch.get_device_cpu_arch", lambda: "arm")
+    assert get_device_platform() == Platform("linux", "arm", "v7")
 
 
 def test_elf_arch(tmp_path):

@@ -23,6 +23,7 @@ other way round, for the header `helpers/binfmt.py` registers a match on.
 """
 
 import ctypes
+import dataclasses
 import os
 import struct
 
@@ -158,6 +159,92 @@ def normalize_arch(arch: str) -> str | None:
     if s in _KNOWN_ARCHS:
         return s
     return _DOCKER_TO_PROOT.get(s)
+
+
+_SUPPORTED_PLATFORM_ARCHES = frozenset({"amd64", "arm64", "arm", "386", "riscv64"})
+
+
+@dataclasses.dataclass(frozen=True)
+class Platform:
+    """A normalized OCI platform supported by chroot-distro."""
+
+    os: str
+    architecture: str
+    variant: str = ""
+
+    def __post_init__(self) -> None:
+        os_name = self.os.strip().lower()
+        architecture = self.architecture.strip().lower()
+        variant = self.variant.strip().lower()
+        if os_name != "linux":
+            raise ValueError(f"unsupported platform OS '{self.os}'")
+        if architecture not in _SUPPORTED_PLATFORM_ARCHES:
+            raise ValueError(f"unsupported platform architecture '{self.architecture}'")
+        if architecture != "arm" and variant:
+            raise ValueError(f"platform variant is only supported for arm, not '{architecture}'")
+        if architecture == "arm" and variant not in ("", "v7"):
+            raise ValueError(f"unsupported arm platform variant '{self.variant}'")
+        object.__setattr__(self, "os", os_name)
+        object.__setattr__(self, "architecture", architecture)
+        object.__setattr__(self, "variant", variant)
+
+    def format(self) -> str:
+        """Return the canonical OCI platform string."""
+        suffix = f"/{self.variant}" if self.variant else ""
+        return f"{self.os}/{self.architecture}{suffix}"
+
+    def __str__(self) -> str:
+        return self.format()
+
+    def to_arch(self) -> str:
+        """Return the existing chroot-distro architecture name."""
+        docker_name = f"{self.architecture}/{self.variant}" if self.variant else self.architecture
+        if docker_name in _DOCKER_TO_PROOT:
+            return _DOCKER_TO_PROOT[docker_name]
+        from chroot_distro.helpers.docker.refs import ARCH_TO_DOCKER
+
+        for arch, (name, variant) in ARCH_TO_DOCKER.items():
+            if (name, variant) == (self.architecture, self.variant):
+                return arch
+        raise ValueError(f"unsupported platform '{self}'")
+
+
+def platform_from_arch(arch: str) -> Platform:
+    """Convert a chroot-distro architecture name to a Linux platform."""
+    normalized = normalize_arch(arch)
+    if normalized is None:
+        raise ValueError(f"unknown architecture '{arch}'")
+    from chroot_distro.helpers.docker.refs import ARCH_TO_DOCKER
+
+    docker_arch, variant = ARCH_TO_DOCKER.get(normalized, (normalized, ""))
+    return Platform("linux", docker_arch, variant)
+
+
+def parse_platform(value: str) -> Platform:
+    """Parse and normalize a supported OCI platform or architecture alias."""
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("platform cannot be empty")
+
+    parts = value.strip().lower().split("/")
+    if len(parts) == 1:
+        return platform_from_arch(parts[0])
+    if len(parts) not in (2, 3) or not all(parts):
+        raise ValueError(f"malformed platform '{value}'")
+
+    os_name, arch_value = parts[:2]
+    normalized = normalize_arch(arch_value)
+    if normalized is None:
+        raise ValueError(f"unknown platform architecture '{arch_value}'")
+    from chroot_distro.helpers.docker.refs import ARCH_TO_DOCKER
+
+    docker_arch, default_variant = ARCH_TO_DOCKER.get(normalized, (normalized, ""))
+    variant = parts[2] if len(parts) == 3 else default_variant
+    return Platform(os_name, docker_arch, variant)
+
+
+def get_device_platform() -> Platform:
+    """Return the host CPU as a normalized Linux platform."""
+    return platform_from_arch(get_device_cpu_arch())
 
 
 # Machine string reported by `uname -m` for each arch.
