@@ -30,7 +30,7 @@ import shutil
 import sys
 from dataclasses import dataclass, field
 
-from chroot_distro.arch import detect_installed_arch, get_device_cpu_arch, supports_32bit
+from chroot_distro.arch import detect_installed_arch, get_device_cpu_arch, needs_emulation, supports_32bit
 from chroot_distro.commands.kernel_config import (
     CONFIG_BUILTIN,
     CONFIG_MODULE,
@@ -60,6 +60,7 @@ from chroot_distro.constants import (
     RUNTIME_DIR,
     TERMUX_APP_PACKAGE,
 )
+from chroot_distro.helpers.binfmt import BINFMT_DIR, covered_arches
 from chroot_distro.locking import container_busy_status
 from chroot_distro.message import C, msg
 from chroot_distro.paths import container_manifest, container_rootfs
@@ -264,20 +265,13 @@ def _data_mount_flags() -> tuple[str, str]:
 
 def _binfmt_qemu_status(needs_emulation: bool) -> tuple[str, str]:
     """Return (value, level) describing binfmt_misc + QEMU availability."""
-    binfmt_dir = "/proc/sys/fs/binfmt_misc"
-    if not os.path.isdir(binfmt_dir):
+    if not os.path.isdir(BINFMT_DIR):
         value = "binfmt_misc not mounted"
         return value, ("bad" if needs_emulation else "info")
-    qemu_handlers: list[str] = []
-    try:
-        for entry in sorted(os.listdir(binfmt_dir)):
-            if entry.startswith("qemu-"):
-                qemu_handlers.append(entry[len("qemu-") :])
-    except OSError:
-        pass
-    if qemu_handlers:
-        return f"binfmt_misc + qemu ({', '.join(qemu_handlers)})", "ok"
-    value = "binfmt_misc mounted, no qemu handler registered"
+    covered = covered_arches()
+    if covered:
+        return f"binfmt_misc + qemu ({', '.join(covered)})", "ok"
+    value = "binfmt_misc mounted, no emulator registered"
     return value, ("bad" if needs_emulation else "info")
 
 
@@ -542,12 +536,7 @@ def _analyze_image(info: _ImageInfo, host_arch: str) -> None:
         # minimal/distroless images legitimately lack /etc files.
         info.findings.append("no recognizable rootfs layout (install may be incomplete)")
 
-    if (
-        info.arch not in (_NA, "")
-        and host_arch not in (_NA, "")
-        and info.arch != host_arch
-        and not (host_arch in ("x86_64", "aarch64") and info.arch in ("i686", "arm"))
-    ):
+    if info.arch not in (_NA, "") and host_arch not in (_NA, "") and needs_emulation(info.arch, host_arch):
         info.findings.append(f"arch '{info.arch}' differs from host '{host_arch}' (needs emulation)")
 
 

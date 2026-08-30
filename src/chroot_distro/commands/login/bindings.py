@@ -199,13 +199,19 @@ def _usb_specials() -> list[SpecialMount]:
     ]
 
 
-def _binfmt_misc_special(*, fresh_proc: bool = True) -> SpecialMount | None:
+def _binfmt_misc_special(*, fresh_proc: bool = True, use_userns: bool = False) -> SpecialMount | None:
     """Mount binfmt_misc inside the chroot when the kernel supports it.
 
-    The chroot's /proc is always a fresh procfs, so the host's registrations
-    are never inherited; *fresh_proc*=False instead skips the mount when the
-    host already has one.
+    Never under a user namespace: since Linux 6.7 the entries hang off the user
+    namespace and one without its own mount inherits its nearest ancestor's, so
+    a fresh instance here would hand the session an empty set and shadow the
+    QEMU handler a foreign-arch guest needs. *fresh_proc*=False skips the mount
+    when the host already has one.
     """
+    if use_userns:
+        log.debug("binfmt_misc: not mounted, so the user namespace inherits the host's entries")
+        return None
+
     if not fresh_proc and os.path.exists("/proc/sys/fs/binfmt_misc/register"):
         return None
 
@@ -325,7 +331,7 @@ def get_special_mounts(
         specials.extend(_usb_specials())
 
     if enable_binfmt:
-        sm = _binfmt_misc_special(fresh_proc=True)
+        sm = _binfmt_misc_special(fresh_proc=True, use_userns=use_userns)
         if sm:
             specials.append(sm)
 

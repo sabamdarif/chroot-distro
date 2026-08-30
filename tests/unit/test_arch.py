@@ -5,6 +5,7 @@ from chroot_distro.arch import (
     _elf_arch,
     detect_installed_arch,
     get_device_cpu_arch,
+    needs_emulation,
     normalize_arch,
     supports_32bit,
 )
@@ -121,3 +122,17 @@ def test_detect_installed_arch(mock_container_rootfs, tmp_path):
     # Test unknown
     bash_path.unlink()
     assert detect_installed_arch("my_container") == "unknown"
+
+
+def test_needs_emulation():
+    assert needs_emulation("x86_64", "x86_64") is False
+    assert needs_emulation("aarch64", "x86_64") is True
+
+    with patch("chroot_distro.arch.supports_32bit", return_value=True):
+        assert needs_emulation("i686", "x86_64") is False
+        assert needs_emulation("arm", "aarch64") is False
+        # A 64-bit CPU only runs the 32-bit half of its own family.
+        assert needs_emulation("i686", "aarch64") is True
+
+    with patch("chroot_distro.arch.supports_32bit", return_value=False):
+        assert needs_emulation("arm", "aarch64") is True

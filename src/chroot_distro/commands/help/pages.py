@@ -398,7 +398,9 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
                 "Override the target CPU architecture. Accepts native "
                 "names (aarch64, arm, i686, riscv64, x86_64) or Docker "
                 "platform strings (linux/arm64, linux/amd64, linux/arm/v7, "
-                "linux/386, linux/riscv64).",
+                "linux/386, linux/riscv64). A foreign architecture needs "
+                "QEMU's user-mode emulator installed on the host; login "
+                "registers it with binfmt_misc on first entry.",
             ),
             ("-q, --quiet", "Suppress non-error output."),
         ],

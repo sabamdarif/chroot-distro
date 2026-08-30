@@ -234,9 +234,10 @@ paths by hand.
 
 **Debug/escape hatches, deliberately undocumented:**
 `CD_NO_DAEMON=1` (skip the daemon socket), `CD_NO_CAP_DROP=1` (keep the full
-capability bounding set), `CD_SU_PATH` / `CD_SU_MOUNT_MASTER=1` (Termux `su`
-selection and namespace), `CD_SUBID_BASE` (user-namespace subid base),
-`CD_PUSH_CHUNK_SIZE`, `CD_SECRET_FILE` (internal, set by `elevate.py`).
+capability bounding set), `CD_NO_BINFMT=1` (never register a binfmt_misc
+handler), `CD_SU_PATH` / `CD_SU_MOUNT_MASTER=1` (Termux `su` selection and
+namespace), `CD_SUBID_BASE` (user-namespace subid base), `CD_PUSH_CHUNK_SIZE`,
+`CD_SECRET_FILE` (internal, set by `elevate.py`).
 
 ### This file
 
@@ -450,6 +451,7 @@ the caller (`build_engine/constants.is_host_exec_var`, applied in
 | `helpers/android.py`        | the Termux-side fixups, and nothing on Linux              |
 | `helpers/rootfs.py`         | the guest `/etc` files this program writes                |
 | `helpers/owner.py`          | a `--chown` spec to the numeric pair                      |
+| `helpers/binfmt.py`         | the binfmt_misc entry a foreign-arch guest runs on        |
 | `arch.py`                   | host arch, image arch, and what a rootfs turned out to be |
 | `commands/info.py`          | one report a bug can be filed with                        |
 | `commands/kernel_config.py` | what the running kernel was built with                    |

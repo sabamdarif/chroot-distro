@@ -1437,3 +1437,123 @@ def test_live_mount_options_requires_a_live_session(monkeypatch):
 
     monkeypatch.setattr(session_mod, "get_active_chroot_pids", lambda name: [123])
     assert session_mod.live_mount_options("box") == {"shared_home": True}
+
+
+def test_special_mounts_skips_binfmt_under_a_user_namespace():
+    from chroot_distro.commands.login.bindings import get_special_mounts
+
+    with (
+        patch("chroot_distro.commands.login.bindings._fs_supported", return_value=True),
+        patch("os.path.exists", return_value=True),
+    ):
+        plain = get_special_mounts("/fake/rootfs")
+        userns = get_special_mounts("/fake/rootfs", use_userns=True)
+
+    # A fresh instance inside the userns would be empty, shadowing the host's
+    # entries that an unmounted one inherits instead.
+    assert "binfmt_misc" in [sm.fstype for sm in plain]
+    assert "binfmt_misc" not in [sm.fstype for sm in userns]
+
+
+def _aarch64_rootfs(tmp_path):
+    """A rootfs whose own /bin/sh reports EM_AARCH64, the way a real one would."""
+    import struct
+
+    header = bytearray(20)
+    header[:4] = b"\x7fELF"
+    header[4] = 2  # EI_CLASS: 64-bit
+    header[5] = 1  # EI_DATA: little endian
+    struct.pack_into("<H", header, 18, 183)  # EM_AARCH64
+    rootfs = tmp_path / "rootfs"
+    (rootfs / "bin").mkdir(parents=True)
+    (rootfs / "bin" / "sh").write_bytes(bytes(header))
+    return rootfs
+
+
+def test_ensure_guest_arch_runnable_registers_a_handler_for_a_foreign_image(tmp_path):
+    import json
+
+    from chroot_distro.commands.login import _ensure_guest_arch_runnable
+
+    (tmp_path / "manifest.json").write_text(json.dumps({"arch": "arm64"}))
+    with (
+        patch("chroot_distro.arch.get_device_cpu_arch", return_value="x86_64"),
+        patch(
+            "chroot_distro.helpers.binfmt.ensure_handler",
+            return_value=("/usr/bin/qemu-aarch64-static", ""),
+        ) as ensure,
+        patch("chroot_distro.commands.login.warn") as warned,
+    ):
+        _ensure_guest_arch_runnable(str(tmp_path), str(tmp_path / "empty-rootfs"))
+
+    ensure.assert_called_once_with("aarch64")
+    warned.assert_not_called()
+
+
+def test_ensure_guest_arch_runnable_only_warns_when_the_manifest_alone_says_foreign(tmp_path):
+    import json
+
+    from chroot_distro.commands.login import _ensure_guest_arch_runnable
+
+    (tmp_path / "manifest.json").write_text(json.dumps({"arch": "arm64"}))
+    with (
+        patch("chroot_distro.arch.get_device_cpu_arch", return_value="x86_64"),
+        patch("chroot_distro.helpers.binfmt.ensure_handler", return_value=(None, "no QEMU for it")),
+        patch("chroot_distro.commands.login.warn") as warned,
+    ):
+        # No SystemExit: a manifest can name a platform its files do not match.
+        _ensure_guest_arch_runnable(str(tmp_path), str(tmp_path / "empty-rootfs"))
+
+    assert "no QEMU for it" in warned.call_args[0][0]
+
+
+def test_ensure_guest_arch_runnable_refuses_when_the_rootfs_confirms_it(tmp_path):
+    import pytest
+
+    from chroot_distro.commands.login import _ensure_guest_arch_runnable
+
+    rootfs = _aarch64_rootfs(tmp_path)
+    with (
+        patch("chroot_distro.arch.get_device_cpu_arch", return_value="x86_64"),
+        patch("chroot_distro.helpers.binfmt.ensure_handler", return_value=(None, "no QEMU for it")),
+        patch("chroot_distro.commands.login.crit_error") as errored,
+        pytest.raises(SystemExit) as exit_info,
+    ):
+        _ensure_guest_arch_runnable(str(tmp_path), str(rootfs))
+
+    assert exit_info.value.code == 1
+    assert "cannot execute" in errored.call_args[0][0]
+
+
+def test_ensure_guest_arch_runnable_uses_the_rootfs_when_there_is_no_manifest(tmp_path):
+    from chroot_distro.commands.login import _ensure_guest_arch_runnable
+
+    rootfs = _aarch64_rootfs(tmp_path)
+    with (
+        patch("chroot_distro.arch.get_device_cpu_arch", return_value="x86_64"),
+        patch(
+            "chroot_distro.helpers.binfmt.ensure_handler",
+            return_value=("/usr/bin/qemu-aarch64-static", ""),
+        ) as ensure,
+    ):
+        _ensure_guest_arch_runnable(str(tmp_path), str(rootfs))
+
+    ensure.assert_called_once_with("aarch64")
+
+
+def test_ensure_guest_arch_runnable_stays_quiet_for_a_32bit_guest_on_a_64bit_host(tmp_path):
+    import json
+
+    from chroot_distro.commands.login import _ensure_guest_arch_runnable
+
+    (tmp_path / "manifest.json").write_text(json.dumps({"arch": "386"}))
+    with (
+        patch("chroot_distro.arch.get_device_cpu_arch", return_value="x86_64"),
+        patch("chroot_distro.arch.supports_32bit", return_value=True),
+        patch("chroot_distro.helpers.binfmt.ensure_handler") as ensure,
+        patch("chroot_distro.commands.login.warn") as warned,
+    ):
+        _ensure_guest_arch_runnable(str(tmp_path), str(tmp_path / "empty-rootfs"))
+
+    ensure.assert_not_called()
+    warned.assert_not_called()

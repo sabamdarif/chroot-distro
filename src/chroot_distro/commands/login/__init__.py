@@ -267,39 +267,65 @@ def _merge_image_path(image_path: str, system_path: str) -> str:
     return ":".join(merged)
 
 
-def _check_arch_mismatch(container_path: str) -> None:
-    """Warn if the image architecture does not match the host CPU."""
-    from chroot_distro.arch import get_device_cpu_arch, normalize_arch
+def _manifest_arch(container_path: str) -> str:
+    """Return the arch the manifest claims, or "" when it claims none."""
+    from chroot_distro.arch import normalize_arch
 
     try:
         with open(os.path.join(container_path, "manifest.json")) as fh:
             data = json.load(fh)
-        img_arch_raw = data.get("arch") or (data.get("image_config") or {}).get("architecture", "")
-        if not img_arch_raw:
-            return
-        img_arch = normalize_arch(img_arch_raw) or img_arch_raw
-        host_arch = get_device_cpu_arch()
-        if img_arch == host_arch:
-            return
-        binfmt_dir = "/proc/sys/fs/binfmt_misc"
-        if os.path.isdir(binfmt_dir):
-            for entry in os.listdir(binfmt_dir):
-                if entry in ("register", "status"):
-                    continue
-                try:
-                    with open(os.path.join(binfmt_dir, entry)) as fh:
-                        if "enabled" in fh.read():
-                            return
-                except OSError:
-                    continue
-        warn(
-            f"Image architecture '{img_arch}' does not match host "
-            f"architecture '{host_arch}'. Binaries may fail to execute. "
-            f"Install qemu-user-static and register binfmt_misc handlers "
-            f"for cross-architecture support."
-        )
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
-        log.warning("Could not check container/host architecture mismatch: %s", exc)
+    except (OSError, ValueError) as exc:
+        log.debug("Could not read the manifest's architecture: %s", exc)
+        return ""
+    raw = data.get("arch") or (data.get("image_config") or {}).get("architecture", "")
+    if not raw:
+        return ""
+    return normalize_arch(raw) or raw
+
+
+def _ensure_guest_arch_runnable(container_path: str, rootfs: str) -> None:
+    """Register a QEMU handler for a foreign-arch guest, or refuse to enter it.
+
+    Two sources, and either one alone is enough to go looking for a handler: the
+    manifest's claim, and the arch the rootfs's own ELF headers report. Only the
+    second aborts the login, because a tarball can arrive with no manifest or
+    one naming a platform its files do not match, and a manifest's word alone
+    must not lock the user out of a container that runs fine.
+
+    Runs before the mounts, but the `F` flag in the registration is what makes
+    that irrelevant: the kernel holds the emulator open, so it never has to be
+    reachable from inside the rootfs.
+    """
+    from chroot_distro.arch import detect_installed_arch, get_device_cpu_arch, needs_emulation
+    from chroot_distro.helpers.binfmt import ensure_handler
+    from chroot_distro.message import quote_path
+
+    host_arch = get_device_cpu_arch()
+    on_disk = detect_installed_arch(rootfs)
+    confirmed = on_disk not in ("", "unknown") and needs_emulation(on_disk, host_arch)
+    claimed = _manifest_arch(container_path)
+
+    if confirmed:
+        guest_arch = on_disk
+    elif claimed and needs_emulation(claimed, host_arch):
+        guest_arch = claimed
+    else:
+        return
+
+    interpreter, reason = ensure_handler(guest_arch)
+    if interpreter:
+        log.debug("%s runs '%s' binaries for this session", interpreter, guest_arch)
+        return
+
+    detail = (
+        f"Container architecture '{quote_path(guest_arch)}' does not match host "
+        f"architecture '{host_arch}', and no emulator was registered ({reason}). "
+        f"Install a QEMU user-mode emulator for '{quote_path(guest_arch)}'."
+    )
+    if confirmed:
+        crit_error(f"{detail} Its binaries cannot execute.")
+        sys.exit(1)
+    warn(f"{detail} Binaries may fail to execute.")
 
 
 def _build_termux_env(rootfs, container_path, extra_env, minimal, isolated, container_name=""):
@@ -502,7 +528,7 @@ def _command_login_inner_once(container_name: str, args) -> None:
     dist_type = _detect_dist_type(rootfs)
     container_path = container_dir(container_name)
 
-    _check_arch_mismatch(container_path)
+    _ensure_guest_arch_runnable(container_path, rootfs)
 
     # Precedence: CLI flag > CD_* env > image default. Already resolved by
     # command_run on the `run` path, so these are no-ops there.

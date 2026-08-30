@@ -67,3 +67,37 @@ def test_a_free_name_gets_past_the_guard(build_dir, containers, monkeypatch):
 
     with pytest.raises(ChrootDistroError, match="reached the build"):
         command_build(_args(build_dir, "free"))
+
+
+def test_foreign_build_with_run_refuses_without_an_emulator(build_dir, monkeypatch, capsys):
+    (build_dir / "Dockerfile").write_text("FROM alpine\nRUN echo hello\n")
+    monkeypatch.setattr("chroot_distro.commands.build.get_device_cpu_arch", lambda: "x86_64")
+    monkeypatch.setattr("chroot_distro.commands.build.needs_emulation", lambda _arch: True)
+    monkeypatch.setattr(
+        "chroot_distro.commands.build.ensure_handler",
+        lambda _arch: (None, "no QEMU user-mode emulator is installed"),
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        command_build(SimpleNamespace(path=str(build_dir), override_arch="aarch64", quiet=True))
+
+    assert exc.value.code == 1
+    assert "RUN steps cannot execute" in capsys.readouterr().err
+
+
+def test_foreign_build_without_run_warns_but_can_finish(build_dir, monkeypatch, capsys):
+    monkeypatch.setattr("chroot_distro.commands.build.get_device_cpu_arch", lambda: "x86_64")
+    monkeypatch.setattr("chroot_distro.commands.build.needs_emulation", lambda _arch: True)
+    monkeypatch.setattr(
+        "chroot_distro.commands.build.ensure_handler",
+        lambda _arch: (None, "no QEMU user-mode emulator is installed"),
+    )
+
+    def boom(*_args, **_kwargs):
+        raise ChrootDistroError("reached the build")
+
+    monkeypatch.setattr("chroot_distro.commands.build.BuildLock", boom)
+    with pytest.raises(ChrootDistroError, match="reached the build"):
+        command_build(SimpleNamespace(path=str(build_dir), override_arch="aarch64", quiet=True))
+
+    assert "no emulator was registered" in capsys.readouterr().err
