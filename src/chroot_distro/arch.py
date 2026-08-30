@@ -15,6 +15,11 @@ platform the files do not match. `supports_32bit` asks the kernel through
 `personality(PER_LINUX32)` and puts the previous value back, since on arm64
 whether 32-bit userspace runs is a kernel build option and not something the
 machine name says.
+
+`needs_emulation` is the single place that answers whether a rootfs needs QEMU,
+so a 32-bit guest on a 64-bit host of the same family asks `supports_32bit`
+instead of counting as foreign. `ELF_MACHINE_BY_ARCH` is the machine table the
+other way round, for the header `helpers/binfmt.py` registers a match on.
 """
 
 import ctypes
@@ -66,6 +71,21 @@ _ELF_MACHINE_MAP = {
     183: "aarch64",  # EM_AARCH64
     243: "riscv64",  # EM_RISCV
 }
+
+ELF_MACHINE_BY_ARCH = {name: machine for machine, name in _ELF_MACHINE_MAP.items()}
+
+# Host/guest pairs whose 32-bit userspace the 64-bit CPU runs without emulation.
+_NATIVE_32BIT = frozenset({("x86_64", "i686"), ("aarch64", "arm")})
+
+
+def needs_emulation(image_arch: str, host_arch: str = "") -> bool:
+    """Return True if *image_arch* binaries cannot run on this CPU as they are."""
+    host = host_arch or get_device_cpu_arch()
+    if image_arch == host:
+        return False
+    if (host, image_arch) in _NATIVE_32BIT:
+        return not supports_32bit()
+    return True
 
 
 def _elf_arch(path: str) -> str:

@@ -130,17 +130,17 @@ def test_detect_escalation_tool_prefers_sudo():
 def test_binfmt_qemu_status_flags_missing_handler_when_emulation_needed():
     with (
         patch("os.path.isdir", return_value=True),
-        patch("os.listdir", return_value=["status", "register"]),
+        patch("chroot_distro.commands.info.covered_arches", return_value=[]),
     ):
         value, level = info._binfmt_qemu_status(needs_emulation=True)
     assert level == "bad"
-    assert "no qemu handler" in value
+    assert "no emulator" in value
 
 
 def test_binfmt_qemu_status_ok_with_handler():
     with (
         patch("os.path.isdir", return_value=True),
-        patch("os.listdir", return_value=["qemu-aarch64", "qemu-arm", "status"]),
+        patch("chroot_distro.commands.info.covered_arches", return_value=["aarch64", "arm"]),
     ):
         value, level = info._binfmt_qemu_status(needs_emulation=True)
     assert level == "ok"

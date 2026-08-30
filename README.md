@@ -123,6 +123,13 @@ chroot-distro install myuser/private-image:tag
 
 Downloaded layers are cached, so installing the same image again works offline.
 
+A container for another CPU needs QEMU's user-mode emulator on the host: install
+`qemu-user-static` (Linux) or `qemu-user-aarch64` and friends (Termux). `login`
+then registers it with the kernel's `binfmt_misc` the first time you enter the
+container, and the registration stays until the host reboots. `chroot-distro
+info` lists which architectures are covered. Nothing to install for your CPU's
+own 32-bit half: `i686` on `x86_64` and `arm` on `aarch64` run directly.
+
 ### login
 
 ```
@@ -519,6 +526,7 @@ All of these are optional.
 - **Isolation is partial.** `--isolated` covers mount, PID, UTS, and IPC namespaces. It is not a full container runtime like Docker or Podman.
 - **Builds are not full BuildKit.** `RUN` steps execute under chroot. A few BuildKit features are rejected with an error, and multi-platform images are not produced.
 - **`push` is single-architecture.** Build and push once per CPU type.
+- **Foreign architectures need the kernel's help.** Emulation goes through `binfmt_misc`, so a kernel built without `CONFIG_BINFMT_MISC` cannot run an image for another CPU. `chroot-distro info` reports it.
 - **Backups capture files only.** Running programs are not saved by `backup`/`restore`.
 - **Registry login is env-var only.** Set `CD_DOCKER_AUTH`. Docker's `config.json` credential helpers are not read.
 

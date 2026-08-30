@@ -36,13 +36,14 @@ from contextlib import ExitStack
 from types import SimpleNamespace
 
 from chroot_distro import dirfd
-from chroot_distro.arch import get_device_cpu_arch, normalize_arch
+from chroot_distro.arch import get_device_cpu_arch, needs_emulation, normalize_arch
 from chroot_distro.commands.install import command_install
 from chroot_distro.constants import (
     PROGRAM_NAME,
     RUNTIME_DIR,
 )
 from chroot_distro.helpers import namespace
+from chroot_distro.helpers.binfmt import ensure_handler
 from chroot_distro.helpers.build_engine import (
     BuildEngine,
     BuildError,
@@ -140,6 +141,21 @@ def command_build(args: typing.Any) -> None:
             sys.exit(1)
     else:
         target_arch = get_device_cpu_arch()
+
+    # Every RUN step chroots into the target rootfs, so a foreign build needs the
+    # same handler a foreign login does. A build with no RUN never execs a guest
+    # binary, so there it is only a warning.
+    if needs_emulation(target_arch):
+        interpreter, reason = ensure_handler(target_arch)
+        if interpreter is None:
+            detail = (
+                f"Building for '{target_arch}' on a '{get_device_cpu_arch()}' host, "
+                f"and no emulator was registered ({reason})."
+            )
+            if any(ins.get("name") == "RUN" for ins in instructions):
+                crit_error(f"{detail} RUN steps cannot execute.")
+                sys.exit(1)
+            warn(detail)
 
     if install_as:
         require_valid_name(install_as, kind="--install-as value")
