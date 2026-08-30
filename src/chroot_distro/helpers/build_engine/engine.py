@@ -40,7 +40,7 @@ import time
 import typing
 
 from chroot_distro import dirfd
-from chroot_distro.arch import get_device_cpu_arch
+from chroot_distro.arch import Platform, get_device_platform, platform_from_arch
 from chroot_distro.helpers.build_engine.constants import (
     EXPANDS_VARS,
     PREDEFINED_ARGS,
@@ -58,7 +58,6 @@ from chroot_distro.helpers.build_engine.handlers import HANDLERS, do_onbuild
 from chroot_distro.helpers.build_engine.parsing import split_arg
 from chroot_distro.helpers.build_engine.stage import Stage
 from chroot_distro.helpers.docker import (
-    ARCH_TO_DOCKER,
     apply_layer,
     layer_cache_path,
     pull_image,
@@ -236,6 +235,8 @@ class BuildEngine:
         ssh_sockets: dict[str, str] | None = None,
         reporter: Reporter | None = None,
         tmp_root_fd: int | None = None,
+        target_platform: Platform | None = None,
+        build_platform: Platform | None = None,
     ):
         self.build_dir = os.path.abspath(build_dir)
         self.tmp_root = tmp_root
@@ -244,10 +245,11 @@ class BuildEngine:
         # build created rather than below whatever `tmp_root` resolves to by
         # the time a stage starts. None only for a caller that made the tree.
         self.tmp_root_fd = tmp_root_fd
-        self.target_arch_pd = target_arch_pd
-        self.target_arch_docker = ARCH_TO_DOCKER.get(target_arch_pd, (target_arch_pd, ""))[0]
-        host_arch = get_device_cpu_arch()
-        self.host_arch_docker = ARCH_TO_DOCKER.get(host_arch, (host_arch, ""))[0]
+        self.target_platform = target_platform or platform_from_arch(target_arch_pd)
+        self.build_platform = build_platform or get_device_platform()
+        self.target_arch_pd = self.target_platform.to_arch()
+        self.target_arch_docker = self.target_platform.architecture
+        self.host_arch_docker = self.build_platform.architecture
         self.user_build_args = dict(user_build_args)
         self.target_stage = target_stage
         self.verbose = verbose
@@ -344,13 +346,21 @@ class BuildEngine:
         return expand_vars(value, scope)
 
     def _set_arch_defaults(self, scope: dict[str, str | None]) -> None:
-        """Populate the TARGET*/BUILD* arch annotations (Docker defaults)."""
-        scope.setdefault("TARGETARCH", self.target_arch_docker)
-        scope.setdefault("BUILDARCH", self.host_arch_docker)
-        scope.setdefault("TARGETOS", "linux")
-        scope.setdefault("BUILDOS", "linux")
-        scope.setdefault("TARGETPLATFORM", f"linux/{self.target_arch_docker}")
-        scope.setdefault("BUILDPLATFORM", f"linux/{self.host_arch_docker}")
+        """Populate the TARGET*/BUILD* platform annotations (Docker defaults)."""
+        target = self.target_platform
+        build = self.build_platform
+        defaults = {
+            "TARGETPLATFORM": target.format(),
+            "TARGETOS": target.os,
+            "TARGETARCH": target.architecture,
+            "TARGETVARIANT": target.variant,
+            "BUILDPLATFORM": build.format(),
+            "BUILDOS": build.os,
+            "BUILDARCH": build.architecture,
+            "BUILDVARIANT": build.variant,
+        }
+        for key, value in defaults.items():
+            scope.setdefault(key, value)
 
     def _stage_label(self) -> str:
         if self.current is None:
@@ -508,6 +518,7 @@ class BuildEngine:
             name=stage_name or "",
             rootfs_dir=rootfs_dir,
             target_arch_pd=self.target_arch_pd,
+            platform=self.target_platform,
             dir_fd=stage_fd,
             rootfs_fd=rootfs_fd,
         )

@@ -16,6 +16,8 @@ import contextlib
 import os
 import typing
 
+from chroot_distro.arch import Platform, platform_from_arch
+
 
 class Stage:
     """Per-FROM state for the build engine.
@@ -42,6 +44,7 @@ class Stage:
         "layers",
         "name",
         "parent_layer_digest",
+        "platform",
         "rootfs_dir",
         "rootfs_fd",
         "shell",
@@ -59,6 +62,7 @@ class Stage:
         *,
         dir_fd: int | None = None,
         rootfs_fd: int | None = None,
+        platform: Platform | None = None,
     ):
         self.index = index
         self.name = name
@@ -74,7 +78,8 @@ class Stage:
         self.workdir = "/"
         self.user = ""
         self.shell = ["/bin/sh", "-c"]
-        self.target_arch_pd = target_arch_pd
+        self.platform = platform or platform_from_arch(target_arch_pd)
+        self.target_arch_pd = self.platform.to_arch()
 
     def close(self) -> None:
         """Release the two descriptors. Idempotent."""
