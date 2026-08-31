@@ -124,13 +124,21 @@ def test_each_solve_numbers_its_own_steps(scratch, context, capsys):
     assert [ev["step_no"] for ev in events if ev["kind"] == "step_started"] == [1, 2, 1, 2]
 
 
-def test_one_parse_answers_for_every_solve(scratch, context):
-    request = _request(scratch, context, "FROM scratch\nENV A=1\nARG B=2\n")
+def test_a_request_survives_its_own_solve(scratch, context):
+    # What every later platform reads: the one parse of the Dockerfile and the
+    # ARG values the command line gave, neither of which a solve may edit.
+    request = _request(
+        scratch,
+        context,
+        "ARG B=2\nFROM scratch\nARG B\nENV A=$B\n",
+        user_build_args={"B": "3"},
+    )
     before = json.dumps(request.instructions, sort_keys=True)
 
     solve_platform(request)
 
     assert json.dumps(request.instructions, sort_keys=True) == before
+    assert request.user_build_args == {"B": "3"}
 
 
 # ── a solve that fails ────────────────────────────────────────────────────────
@@ -143,5 +151,3 @@ def test_a_failed_solve_leaves_the_root_as_it_found_it(scratch, context):
     assert os.listdir(str(root)) == []
     # And the next platform still builds under the same root.
     assert solve_platform(_request(scratch, context, "FROM scratch\n")).platform == ARM64
-
-
