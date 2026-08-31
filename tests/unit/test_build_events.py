@@ -11,6 +11,7 @@ from chroot_distro.helpers.build_engine.events import (
     JSONReporter,
     NullReporter,
     PlainReporter,
+    PlatformReporter,
     TTYReporter,
     make_reporter,
 )
@@ -164,6 +165,7 @@ def test_json_reporter_emits_json_lines():
         "kind": "step_started",
         "step_no": 1,
         "step_total": 2,
+        "platform": "",
         "stage_name": "",
         "instruction": "RUN",
         "text": "RUN x",
@@ -173,9 +175,45 @@ def test_json_reporter_emits_json_lines():
     assert json.loads(lines[1])["duration"] == 0.5
 
 
+# ── PlatformReporter ──────────────────────────────────────────────────────────
+def test_platform_is_named_before_the_stage(capsys):
+    rep = PlatformReporter(PlainReporter(), "linux/arm64")
+
+    rep.emit(_ev("step_started", step_no=1, step_total=2, stage_name="builder", text="RUN echo hi"))
+
+    assert capsys.readouterr().err == "[*] Step 1/2 [linux/arm64 builder]: RUN echo hi\n"
+
+
+def test_platform_alone_still_gets_brackets():
+    out = io.StringIO()
+    rep = PlatformReporter(TTYReporter(stream=out), "linux/arm/v7")
+
+    rep.emit(_ev("step_started", step_no=1, step_total=1, instruction="RUN", text="RUN make"))
+
+    assert "#1 [linux/arm/v7] RUN" in out.getvalue()
+
+
+def test_the_engine_keeps_its_own_event():
+    rec = _Recorder()
+    ev = _ev("step_started", step_no=1)
+
+    PlatformReporter(rec, "linux/amd64").emit(ev)
+
+    assert ev.platform == ""
+    assert rec.events[0].platform == "linux/amd64"
+
+
 # ── make_reporter ─────────────────────────────────────────────────────────────
 def test_quiet_wins():
     assert isinstance(make_reporter("rawjson", quiet=True), NullReporter)
+
+
+def test_a_named_platform_wraps_the_renderer():
+    assert isinstance(make_reporter("plain", quiet=False, platform="linux/amd64"), PlatformReporter)
+
+
+def test_quiet_wins_over_a_named_platform():
+    assert isinstance(make_reporter("plain", quiet=True, platform="linux/amd64"), NullReporter)
 
 
 @pytest.mark.parametrize(

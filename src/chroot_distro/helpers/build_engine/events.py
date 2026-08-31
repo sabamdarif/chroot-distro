@@ -7,6 +7,11 @@ Three renderers: plain one-line-per-event (today's format), a minimal
 TTY renderer that collapses finished steps, and JSON-lines for tooling.
 Selected via ``--progress {auto,plain,tty,rawjson}``; ``--quiet`` maps
 to the no-op reporter.
+
+A build solving several platforms sends every solve's events to one of those
+renderers, so `PlatformReporter` wraps it and names the platform each event came
+from. Only such a build gets the name: a step number is unambiguous when there is
+one solve, which is also where buildx draws the line.
 """
 
 import dataclasses
@@ -24,6 +29,7 @@ class BuildEvent:
     kind: str
     step_no: int = 0
     step_total: int = 0
+    platform: str = ""
     stage_name: str = ""
     instruction: str = ""
     text: str = ""
@@ -35,10 +41,15 @@ class Reporter(typing.Protocol):
     def emit(self, ev: BuildEvent) -> None: ...
 
 
+def _label(ev: BuildEvent) -> str:
+    """The bracketed `[platform stage]` part, empty when the event has neither."""
+    inner = " ".join(part for part in (ev.platform, ev.stage_name) if part)
+    return f" [{inner}]" if inner else ""
+
+
 def _head(ev: BuildEvent) -> str:
-    """`#N [stage] INSTR` prefix shared by the renderers."""
-    stage = f" [{ev.stage_name}]" if ev.stage_name else ""
-    return f"#{ev.step_no}{stage} {ev.instruction}"
+    """`#N [platform stage] INSTR` prefix shared by the renderers."""
+    return f"#{ev.step_no}{_label(ev)} {ev.instruction}"
 
 
 def _truncate(text: str, limit: int = 120) -> str:
@@ -65,8 +76,7 @@ class PlainReporter:
                 rendered = f"{C['YELLOW']}{parts[0]}{C['RST']}"
             else:
                 rendered = ""
-            stage = f" [{ev.stage_name}]" if ev.stage_name else ""
-            log_info(f"Step {ev.step_no}/{ev.step_total}{stage}: {C['RST']}{rendered}")
+            log_info(f"Step {ev.step_no}/{ev.step_total}{_label(ev)}: {C['RST']}{rendered}")
         elif ev.kind == "cache_hit":
             log_info(f"{C['GREEN']}CACHED{C['RST']}")
         elif ev.kind == "step_finished":
@@ -133,10 +143,35 @@ class JSONReporter:
         self._stream.flush()
 
 
-def make_reporter(progress: str, quiet: bool) -> Reporter:
-    """Pick the reporter for --progress/--quiet (auto = TTY-detect on stderr)."""
+class PlatformReporter:
+    """Stamp the platform of one solve onto every event on its way to *inner*.
+
+    The event is replaced rather than edited, since it belongs to the engine that
+    emitted it.
+    """
+
+    def __init__(self, inner: Reporter, platform: str) -> None:
+        self._inner = inner
+        self._platform = platform
+
+    def emit(self, ev: BuildEvent) -> None:
+        self._inner.emit(dataclasses.replace(ev, platform=self._platform))
+
+
+def make_reporter(progress: str, quiet: bool, platform: str = "") -> Reporter:
+    """Pick the reporter for --progress/--quiet, naming *platform* when given.
+
+    A platform is passed by a build that solves more than one, and every event it
+    renders then says which solve produced it.
+    """
     if quiet:
         return NullReporter()
+    renderer = _renderer(progress)
+    return PlatformReporter(renderer, platform) if platform else renderer
+
+
+def _renderer(progress: str) -> Reporter:
+    """The renderer --progress asks for (auto = TTY-detect on stderr)."""
     if progress == "rawjson":
         return JSONReporter()
     if progress == "plain":
