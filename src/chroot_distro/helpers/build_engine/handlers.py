@@ -54,14 +54,16 @@ def do_arg(engine: typing.Any, instr: dict[str, typing.Any]) -> None:
 
     Resolution order: --build-arg from the CLI, then the Dockerfile
     default, then the global-ARG value re-exposed by a bare `ARG NAME`,
-    then a host env var when NAME is one of the predefined ARGs.
-    Falls back to the empty string.
+    then the automatic platform value for a TARGET*/BUILD* name, then a
+    host env var when NAME is one of the predefined ARGs. Falls back to
+    the empty string.
     """
     key, default = split_arg(instr["value"])
     if not key:
         raise BuildError(f"Invalid ARG at line {instr['lineno']}: {instr['value']!r}")
     stage = engine.current
     stage.declared_args.add(key)
+    platform_args = engine.platform_args()
     if key in engine.user_build_args:
         stage.args[key] = engine.user_build_args[key]
     elif default is not None:
@@ -69,6 +71,10 @@ def do_arg(engine: typing.Any, instr: dict[str, typing.Any]) -> None:
     elif key in engine.global_args and key in engine.declared_global:
         # Bare `ARG NAME` re-exposes the global value inside the stage.
         stage.args[key] = engine.global_args[key]
+    elif key in platform_args:
+        # The automatic platform values are global as well, so a bare
+        # `ARG TARGETARCH` is what brings one into the stage.
+        stage.args[key] = platform_args[key]
     elif key in PREDEFINED_ARGS:
         stage.args[key] = os.environ.get(key, "")
     else:

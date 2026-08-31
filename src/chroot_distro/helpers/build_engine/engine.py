@@ -17,7 +17,9 @@ from `scratch`, from an earlier stage or from a pulled image, seeds env, workdir
 user and shell out of it, writes the stage's resolv.conf and hosts so a RUN can
 resolve a name, and fires the base image's ONBUILD triggers. Global ARGs start
 unset in a new stage and become visible again only when a bare `ARG NAME`
-re-declares one, which is Docker's rule and not an omission.
+re-declares one, which is Docker's rule and not an omission; the automatic
+TARGET*/BUILD* values follow that rule too, so `platform_args` is what a bare
+`ARG TARGETARCH` reads and `expansion_scope` does not carry them.
 
 `_adopt_image_config` is this module's trust boundary, and its own docstring is
 where the reasoning lives: a pulled config is a document this program did not
@@ -458,7 +460,7 @@ class BuildEngine:
         return expand_vars(value, _from_scope(self.global_args, self.target_platform, self.build_platform))
 
     def platform_args(self) -> dict[str, str]:
-        """The automatic TARGET*/BUILD* values this build was asked for."""
+        """The automatic TARGET*/BUILD* values a bare `ARG NAME` re-exposes in a stage."""
         return _platform_args(self.target_platform, self.build_platform)
 
     def _stage_label(self) -> str:
@@ -575,10 +577,11 @@ class BuildEngine:
     def expansion_scope(self) -> dict[str, str | None]:
         """Variable scope for `${VAR}` expansion inside the current stage.
 
-        Composed in increasing precedence: PREDEFINED_ARGS from the
-        host env, the automatic platform values, declared ARGs in this
-        stage, and finally ENVs (which win over ARGs by Docker
-        semantics).
+        Composed in increasing precedence: PREDEFINED_ARGS from the host
+        env, declared ARGs in this stage, and finally ENVs (which win
+        over ARGs by Docker semantics). The automatic platform values are
+        deliberately absent: they live in the global scope, and a bare
+        `ARG TARGETARCH` is what brings one into a stage (handlers.do_arg).
         """
         assert self.current is not None
         scope: dict[str, str | None] = {}
@@ -586,8 +589,6 @@ class BuildEngine:
             v = os.environ.get(k, "")
             if v:
                 scope[k] = v
-        for k, v in self.platform_args().items():
-            scope.setdefault(k, v)
         for k, v in self.current.args.items():
             scope[k] = v
         for k, v in self.current.env.items():

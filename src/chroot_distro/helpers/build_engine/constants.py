@@ -5,7 +5,10 @@
 `PREDEFINED_ARGS` and `EXPANDS_VARS` say which ARG keys exist without a
 declaration and which instruction values are variable-expanded. Both follow
 Docker's documented behaviour and are not derived from anything here, so a
-difference from Docker is a difference in these sets.
+difference from Docker is a difference in these sets. The automatic
+TARGET*/BUILD* values are not among them: Docker keeps those in the global
+scope, so they come from the build's platforms (`engine.platform_args`) and a
+stage sees one only after a bare `ARG NAME` re-declares it.
 
 `needs_chroot` is asked once, before any step runs, so a Dockerfile with no RUN
 never pays for a chroot. It looks through an ONBUILD wrapper because the
@@ -18,18 +21,10 @@ where the reason lives.
 import typing
 
 # Predefined ARG keys that are always visible without explicit
-# declaration in the Dockerfile (subset of Docker's "predefined"
-# build args).
+# declaration in the Dockerfile, and whose value comes from the invoking
+# environment (Docker's "predefined" build args).
 PREDEFINED_ARGS = frozenset(
     {
-        "TARGETPLATFORM",
-        "TARGETOS",
-        "TARGETARCH",
-        "TARGETVARIANT",
-        "BUILDPLATFORM",
-        "BUILDOS",
-        "BUILDARCH",
-        "BUILDVARIANT",
         "HTTP_PROXY",
         "HTTPS_PROXY",
         "NO_PROXY",

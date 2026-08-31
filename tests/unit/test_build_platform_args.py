@@ -166,6 +166,29 @@ def test_the_engine_builds_each_stage_for_its_own_platform(tmp_path):
     assert [s.target_arch_pd for s in engine.stages_by_idx] == ["x86_64", "aarch64"]
 
 
+def test_a_platform_value_reaches_a_stage_only_once_declared(tmp_path):
+    engine = _engine(tmp_path)
+    _, instructions = parse_dockerfile("FROM scratch\n")
+    engine.run(instructions)
+    assert "TARGETARCH" not in engine.expansion_scope()
+
+    engine = _engine(tmp_path)
+    _, instructions = parse_dockerfile("FROM scratch\nARG TARGETARCH\nARG TARGETVARIANT\n")
+    engine.run(instructions)
+    scope = engine.expansion_scope()
+    assert scope["TARGETARCH"] == "arm64"
+    assert scope["TARGETVARIANT"] == ""
+
+
+def test_a_declared_platform_value_reaches_a_run_step(tmp_path):
+    engine = _engine(tmp_path)
+    _, instructions = parse_dockerfile("FROM scratch\nARG BUILDARCH\n")
+    engine.run(instructions)
+
+    assert engine.current.declared_args == {"BUILDARCH"}
+    assert engine.current.args["BUILDARCH"] == "amd64"
+
+
 def test_a_pull_records_the_base_image_identity(tmp_path, monkeypatch):
     engine = _engine(tmp_path)
     stage = Stage(index=0, name="", rootfs_dir=str(tmp_path), target_arch_pd="aarch64")
