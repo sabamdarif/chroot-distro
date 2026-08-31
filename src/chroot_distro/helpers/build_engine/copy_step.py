@@ -33,7 +33,8 @@ buys.
 
 Flags are an allow-list. `--link` is refused as BuildKit-only and `--checksum`
 and `--keep-git-dir` as unimplemented, never ignored, since each one changes what
-the instruction is meant to produce.
+the instruction is meant to produce. An ADD naming a git repository is refused
+the same way, for the same reason.
 """
 
 import contextlib
@@ -400,6 +401,11 @@ def _do_copy_or_add(
         tag = _heredoc_tag(src)
         if tag is not None and tag in heredocs:
             resolved.append(("heredoc", tag))
+        elif allow_url and _looks_like_git(src):
+            # Docker clones one. Refused by name rather than left to the URL
+            # download (which would fetch a `.git` URL as a file) or to the
+            # context walk (which would report the ref missing).
+            raise BuildError(f"ADD from a git repository ('{src}') is not supported (line {instr['lineno']}).")
         elif from_rootfs is not None:
             resolved.append(("rootfs", src))
         elif allow_url and looks_like_url(src):
@@ -475,6 +481,20 @@ def _do_copy_or_add(
         if owned_fd is not None:
             with contextlib.suppress(OSError):
                 os.close(owned_fd)
+
+
+# What Docker reads as a git repository for ADD to clone rather than as a file:
+# a scheme it clones over, an http(s) URL whose path ends in `.git`, or an
+# scp-like `user@host:path`.
+_GIT_SCHEME_RE = re.compile(r"^(?:git|ssh)://", re.IGNORECASE)
+_GIT_SCP_RE = re.compile(r"^[A-Za-z0-9._-]+@[A-Za-z0-9.-]+:")
+
+
+def _looks_like_git(src: str) -> bool:
+    """True when *src* names a git repository rather than a file or a tree."""
+    if _GIT_SCHEME_RE.match(src) or _GIT_SCP_RE.match(src):
+        return True
+    return looks_like_url(src) and urllib.parse.urlparse(src).path.endswith(".git")
 
 
 # A source operand that is a here-doc opener. The quotes a tag may carry are

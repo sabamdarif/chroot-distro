@@ -13,6 +13,7 @@ import http.client
 import io
 import os
 import sys
+from types import SimpleNamespace
 
 if sys.version_info >= (3, 14):
     import tarfile
@@ -264,3 +265,40 @@ def test_a_body_past_its_declared_length_is_kept_whole(spool, monkeypatch):
 
     with open(file_map["opt/blob.bin"]["src"], "rb") as fh:
         assert fh.read() == b"payload"
+
+
+# ── a source ADD would have to clone ──────────────────────────────────────────
+def _add(src):
+    """Run `ADD <src> /app/` far enough to see how the source is read."""
+    engine = SimpleNamespace(current=SimpleNamespace(workdir="/"))
+    instr = {
+        "name": "ADD",
+        "flags": {},
+        "value": f"{src} /app/",
+        "exec_form": False,
+        "heredocs": [],
+        "lineno": 4,
+    }
+    copy_step.do_add(engine, instr)
+
+
+@pytest.mark.parametrize(
+    "src",
+    [
+        "git@github.com:example/repo.git",
+        "git://example.com/repo",
+        "ssh://git@example.com/example/repo.git",
+        "https://github.com/example/repo.git",
+        "https://github.com/example/repo.git#v1",
+    ],
+)
+def test_a_git_source_is_refused_by_name(src):
+    # Docker clones one; downloading a `.git` URL as a file or reporting the ref
+    # missing from the build context would both build something else.
+    with pytest.raises(BuildError, match="git repository"):
+        _add(src)
+
+
+@pytest.mark.parametrize("src", ["https://example.com/file.tar.gz", "sub/dir", "user@host"])
+def test_an_ordinary_source_is_not_taken_for_git(src):
+    assert copy_step._looks_like_git(src) is False
