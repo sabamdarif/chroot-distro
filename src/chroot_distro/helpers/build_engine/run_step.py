@@ -7,6 +7,11 @@ chroot. On a miss the rootfs is snapshotted, the command runs, the rootfs is
 snapshotted again, and the delta becomes a gzipped OCI layer, published into the
 layer cache through the same O_NOFOLLOW walk every other cache writer uses.
 
+`_run_extra_inputs` is what that hash is worth: the instruction text says what
+the command is, and this says what it is being run against. Its own docstring
+lists the inputs and why each one is there, since a missing one is a layer built
+for another platform, or from another context, served as this step's.
+
 A step is over when nothing of it is still running, not when the command it
 started exits. Docker gets that from the pid namespace it tears down, and so do
 the CD_USE_NS and CD_USE_ISOLATION paths here, where the holder is pid 1 of a
@@ -45,6 +50,7 @@ import time
 import typing
 
 from chroot_distro import dirfd
+from chroot_distro.arch import needs_emulation
 from chroot_distro.atomic import publish_file
 from chroot_distro.constants import (
     DEFAULT_PATH_ENV,
@@ -62,6 +68,7 @@ from chroot_distro.helpers.build_engine.constants import PREDEFINED_ARGS, is_hos
 from chroot_distro.helpers.build_engine.errors import BuildError
 from chroot_distro.helpers.build_engine.run_mounts import (
     RunMount,
+    mount_cache_inputs,
     run_mount_session,
     validate_and_parse_run_flags,
 )
@@ -120,7 +127,7 @@ def do_run(engine: typing.Any, instr: dict[str, typing.Any]) -> None:
             command = [*list(stage.shell), str(instr["value"])]
         stdin_input = None
 
-    extra = _run_extra_inputs(engine)
+    extra = _run_extra_inputs(engine, stage, mounts)
     recipe = compute_recipe_hash(stage.parent_layer_digest, instr, extra_inputs=extra)
     if not engine.no_cache:
         hit = cache_lookup(recipe)
@@ -178,11 +185,39 @@ def do_run(engine: typing.Any, instr: dict[str, typing.Any]) -> None:
     cache_record(recipe, digest, diff_id, size, {})
 
 
-def _run_extra_inputs(engine: typing.Any) -> str:
-    """Encode env + ARG state visible to RUN for the recipe hash."""
-    scope = engine.expansion_scope()
-    items = sorted(scope.items())
-    return "\n".join(f"{k}={v}" for k, v in items)
+def _run_extra_inputs(engine: typing.Any, stage: typing.Any, mounts: list[RunMount]) -> str:
+    """Everything this step reads that its own instruction text does not carry.
+
+    The platforms come first, and the base manifest with them: a stage built for
+    another platform runs other binaries, and the chained parent digest does not
+    always tell the two apart, since a `FROM scratch` stage has no parent layer
+    at all and a single-platform base image hands the same layers to every
+    platform asked for. Then how the step is executed, because a command
+    emulated through binfmt_misc and the same command run native are not the
+    same command, and the isolation mode decides which mounts it sees. Then every
+    tree a `--mount` exposes, and last the env and ARG state the command reads.
+
+    A secret is deliberately not here, in any form: its id travels in the
+    instruction's own flags, which is what BuildKit keys on, and its value must
+    never reach a cache key.
+    """
+    lines = [
+        f"stage-platform={stage.platform.format()}",
+        f"target-platform={engine.target_platform.format()}",
+        f"build-platform={engine.build_platform.format()}",
+        f"base-manifest={stage.base_manifest_digest}",
+        f"exec={_exec_mode(engine, stage)}",
+        f"isolation={engine.isolation_mode}",
+        *mount_cache_inputs(engine, mounts),
+    ]
+    lines.extend(f"env {k}={v}" for k, v in sorted(engine.expansion_scope().items()))
+    return "\n".join(lines)
+
+
+def _exec_mode(engine: typing.Any, stage: typing.Any) -> str:
+    """Whether this stage's binaries run on the CPU or through an emulator."""
+    foreign = needs_emulation(stage.platform.to_arch(), engine.build_platform.to_arch())
+    return "emulated" if foreign else "native"
 
 
 def _exec_chroot(

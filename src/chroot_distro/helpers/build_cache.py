@@ -11,9 +11,10 @@ index costs rebuild time and nothing else.
 module that can be wrong in a way the user pays for. It chains the parent
 layer's digest, the instruction name, its flags, its value and every here-doc
 body, then whatever the caller passes as `extra_inputs` for the inputs the
-instruction text does not carry: the digests of the files a COPY reads, the env
-and ARG state a RUN can see. An input left out of that string is a stale layer
-served as a fresh one, silently.
+instruction text does not carry: the platforms a stage is built for and on, the
+base manifest it stands on, how its steps are executed, the env and ARG state a
+RUN can see, and `source_digest` of every tree a `RUN --mount` exposes. An input
+left out of that string is a stale layer served as a fresh one, silently.
 
 The index is a document this program wrote, but the entry standing under its
 name need not be: on Termux the cache is nested inside the `$PREFIX` that is
@@ -38,6 +39,7 @@ import fcntl
 import hashlib
 import json
 import os
+import stat
 import time
 import typing
 
@@ -45,6 +47,7 @@ from chroot_distro import dirfd, locking
 from chroot_distro.atomic import atomic_write
 from chroot_distro.constants import BASE_CACHE_DIR, RUNTIME_DIR
 from chroot_distro.helpers.docker import is_valid_digest
+from chroot_distro.helpers.layer_diff import snapshot
 
 _INDEX_PATH = os.path.join(BASE_CACHE_DIR, "build_cache_index.json")
 _INDEX_LOCK_PATH = _INDEX_PATH + ".lock"
@@ -355,4 +358,40 @@ def compute_recipe_hash(
         h.update(extra_inputs)
     else:
         h.update(str(extra_inputs).encode())
+    return h.hexdigest()
+
+
+def source_digest(path: str) -> str:
+    """What *path* holds now, as a digest: one file's content, or a whole tree's.
+
+    An input a step reads that its instruction text does not describe has to
+    reach the recipe hash as something that changes when the bytes do, and a
+    `RUN --mount=type=bind` source is exactly that. `layer_diff.snapshot`
+    already indexes a tree through descriptor walks, so a directory is that
+    index with the mtimes dropped: an mtime changes without the content
+    changing, and a checkout that rewrites one would cost a rebuild for
+    nothing. Content is told apart by the same crc32 the layer diff already
+    stakes a step's correctness on.
+
+    Anything that is neither a file nor a directory contributes nothing, and so
+    does a path that is not there: both are a miss rather than a hit, and the
+    mount session refuses the step a moment later with the reason.
+    """
+    h = hashlib.sha256()
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return h.hexdigest()
+    if stat.S_ISDIR(st.st_mode):
+        for rel, entry in sorted(snapshot(path).items()):
+            fields = ("file", entry[1], entry[3], entry[4]) if entry[0] == "file" else entry
+            h.update(("\x00".join([rel, *(str(f) for f in fields)]) + "\n").encode())
+    elif stat.S_ISREG(st.st_mode):
+        h.update(f"file\x00{stat.S_IMODE(st.st_mode)}\x00".encode())
+        try:
+            with open(path, "rb") as fh:
+                while chunk := fh.read(_READ_CHUNK):
+                    h.update(chunk)
+        except OSError:
+            return hashlib.sha256().hexdigest()
     return h.hexdigest()

@@ -60,6 +60,7 @@ def test_step_started_then_finished_per_step(tmp_path):
 
 
 def test_run_cache_hit_emits_event(tmp_path):
+    from chroot_distro.arch import Platform
     from chroot_distro.helpers.build_engine import run_step
 
     layer = tmp_path / "layer.tar.gz"
@@ -70,6 +71,8 @@ def test_run_cache_hit_emits_event(tmp_path):
         layers=[],
         parent_layer_digest=None,
         shell=["/bin/sh", "-c"],
+        platform=Platform("linux", "arm64"),
+        base_manifest_digest="sha256:m",
     )
     hits = []
     engine = SimpleNamespace(
@@ -77,6 +80,10 @@ def test_run_cache_hit_emits_event(tmp_path):
         no_cache=False,
         expansion_scope=dict,
         report_cache_hit=lambda instr: hits.append(instr["name"]),
+        target_platform=Platform("linux", "arm64"),
+        build_platform=Platform("linux", "amd64"),
+        isolation_mode="none",
+        stages={},
     )
     hit = {"layer_digest": "sha256:x", "size": 1, "diff_id": "sha256:y"}
     instr = {"name": "RUN", "flags": {}, "value": "echo", "exec_form": False, "heredocs": [], "lineno": 1}

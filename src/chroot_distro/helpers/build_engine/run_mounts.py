@@ -26,6 +26,11 @@ once, and a secret is copied to a 0400 file that teardown removes. Placeholders
 this module created for the mount points are removed deepest-first with rmdir,
 so an empty one does not leak into the layer diff (BuildKit excludes mount
 targets from layers) while whatever the step actually wrote into one is kept.
+
+`mount_cache_inputs` is the other half of a bind: what a step reads through one
+is an input to the layer it produces, and no instruction text describes it, so
+the step's recipe hash has to carry the identity of every bound tree. Its
+docstring says why a cache mount, a secret and an ssh socket are left out.
 """
 
 import contextlib
@@ -37,6 +42,7 @@ from dataclasses import dataclass
 
 from chroot_distro import dirfd
 from chroot_distro.constants import BASE_CACHE_DIR
+from chroot_distro.helpers.build_cache import source_digest
 from chroot_distro.helpers.build_engine.errors import BuildError
 from chroot_distro.helpers.tar_extract import _safe_resolve
 
@@ -249,6 +255,45 @@ def _remove_scratch(engine: typing.Any, parts: typing.Sequence[str]) -> None:
         os.close(parent_fd)
 
 
+def _bind_source(base: str, source: str) -> str | None:
+    """Where *source* lands inside *base*, clamped to it. A path, or None."""
+    base_abs = os.path.abspath(base)
+    src_parts = [p for p in source.lstrip("/").split("/") if p not in ("", ".")]
+    src = _safe_resolve(base_abs, src_parts)
+    if src is None or not (src == base_abs or src.startswith(base_abs + os.sep)):
+        return None
+    return src
+
+
+def mount_cache_inputs(engine: typing.Any, mounts: list[RunMount]) -> list[str]:
+    """The identity of every tree *mounts* exposes, for the step's recipe hash.
+
+    Only a bind is an input. What a `type=cache` mount holds is scratch a step
+    keeps between builds and BuildKit leaves it out of a cache key too; a secret
+    and an ssh socket must stay out of one, which is the whole point of passing
+    them separately; a tmpfs starts empty.
+
+    A bind from an earlier stage is identified by that stage's last layer, which
+    is exactly what its tree holds, and one from an image by the reference, since
+    resolving that means a pull and a cache hit must not need one. A bind of the
+    build context is read: the digest covers the subtree as it is bound, which is
+    the unfiltered tree, since `.dockerignore` shapes what a COPY packs rather
+    than what a bind exposes.
+    """
+    inputs: list[str] = []
+    for n, m in enumerate(mounts):
+        if m.type != "bind":
+            continue
+        if m.from_:
+            ref_stage = engine.stages.get(m.from_)
+            token = f"image={m.from_}" if ref_stage is None else f"stage={ref_stage.parent_layer_digest}"
+        else:
+            src = _bind_source(engine.build_dir, m.source)
+            token = "context=" + (source_digest(src) if src is not None else "")
+        inputs.append(f"mount {n} {m.source} {token}")
+    return inputs
+
+
 def _resolve_bind(engine: typing.Any, m: RunMount, n: int, scratch_names: list[tuple[str, ...]]) -> tuple[str, bool]:
     if m.from_:
         from chroot_distro.helpers.build_engine.copy_step import _pull_throwaway_image
@@ -264,10 +309,8 @@ def _resolve_bind(engine: typing.Any, m: RunMount, n: int, scratch_names: list[t
             base = ref_stage.rootfs_dir
     else:
         base = engine.build_dir
-    base_abs = os.path.abspath(base)
-    src_parts = [p for p in m.source.lstrip("/").split("/") if p not in ("", ".")]
-    src = _safe_resolve(base_abs, src_parts)
-    if src is None or not (src == base_abs or src.startswith(base_abs + os.sep)):
+    src = _bind_source(base, m.source)
+    if src is None:
         raise BuildError(f"RUN --mount source '{m.source}' escapes the build context.")
     if not os.path.exists(src):
         raise BuildError(f"RUN --mount source '{m.source}' not found.")
