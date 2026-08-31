@@ -29,7 +29,10 @@ says it is at the single point it is adopted.
 `firing_onbuild` is true only while a base image's triggers run, which is what
 lets `do_env` tell a stranger's ENV line from the Dockerfile author's. An ONBUILD
 in this Dockerfile records a trigger for whoever builds FROM the result and fires
-nothing here.
+nothing here. A trigger fires once and is then dropped from the stage's config,
+which is where BuildKit clears one too: it belongs to the image or stage this one
+stands on, so the image this build publishes must not re-announce it and a stage
+built FROM this one must not fire it a second time.
 
 Every instruction appends one history entry, with `created` pinned to the epoch
 so a rebuild produces the same config and `empty_layer` set when the handler grew
@@ -70,7 +73,7 @@ from chroot_distro.helpers.docker import (
     layer_cache_path,
     pull_image,
 )
-from chroot_distro.helpers.dockerfile import expand_vars
+from chroot_distro.helpers.dockerfile import DockerfileSyntaxError, expand_vars, parse_dockerfile
 from chroot_distro.helpers.rootfs import write_hosts, write_resolv_conf
 from chroot_distro.message import log_info
 
@@ -671,28 +674,50 @@ class BuildEngine:
 
         base_onbuild = (stage.image_config.get("config") or {}).get("OnBuild") or []
         if base_onbuild:
-            from chroot_distro.helpers.dockerfile import parse_dockerfile
+            self._fire_base_onbuild(stage, base_ref)
 
-            # A trigger that *fires* is always the base image's, never this
-            # Dockerfile's: an ONBUILD here only records one for whoever builds
-            # FROM the result. So an ENV among them is a stranger's line, and
-            # do_env holds it to the rule the image's own Env is held to.
-            self.firing_onbuild = True
-            try:
-                for trig in base_onbuild:
+    def _fire_base_onbuild(self, stage: Stage, base_ref: str) -> None:
+        """Run the triggers *stage*'s base recorded, then drop them.
+
+        A trigger that fires is always the base's, never this Dockerfile's: an
+        ONBUILD here only records one for whoever builds FROM the result. So an
+        ENV among them is a stranger's line, and do_env holds it to the rule the
+        image's own Env is held to.
+
+        They are cleared from this stage's config before the first one runs,
+        which is where BuildKit clears them: the triggers answer for the image
+        or stage this one was built from, so the image this build publishes must
+        not re-announce them and a `FROM <this stage>` must not fire them again.
+
+        The text is a Dockerfile line out of a config this program did not write,
+        so a trigger that does not parse names the base rather than ending the
+        build in a traceback: `build` catches BuildError and OSError, and a
+        DockerfileSyntaxError is neither.
+        """
+        cfg = stage.image_config.setdefault("config", {})
+        triggers = list(cfg.pop("OnBuild", None) or [])
+        self.firing_onbuild = True
+        try:
+            for trig in triggers:
+                try:
                     _, trig_instrs = parse_dockerfile(trig + "\n")
-                    for ti in trig_instrs:
-                        self._step_no += 1
-                        self._announce(ti)
-                        trig_instr = ti
-                        if ti["name"] in EXPANDS_VARS and not ti["exec_form"]:
-                            trig_instr = self._expand_instruction(ti)
-                        h = HANDLERS.get(trig_instr["name"])
-                        if h is None:
-                            raise BuildError(f"ONBUILD trigger uses unsupported instruction '{trig_instr['name']}'.")
-                        self._run_with_history(h, trig_instr)
-            finally:
-                self.firing_onbuild = False
+                except DockerfileSyntaxError as exc:
+                    raise BuildError(f"FROM {base_ref}: ONBUILD trigger {trig!r} does not parse: {exc}") from exc
+                for ti in trig_instrs:
+                    self._step_no += 1
+                    self._announce(ti)
+                    trig_instr = ti
+                    if ti["name"] in EXPANDS_VARS and not ti["exec_form"]:
+                        trig_instr = self._expand_instruction(ti)
+                    h = HANDLERS.get(trig_instr["name"])
+                    if h is None:
+                        raise BuildError(
+                            f"FROM {base_ref}: ONBUILD trigger uses unsupported "
+                            f"instruction '{trig_instr['name']}'."
+                        )
+                    self._run_with_history(h, trig_instr)
+        finally:
+            self.firing_onbuild = False
 
     def _make_stage_dirs(self, idx: int) -> tuple[int | None, int | None]:
         """Create stage *idx*'s scratch tree. (stage_fd, rootfs_fd), or (None, None).
