@@ -165,6 +165,8 @@ def command_build(args: typing.Any) -> None:
         crit_error(f"syntax error in Dockerfile: {exc}")
         sys.exit(1)
 
+    _warn_foreign_frontend(_directives)
+
     if not instructions:
         crit_error("no instructions in Dockerfile.")
         sys.exit(1)
@@ -349,6 +351,34 @@ def command_build(args: typing.Any) -> None:
             with contextlib.suppress(OSError):
                 os.close(tmp_root_fd)
             _remove_build_tmp(tmp_root, tmp_parent_fd)
+
+
+# The frontend this program's own reading of a Dockerfile answers for. Every
+# `# syntax=` in the wild names it, with or without a registry and a channel tag.
+_STOCK_FRONTENDS = frozenset({"docker/dockerfile", "docker.io/docker/dockerfile"})
+
+
+def _warn_foreign_frontend(directives: dict[str, str]) -> None:
+    """Say so when `# syntax=` names a frontend other than the stock one.
+
+    The directive tells BuildKit to build the file with another program
+    entirely, and this one can neither fetch nor run it: what gets built is this
+    program's own reading of the file, which is a Dockerfile. Naming the stock
+    frontend is what nearly every Dockerfile does and says nothing about the
+    instruction set, so only a different one is worth a line. `escape` and
+    `check` need none: the parser acts on the first, and the second only turns
+    off build checks this program does not make.
+    """
+    ref = directives.get("syntax", "")
+    if not ref:
+        return
+    repo = ref.split("@", 1)[0].rsplit(":", 1)[0].strip("/")
+    if repo in _STOCK_FRONTENDS:
+        return
+    warn(
+        f"this Dockerfile asks to be built by '{ref}', a frontend {PROGRAM_NAME} cannot run; "
+        f"reading it as an ordinary Dockerfile."
+    )
 
 
 def _resolve_target_platforms(raw: list[str], override_arch: str) -> list[Platform]:
