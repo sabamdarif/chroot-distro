@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-only
 # Copyright (C) 2025-2026 Md Arif
-"""One request in, one platform's image out: the boundary around a single solve.
+"""One request in, one platform's image out, and the loop that asks for several.
 
 `BuildRequest` says what to build, `PlatformResult` is what came out, and
 `solve_platform` is the only thing between them. Everything an engine run mutates
@@ -9,9 +9,13 @@ stage map, the global ARG scope, the reporter's step numbering. A second request
 therefore starts from nothing the first one left behind, and a failed one leaves
 nothing for the next.
 
-A request is read, never written, which is what lets two of them share one parse
-of the Dockerfile: no handler mutates an instruction, and a request for another
-platform is this one with `target_platform` replaced.
+`solve_platforms` is that property spent: one solve per requested platform, in
+order, sharing only what a solve reads. A request is read, never written, which is
+what lets all of them share one parse of the Dockerfile: no handler mutates an
+instruction, and a request for another platform is this one with
+`target_platform` replaced. Nothing else is carried across, and each solve loads
+the context's `.dockerignore` and hashes what it copies for itself, since those
+answer for the tree as it is when that solve reads it.
 
 What a solve produces does not live in its scratch tree. A layer is published
 into the layer cache under the digest of its own bytes, and the manifest and the
@@ -27,6 +31,7 @@ import typing
 from chroot_distro import dirfd
 from chroot_distro.arch import Platform
 from chroot_distro.helpers.build_engine.engine import BuildEngine
+from chroot_distro.helpers.build_engine.errors import BuildError
 from chroot_distro.helpers.build_engine.events import make_reporter
 from chroot_distro.helpers.oci_writer import build_manifest_and_config
 
@@ -39,6 +44,11 @@ class BuildRequest:
     descriptor on it, which is where the solve makes its tree; the rest are
     validated command-line values. One target platform per request, so a matrix
     is one request per platform rather than one request that fans out.
+
+    `multi_platform` is whether the build was asked for more than one of them,
+    which is what puts the platform on every event and in every failure: with one
+    solve there is nothing to tell apart. BuildKit's frontend carries the same
+    flag for the same reason.
     """
 
     build_dir: str
@@ -57,6 +67,7 @@ class BuildRequest:
     secrets: dict[str, str] = dataclasses.field(default_factory=dict)
     ssh_sockets: dict[str, str] = dataclasses.field(default_factory=dict)
     progress: str = "auto"
+    multi_platform: bool = False
 
 
 @dataclasses.dataclass(frozen=True)
@@ -74,6 +85,41 @@ class PlatformResult:
     layers: list[dict[str, typing.Any]]
 
 
+def solve_platforms(request: BuildRequest, platforms: typing.Sequence[Platform]) -> list[PlatformResult]:
+    """Solve every platform in *platforms* and return one result each, in order.
+
+    Duplicates drop out and the first mention of a platform keeps its place, so
+    the results line up with what was asked for and no platform is built, or
+    described in an index, twice. Two spellings of one platform are one entry,
+    since a `Platform` compares by what it is rather than by how it was written.
+
+    One solve at a time: a solve mounts, chroots and holds namespaces, and
+    running two of those at once has been neither measured nor tested here.
+
+    A platform that fails ends the build. The exception leaves this function
+    unswallowed, no later platform is attempted, and no result is returned, so a
+    caller holds either every platform or none and cannot publish half an index.
+    A matrix names the platform in that failure, since a message about one solve
+    among several says little without it.
+    """
+    ordered = list(dict.fromkeys(platforms))
+    if not ordered:
+        raise BuildError("no target platform to build for.")
+    matrix = len(ordered) > 1
+
+    results: list[PlatformResult] = []
+    for platform in ordered:
+        try:
+            results.append(
+                solve_platform(dataclasses.replace(request, target_platform=platform, multi_platform=matrix))
+            )
+        except BuildError as exc:
+            if not matrix:
+                raise
+            raise BuildError(f"target platform '{platform}': {exc}") from exc
+    return results
+
+
 def solve_platform(request: BuildRequest) -> PlatformResult:
     """Build *request*'s one target platform and return what it produced.
 
@@ -81,6 +127,7 @@ def solve_platform(request: BuildRequest) -> PlatformResult:
     walks losing its footing; both reach the caller, which is what decides
     whether anything else still runs.
     """
+    label = request.target_platform.format() if request.multi_platform else ""
     name, tmp_root, tmp_root_fd = _make_solve_tmp(request)
     engine: BuildEngine | None = None
     try:
@@ -97,7 +144,7 @@ def solve_platform(request: BuildRequest) -> PlatformResult:
             isolation_mode=request.isolation_mode,
             secrets=request.secrets,
             ssh_sockets=request.ssh_sockets,
-            reporter=make_reporter(request.progress, request.quiet),
+            reporter=make_reporter(request.progress, request.quiet, label),
             tmp_root_fd=tmp_root_fd,
             target_platform=request.target_platform,
             build_platform=request.build_platform,

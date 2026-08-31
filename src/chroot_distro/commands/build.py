@@ -14,10 +14,12 @@ from its answer: a handler is only required for a stage whose platform this host
 cannot execute *and* which carries a RUN, so the cross-compile shape (a native
 builder stage, a foreign stage that only assembles files) needs no emulator.
 
-What is validated here becomes one `BuildRequest`, and `build_engine/solve.py`
-turns that into one `PlatformResult`: everything an engine run mutates belongs to
-that solve, so the publishing below reads a finished manifest and config and
-never a live stage.
+What is validated here becomes one `BuildRequest`, and
+`build_engine/solve.solve_platforms` turns it into one `PlatformResult` per
+requested target platform: everything an engine run mutates belongs to one solve,
+so the publishing below reads a finished manifest and config and never a live
+stage. One platform is requested today, the one `--override-arch` names or the
+host's own.
 
 One exclusive `BuildLock` per tag is held for the whole build, taken in lock-path
 order so two concurrent builds with overlapping but differently spelled tag sets
@@ -69,7 +71,7 @@ from chroot_distro.helpers.build_engine import (
     BuildRequest,
     StagePlan,
     plan_stages,
-    solve_platform,
+    solve_platforms,
 )
 from chroot_distro.helpers.dockerfile import (
     DockerfileSyntaxError,
@@ -267,7 +269,7 @@ def command_build(args: typing.Any) -> None:
             )
 
             try:
-                result = solve_platform(request)
+                (result,) = solve_platforms(request, [target_platform])
             except BuildError as exc:
                 # A BuildError builds its message by interpolation and the
                 # names it reports on are not the author's: a member of an

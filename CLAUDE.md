@@ -420,6 +420,7 @@ the caller (`build_engine/constants.is_host_exec_var`, applied in
 | `helpers/build_engine/run_mounts.py`   | `RUN --mount`, all five types                          |
 | `helpers/build_engine/users.py`        | a USER or `--chown` name against the image's databases |
 | `helpers/build_engine/copy_step.py`    | COPY and ADD: locate, write, pack                      |
+| `helpers/build_engine/solve.py`        | one request to one image, and the platform matrix      |
 | `commands/build.py`                    | validate, run the engine, publish                      |
 | `commands/diff.py`                     | what a rootfs holds that its image did not             |
 
