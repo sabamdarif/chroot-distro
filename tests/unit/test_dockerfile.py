@@ -98,6 +98,21 @@ def test_parse_dockerfile_repeated_nonmount_flag_last_wins():
     assert instructions[0]["flags"]["chmod"] == "755"
 
 
+def test_parse_dockerfile_from_platform_stays_unexpanded():
+    # The engine expands a FROM against the global ARG scope, so the parser has
+    # to hand the expression over as written.
+    _, instructions = parse_dockerfile('FROM --platform="$BUILDPLATFORM" golang:1.22 AS builder\n')
+    (instr,) = instructions
+    assert instr["flags"] == {"platform": "$BUILDPLATFORM"}
+    assert instr["value"] == "golang:1.22 AS builder"
+
+
+def test_parse_dockerfile_from_platform_without_a_value():
+    _, instructions = parse_dockerfile("FROM --platform alpine\n")
+    assert instructions[0]["flags"] == {"platform": ""}
+    assert instructions[0]["value"] == "alpine"
+
+
 def test_parse_dockerfile_onbuild():
     content = "ONBUILD RUN echo nested"
     _, instructions = parse_dockerfile(content)
