@@ -35,7 +35,7 @@ from chroot_distro.helpers.build_engine.copy_step import do_add, do_copy
 from chroot_distro.helpers.build_engine.errors import BuildError
 from chroot_distro.helpers.build_engine.parsing import (
     parse_kv_list,
-    split_arg,
+    split_args,
     split_operands,
     to_argv,
 )
@@ -50,35 +50,36 @@ log = logging.getLogger(__name__)
 
 
 def do_arg(engine: typing.Any, instr: dict[str, typing.Any]) -> None:
-    """ARG NAME[=DEFAULT]: declare a build-time variable for this stage.
+    """ARG NAME[=DEFAULT] [NAME[=DEFAULT]...]: declare build-time variables.
 
-    Resolution order: --build-arg from the CLI, then the Dockerfile
+    Resolution order per name: --build-arg from the CLI, then the Dockerfile
     default, then the global-ARG value re-exposed by a bare `ARG NAME`,
     then the automatic platform value for a TARGET*/BUILD* name, then a
     host env var when NAME is one of the predefined ARGs. Falls back to
     the empty string.
     """
-    key, default = split_arg(instr["value"])
-    if not key:
+    names = [(key, default) for key, default in split_args(instr["value"]) if key]
+    if not names:
         raise BuildError(f"Invalid ARG at line {instr['lineno']}: {instr['value']!r}")
     stage = engine.current
-    stage.declared_args.add(key)
     platform_args = engine.platform_args()
-    if key in engine.user_build_args:
-        stage.args[key] = engine.user_build_args[key]
-    elif default is not None:
-        stage.args[key] = default
-    elif key in engine.global_args and key in engine.declared_global:
-        # Bare `ARG NAME` re-exposes the global value inside the stage.
-        stage.args[key] = engine.global_args[key]
-    elif key in platform_args:
-        # The automatic platform values are global as well, so a bare
-        # `ARG TARGETARCH` is what brings one into the stage.
-        stage.args[key] = platform_args[key]
-    elif key in PREDEFINED_ARGS:
-        stage.args[key] = os.environ.get(key, "")
-    else:
-        stage.args[key] = ""
+    for key, default in names:
+        stage.declared_args.add(key)
+        if key in engine.user_build_args:
+            stage.args[key] = engine.user_build_args[key]
+        elif default is not None:
+            stage.args[key] = default
+        elif key in engine.global_args and key in engine.declared_global:
+            # Bare `ARG NAME` re-exposes the global value inside the stage.
+            stage.args[key] = engine.global_args[key]
+        elif key in platform_args:
+            # The automatic platform values are global as well, so a bare
+            # `ARG TARGETARCH` is what brings one into the stage.
+            stage.args[key] = platform_args[key]
+        elif key in PREDEFINED_ARGS:
+            stage.args[key] = os.environ.get(key, "")
+        else:
+            stage.args[key] = ""
 
 
 def do_env(engine: typing.Any, instr: dict[str, typing.Any]) -> None:

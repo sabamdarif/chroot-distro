@@ -66,7 +66,7 @@ from chroot_distro.helpers.build_engine.events import (
     Reporter,
 )
 from chroot_distro.helpers.build_engine.handlers import HANDLERS, do_onbuild
-from chroot_distro.helpers.build_engine.parsing import split_arg
+from chroot_distro.helpers.build_engine.parsing import split_args
 from chroot_distro.helpers.build_engine.stage import Stage
 from chroot_distro.helpers.docker import (
     apply_layer,
@@ -159,6 +159,12 @@ def plan_stages(
     platform. A FROM naming an earlier stage takes that stage's platform
     whatever the flag says, because the tree it starts from is that stage's;
     Docker resolves one the same way.
+
+    A global ARG's default is expanded against the globals before it and the
+    automatic platform values, so `ARG TAG=${TARGETARCH}-slim` reaches a FROM as
+    Docker resolves it. One with no default and no `--build-arg` records nothing:
+    it declares a name, and a value it does not carry must not shadow the
+    automatic one of the same name.
     """
     plans: list[StagePlan] = []
     by_name: dict[str, Platform] = {}
@@ -174,9 +180,14 @@ def plan_stages(
             if "platform" in flags:
                 raise BuildError(f"{name} --platform is not supported (line {lineno}); only FROM takes one.")
             if name == "ARG" and not seen_from:
-                key, default = split_arg(instr["value"])
-                if key:
-                    global_args[key] = user_build_args.get(key, default or "")
+                for key, default in split_args(instr["value"]):
+                    if not key:
+                        continue
+                    if key in user_build_args:
+                        global_args[key] = user_build_args[key]
+                    elif default is not None:
+                        scope = _from_scope(global_args, target_platform, build_platform)
+                        global_args[key] = expand_vars(default, scope)
             elif plans and needs_chroot([instr]):
                 plans[-1].runs = True
             continue

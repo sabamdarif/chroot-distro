@@ -3,9 +3,10 @@
 """Turn one instruction's value text into the pieces a handler wants.
 
 Text work only, shared by the handlers so the same quoting rules apply
-everywhere: `split_arg` for `ARG K[=V]`, `split_operands` for the shell-form
+everywhere: `split_args` for `ARG K[=V] ...`, `split_operands` for the shell-form
 lists COPY, ADD, EXPOSE and VOLUME carry, `parse_kv_list` for ENV and LABEL
-(including the legacy `ENV KEY value` form), `to_argv` for CMD and ENTRYPOINT.
+(including the legacy `ENV KEY value` form), `to_argv` for CMD and ENTRYPOINT,
+`parse_duration_ns` for HEALTHCHECK's intervals.
 
 Every ValueError shlex can raise becomes a `BuildError` naming the line, because
 `build` catches only BuildError and OSError and one mistyped quote would
@@ -16,26 +17,36 @@ and nothing more: it takes bytes, not a name, so ADD's auto-extract sniffs the
 inode it already holds open.
 """
 
+import re
 import shlex
 import typing
 
 from chroot_distro.helpers.build_engine.errors import BuildError
 
+# One whitespace-separated word of an ARG value, with a quoted run counting as
+# part of the word it sits in (`ARG A="x y" B=2` is two words).
+_ARG_WORD_RE = re.compile(r"""(?:[^\s"']|"[^"]*"|'[^']*')+""")
 
-def split_arg(value: typing.Any) -> tuple[str, str | None]:
-    """Parse `ARG K[=V]` value text. Returns (key, default_or_None)."""
+
+def split_args(value: typing.Any) -> list[tuple[str, str | None]]:
+    """Parse an `ARG K[=V] [K[=V]...]` value. One (key, default_or_None) per name.
+
+    One ARG line may declare several names, which is what Docker accepts, so the
+    result is a list: read as a single pair, `ARG A=1 B=2` declared one variable
+    named A whose default was the text `1 B=2`.
+    """
     if isinstance(value, list):
         value = " ".join(value)
-    s = str(value).strip()
-    if not s:
-        return ("", None)
-    if "=" in s:
-        k, _, v = s.partition("=")
-        v = v.strip()
-        if len(v) >= 2 and ((v.startswith('"') and v.endswith('"')) or (v.startswith("'") and v.endswith("'"))):
-            v = v[1:-1]
-        return (k.strip(), v)
-    return (s, None)
+    return [_split_one_arg(word) for word in _ARG_WORD_RE.findall(str(value))]
+
+
+def _split_one_arg(word: str) -> tuple[str, str | None]:
+    if "=" not in word:
+        return (word, None)
+    k, _, v = word.partition("=")
+    if len(v) >= 2 and ((v.startswith('"') and v.endswith('"')) or (v.startswith("'") and v.endswith("'"))):
+        v = v[1:-1]
+    return (k, v)
 
 
 def split_operands(value: typing.Any, instr: dict[str, typing.Any]) -> list[str]:

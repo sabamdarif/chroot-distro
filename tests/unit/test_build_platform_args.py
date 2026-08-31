@@ -105,6 +105,36 @@ def test_an_arg_after_the_first_from_is_not_global():
     assert global_args == {"A": "1"}
 
 
+# ── the global ARG scope ──────────────────────────────────────────────────────
+def test_a_global_default_expands_against_the_globals_before_it():
+    _plans, global_args = _plan("ARG BASE=alpine\nARG REF=${BASE}:3.20\nFROM $REF\n")
+    assert global_args == {"BASE": "alpine", "REF": "alpine:3.20"}
+
+
+def test_a_global_default_expands_against_the_platform_values():
+    plans, global_args = _plan("ARG PLAT=$TARGETOS/$TARGETARCH\nFROM --platform=$PLAT alpine\n")
+    assert global_args == {"PLAT": "linux/arm64"}
+    assert plans[0].platform == TARGET
+
+
+def test_a_bare_global_arg_does_not_shadow_a_platform_value():
+    # `ARG TARGETARCH` declares a name; it carries no value of its own, so the
+    # automatic one has to survive it (Docker resolves a FROM the same way).
+    plans, global_args = _plan("ARG TARGETARCH\nFROM --platform=linux/$TARGETARCH alpine\n")
+    assert global_args == {}
+    assert plans[0].platform == TARGET
+
+
+def test_a_build_arg_gives_a_bare_global_arg_its_value():
+    _plans, global_args = _plan("ARG A\nFROM alpine\n", args={"A": "1"})
+    assert global_args == {"A": "1"}
+
+
+def test_one_global_line_may_declare_several_names():
+    _plans, global_args = _plan("ARG A=1 B=2\nFROM $A$B\n")
+    assert global_args == {"A": "1", "B": "2"}
+
+
 def test_a_stage_reference_keeps_the_source_stage_platform():
     plans, _ = _plan(
         "FROM --platform=$BUILDPLATFORM golang AS builder\nFROM --platform=$TARGETPLATFORM builder AS out\n"
@@ -187,6 +217,15 @@ def test_a_declared_platform_value_reaches_a_run_step(tmp_path):
 
     assert engine.current.declared_args == {"BUILDARCH"}
     assert engine.current.args["BUILDARCH"] == "amd64"
+
+
+def test_one_stage_arg_line_declares_several_names(tmp_path):
+    engine = _engine(tmp_path)
+    _, instructions = parse_dockerfile("FROM scratch\nARG A=1 TARGETARCH B\n")
+    engine.run(instructions)
+
+    assert engine.current.declared_args == {"A", "TARGETARCH", "B"}
+    assert engine.current.args == {"A": "1", "TARGETARCH": "arm64", "B": ""}
 
 
 def test_a_pull_records_the_base_image_identity(tmp_path, monkeypatch):

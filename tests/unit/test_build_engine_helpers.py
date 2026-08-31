@@ -8,30 +8,39 @@ from chroot_distro.helpers.build_engine.constants import needs_chroot
 from chroot_distro.helpers.build_engine.errors import BuildError
 
 
-# ── parsing.split_arg ─────────────────────────────────────────────────────────
-def test_split_arg_key_only():
-    assert parsing.split_arg("FOO") == ("FOO", None)
+# ── parsing.split_args ────────────────────────────────────────────────────────
+def test_split_args_key_only():
+    assert parsing.split_args("FOO") == [("FOO", None)]
 
 
-def test_split_arg_key_value():
-    assert parsing.split_arg("FOO=bar") == ("FOO", "bar")
+def test_split_args_key_value():
+    assert parsing.split_args("FOO=bar") == [("FOO", "bar")]
 
 
-def test_split_arg_empty_value_after_equals():
-    assert parsing.split_arg("FOO=") == ("FOO", "")
+def test_split_args_empty_value_after_equals():
+    assert parsing.split_args("FOO=") == [("FOO", "")]
 
 
-def test_split_arg_blank():
-    assert parsing.split_arg("   ") == ("", None)
+def test_split_args_blank():
+    assert parsing.split_args("   ") == []
 
 
-def test_split_arg_list_is_joined():
-    assert parsing.split_arg(["FOO=a", "b"]) == ("FOO", "a b")
+def test_split_args_several_names_on_one_line():
+    # One ARG line may declare several names, which is what Docker accepts.
+    assert parsing.split_args("A=1 B C=3") == [("A", "1"), ("B", None), ("C", "3")]
 
 
-def test_split_arg_quoted_value():
-    assert parsing.split_arg('FOO="https://example.com/file.zip"') == ("FOO", "https://example.com/file.zip")
-    assert parsing.split_arg("FOO='https://example.com/file.zip'") == ("FOO", "https://example.com/file.zip")
+def test_split_args_quoted_value_keeps_its_spaces():
+    assert parsing.split_args('A="x y" B=2') == [("A", "x y"), ("B", "2")]
+
+
+def test_split_args_list_is_joined():
+    assert parsing.split_args(["FOO=a", "B=b"]) == [("FOO", "a"), ("B", "b")]
+
+
+def test_split_args_quoted_value():
+    assert parsing.split_args('FOO="https://example.com/file.zip"') == [("FOO", "https://example.com/file.zip")]
+    assert parsing.split_args("FOO='https://example.com/file.zip'") == [("FOO", "https://example.com/file.zip")]
 
 
 # ── parsing.parse_kv_list ─────────────────────────────────────────────────────
