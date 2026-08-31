@@ -39,6 +39,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from chroot_distro.arch import platform_from_arch
 from chroot_distro.constants import PROGRAM_NAME
 from chroot_distro.helpers.docker.cache import (
     layer_cache_path,
@@ -458,7 +459,7 @@ def push_image(image_ref: str, arch: str, insecure: bool = False) -> dict[str, t
     in MANIFEST_CACHE_DIR and the layer + config blobs in
     LAYER_CACHE_DIR using the same digests we transmit here.
     """
-    manifest, repo, image_config = load_manifest_cache(image_ref, arch)
+    manifest, repo, image_config = load_manifest_cache(image_ref, platform_from_arch(arch))
     if manifest is None:
         raise RuntimeError(
             f"No cached manifest for '{image_ref}' ({arch}). Build image "

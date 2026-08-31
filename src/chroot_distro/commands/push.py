@@ -14,7 +14,7 @@ import sys
 import typing
 import urllib.error
 
-from chroot_distro.arch import get_device_cpu_arch, normalize_arch
+from chroot_distro.arch import get_device_cpu_arch, normalize_arch, platform_from_arch
 from chroot_distro.constants import PROGRAM_NAME
 from chroot_distro.helpers.docker import (
     load_manifest_cache,
@@ -54,7 +54,7 @@ def command_push(args: typing.Any) -> None:
     # Pre-flight check: refuse early when no manifest is cached for this
     # image_ref + arch. This catches a typoed tag before we open a
     # network connection.
-    manifest, _, _ = load_manifest_cache(image_ref, target_arch)
+    manifest, _, _ = load_manifest_cache(image_ref, platform_from_arch(target_arch))
     if manifest is None:
         crit_error(
             f"No image found in local cache for "

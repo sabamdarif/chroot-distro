@@ -32,6 +32,7 @@ else:
     from backports.zstd import tarfile
 import typing
 
+from chroot_distro.arch import Platform
 from chroot_distro.atomic import atomic_write
 from chroot_distro.helpers.docker import (
     layer_cache_path,
@@ -104,23 +105,23 @@ def build_manifest_and_config(
 
 def store_in_cache(
     image_ref: str,
-    arch_name_pd: str,
+    platform: Platform,
     manifest: dict[str, typing.Any],
     image_config: dict[str, typing.Any],
 ) -> str:
     """Write the manifest into MANIFEST_CACHE_DIR for offline install.
 
-    `arch_name_pd` is the chroot-distro arch (aarch64, x86_64, …). The
-    cache key matches what helpers/docker.manifest_cache_path uses
-    so that a subsequent `install <image_ref>` reads it on the
-    fully-offline branch of pull_image().
+    The cache key and the recorded platform match what
+    `helpers/docker/cache.py` writes and reads, which is the whole reason a
+    `build` followed by an `install` of the same reference needs no network.
     """
     _, repo, _ = parse_image_ref(image_ref)
-    path = manifest_cache_path(image_ref, arch_name_pd)
+    path = manifest_cache_path(image_ref, platform)
     payload = {
         "manifest": manifest,
         "repo": repo,
         "image_config": image_config,
+        "platform": platform.format(),
     }
     with atomic_write(path) as fh:
         json.dump(payload, fh, indent=2, sort_keys=True)

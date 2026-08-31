@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: GPL-3.0-only
 # Copyright (C) 2025-2026 Md Arif
-"""Resolve an image reference to one architecture's manifest, then fill the rootfs.
+"""Resolve an image reference to one platform's manifest, then fill the rootfs.
 
 `pull_image` is the whole entry point. It answers from the manifest cache when it can,
 authenticates and fetches when it cannot, downloads every missing layer in parallel,
-then applies them in order into a rootfs the caller has already validated.
+then applies them in order into a rootfs the caller has already validated. The platform
+it is given is the whole platform, which is what picks a manifest out of an index and
+what addresses the manifest cache.
 
 The rootfs arrives as a *descriptor*, not a path. `install` walks
 `containers/<name>/rootfs` with O_NOFOLLOW and hands the result straight down, so no
@@ -45,6 +47,7 @@ import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+from chroot_distro.arch import Platform
 from chroot_distro.constants import layer_download_workers
 from chroot_distro.helpers.docker.cache import (
     all_layers_cached,
@@ -59,7 +62,7 @@ from chroot_distro.helpers.docker.media import (
     OCI_INDEX_MEDIA,
     OCI_MANIFEST_MEDIA,
 )
-from chroot_distro.helpers.docker.refs import ARCH_TO_DOCKER, parse_image_ref
+from chroot_distro.helpers.docker.refs import parse_image_ref
 from chroot_distro.helpers.docker.transport import (
     _ua,
     auth_denied_msg,
@@ -260,9 +263,9 @@ def _pick_platform(
 
 
 def _resolve_single_manifest(
-    image_ref: str, arch: str, insecure: bool = False
+    image_ref: str, platform: Platform, insecure: bool = False
 ) -> tuple[dict[str, typing.Any], str, str, str]:
-    """Return (single_image_manifest, token, repo, base) for the arch."""
+    """Return (single_image_manifest, token, repo, base) for the platform."""
     registry, repo, tag = parse_image_ref(image_ref)
 
     log_info(f"Authenticating with registry{auth_note()}...")
@@ -272,14 +275,13 @@ def _resolve_single_manifest(
     manifest = _get_manifest(repo, tag, token, base, insecure=insecure)
 
     if manifest["_ct"] in _MANIFEST_LIST_TYPES or "manifests" in manifest:
-        docker_arch, docker_variant = ARCH_TO_DOCKER.get(arch, (arch, ""))
         target = _pick_platform(
             manifest.get("manifests", []),
-            docker_arch,
-            docker_variant,
+            platform.architecture,
+            platform.variant,
             image_ref,
         )
-        log_info(f"Fetching {arch} manifest...")
+        log_info(f"Fetching {platform} manifest...")
         manifest = _get_manifest(repo, target["digest"], token, base, insecure=insecure)
 
     return manifest, token, repo, base
@@ -310,7 +312,7 @@ def _fetch_config_blob(
         return {}
 
 
-def pull_image(image_ref: str, rootfs_fd: int, arch: str, insecure: bool = False) -> dict[str, typing.Any]:
+def pull_image(image_ref: str, rootfs_fd: int, platform: Platform, insecure: bool = False) -> dict[str, typing.Any]:
     """Pull an OCI/Docker image and extract all layers into the *rootfs_fd* tree.
 
     The rootfs is a **descriptor**, not a path: `install` validates
@@ -318,22 +320,26 @@ def pull_image(image_ref: str, rootfs_fd: int, arch: str, insecure: bool = False
     straight down, so nothing between that check and the last member written
     resolves the name a second time.
 
+    *platform* is the whole platform, not an architecture: it picks the manifest
+    out of an index and it addresses the manifest cache, so an `arm` variant is a
+    cache entry of its own rather than one shared with every other `arm`.
+
     The manifest is checked in the local cache first.
     """
     token = None
     base = None
 
-    manifest, repo, image_config = load_manifest_cache(image_ref, arch)
+    manifest, repo, image_config = load_manifest_cache(image_ref, platform)
     registry = parse_image_ref(image_ref)[0]
 
     if manifest is not None:
         assert repo is not None
         layers = manifest.get("layers", [])
         if all_layers_cached(layers):
-            log_info(f"Image '{image_ref}' ({arch}) is cached.")
+            log_info(f"Image '{image_ref}' ({platform}) is cached.")
         else:
             missing = sum(1 for layer in layers if not os.path.isfile(layer_cache_path(layer["digest"])))
-            log_info(f"Downloading {missing} missing layer(s) for '{image_ref}' ({arch})...")
+            log_info(f"Downloading {missing} missing layer(s) for '{image_ref}' ({platform})...")
             try:
                 log_info(f"Authenticating with registry{auth_note()}...")
                 token, base = get_auth_token(repo, registry, insecure=insecure)
@@ -345,22 +351,24 @@ def pull_image(image_ref: str, rootfs_fd: int, arch: str, insecure: bool = False
                         raise RuntimeError(
                             f"Image not found: '{image_ref}' does not exist on the registry."
                         ) from net_err
-                log_error(f"{missing} of {len(layers)} layer(s) for '{image_ref}' ({arch}) are not in the local cache.")
+                log_error(
+                    f"{missing} of {len(layers)} layer(s) for '{image_ref}' ({platform}) are not in the local cache."
+                )
                 raise RuntimeError(f"Network error: {net_err}") from net_err
     else:
         try:
-            manifest, token, repo, base = _resolve_single_manifest(image_ref, arch, insecure=insecure)
+            manifest, token, repo, base = _resolve_single_manifest(image_ref, platform, insecure=insecure)
         except (urllib.error.URLError, OSError) as net_err:
             if isinstance(net_err, urllib.error.HTTPError):
                 if net_err.code in (401, 403):
                     raise RuntimeError(auth_denied_msg(image_ref, net_err.code)) from net_err
                 if net_err.code == 404:
                     raise RuntimeError(f"Image not found: '{image_ref}' does not exist on the registry.") from net_err
-            log_error(f"No cached manifest found for '{image_ref}' ({arch}).")
+            log_error(f"No cached manifest found for '{image_ref}' ({platform}).")
             raise RuntimeError(f"Network error: {net_err}") from net_err
         cfg_digest = manifest.get("config", {}).get("digest", "")
         image_config = _fetch_config_blob(repo, cfg_digest, token, base, insecure=insecure)
-        save_manifest_cache(image_ref, arch, manifest, repo, image_config)
+        save_manifest_cache(image_ref, platform, manifest, repo, image_config)
 
     layers = manifest.get("layers", [])
     if not layers:

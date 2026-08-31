@@ -293,7 +293,7 @@ def command_build(args: typing.Any) -> None:
             # offline by name.
             for t in tags:
                 try:
-                    store_in_cache(t, target_arch, manifest, image_config)
+                    store_in_cache(t, target_platform, manifest, image_config)
                 except OSError as exc:
                     log_error(f"Cannot write manifest cache for '{t}': {exc}")
                     sys.exit(1)

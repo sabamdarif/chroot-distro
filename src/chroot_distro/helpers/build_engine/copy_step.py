@@ -484,7 +484,7 @@ def _pull_throwaway_image(engine: typing.Any, image_ref: str) -> tuple[str, int]
         if not engine.quiet:
             log_info(f"COPY --from='{image_ref}': fetching external image...")
         try:
-            pull_image(image_ref, rootfs_fd, engine.target_platform.to_arch())
+            pull_image(image_ref, rootfs_fd, engine.target_platform)
         except (OSError, RuntimeError) as exc:
             raise BuildError(f"COPY --from={image_ref}: {exc}") from exc
     except BaseException:

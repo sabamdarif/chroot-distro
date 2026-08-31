@@ -36,7 +36,7 @@ else:
     from backports.zstd import tarfile
 import tempfile
 
-from chroot_distro.arch import get_device_cpu_arch, normalize_arch
+from chroot_distro.arch import get_device_cpu_arch, normalize_arch, platform_from_arch
 from chroot_distro.atomic import atomic_write
 from chroot_distro.commands.install_local import install_from_local_file
 from chroot_distro.constants import (
@@ -299,7 +299,7 @@ def _run_install(
             metadata = install_from_local_file(tmp_archive, rootfs_fd, dist_arch)
         else:
             os.makedirs(BASE_CACHE_DIR, exist_ok=True)
-            metadata = pull_image(image_ref, rootfs_fd, dist_arch, insecure=insecure)
+            metadata = pull_image(image_ref, rootfs_fd, platform_from_arch(dist_arch), insecure=insecure)
 
         if metadata is not None:
             manifest_data = {

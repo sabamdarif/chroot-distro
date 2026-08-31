@@ -198,14 +198,14 @@ def test_a_pull_records_the_base_image_identity(tmp_path, monkeypatch):
     }
     seen = {}
 
-    def fake_pull(image_ref, rootfs_fd, arch):
-        seen["arch"] = arch
+    def fake_pull(image_ref, rootfs_fd, platform):
+        seen["platform"] = platform
         return meta
 
     monkeypatch.setattr(engine_mod, "pull_image", fake_pull)
     engine._pull_base_image(stage, "alpine:3")
 
-    assert seen["arch"] == "aarch64"
+    assert seen["platform"] == Platform("linux", "arm64")
     assert stage.base_image_ref == "alpine:3"
     assert stage.base_manifest_digest == "sha256:m1"
     assert stage.layers == [{"digest": "sha256:l1", "size": 7, "diff_id": "sha256:d1"}]

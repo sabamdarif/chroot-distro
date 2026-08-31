@@ -757,7 +757,7 @@ class BuildEngine:
         except OSError as exc:
             raise BuildError(f"FROM {image_ref}: {exc}") from exc
         try:
-            meta = pull_image(image_ref, rootfs_fd, stage.target_arch_pd)
+            meta = pull_image(image_ref, rootfs_fd, stage.platform)
         except RuntimeError as exc:
             raise BuildError(f"FROM {image_ref}: {exc}") from exc
         finally:
