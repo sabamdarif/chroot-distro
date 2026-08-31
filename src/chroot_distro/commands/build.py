@@ -14,20 +14,27 @@ from its answer: a handler is only required for a stage whose platform this host
 cannot execute *and* which carries a RUN, so the cross-compile shape (a native
 builder stage, a foreign stage that only assembles files) needs no emulator.
 
+What is validated here becomes one `BuildRequest`, and `build_engine/solve.py`
+turns that into one `PlatformResult`: everything an engine run mutates belongs to
+that solve, so the publishing below reads a finished manifest and config and
+never a live stage.
+
 One exclusive `BuildLock` per tag is held for the whole build, taken in lock-path
 order so two concurrent builds with overlapping but differently spelled tag sets
 cannot deadlock each other.
 
-A `BuildError` or an `OSError` out of the engine is a build failure and ends as
+A `BuildError` or an `OSError` out of the solve is a build failure and ends as
 one quoted line rather than a traceback: the engine's walks report a per-entry
 failure and carry on, so an OSError that reaches here is a walk losing its
 footing, not a bug. Anything else is left to `cli.main`.
 
 `_make_build_tmp` is where this file's care goes and its own docstring says why.
 It returns the scratch root's path plus descriptors on the root and on the
-directory holding it; the stage rootfs trees, the ADD spool and every
-`COPY --from` tree are made off the root descriptor, and the teardown removes the
-root under the parent descriptor rather than resolving `build-tmp` again.
+directory holding it. What the build itself owns lives there, a `--secret`
+spooled out of the environment and one directory per solve, while the stage
+trees, the ADD spool and every `COPY --from` tree are the solve's own; the
+teardown removes the root under the parent descriptor rather than resolving
+`build-tmp` again.
 
 RUN steps have no isolation flag here: the mode comes from `CD_USE_ISOLATION` or
 `CD_USE_NS` alone.
@@ -58,20 +65,18 @@ from chroot_distro.constants import (
 from chroot_distro.helpers import namespace
 from chroot_distro.helpers.binfmt import ensure_handler
 from chroot_distro.helpers.build_engine import (
-    BuildEngine,
     BuildError,
+    BuildRequest,
     StagePlan,
     plan_stages,
+    solve_platform,
 )
-from chroot_distro.helpers.build_engine.events import make_reporter
-from chroot_distro.helpers.docker import ARCH_TO_DOCKER
 from chroot_distro.helpers.dockerfile import (
     DockerfileSyntaxError,
     parse_dockerfile,
 )
 from chroot_distro.helpers.isolation import use_isolation_env_enabled
 from chroot_distro.helpers.oci_writer import (
-    build_manifest_and_config,
     store_in_cache,
     write_oci_archive,
 )
@@ -237,35 +242,32 @@ def command_build(args: typing.Any) -> None:
 
         tmp_root, tmp_parent_fd, tmp_root_fd = _make_build_tmp()
 
-        engine: BuildEngine | None = None
         try:
             secrets = _parse_secret_opts(getattr(args, "secrets", None) or [], tmp_root)
             ssh_sockets = _parse_ssh_opts(getattr(args, "ssh", None) or [])
 
-            # build has no isolation CLI flag; both modes are env-var opt-in.
-            isolation_mode = _resolve_build_isolation_mode()
-
-            engine = BuildEngine(
+            request = BuildRequest(
                 build_dir=build_dir,
-                tmp_root=tmp_root,
-                target_arch_pd=target_arch,
+                instructions=instructions,
+                target_platform=target_platform,
+                build_platform=build_platform,
+                scratch_dir=tmp_root,
+                scratch_fd=tmp_root_fd,
                 user_build_args=build_args,
                 target_stage=target_stage,
                 verbose=verbose,
                 quiet=quiet,
                 no_cache=no_cache,
                 emulator=emulator,
-                isolation_mode=isolation_mode,
+                # build has no isolation CLI flag; both modes are env-var opt-in.
+                isolation_mode=_resolve_build_isolation_mode(),
                 secrets=secrets,
                 ssh_sockets=ssh_sockets,
-                reporter=make_reporter(getattr(args, "progress", "auto") or "auto", quiet),
-                tmp_root_fd=tmp_root_fd,
-                target_platform=target_platform,
-                build_platform=build_platform,
+                progress=getattr(args, "progress", "auto") or "auto",
             )
 
             try:
-                final_stage = engine.run(instructions)
+                result = solve_platform(request)
             except BuildError as exc:
                 # A BuildError builds its message by interpolation and the
                 # names it reports on are not the author's: a member of an
@@ -282,18 +284,11 @@ def command_build(args: typing.Any) -> None:
                 log_error(f"Build failed: {quote_path(exc.strerror or str(exc))}")
                 sys.exit(1)
 
-            arch_docker = ARCH_TO_DOCKER.get(target_arch, (target_arch, ""))[0]
-            manifest, image_config = build_manifest_and_config(
-                final_stage.image_config,
-                final_stage.layers,
-                arch_docker,
-            )
-
             # One manifest cache entry per tag, so each can be installed
             # offline by name.
             for t in tags:
                 try:
-                    store_in_cache(t, target_platform, manifest, image_config)
+                    store_in_cache(t, result.platform, result.manifest, result.image_config)
                 except OSError as exc:
                     log_error(f"Cannot write manifest cache for '{t}': {exc}")
                     sys.exit(1)
@@ -303,19 +298,17 @@ def command_build(args: typing.Any) -> None:
                 try:
                     if not quiet:
                         log_info(f"Writing OCI archive to '{out_abs}'...")
-                    write_oci_archive(out_abs, manifest, image_config, primary_tag)
+                    write_oci_archive(out_abs, result.manifest, result.image_config, primary_tag)
                 except (OSError, RuntimeError) as exc:
                     log_error(f"Cannot write '{out_file}': {exc}")
                     sys.exit(1)
 
             if not quiet:
-                total_size = sum(layer["size"] for layer in final_stage.layers)
+                total_size = sum(layer["size"] for layer in result.layers)
                 log_info("Build complete.")
                 msg()
                 msg(f"{C['CYAN']}Tag(s): {C['GREEN']}{', '.join(tags)}{C['RST']}")
-                msg(
-                    f"{C['CYAN']}Layers: {C['GREEN']}{len(final_stage.layers)} ({fmt_size(total_size)} total){C['RST']}"
-                )
+                msg(f"{C['CYAN']}Layers: {C['GREEN']}{len(result.layers)} ({fmt_size(total_size)} total){C['RST']}")
                 msg()
 
             if install_as:
@@ -328,10 +321,6 @@ def command_build(args: typing.Any) -> None:
             log_error("Aborted by user.")
             sys.exit(1)
         finally:
-            # The stage descriptors point inside the tree about to be removed,
-            # and the run's own root descriptor is what they were made off.
-            if engine is not None:
-                engine.close()
             with contextlib.suppress(OSError):
                 os.close(tmp_root_fd)
             _remove_build_tmp(tmp_root, tmp_parent_fd)
@@ -353,15 +342,15 @@ def _foreign_platforms(plans: list[StagePlan]) -> list[tuple[Platform, bool]]:
 
 
 def _make_build_tmp() -> tuple[str, int, int]:
-    """Create the scratch root a build assembles its stages in.
+    """Create the scratch root a build works under.
 
     Returns (path, a descriptor on the directory holding it, a descriptor on the
     root itself). The second is what the build addresses its own tree through:
-    the stage directories, the ADD spool and the COPY --from rootfs are all made
-    off it, so none of them is reached by resolving `tmp_root` again. `build-tmp`
-    is a
-    predictable name inside the runtime tree, which on Termux sits under the
-    $TERMUX_PREFIX bound read-write into every non-isolated container, and
+    each solve's directory is made off it, and the stage directories, the ADD
+    spool and the COPY --from rootfs are made off that, so none of them is
+    reached by resolving `tmp_root` again. `build-tmp` is a predictable name
+    inside the runtime tree, which on Termux sits under the $TERMUX_PREFIX bound
+    read-write into every non-isolated container, and
     `tempfile.mkdtemp(dir=...)` resolved it: a guest that left
     `build-tmp -> <host dir>` behind had every stage rootfs, every spooled ADD
     and every packed layer assembled inside that host directory. The name is
@@ -371,7 +360,7 @@ def _make_build_tmp() -> tuple[str, int, int]:
 
     Both descriptors are kept for the length of the build: the removal at the end
     names the directory this created the root in rather than resolving
-    `build-tmp` a second time, and the root's own descriptor outlives every stage
+    `build-tmp` a second time, and the root's own descriptor outlives every solve
     that was made off it.
 
     A runtime tree that cannot hold the directory falls back to /tmp, as it

@@ -14,6 +14,7 @@ import pytest
 
 from chroot_distro.commands import build as build_cmd
 from chroot_distro.helpers.build_engine import BuildError
+from chroot_distro.helpers.build_engine import solve as solve_mod
 
 NASTY = "\x1b[2J\x1b[31mPWNED"
 
@@ -51,11 +52,15 @@ def failing_build(monkeypatch, tmp_path):
             raise _Engine.failure
 
     monkeypatch.setattr(build_cmd, "BuildLock", _Lock)
-    monkeypatch.setattr(build_cmd, "BuildEngine", _Engine)
+    monkeypatch.setattr(solve_mod, "BuildEngine", _Engine)
     monkeypatch.setattr(
         build_cmd,
         "_make_build_tmp",
-        lambda: (str(scratch), os.open(str(tmp_path), os.O_RDONLY | os.O_DIRECTORY), -1),
+        lambda: (
+            str(scratch),
+            os.open(str(tmp_path), os.O_RDONLY | os.O_DIRECTORY),
+            os.open(str(scratch), os.O_RDONLY | os.O_DIRECTORY),
+        ),
     )
     monkeypatch.setattr(build_cmd, "_remove_build_tmp", lambda _root, dir_fd: os.close(dir_fd))
 
