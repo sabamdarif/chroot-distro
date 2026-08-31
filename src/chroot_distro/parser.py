@@ -362,6 +362,13 @@ def _build(sub):
         metavar="ARCH",
     )
     p.add_argument(
+        "--platform",
+        dest="platforms",
+        action="append",
+        default=[],
+        metavar="LIST",
+    )
+    p.add_argument(
         "--target",
         dest="target_stage",
         metavar="STAGE",

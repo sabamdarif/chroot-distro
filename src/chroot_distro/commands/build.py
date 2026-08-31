@@ -3,27 +3,40 @@
 """`chroot-distro build`: validate the request, run the engine, publish the result.
 
 Everything the command can refuse is refused before anything is created or
-fetched: an unreadable or unparsable Dockerfile, an unknown `--override-arch`, a
-FROM that does not resolve to a platform this program builds for, an
-`--install-as` name already in use, a malformed tag, an output file that already
-exists. A build that was going to be rejected therefore leaves behind no scratch
-tree, no cache entry and no half-written archive.
+fetched: an unreadable or unparsable Dockerfile, an unknown `--architecture` or
+`--platform`, a FROM that does not resolve to a platform this program builds for,
+an `--install-as` name already in use or naming no platform this host can run, a
+malformed tag, an output file that already exists. A build that was going to be
+rejected therefore leaves behind no scratch tree, no cache entry and no
+half-written archive.
 
-`plan_stages` is what settles the platforms, and the emulator question follows
-from its answer: a handler is only required for a stage whose platform this host
-cannot execute *and* which carries a RUN, so the cross-compile shape (a native
-builder stage, a foreign stage that only assembles files) needs no emulator.
+`_resolve_target_platforms` settles what is built: `--platform`, repeatable and
+comma-separated, or the one platform `--architecture` names, or the host's own.
+`--architecture` is the single-platform spelling this program shipped with, so the
+two together have to name the same one platform.
+
+`plan_stages` then settles the stage platforms of each of them, and the emulator
+question follows from its answer: a handler is only required for a stage whose
+platform this host cannot execute *and* which carries a RUN, so the cross-compile
+shape (a native builder stage, a foreign stage that only assembles files) needs
+no emulator.
 
 What is validated here becomes one `BuildRequest`, and
 `build_engine/solve.solve_platforms` turns it into one `PlatformResult` per
 requested target platform: everything an engine run mutates belongs to one solve,
 so the publishing below reads a finished manifest and config and never a live
-stage. One platform is requested today, the one `--override-arch` names or the
-host's own.
+stage.
 
-One exclusive `BuildLock` per tag is held for the whole build, taken in lock-path
-order so two concurrent builds with overlapping but differently spelled tag sets
-cannot deadlock each other.
+Every tag records every platform: one manifest cache entry per (tag, platform),
+which is what `install <tag>` and `push -a` each resolve one of. An `--output`
+archive is the only place a whole matrix stands as one document, an OCI image
+index over every platform. `--install-as` installs one container, so among several
+platforms it takes the host's own and refuses a matrix holding nothing this host
+runs.
+
+One exclusive `BuildLock` per (tag, platform) is held for the whole build, taken
+in lock-path order so two concurrent builds with overlapping but differently
+spelled tag sets cannot deadlock each other.
 
 A `BuildError` or an `OSError` out of the solve is a build failure and ends as
 one quoted line rather than a traceback: the engine's walks report a per-entry
@@ -53,10 +66,10 @@ from types import SimpleNamespace
 from chroot_distro import dirfd
 from chroot_distro.arch import (
     Platform,
-    get_device_cpu_arch,
     get_device_platform,
     needs_emulation,
     normalize_arch,
+    parse_platform,
     platform_from_arch,
 )
 from chroot_distro.commands.install import command_install
@@ -156,29 +169,29 @@ def command_build(args: typing.Any) -> None:
         crit_error("no instructions in Dockerfile.")
         sys.exit(1)
 
-    if override_arch:
-        target_arch = normalize_arch(override_arch)
-        if target_arch is None:
-            crit_error(f"unknown architecture '{override_arch}'.")
-            sys.exit(1)
-    else:
-        target_arch = get_device_cpu_arch()
-    target_platform = platform_from_arch(target_arch)
+    target_platforms = _resolve_target_platforms(
+        list(getattr(args, "platforms", None) or []),
+        override_arch,
+    )
     build_platform = get_device_platform()
 
     # What every FROM resolves to, settled before the locks and the scratch tree:
-    # a Dockerfile whose stages do not resolve is refused here, and the engine
-    # reads the same plan back rather than resolving one of its own.
-    try:
-        stage_plans, _global_args = plan_stages(
-            instructions,
-            target_platform=target_platform,
-            build_platform=build_platform,
-            user_build_args=build_args,
-        )
-    except BuildError as exc:
-        crit_error(quote_path(str(exc)))
-        sys.exit(1)
+    # a Dockerfile whose stages do not resolve for one of the requested platforms
+    # is refused here, and the engine reads the same plan back rather than
+    # resolving one of its own.
+    stage_plans: list[StagePlan] = []
+    for platform in target_platforms:
+        try:
+            plans, _global_args = plan_stages(
+                instructions,
+                target_platform=platform,
+                build_platform=build_platform,
+                user_build_args=build_args,
+            )
+        except BuildError as exc:
+            crit_error(quote_path(_qualify(str(exc), platform, target_platforms)))
+            sys.exit(1)
+        stage_plans.extend(plans)
 
     # Every RUN step chroots into its own stage's rootfs, so a stage built for a
     # foreign platform needs the same handler a foreign login does. A stage that
@@ -193,6 +206,7 @@ def command_build(args: typing.Any) -> None:
             sys.exit(1)
         warn(detail)
 
+    install_platform = target_platforms[0]
     if install_as:
         require_valid_name(install_as, kind="--install-as value")
 
@@ -203,6 +217,8 @@ def command_build(args: typing.Any) -> None:
                 f"'{PROGRAM_NAME} reset {install_as}' to rebuild."
             )
             sys.exit(1)
+
+        install_platform = _install_platform(target_platforms)
 
     if not tags:
         derived = _derive_tag_from_path(build_dir, dockerfile)
@@ -230,11 +246,12 @@ def command_build(args: typing.Any) -> None:
             crit_error(f"file '{out_abs}' already exists. Please specify a different name.")
             sys.exit(1)
 
-    # Acquire one exclusive BuildLock per tag for the duration of the
-    # build. Sorted by lock path so two concurrent builds with
-    # overlapping but differently-ordered tag sets can't deadlock.
+    # Acquire one exclusive BuildLock per (tag, platform) for the duration of the
+    # build: the manifest cache entry a build publishes is per pair, so that is
+    # what two of them can collide on. Sorted by lock path so two concurrent
+    # builds with overlapping but differently-ordered tag sets can't deadlock.
     build_locks = sorted(
-        [BuildLock(t, target_arch, command="build") for t in tags],
+        [BuildLock(t, p.to_arch(), command="build") for t in tags for p in target_platforms],
         key=lambda lock: lock.lock_path,
     )
 
@@ -251,7 +268,7 @@ def command_build(args: typing.Any) -> None:
             request = BuildRequest(
                 build_dir=build_dir,
                 instructions=instructions,
-                target_platform=target_platform,
+                target_platform=target_platforms[0],
                 build_platform=build_platform,
                 scratch_dir=tmp_root,
                 scratch_fd=tmp_root_fd,
@@ -269,7 +286,7 @@ def command_build(args: typing.Any) -> None:
             )
 
             try:
-                (result,) = solve_platforms(request, [target_platform])
+                results = solve_platforms(request, target_platforms)
             except BuildError as exc:
                 # A BuildError builds its message by interpolation and the
                 # names it reports on are not the author's: a member of an
@@ -286,35 +303,41 @@ def command_build(args: typing.Any) -> None:
                 log_error(f"Build failed: {quote_path(exc.strerror or str(exc))}")
                 sys.exit(1)
 
-            # One manifest cache entry per tag, so each can be installed
-            # offline by name.
+            # One manifest cache entry per tag and platform, so each can be
+            # installed or pushed offline by name and architecture.
             for t in tags:
-                try:
-                    store_in_cache(t, result.platform, result.manifest, result.image_config)
-                except OSError as exc:
-                    log_error(f"Cannot write manifest cache for '{t}': {exc}")
-                    sys.exit(1)
+                for result in results:
+                    try:
+                        store_in_cache(t, result.platform, result.manifest, result.image_config)
+                    except OSError as exc:
+                        log_error(f"Cannot write manifest cache for '{t}' ({result.platform}): {exc}")
+                        sys.exit(1)
 
             for out_file in outputs:
                 out_abs = os.path.abspath(os.path.expanduser(out_file))
                 try:
                     if not quiet:
                         log_info(f"Writing OCI archive to '{out_abs}'...")
-                    write_oci_archive(out_abs, [result], primary_tag)
+                    write_oci_archive(out_abs, results, primary_tag)
                 except (OSError, RuntimeError) as exc:
                     log_error(f"Cannot write '{out_file}': {exc}")
                     sys.exit(1)
 
             if not quiet:
-                total_size = sum(layer["size"] for layer in result.layers)
                 log_info("Build complete.")
                 msg()
                 msg(f"{C['CYAN']}Tag(s): {C['GREEN']}{', '.join(tags)}{C['RST']}")
-                msg(f"{C['CYAN']}Layers: {C['GREEN']}{len(result.layers)} ({fmt_size(total_size)} total){C['RST']}")
+                for result in results:
+                    label = f"Layers ({result.platform})" if len(results) > 1 else "Layers"
+                    total_size = sum(layer["size"] for layer in result.layers)
+                    msg(
+                        f"{C['CYAN']}{label}: {C['GREEN']}{len(result.layers)} "
+                        f"({fmt_size(total_size)} total){C['RST']}"
+                    )
                 msg()
 
             if install_as:
-                _install_as_container(install_as, primary_tag, target_arch, quiet)
+                _install_as_container(install_as, primary_tag, install_platform.to_arch(), quiet)
 
             if not outputs and not install_as and not quiet:
                 msg(f"{C['CYAN']}Install with: {C['GREEN']}{PROGRAM_NAME} install {primary_tag}{C['RST']}")
@@ -328,12 +351,86 @@ def command_build(args: typing.Any) -> None:
             _remove_build_tmp(tmp_root, tmp_parent_fd)
 
 
+def _resolve_target_platforms(raw: list[str], override_arch: str) -> list[Platform]:
+    """The ordered, deduplicated platforms this build produces.
+
+    `--platform` is repeatable and every occurrence may itself be a
+    comma-separated list, which are the two spellings buildx accepts. Two
+    spellings of one platform are one entry and the first mention keeps its place,
+    since that order is what an image index describes and a platform named twice
+    is not a valid index. `--architecture` names one platform, and the two options
+    together have to agree on it: silently letting one win would build something
+    the command line does not say.
+    """
+    ordered: list[Platform] = []
+    for value in raw:
+        for part in value.split(","):
+            try:
+                ordered.append(parse_platform(part))
+            except ValueError as exc:
+                crit_error(f"invalid --platform value: {exc}.")
+                sys.exit(1)
+    ordered = list(dict.fromkeys(ordered))
+
+    if override_arch:
+        arch = normalize_arch(override_arch)
+        if arch is None:
+            crit_error(f"unknown architecture '{override_arch}'.")
+            sys.exit(1)
+        named = platform_from_arch(arch)
+        if ordered and ordered != [named]:
+            crit_error(
+                f"--architecture {override_arch} and --platform "
+                f"{','.join(str(p) for p in ordered)} name different platforms. "
+                f"Pass one of the two."
+            )
+            sys.exit(1)
+        return [named]
+    return ordered or [get_device_platform()]
+
+
+def _install_platform(platforms: list[Platform]) -> Platform:
+    """Which of the requested platforms `--install-as` installs.
+
+    One platform answers for itself, foreign or not: `-a aarch64 --install-as`
+    has always installed what it built, and an emulator is what makes that work.
+    Among several, a container is still one rootfs, so this program takes the
+    host's own platform and a platform the host runs natively (32-bit userspace on
+    a 64-bit CPU of the same family) after it, rather than guessing which foreign
+    one was meant.
+    """
+    if len(platforms) == 1:
+        return platforms[0]
+    host = get_device_platform()
+    runnable = [p for p in platforms if p == host] or [p for p in platforms if not needs_emulation(p.to_arch())]
+    if not runnable:
+        crit_error(
+            f"--install-as cannot pick one of the platforms this build produces "
+            f"({', '.join(str(p) for p in platforms)}): none of them runs on this "
+            f"'{host}' host. Build one platform, or install one afterwards with "
+            f"'{PROGRAM_NAME} install <tag> --architecture <arch>'."
+        )
+        sys.exit(1)
+    return runnable[0]
+
+
+def _qualify(message: str, platform: Platform, platforms: list[Platform]) -> str:
+    """Name the platform a message belongs to, where more than one was asked for.
+
+    The line `solve_platforms` draws for the same reason: with one platform there
+    is nothing to tell apart, so a single-platform build's errors are what they
+    were.
+    """
+    return f"target platform '{platform}': {message}" if len(platforms) > 1 else message
+
+
 def _foreign_platforms(plans: list[StagePlan]) -> list[tuple[Platform, bool]]:
     """The stage platforms this host cannot execute, and whether one of them runs.
 
-    In stage order, one entry per platform, so a Dockerfile that builds a native
-    stage for the host and a foreign one for the image asks for an emulator for
-    the second alone.
+    One entry per platform, in the order the plans mention it, so a Dockerfile
+    that builds a native stage for the host and a foreign one for the image asks
+    for an emulator for the second alone, and a matrix whose platforms share a
+    foreign stage asks once.
     """
     runs: dict[Platform, bool] = {}
     for plan in plans:

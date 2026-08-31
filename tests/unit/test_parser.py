@@ -148,6 +148,13 @@ def test_parser_build_secret_ssh_default_empty():
     assert args.ssh == []
 
 
+def test_parser_build_platform_repeatable():
+    parser = build_parser()
+    args = parser.parse_args(["build", ".", "--platform", "linux/amd64,linux/arm64", "--platform", "linux/arm/v7"])
+    assert args.platforms == ["linux/amd64,linux/arm64", "linux/arm/v7"]
+    assert parser.parse_args(["build", "."]).platforms == []
+
+
 def test_parser_build_progress():
     parser = build_parser()
     for value in ("auto", "plain", "tty", "rawjson"):

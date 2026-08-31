@@ -72,7 +72,7 @@ def test_a_free_name_gets_past_the_guard(build_dir, containers, monkeypatch):
 
 def test_foreign_build_with_run_refuses_without_an_emulator(build_dir, monkeypatch, capsys):
     (build_dir / "Dockerfile").write_text("FROM alpine\nRUN echo hello\n")
-    monkeypatch.setattr("chroot_distro.commands.build.get_device_cpu_arch", lambda: "x86_64")
+    monkeypatch.setattr("chroot_distro.commands.build.get_device_platform", lambda: Platform("linux", "amd64"))
     monkeypatch.setattr("chroot_distro.commands.build.needs_emulation", lambda _arch: True)
     monkeypatch.setattr(
         "chroot_distro.commands.build.ensure_handler",
@@ -87,7 +87,7 @@ def test_foreign_build_with_run_refuses_without_an_emulator(build_dir, monkeypat
 
 
 def test_foreign_build_without_run_warns_but_can_finish(build_dir, monkeypatch, capsys):
-    monkeypatch.setattr("chroot_distro.commands.build.get_device_cpu_arch", lambda: "x86_64")
+    monkeypatch.setattr("chroot_distro.commands.build.get_device_platform", lambda: Platform("linux", "amd64"))
     monkeypatch.setattr("chroot_distro.commands.build.needs_emulation", lambda _arch: True)
     monkeypatch.setattr(
         "chroot_distro.commands.build.ensure_handler",
@@ -113,7 +113,6 @@ def test_a_run_on_the_build_platform_needs_no_emulator(build_dir, monkeypatch, c
         "FROM alpine\n"
         "COPY --from=builder /app /app\n"
     )
-    monkeypatch.setattr("chroot_distro.commands.build.get_device_cpu_arch", lambda: "x86_64")
     monkeypatch.setattr("chroot_distro.commands.build.get_device_platform", lambda: Platform("linux", "amd64"))
     monkeypatch.setattr("chroot_distro.commands.build.needs_emulation", lambda arch: arch != "x86_64")
     monkeypatch.setattr(
