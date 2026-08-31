@@ -525,13 +525,26 @@ class BuildEngine:
             do_onbuild(self, instr)
             self._record_history(instr, layer_added=False)
             return
-        if name in EXPANDS_VARS and not instr["exec_form"]:
-            instr = self._expand_instruction(instr)
+        instr = self._expanded(instr)
 
         handler = HANDLERS.get(name)
         if handler is None:
             raise BuildError(f"Unsupported instruction '{name}' at line {instr['lineno']}.")
         self._run_with_history(handler, instr)
+
+    def _expanded(self, instr: dict[str, typing.Any]) -> dict[str, typing.Any]:
+        """*instr* with the expansion its instruction gets, or *instr* itself.
+
+        Docker expands a RUN's `--mount` fields and never its command: what a
+        `$VAR` means in the command is the shell's business. Every other
+        instruction is in EXPANDS_VARS or takes no expansion at all.
+        """
+        name = instr["name"]
+        if name in EXPANDS_VARS:
+            return self._expand_instruction(instr)
+        if name == "RUN":
+            return self._expand_instruction(instr, value=False)
+        return instr
 
     def _run_with_history(
         self, handler: typing.Callable[[typing.Any, dict[str, typing.Any]], None], instr: dict[str, typing.Any]
@@ -570,13 +583,13 @@ class BuildEngine:
         cfg = self.current.image_config
         cfg.setdefault("history", []).append(entry)
 
-    def _expand_instruction(self, instr: dict[str, typing.Any]) -> dict[str, typing.Any]:
-        """Return a copy of instr with its `value` variable-expanded."""
+    def _expand_instruction(self, instr: dict[str, typing.Any], *, value: bool = True) -> dict[str, typing.Any]:
+        """Return a copy of instr with its flags, and by default its `value`, expanded."""
         env = self.expansion_scope()
         new = dict(instr)
-        value = instr.get("value", "")
-        if isinstance(value, str):
-            new["value"] = expand_vars(value, env)
+        raw_value = instr.get("value", "")
+        if value and isinstance(raw_value, str):
+            new["value"] = expand_vars(raw_value, env)
 
         def _expand_flag(v: typing.Any) -> typing.Any:
             if isinstance(v, str):
@@ -717,9 +730,7 @@ class BuildEngine:
                 for ti in trig_instrs:
                     self._step_no += 1
                     self._announce(ti)
-                    trig_instr = ti
-                    if ti["name"] in EXPANDS_VARS and not ti["exec_form"]:
-                        trig_instr = self._expand_instruction(ti)
+                    trig_instr = self._expanded(ti)
                     h = HANDLERS.get(trig_instr["name"])
                     if h is None:
                         raise BuildError(

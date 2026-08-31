@@ -38,8 +38,10 @@ PREDEFINED_ARGS = frozenset(
     }
 )
 
-# Instructions whose argument values undergo variable expansion before
-# dispatch (everything except CMD/ENTRYPOINT/RUN exec-form payloads).
+# Instructions whose value is variable-expanded before dispatch, which is
+# Docker's documented list. RUN is deliberately absent: its command is the
+# shell's to expand, while its flags are expanded like any other (engine
+# ._dispatch), and CMD and ENTRYPOINT are expanded by nothing at all.
 EXPANDS_VARS = frozenset(
     {
         "ADD",

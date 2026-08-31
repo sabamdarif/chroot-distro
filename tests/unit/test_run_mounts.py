@@ -132,6 +132,33 @@ def test_bad_mode_rejected():
         validate_and_parse_run_flags(_instr({"mount": "type=cache,target=/c,mode=zz"}))
 
 
+# ── what the engine expands before the step is parsed ─────────────────────────
+def test_a_mount_field_expands_and_the_command_does_not(tmp_path):
+    from chroot_distro.helpers.build_engine.engine import BuildEngine
+    from chroot_distro.helpers.dockerfile import parse_dockerfile
+
+    engine = BuildEngine(
+        build_dir=str(tmp_path),
+        tmp_root=str(tmp_path / "tmp"),
+        target_arch_pd="x86_64",
+        user_build_args={},
+        target_stage=None,
+        verbose=False,
+        quiet=True,
+        no_cache=False,
+        emulator=None,
+    )
+    _, instructions = parse_dockerfile("FROM scratch\nENV DIR=/cache\n")
+    engine.run(instructions)
+
+    out = engine._expanded(_instr({"mount": "type=cache,target=$DIR"}) | {"value": "echo $DIR"})
+
+    (m,) = validate_and_parse_run_flags(out)
+    assert m.target == "/cache"
+    # The command is the shell's to expand, so it reaches the step as written.
+    assert out["value"] == "echo $DIR"
+
+
 # ── cache-hit path still validates flags ─────────────────────────────────────
 def test_flag_validation_runs_before_cache_lookup():
     from types import SimpleNamespace
