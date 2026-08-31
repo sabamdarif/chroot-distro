@@ -36,6 +36,8 @@ class Stage:
 
     __slots__ = (
         "args",
+        "base_image_ref",
+        "base_manifest_digest",
         "declared_args",
         "dir_fd",
         "env",
@@ -66,6 +68,8 @@ class Stage:
     ):
         self.index = index
         self.name = name
+        self.base_image_ref = ""
+        self.base_manifest_digest = ""
         self.rootfs_dir = rootfs_dir
         self.dir_fd = dir_fd
         self.rootfs_fd = rootfs_fd

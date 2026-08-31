@@ -10,7 +10,7 @@ from chroot_distro.helpers.build_engine.constants import (
     CHROOT_REQUIRED_INSTRUCTIONS,
     needs_chroot,
 )
-from chroot_distro.helpers.build_engine.engine import BuildEngine
+from chroot_distro.helpers.build_engine.engine import BuildEngine, StagePlan, plan_stages
 from chroot_distro.helpers.build_engine.errors import BuildError
 from chroot_distro.helpers.build_engine.stage import Stage
 
@@ -19,5 +19,7 @@ __all__ = (
     "BuildEngine",
     "BuildError",
     "Stage",
+    "StagePlan",
     "needs_chroot",
+    "plan_stages",
 )

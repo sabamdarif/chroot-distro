@@ -3,10 +3,16 @@
 """`chroot-distro build`: validate the request, run the engine, publish the result.
 
 Everything the command can refuse is refused before anything is created or
-fetched: an unreadable or unparsable Dockerfile, an unknown `--override-arch`, an
+fetched: an unreadable or unparsable Dockerfile, an unknown `--override-arch`, a
+FROM that does not resolve to a platform this program builds for, an
 `--install-as` name already in use, a malformed tag, an output file that already
 exists. A build that was going to be rejected therefore leaves behind no scratch
 tree, no cache entry and no half-written archive.
+
+`plan_stages` is what settles the platforms, and the emulator question follows
+from its answer: a handler is only required for a stage whose platform this host
+cannot execute *and* which carries a RUN, so the cross-compile shape (a native
+builder stage, a foreign stage that only assembles files) needs no emulator.
 
 One exclusive `BuildLock` per tag is held for the whole build, taken in lock-path
 order so two concurrent builds with overlapping but differently spelled tag sets
@@ -36,7 +42,14 @@ from contextlib import ExitStack
 from types import SimpleNamespace
 
 from chroot_distro import dirfd
-from chroot_distro.arch import get_device_cpu_arch, needs_emulation, normalize_arch
+from chroot_distro.arch import (
+    Platform,
+    get_device_cpu_arch,
+    get_device_platform,
+    needs_emulation,
+    normalize_arch,
+    platform_from_arch,
+)
 from chroot_distro.commands.install import command_install
 from chroot_distro.constants import (
     PROGRAM_NAME,
@@ -47,6 +60,8 @@ from chroot_distro.helpers.binfmt import ensure_handler
 from chroot_distro.helpers.build_engine import (
     BuildEngine,
     BuildError,
+    StagePlan,
+    plan_stages,
 )
 from chroot_distro.helpers.build_engine.events import make_reporter
 from chroot_distro.helpers.docker import ARCH_TO_DOCKER
@@ -141,21 +156,35 @@ def command_build(args: typing.Any) -> None:
             sys.exit(1)
     else:
         target_arch = get_device_cpu_arch()
+    target_platform = platform_from_arch(target_arch)
+    build_platform = get_device_platform()
 
-    # Every RUN step chroots into the target rootfs, so a foreign build needs the
-    # same handler a foreign login does. A build with no RUN never execs a guest
-    # binary, so there it is only a warning.
-    if needs_emulation(target_arch):
-        interpreter, reason = ensure_handler(target_arch)
-        if interpreter is None:
-            detail = (
-                f"Building for '{target_arch}' on a '{get_device_cpu_arch()}' host, "
-                f"and no emulator was registered ({reason})."
-            )
-            if any(ins.get("name") == "RUN" for ins in instructions):
-                crit_error(f"{detail} RUN steps cannot execute.")
-                sys.exit(1)
-            warn(detail)
+    # What every FROM resolves to, settled before the locks and the scratch tree:
+    # a Dockerfile whose stages do not resolve is refused here, and the engine
+    # reads the same plan back rather than resolving one of its own.
+    try:
+        stage_plans, _global_args = plan_stages(
+            instructions,
+            target_platform=target_platform,
+            build_platform=build_platform,
+            user_build_args=build_args,
+        )
+    except BuildError as exc:
+        crit_error(quote_path(str(exc)))
+        sys.exit(1)
+
+    # Every RUN step chroots into its own stage's rootfs, so a stage built for a
+    # foreign platform needs the same handler a foreign login does. A stage that
+    # runs nothing never execs a guest binary, so there it is only a warning.
+    for platform, runs in _foreign_platforms(stage_plans):
+        interpreter, reason = ensure_handler(platform.to_arch())
+        if interpreter is not None:
+            continue
+        detail = f"Building for '{platform}' on a '{build_platform}' host, and no emulator was registered ({reason})."
+        if runs:
+            crit_error(f"{detail} RUN steps cannot execute.")
+            sys.exit(1)
+        warn(detail)
 
     if install_as:
         require_valid_name(install_as, kind="--install-as value")
@@ -231,6 +260,8 @@ def command_build(args: typing.Any) -> None:
                 ssh_sockets=ssh_sockets,
                 reporter=make_reporter(getattr(args, "progress", "auto") or "auto", quiet),
                 tmp_root_fd=tmp_root_fd,
+                target_platform=target_platform,
+                build_platform=build_platform,
             )
 
             try:
@@ -304,6 +335,21 @@ def command_build(args: typing.Any) -> None:
             with contextlib.suppress(OSError):
                 os.close(tmp_root_fd)
             _remove_build_tmp(tmp_root, tmp_parent_fd)
+
+
+def _foreign_platforms(plans: list[StagePlan]) -> list[tuple[Platform, bool]]:
+    """The stage platforms this host cannot execute, and whether one of them runs.
+
+    In stage order, one entry per platform, so a Dockerfile that builds a native
+    stage for the host and a foreign one for the image asks for an emulator for
+    the second alone.
+    """
+    runs: dict[Platform, bool] = {}
+    for plan in plans:
+        if not needs_emulation(plan.platform.to_arch()):
+            continue
+        runs[plan.platform] = runs.get(plan.platform, False) or plan.runs
+    return list(runs.items())
 
 
 def _make_build_tmp() -> tuple[str, int, int]:

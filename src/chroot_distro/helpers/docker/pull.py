@@ -17,7 +17,9 @@ either exactly or when the entry declares none. A miss falls back to any linux e
 for the architecture, and only then fails, listing what the image does offer, since
 "no image for aarch64" is unhelpful without that. The `Content-Type` header wins over
 the body's own `mediaType` for deciding which shape arrived, kept as `_ct` on the
-parsed dict.
+parsed dict, and the digest of the bytes that arrived is kept beside it as `_digest`,
+which is what a build records as the base image it resolved to. Both are private keys
+a caller strips before a manifest goes back to a registry (`push._strip_private_keys`).
 
 Layer order is the one thing that cannot be relaxed. Downloads run in parallel across
 `layer_download_workers()`, but application is strictly sequential, because a later
@@ -32,6 +34,7 @@ not fatal: it returns empty, since a rootfs without image metadata is still usab
 """
 
 import contextlib
+import hashlib
 import json
 import os
 import signal
@@ -216,6 +219,9 @@ def _get_manifest(repo: str, ref: str, token: str, base: str, insecure: bool = F
     body, ct = typing.cast(tuple[bytes, str], retry_http(_attempt, what=f"Fetching manifest {ref}"))
     data: dict[str, typing.Any] = json.loads(body)
     data["_ct"] = ct.split(";")[0].strip() or data.get("mediaType", "")
+    # Over the bytes as they arrived, which is what a digest is defined over: a
+    # re-serialised document is a different one.
+    data["_digest"] = "sha256:" + hashlib.sha256(body).hexdigest()
     return data
 
 

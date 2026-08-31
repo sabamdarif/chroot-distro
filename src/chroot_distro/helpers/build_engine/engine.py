@@ -6,8 +6,12 @@ The engine keeps only what crosses a stage boundary, the global ARG scope, the
 named-stage map `COPY --from=` resolves against, and which stage is current;
 everything else a step does it does to the stage or to the rootfs on disk.
 
-A prescan runs first, so a `--target` naming no stage fails before anything is
-pulled. FROM is the one instruction the engine handles itself: it makes the
+A prescan runs first, and `plan_stages` is what it runs: one walk that resolves
+every FROM's platform and collects the global ARG scope, so a `--target` naming
+no stage, a FROM that does not parse and a `--platform` that does not resolve all
+fail before anything is pulled. `build` calls the same function for its emulator
+preflight, which is why the resolution lives in a function rather than in the
+walk. FROM is then the one instruction the engine handles itself: it makes the
 stage's scratch tree off this run's scratch-root descriptor, takes the config
 from `scratch`, from an earlier stage or from a pulled image, seeds env, workdir,
 user and shell out of it, writes the stage's resolv.conf and hosts so a RUN can
@@ -32,6 +36,7 @@ registry renders the image's layers wrong, so the entry is written by the call
 that ran the handler rather than by each handler.
 """
 
+import dataclasses
 import json
 import logging
 import os
@@ -40,11 +45,12 @@ import time
 import typing
 
 from chroot_distro import dirfd
-from chroot_distro.arch import Platform, get_device_platform, platform_from_arch
+from chroot_distro.arch import Platform, get_device_platform, parse_platform, platform_from_arch
 from chroot_distro.helpers.build_engine.constants import (
     EXPANDS_VARS,
     PREDEFINED_ARGS,
     is_host_exec_var,
+    needs_chroot,
 )
 from chroot_distro.helpers.build_engine.dockerignore import load_dockerignore
 from chroot_distro.helpers.build_engine.errors import BuildError
@@ -69,7 +75,126 @@ from chroot_distro.message import log_info
 log = logging.getLogger(__name__)
 
 _FROM_RE = re.compile(r"^\s*(\S+)(?:\s+AS\s+(\S+))?\s*$", re.IGNORECASE)
-_FROM_AS_RE = re.compile(r"\s+AS\s+(\S+)\s*$", re.IGNORECASE)
+
+
+@dataclasses.dataclass
+class StagePlan:
+    """What one FROM decides before anything is pulled.
+
+    `runs` is whether the stage carries an instruction that execs a guest
+    binary, which is what decides whether its platform needs an emulator.
+    """
+
+    name: str
+    platform: Platform
+    runs: bool = False
+
+
+def _platform_args(target: Platform, build: Platform) -> dict[str, str]:
+    """The automatic TARGET*/BUILD* ARG values, which Docker keeps global."""
+    return {
+        "TARGETPLATFORM": target.format(),
+        "TARGETOS": target.os,
+        "TARGETARCH": target.architecture,
+        "TARGETVARIANT": target.variant,
+        "BUILDPLATFORM": build.format(),
+        "BUILDOS": build.os,
+        "BUILDARCH": build.architecture,
+        "BUILDVARIANT": build.variant,
+    }
+
+
+def _from_scope(global_args: dict[str, str], target: Platform, build: Platform) -> dict[str, str | None]:
+    """The scope a FROM line is expanded against: global ARGs, then the platform values."""
+    scope: dict[str, str | None] = dict(global_args)
+    for key, value in _platform_args(target, build).items():
+        scope.setdefault(key, value)
+    return scope
+
+
+def _from_parts(value: str, lineno: int) -> tuple[str, str]:
+    """Split an expanded FROM value into (base reference, stage name)."""
+    m = _FROM_RE.match(value)
+    if not m:
+        raise BuildError(f"Invalid FROM at line {lineno}: {value!r}")
+    return m.group(1), m.group(2) or ""
+
+
+def _from_platform(raw: typing.Any, scope: dict[str, str | None], default: Platform, lineno: int) -> Platform:
+    """Resolve one FROM's `--platform`, or return *default* when it carries none."""
+    if raw is None:
+        return default
+    if not isinstance(raw, str) or not raw.strip():
+        raise BuildError(f"FROM --platform needs a value (line {lineno}).")
+    value = expand_vars(raw, scope).strip()
+    if not value:
+        raise BuildError(f"FROM --platform={raw} expanded to nothing (line {lineno}).")
+    try:
+        return parse_platform(value)
+    except ValueError as exc:
+        raise BuildError(f"FROM --platform={value}: {exc} (line {lineno}).") from exc
+
+
+def plan_stages(
+    instructions: list[dict[str, typing.Any]],
+    *,
+    target_platform: Platform,
+    build_platform: Platform,
+    user_build_args: dict[str, str],
+) -> tuple[list[StagePlan], dict[str, str]]:
+    """One walk of the instructions: a plan per FROM, and the global ARG scope.
+
+    The one place a stage's platform is decided, so `build`'s emulator preflight
+    and the engine cannot disagree about what a stage is built for. Nothing here
+    opens or fetches anything, which is the point: a Dockerfile whose FROM lines
+    do not resolve is refused before the first pull.
+
+    A bare FROM takes the target platform, and `--platform` is expanded against
+    the scope a FROM sees, so `--platform=$BUILDPLATFORM` reaches the build
+    platform. A FROM naming an earlier stage takes that stage's platform
+    whatever the flag says, because the tree it starts from is that stage's;
+    Docker resolves one the same way.
+    """
+    plans: list[StagePlan] = []
+    by_name: dict[str, Platform] = {}
+    global_args: dict[str, str] = {}
+    seen_from = False
+
+    for instr in instructions:
+        name = instr.get("name", "")
+        lineno = instr.get("lineno", 0)
+        flags = instr.get("flags") or {}
+
+        if name != "FROM":
+            if "platform" in flags:
+                raise BuildError(f"{name} --platform is not supported (line {lineno}); only FROM takes one.")
+            if name == "ARG" and not seen_from:
+                key, default = split_arg(instr["value"])
+                if key:
+                    global_args[key] = user_build_args.get(key, default or "")
+            elif plans and needs_chroot([instr]):
+                plans[-1].runs = True
+            continue
+
+        seen_from = True
+        for key in flags:
+            if key != "platform":
+                raise BuildError(f"FROM --{key} is not supported (line {lineno}); refusing to silently ignore it.")
+
+        scope = _from_scope(global_args, target_platform, build_platform)
+        value = instr["value"] if isinstance(instr["value"], str) else ""
+        base_ref, stage_name = _from_parts(expand_vars(value, scope), lineno)
+        platform = _from_platform(flags.get("platform"), scope, target_platform, lineno)
+        if base_ref in by_name:
+            platform = by_name[base_ref]
+        plans.append(StagePlan(name=stage_name, platform=platform))
+        # `COPY --from=0` and `FROM 0` reach a stage by index, so the engine
+        # registers both names and the plan has to know both as well.
+        by_name[str(len(plans) - 1)] = platform
+        if stage_name:
+            by_name[stage_name] = platform
+
+    return plans, global_args
 
 
 def _malformed(image_ref: str, what: str) -> typing.NoReturn:
@@ -270,6 +395,9 @@ class BuildEngine:
         self.stages: dict[str, Stage] = {}
         self.stages_by_idx: list[Stage] = []
         self.current: Stage | None = None
+        # One entry per FROM, filled by the prescan: what a stage is built for
+        # is settled there and read back here rather than resolved twice.
+        self.stage_plans: list[StagePlan] = []
         self.global_args: dict[str, str] = {}
         self.declared_global: set[str] = set()
         self.ignore_patterns = load_dockerignore(self.build_dir)
@@ -309,22 +437,14 @@ class BuildEngine:
             stage.close()
 
     def _prescan(self, instructions: list[dict[str, typing.Any]]) -> None:
-        seen_from = False
-        named_stages = []
-        for instr in instructions:
-            if instr["name"] == "FROM":
-                seen_from = True
-                value = self._expand_for_from(instr["value"], pre_scan=True)
-                m = _FROM_AS_RE.search(value)
-                if m:
-                    named_stages.append(m.group(1))
-            elif instr["name"] == "ARG" and not seen_from:
-                key, default = split_arg(instr["value"])
-                if not key:
-                    continue
-                self.declared_global.add(key)
-                value = self.user_build_args.get(key, default or "")
-                self.global_args[key] = value
+        self.stage_plans, self.global_args = plan_stages(
+            instructions,
+            target_platform=self.target_platform,
+            build_platform=self.build_platform,
+            user_build_args=self.user_build_args,
+        )
+        self.declared_global = set(self.global_args)
+        named_stages = [plan.name for plan in self.stage_plans if plan.name]
 
         if self.target_stage and self.target_stage not in named_stages:
             raise BuildError(
@@ -333,34 +453,13 @@ class BuildEngine:
                 f"{', '.join(named_stages) or 'none'})."
             )
 
-    def _expand_for_from(self, value: str, pre_scan: bool = False) -> str:
+    def _expand_for_from(self, value: str) -> str:
         """Expand variables for a FROM line using global ARGs only."""
-        scope: dict[str, str | None] = {}
-        if pre_scan:
-            # Pre-scan runs before the user-arg merge, so the raw CLI map is
-            # all there is to resolve from.
-            scope.update(self.user_build_args)
-        else:
-            scope.update(self.global_args)
-        self._set_arch_defaults(scope)
-        return expand_vars(value, scope)
+        return expand_vars(value, _from_scope(self.global_args, self.target_platform, self.build_platform))
 
-    def _set_arch_defaults(self, scope: dict[str, str | None]) -> None:
-        """Populate the TARGET*/BUILD* platform annotations (Docker defaults)."""
-        target = self.target_platform
-        build = self.build_platform
-        defaults = {
-            "TARGETPLATFORM": target.format(),
-            "TARGETOS": target.os,
-            "TARGETARCH": target.architecture,
-            "TARGETVARIANT": target.variant,
-            "BUILDPLATFORM": build.format(),
-            "BUILDOS": build.os,
-            "BUILDARCH": build.architecture,
-            "BUILDVARIANT": build.variant,
-        }
-        for key, value in defaults.items():
-            scope.setdefault(key, value)
+    def platform_args(self) -> dict[str, str]:
+        """The automatic TARGET*/BUILD* values this build was asked for."""
+        return _platform_args(self.target_platform, self.build_platform)
 
     def _stage_label(self) -> str:
         if self.current is None:
@@ -477,10 +576,9 @@ class BuildEngine:
         """Variable scope for `${VAR}` expansion inside the current stage.
 
         Composed in increasing precedence: PREDEFINED_ARGS from the
-        host env, the build-time arch annotations (TARGETARCH /
-        BUILDARCH / TARGET/BUILDPLATFORM / TARGET/BUILDOS), declared
-        ARGs in this stage, and finally ENVs (which win over ARGs by
-        Docker semantics).
+        host env, the automatic platform values, declared ARGs in this
+        stage, and finally ENVs (which win over ARGs by Docker
+        semantics).
         """
         assert self.current is not None
         scope: dict[str, str | None] = {}
@@ -488,7 +586,8 @@ class BuildEngine:
             v = os.environ.get(k, "")
             if v:
                 scope[k] = v
-        self._set_arch_defaults(scope)
+        for k, v in self.platform_args().items():
+            scope.setdefault(k, v)
         for k, v in self.current.args.items():
             scope[k] = v
         for k, v in self.current.env.items():
@@ -504,21 +603,20 @@ class BuildEngine:
         value = self._expand_for_from(
             instr["value"] if isinstance(instr["value"], str) else "",
         )
-        m = _FROM_RE.match(value)
-        if not m:
-            raise BuildError(f"Invalid FROM at line {instr['lineno']}: {value!r}")
-        base_ref = m.group(1)
-        stage_name = m.group(2)
+        base_ref, stage_name = _from_parts(value, instr["lineno"])
 
         idx = len(self.stages_by_idx)
+        # Every FROM before this one made a stage, so the prescan's plans and
+        # the stage list are indexed alike.
+        stage_platform = self.stage_plans[idx].platform
         rootfs_dir = os.path.join(self.tmp_root, f"stage-{idx}", "rootfs")
         stage_fd, rootfs_fd = self._make_stage_dirs(idx)
         stage = Stage(
             index=idx,
-            name=stage_name or "",
+            name=stage_name,
             rootfs_dir=rootfs_dir,
-            target_arch_pd=self.target_arch_pd,
-            platform=self.target_platform,
+            target_arch_pd=stage_platform.to_arch(),
+            platform=stage_platform,
             dir_fd=stage_fd,
             rootfs_fd=rootfs_fd,
         )
@@ -624,7 +722,9 @@ class BuildEngine:
         The deep-copy via JSON round-trip carries the parent's
         `history` array along with the rest of image_config, so the
         new stage starts with the inherited entries and subsequent
-        instructions append to the same list.
+        instructions append to the same list. The base identity comes
+        along too: the tree is the parent's, so what it was pulled from
+        is what this stage stands on as well.
         """
         new_stage.image_config = json.loads(json.dumps(parent.image_config))
         rootfs_fd = _stage_rootfs_fd(new_stage)
@@ -640,23 +740,36 @@ class BuildEngine:
             os.close(rootfs_fd)
         new_stage.layers = list(parent.layers)
         new_stage.parent_layer_digest = parent.parent_layer_digest
+        new_stage.base_image_ref = parent.base_image_ref
+        new_stage.base_manifest_digest = parent.base_manifest_digest
 
     def _pull_base_image(self, stage: Stage, image_ref: str) -> None:
-        """Use helpers.docker.pull_image to populate the stage rootfs."""
-        log_info(f"Pulling base image '{image_ref}' ({self.target_arch_pd})...")
+        """Use helpers.docker.pull_image to populate the stage rootfs.
+
+        The platform is the stage's own, not the build's target: a
+        `FROM --platform=$BUILDPLATFORM` stage is the one that gets to run
+        native while the image being built stays foreign.
+        """
+        log_info(f"Pulling base image '{image_ref}' ({stage.platform})...")
         try:
             rootfs_fd = _stage_rootfs_fd(stage)
         except OSError as exc:
             raise BuildError(f"FROM {image_ref}: {exc}") from exc
         try:
-            meta = pull_image(image_ref, rootfs_fd, self.target_arch_pd)
+            meta = pull_image(image_ref, rootfs_fd, stage.target_arch_pd)
         except RuntimeError as exc:
             raise BuildError(f"FROM {image_ref}: {exc}") from exc
         finally:
             os.close(rootfs_fd)
 
         stage.image_config = _adopt_image_config(meta.get("image_config") or {"config": {}}, image_ref)
+        stage.base_image_ref = image_ref
         manifest = meta.get("manifest") or {}
+        # What the pull selected for this stage, which is the base identity a
+        # cache key has to carry. `_digest` is a manifest-cache field like the
+        # `size` below, so a non-string is taken as absent rather than trusted.
+        base_digest = manifest.get("_digest", "")
+        stage.base_manifest_digest = base_digest if isinstance(base_digest, str) else ""
         config_diff_ids = (stage.image_config.get("rootfs") or {}).get("diff_ids") or []
         stage.layers = []
         for i, layer in enumerate(manifest.get("layers", [])):

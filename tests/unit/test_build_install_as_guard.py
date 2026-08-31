@@ -12,6 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 from chroot_distro import paths
+from chroot_distro.arch import Platform
 from chroot_distro.commands.build import command_build
 from chroot_distro.exceptions import ChrootDistroError
 
@@ -101,3 +102,30 @@ def test_foreign_build_without_run_warns_but_can_finish(build_dir, monkeypatch, 
         command_build(SimpleNamespace(path=str(build_dir), override_arch="aarch64", quiet=True))
 
     assert "no emulator was registered" in capsys.readouterr().err
+
+
+def test_a_run_on_the_build_platform_needs_no_emulator(build_dir, monkeypatch, capsys):
+    # The cross-compile shape: the stage that runs is the host's own, and the
+    # foreign stage only assembles files, so the RUN does not ask for an emulator.
+    (build_dir / "Dockerfile").write_text(
+        "FROM --platform=$BUILDPLATFORM alpine AS builder\n"
+        "RUN make\n"
+        "FROM alpine\n"
+        "COPY --from=builder /app /app\n"
+    )
+    monkeypatch.setattr("chroot_distro.commands.build.get_device_cpu_arch", lambda: "x86_64")
+    monkeypatch.setattr("chroot_distro.commands.build.get_device_platform", lambda: Platform("linux", "amd64"))
+    monkeypatch.setattr("chroot_distro.commands.build.needs_emulation", lambda arch: arch != "x86_64")
+    monkeypatch.setattr(
+        "chroot_distro.commands.build.ensure_handler",
+        lambda _arch: (None, "no QEMU user-mode emulator is installed"),
+    )
+
+    def boom(*_args, **_kwargs):
+        raise ChrootDistroError("reached the build")
+
+    monkeypatch.setattr("chroot_distro.commands.build.BuildLock", boom)
+    with pytest.raises(ChrootDistroError, match="reached the build"):
+        command_build(SimpleNamespace(path=str(build_dir), override_arch="aarch64", quiet=True))
+
+    assert "RUN steps cannot execute" not in capsys.readouterr().err
