@@ -881,26 +881,27 @@ def _add_directory_tree(
                 continue
             child = (*rel_parts, name)
             arc = _make_subpath(dest, "/".join(rel_parts), name).lstrip("/")
+            combined = src_rel + "/" + "/".join(child) if src_rel and src_rel != os.curdir else "/".join(child)
             mode = st.st_mode
             if stat.S_ISDIR(mode):
-                # Not put through .dockerignore: a pattern matching a directory
-                # already matches everything under it (is_ignored counts a match
-                # on any parent), and a `!` line re-including one entry of an
-                # ignored directory only survives if the walk goes in.
-                file_map[arc] = {
-                    "kind": "dir",
-                    "mode": mode_override if mode_override is not None else stat.S_IMODE(mode),
-                    "uid": uid,
-                    "gid": gid,
-                    "mtime": 0,
-                }
+                # An ignored directory is left out of the layer, as Docker leaves
+                # it out, but it is still descended: a `!` line re-including one
+                # of its children only survives if the walk goes in, and the pack
+                # synthesises whichever parent a surviving child needs.
+                if not is_ignored(combined, patterns):
+                    file_map[arc] = {
+                        "kind": "dir",
+                        "mode": mode_override if mode_override is not None else stat.S_IMODE(mode),
+                        "uid": uid,
+                        "gid": gid,
+                        "mtime": 0,
+                    }
                 try:
                     sub = dirfd.opendir_at(fd, name)
                 except OSError:
                     continue
                 levels.push([sub, None, None, child, True])
                 continue
-            combined = src_rel + "/" + "/".join(child) if src_rel and src_rel != os.curdir else "/".join(child)
             if is_ignored(combined, patterns):
                 continue
             if stat.S_ISLNK(mode):
