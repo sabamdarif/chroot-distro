@@ -12,6 +12,13 @@ the command is, and this says what it is being run against. Its own docstring
 lists the inputs and why each one is there, since a missing one is a layer built
 for another platform, or from another context, served as this step's.
 
+`_step_command` is where a here-doc becomes a command, and it draws the three
+lines BuildKit draws: a lone `RUN <<EOF` runs its body as the shell's script, one
+whose body opens with a shebang becomes a file the kernel runs through the
+interpreter it names, and anything else (a redirect into a command, several
+bodies) is handed to the shell reassembled, since the shell is what reads a
+here-doc in the first place.
+
 A step is over when nothing of it is still running, not when the command it
 started exits. Docker gets that from the pid namespace it tears down, and so do
 the CD_USE_NS and CD_USE_ISOLATION paths here, where the holder is pid 1 of a
@@ -24,8 +31,8 @@ the step leads and the descendants that daemonise out of it, which land back on
 this process because it makes itself a child subreaper first.
 
 `_exec_chroot` picks between a max isolation holder, a namespace holder and the
-plain host-namespace bind set; a step with stdin (a here-doc) and a kernel
-without mount-namespace support both fall back to the plain path. Either way the
+plain host-namespace bind set; a step with stdin and a kernel without
+mount-namespace support both fall back to the plain path. Either way the
 chroot happens in the child, as the last thing before the exec so the namespaces
 are already joined, and onto the stage's pinned descriptor where there is one.
 
@@ -45,6 +52,7 @@ import contextlib
 import ctypes
 import functools
 import os
+import re
 import signal
 import time
 import typing
@@ -115,17 +123,7 @@ def do_run(engine: typing.Any, instr: dict[str, typing.Any]) -> None:
     # rejected even when the layer is cached.
     mounts = validate_and_parse_run_flags(instr)
 
-    if instr["exec_form"]:
-        command = list(instr["value"])
-        stdin_input = None
-    else:
-        heredocs = instr.get("heredocs") or []
-        if heredocs:
-            body = "\n".join(hd["body"] for hd in heredocs)
-            command = [*list(stage.shell), body]
-        else:
-            command = [*list(stage.shell), str(instr["value"])]
-        stdin_input = None
+    command, script = _step_command(stage, instr)
 
     extra = _run_extra_inputs(engine, stage, mounts)
     recipe = compute_recipe_hash(stage.parent_layer_digest, instr, extra_inputs=extra)
@@ -150,9 +148,17 @@ def do_run(engine: typing.Any, instr: dict[str, typing.Any]) -> None:
                 stage.parent_layer_digest = hit["layer_digest"]
                 return
 
+    if script is not None:
+        _write_step_script(stage, *script)
+
     engine.log("Indexing rootfs state...")
     before = snapshot(stage.rootfs_dir, rootfs_fd=stage.rootfs_fd)
-    exit_code = _exec_chroot(engine, stage, command, stdin_input, mounts)
+    exit_code = _exec_chroot(engine, stage, command, None, mounts)
+    if script is not None:
+        # Out of the tree, and out of the snapshot that recorded it, so the
+        # script the step ran is in neither this layer nor a later step's.
+        _remove_step_script(stage, script[0])
+        before.pop(script[0], None)
     if exit_code != 0:
         raise BuildError(f"RUN command failed at line {instr['lineno']} with exit code {exit_code}.")
 
@@ -183,6 +189,72 @@ def do_run(engine: typing.Any, instr: dict[str, typing.Any]) -> None:
     stage.layers.append({"digest": digest, "size": size, "diff_id": diff_id})
     stage.parent_layer_digest = digest
     cache_record(recipe, digest, diff_id, size, {})
+
+
+# The whole of a command line that is nothing but a here-doc opener, which is
+# the form that runs its body rather than being handed to the shell as written.
+_BARE_HEREDOC_RE = re.compile(r"""^\d*<<-?\s*(["']?)[A-Za-z_][A-Za-z0-9_]*\1$""")
+
+
+def _step_command(stage: typing.Any, instr: dict[str, typing.Any]) -> tuple[list[str], tuple[str, str] | None]:
+    """What this step runs: (argv, the script to plant first, or None).
+
+    A here-doc is the shell's own syntax, so `RUN cat <<EOF > /f` has to reach
+    the shell with the body after it: reading only the bodies ran them as the
+    command and dropped the redirect. A lone `RUN <<EOF` is the one form whose
+    body *is* the command, and a body opening with a shebang is a script for the
+    interpreter it names rather than for the stage's shell, so it becomes a file
+    to exec (the name carries random bytes because it lands in a tree the step
+    itself can write).
+    """
+    if instr["exec_form"]:
+        return list(instr["value"]), None
+
+    heredocs = instr.get("heredocs") or []
+    value = str(instr["value"])
+    if not heredocs:
+        return [*list(stage.shell), value], None
+
+    if len(heredocs) == 1 and _BARE_HEREDOC_RE.match(value):
+        body = heredocs[0]["body"]
+        if body.startswith("#!"):
+            name = f".chroot-distro-step-{os.urandom(4).hex()}"
+            return ["/" + name], (name, body)
+        return [*list(stage.shell), body], None
+
+    rebuilt = value + "".join("\n" + hd["body"] + hd["tag"] for hd in heredocs)
+    return [*list(stage.shell), rebuilt], None
+
+
+def _write_step_script(stage: typing.Any, name: str, body: str) -> None:
+    """Plant a here-doc script at the top of *stage*'s rootfs, executable.
+
+    Written through the stage's own descriptor with O_EXCL, like every other
+    write into a tree a step has had the run of, and 0755 explicitly because the
+    mode the create asked for went through the umask.
+    """
+    try:
+        rootfs_fd = _rootfs_fd(stage)
+        try:
+            fd, _st = dirfd.open_new_at(rootfs_fd, name, 0o755)
+            try:
+                os.write(fd, body.encode())
+                os.fchmod(fd, 0o755)
+            finally:
+                os.close(fd)
+        finally:
+            os.close(rootfs_fd)
+    except OSError as exc:
+        raise BuildError(f"cannot write the RUN here-doc script into the stage rootfs: {exc}") from exc
+
+
+def _remove_step_script(stage: typing.Any, name: str) -> None:
+    """Take the planted script back out of the rootfs."""
+    rootfs_fd = _rootfs_fd(stage)
+    try:
+        dirfd.unlink_quietly(rootfs_fd, name)
+    finally:
+        os.close(rootfs_fd)
 
 
 def _run_extra_inputs(engine: typing.Any, stage: typing.Any, mounts: list[RunMount]) -> str:
