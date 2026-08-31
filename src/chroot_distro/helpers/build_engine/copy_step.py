@@ -884,8 +884,8 @@ def _add_directory_tree(
             mode = st.st_mode
             if stat.S_ISDIR(mode):
                 # Not put through .dockerignore: a pattern matching a directory
-                # already matches everything under it (dockerignore._match is a
-                # prefix match), and a `!` line re-including one entry of an
+                # already matches everything under it (is_ignored counts a match
+                # on any parent), and a `!` line re-including one entry of an
                 # ignored directory only survives if the walk goes in.
                 file_map[arc] = {
                     "kind": "dir",

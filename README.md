@@ -415,6 +415,8 @@ Build an image from a Dockerfile, like `docker build` but without Docker. `PATH`
 
 `RUN` steps need root because they execute inside the half-built image. `RUN --mount` with `type=bind`, `cache`, `tmpfs`, `secret`, and `ssh` is supported. `RUN --network=none`, `RUN --security`, `COPY --link`, and `COPY --parents` are not, and fail with a clear error.
 
+A `.dockerignore` file in the context excludes files from `COPY` and `ADD`, with Docker's own rules: `*` and `?` stop at a `/`, `**` spans any number of folders, `!` puts a file back, the last matching line decides, and naming a folder covers everything inside it.
+
 `FROM --platform` picks one stage's platform, so `FROM --platform=$BUILDPLATFORM` builds that stage for your own CPU while the image stays the one `--architecture` asked for. An emulator is then only needed for a stage that has a `RUN` *and* targets a foreign CPU. `TARGETPLATFORM`, `TARGETOS`, `TARGETARCH`, `TARGETVARIANT` and the matching `BUILD*` names are set automatically, and like Docker they live outside the stages: a bare `ARG TARGETARCH` inside a stage is what lets a `RUN` there read one.
 
 ```sh
