@@ -402,7 +402,8 @@ Build an image from a Dockerfile, like `docker build` but without Docker. `PATH`
 | `-f`, `--file PATH` | Use a Dockerfile at a different location. Pass `-` to read it from stdin. |
 | `-t`, `--tag REF` | Name the image (like `myapp:1.0`). Can be given more than once. |
 | `--build-arg K=V` | Set a build-time `ARG`. Can be given more than once. |
-| `-a`, `--architecture ARCH` | Build for a different CPU type. Default is your device's CPU. |
+| `-a`, `--architecture ARCH` | Build for a different CPU type. Default is your device's CPU. The one-platform spelling of `--platform`. |
+| `--platform LIST` | Build one image per platform, comma-separated (`linux/amd64,linux/arm64`). Can be given more than once. |
 | `--target STAGE` | Stop at a named stage of a multi-stage build. |
 | `-o`, `--output FILE` | Also save the image as an OCI tarball (`.oci.tar`, `.oci.tar.gz`, `.oci.tar.xz`). Can be given more than once. |
 | `--install-as NAME` | Install the built image as a container right after the build. |
@@ -417,10 +418,19 @@ Build an image from a Dockerfile, like `docker build` but without Docker. `PATH`
 
 A `.dockerignore` file in the context excludes files from `COPY` and `ADD`, with Docker's own rules: `*` and `?` stop at a `/`, `**` spans any number of folders, `!` puts a file back, the last matching line decides, and naming a folder covers everything inside it.
 
-`FROM --platform` picks one stage's platform, so `FROM --platform=$BUILDPLATFORM` builds that stage for your own CPU while the image stays the one `--architecture` asked for. An emulator is then only needed for a stage that has a `RUN` *and* targets a foreign CPU. `TARGETPLATFORM`, `TARGETOS`, `TARGETARCH`, `TARGETVARIANT` and the matching `BUILD*` names are set automatically, and like Docker they live outside the stages: a bare `ARG TARGETARCH` inside a stage is what lets a `RUN` there read one.
+`FROM --platform` picks one stage's platform, so `FROM --platform=$BUILDPLATFORM` builds that stage for your own CPU while the image stays the platform the build targets. An emulator is then only needed for a stage that has a `RUN` *and* targets a foreign CPU. `TARGETPLATFORM`, `TARGETOS`, `TARGETARCH`, `TARGETVARIANT` and the matching `BUILD*` names are set automatically, and like Docker they live outside the stages: a bare `ARG TARGETARCH` inside a stage is what lets a `RUN` there read one.
+
+`--platform linux/amd64,linux/arm64` builds one image per platform, one after another, in the order you asked. Two spellings of one platform (`linux/arm64` and `linux/aarch64`) are one image. `--architecture` names a single platform, so passing both is only allowed when they agree. Each platform is built completely on its own, and if one fails the build stops there and publishes nothing.
+
+Where those images end up:
+
+- `--output` writes one archive holding an OCI image index over every platform, sharing the layers they have in common. `docker load` reads the first platform you asked for out of it, since its own format cannot hold more than one; `chroot-distro install FILE` picks the platform matching your CPU.
+- Every `--tag` records every platform in the local cache, so `chroot-distro install myapp:1.0` installs the one for your CPU and `chroot-distro install myapp:1.0 -a arm64` the other. `chroot-distro push` uploads one of them per run, chosen the same way.
+- `--install-as` installs one container, so it takes the platform your device can run. A set of platforms with nothing your device runs is refused before the build starts.
 
 ```sh
 chroot-distro build -t myapp:1.0 --install-as myapp .
+chroot-distro build -t myapp:1.0 --platform linux/amd64,linux/arm64 -o myapp.oci.tar .
 ```
 
 ### push
@@ -528,8 +538,8 @@ All of these are optional.
 - **GPU is shared by design.** GPU access is automatic whenever supported hardware is detected.
 - **No full init systems.** `systemd` and similar will not work inside containers. Individual long-running programs are fine.
 - **Isolation is partial.** `--isolated` covers mount, PID, UTS, and IPC namespaces. It is not a full container runtime like Docker or Podman.
-- **Builds are not full BuildKit.** `RUN` steps execute under chroot. A few BuildKit features are rejected with an error, and multi-platform images are not produced.
-- **`push` is single-architecture.** Build and push once per CPU type.
+- **Builds are not full BuildKit.** `RUN` steps execute under chroot, and a few BuildKit features are rejected with an error.
+- **`push` is single-architecture.** `build --platform` produces several platforms at once, but each is pushed on its own with `push -a`.
 - **Foreign architectures need the kernel's help.** Emulation goes through `binfmt_misc`, so a kernel built without `CONFIG_BINFMT_MISC` cannot run an image for another CPU. `chroot-distro info` reports it.
 - **Backups capture files only.** Running programs are not saved by `backup`/`restore`.
 - **Registry login is env-var only.** Set `CD_DOCKER_AUTH`. Docker's `config.json` credential helpers are not read.

@@ -285,6 +285,10 @@ _chroot_distro() {
 			_chroot_distro_compgen_words "aarch64 arm i686 riscv64 x86_64" "${cur}"
 			return
 			;;
+		--platform)
+			_chroot_distro_compgen_words "linux/amd64 linux/arm64 linux/arm/v7 linux/386 linux/riscv64" "${cur}"
+			return
+			;;
 		--target)
 			return
 			;;
@@ -296,11 +300,15 @@ _chroot_distro() {
 			_chroot_distro_compgen_words "$(_chroot_distro_get_containers)" "${cur}"
 			return
 			;;
+		--progress)
+			_chroot_distro_compgen_words "auto plain tty rawjson" "${cur}"
+			return
+			;;
 		esac
 		if [[ "${cur}" == -* ]]; then
 			_chroot_distro_compgen_words "-f --file -t --tag --build-arg -a --architecture
-                    --target -o --output --install-as --no-cache
-                    -v --verbose -q --quiet -h --help" "${cur}"
+                    --platform --target -o --output --install-as --secret --ssh
+                    --no-cache --progress -v --verbose -q --quiet -h --help" "${cur}"
 		else
 			_filedir -d
 		fi

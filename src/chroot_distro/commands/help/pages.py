@@ -90,7 +90,18 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
                 "Target CPU architecture (default: host architecture). "
                 f"Accepts {PROGRAM_NAME} names (aarch64, arm, i686, "
                 "riscv64, x86_64) or Docker platform strings "
-                "(linux/arm64, linux/amd64, ...).",
+                "(linux/arm64, linux/amd64, ...). The single-platform "
+                "spelling of --platform; passing both is only allowed "
+                "when they name the same platform.",
+            ),
+            (
+                "--platform [LIST]",
+                "Build one image per platform, as a comma-separated list "
+                "(linux/amd64,linux/arm64). Repeatable. An --output "
+                "archive then carries an OCI image index over all of "
+                "them, every --tag records every platform in the local "
+                "cache, and --install-as installs the one platform this "
+                "host can run. A platform that fails ends the build.",
             ),
             ("--target [STAGE]", "Stop after the named stage of a multi-stage build."),
             (
@@ -127,6 +138,7 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
             f"{PROGRAM_NAME} build -t myapp:1.0 --output myapp.oci.tar.gz .",
             f"{PROGRAM_NAME} build -t myapp --install-as myapp .",
             f"{PROGRAM_NAME} build -f Dockerfile.arm --architecture aarch64 .",
+            f"{PROGRAM_NAME} build -t myapp:1.0 --platform linux/amd64,linux/arm64 -o myapp.oci.tar .",
         ],
         "footer": [
             {
@@ -168,9 +180,11 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
                 "title": "LIMITATIONS",
                 "intro": (
                     "RUN steps run under chroot, not a fully isolated container "
-                    "runtime. BuildKit-only features (RUN --mount, --network, "
-                    "--security; COPY --link, --parents) are rejected with an "
-                    "error. Multi-platform manifest lists are not produced."
+                    "runtime. BuildKit-only features (RUN --network, "
+                    "RUN --security; COPY --link, --parents) are rejected with "
+                    "an error. A multi-platform image index is written to an "
+                    "--output archive only; 'push' uploads one platform at a "
+                    "time, chosen with its own --architecture."
                 ),
             },
         ],

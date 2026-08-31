@@ -398,6 +398,9 @@ complete -c chroot-distro -f -n '__fish_seen_subcommand_from build' \
     -s a -l architecture -r -d 'Target CPU architecture' \
     -a 'aarch64\tAArch64 arm\tARM(32-bit) i686\tx86(32-bit) riscv64\tRISC-V x86_64\tx86_64'
 complete -c chroot-distro -f -n '__fish_seen_subcommand_from build' \
+    -l platform       -r -d 'Build one image per platform (comma-separated, repeatable)' \
+    -a 'linux/amd64 linux/arm64 linux/arm/v7 linux/386 linux/riscv64'
+complete -c chroot-distro -f -n '__fish_seen_subcommand_from build' \
     -l target          -r -d 'Stop after this named build stage'
 complete -c chroot-distro -n '__fish_seen_subcommand_from build' \
     -s o -l output     -r -d 'Write OCI tarball to FILE (repeatable)'
@@ -405,7 +408,14 @@ complete -c chroot-distro -f -n '__fish_seen_subcommand_from build' \
     -l install-as      -r -d 'Install image as a local container after build' \
     -a '(__chroot_distro_containers)'
 complete -c chroot-distro -f -n '__fish_seen_subcommand_from build' \
+    -l secret          -r -d 'Expose a secret to RUN --mount=type=secret (repeatable)'
+complete -c chroot-distro -f -n '__fish_seen_subcommand_from build' \
+    -l ssh                -d 'Expose an SSH agent socket to RUN --mount=type=ssh (repeatable)'
+complete -c chroot-distro -f -n '__fish_seen_subcommand_from build' \
     -l no-cache           -d 'Disable per-instruction build cache'
+complete -c chroot-distro -f -n '__fish_seen_subcommand_from build' \
+    -l progress        -r -d 'Build output style' \
+    -a 'auto plain tty rawjson'
 complete -c chroot-distro -f -n '__fish_seen_subcommand_from build' \
     -s v -l verbose       -d 'Echo each instruction and stream RUN output'
 complete -c chroot-distro -f -n '__fish_seen_subcommand_from build' \
