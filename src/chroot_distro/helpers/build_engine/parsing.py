@@ -102,6 +102,44 @@ def to_argv(instr: dict[str, typing.Any], default_shell: list[str]) -> list[str]
     return [*list(default_shell), raw]
 
 
+# The units a Go duration is written in, which is the spelling HEALTHCHECK's
+# options use and the nanoseconds an image config stores them as.
+_DURATION_UNITS = {
+    "ns": 1,
+    "us": 1_000,
+    "µs": 1_000,
+    "μs": 1_000,
+    "ms": 1_000_000,
+    "s": 1_000_000_000,
+    "m": 60_000_000_000,
+    "h": 3_600_000_000_000,
+}
+_DURATION_PART_RE = re.compile(r"(\d+(?:\.\d*)?|\.\d+)(ns|us|µs|μs|ms|s|m|h)")
+
+
+def parse_duration_ns(what: str, value: str, lineno: int) -> int:
+    """A duration like `30s`, `1m30s` or `1.5h` as whole nanoseconds.
+
+    Go's spelling, because HEALTHCHECK's options are written that way and the
+    image config stores them as nanoseconds; a bare `0` is the one value that
+    needs no unit, since every consumer reads a zero as "inherit".
+    """
+    text = value.strip()
+    if text == "0":
+        return 0
+    total = 0.0
+    pos = 0
+    while pos < len(text):
+        m = _DURATION_PART_RE.match(text, pos)
+        if not m:
+            break
+        total += float(m.group(1)) * _DURATION_UNITS[m.group(2)]
+        pos = m.end()
+    if not text or pos != len(text):
+        raise BuildError(f"{what} '{value}' is not a duration like '30s' or '1m30s' (line {lineno}).")
+    return int(total)
+
+
 def looks_like_url(s: str) -> bool:
     return s.startswith(("http://", "https://"))
 

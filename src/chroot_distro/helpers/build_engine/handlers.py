@@ -24,7 +24,6 @@ wanting both puts CMD after ENTRYPOINT.
 
 import contextlib
 import json
-import logging
 import os
 import typing
 
@@ -34,6 +33,7 @@ from chroot_distro.helpers.build_engine.constants import PREDEFINED_ARGS, is_hos
 from chroot_distro.helpers.build_engine.copy_step import do_add, do_copy
 from chroot_distro.helpers.build_engine.errors import BuildError
 from chroot_distro.helpers.build_engine.parsing import (
+    parse_duration_ns,
     parse_kv_list,
     split_args,
     split_operands,
@@ -45,8 +45,6 @@ from chroot_distro.helpers.docker import layer_cache_path
 from chroot_distro.helpers.layer_diff import write_files_layer
 from chroot_distro.helpers.tar_extract import safe_resolve_parts
 from chroot_distro.message import warn
-
-log = logging.getLogger(__name__)
 
 
 def do_arg(engine: typing.Any, instr: dict[str, typing.Any]) -> None:
@@ -350,34 +348,84 @@ def do_shell(engine: typing.Any, instr: dict[str, typing.Any]) -> None:
     cfg["Shell"] = list(instr["value"])
 
 
-def do_healthcheck(engine: typing.Any, instr: dict[str, typing.Any]) -> None:
-    """HEALTHCHECK [NONE|CMD ...]: record healthcheck cmd in image config.
+# A HEALTHCHECK option to the image-config field it is stored in. Every one is a
+# duration; --retries is the odd one out and is handled on its own.
+_HEALTHCHECK_INTERVALS = {
+    "interval": "Interval",
+    "timeout": "Timeout",
+    "start-period": "StartPeriod",
+    "start-interval": "StartInterval",
+}
 
-    Accepted forms are HEALTHCHECK NONE (clears any inherited check)
-    or HEALTHCHECK [opts] CMD ...; opts like --interval are parsed
-    but not enforced under chroot-distro.
+# What a duration below this means to Docker: nothing a check can be run at.
+_MIN_HEALTHCHECK_NS = 1_000_000
+
+
+def _healthcheck_test(rest: str, lineno: int) -> list[str]:
+    """The Test array for a `HEALTHCHECK CMD`: exec form as argv, shell form via a shell.
+
+    A JSON array of strings is the command itself; anything else is text for a
+    shell, including a JSON array holding something that is not a string, which
+    must not reach the config as one.
+    """
+    if not rest:
+        raise BuildError(f"HEALTHCHECK CMD needs a command at line {lineno}.")
+    with contextlib.suppress(json.JSONDecodeError, ValueError):
+        parsed = json.loads(rest)
+        if isinstance(parsed, list) and parsed and all(isinstance(x, str) for x in parsed):
+            return ["CMD", *parsed]
+    return ["CMD-SHELL", rest]
+
+
+def _healthcheck_retries(value: str, lineno: int) -> int:
+    if not value.isdigit():
+        raise BuildError(f"HEALTHCHECK --retries '{value}' is not a count (line {lineno}).")
+    return int(value)
+
+
+def do_healthcheck(engine: typing.Any, instr: dict[str, typing.Any]) -> None:
+    """HEALTHCHECK [OPTIONS] CMD ... | HEALTHCHECK NONE: record the check.
+
+    The options are recorded, not enforced: nothing here runs a check, but the
+    image this build publishes tells a runtime that does how to run one, and
+    dropping them would publish an image the Dockerfile does not describe. A
+    duration is stored as whole nanoseconds, and a zero is left out, which is how
+    the config spells "inherit".
     """
     value = str(instr["value"]).strip()
+    flags = instr.get("flags") or {}
+    lineno = instr["lineno"]
     cfg = engine.current.image_config.setdefault("config", {})
-    upper = value.split(None, 1)[0].upper() if value else ""
+    head, _, rest = value.partition(" ")
+    upper = head.upper()
+
+    for flag in flags:
+        if flag not in _HEALTHCHECK_INTERVALS and flag != "retries":
+            raise BuildError(f"HEALTHCHECK --{flag} is not supported (line {lineno}); refusing to silently ignore it.")
+
     if upper == "NONE":
+        if rest.strip() or flags:
+            raise BuildError(f"HEALTHCHECK NONE takes no arguments or options (line {lineno}).")
         cfg["Healthcheck"] = {"Test": ["NONE"]}
         return
-    # We parse the inner CMD only; HEALTHCHECK flags like --interval
-    # are accepted but not enforced under chroot-distro.
-    if not upper.startswith("CMD"):
-        raise BuildError(f"HEALTHCHECK must be 'NONE' or 'CMD ...' at line {instr['lineno']}.")
-    rest = value[len("CMD") :].strip()
-    argv = None
-    try:
-        parsed = json.loads(rest)
-        if isinstance(parsed, list):
-            argv = ["CMD", *list(parsed)]
-    except (json.JSONDecodeError, ValueError) as exc:
-        log.debug("HEALTHCHECK not JSON-formatted, fallback to CMD-SHELL: %s", exc)
-    if argv is None:
-        argv = ["CMD-SHELL", rest]
-    cfg["Healthcheck"] = {"Test": argv}
+    if upper != "CMD":
+        raise BuildError(f"HEALTHCHECK must be 'NONE' or 'CMD ...' at line {lineno}.")
+
+    check: dict[str, typing.Any] = {"Test": _healthcheck_test(rest.strip(), lineno)}
+    for flag, field in _HEALTHCHECK_INTERVALS.items():
+        if flag not in flags:
+            continue
+        nanoseconds = parse_duration_ns(f"HEALTHCHECK --{flag}", str(flags[flag]), lineno)
+        if not nanoseconds:
+            continue
+        if nanoseconds < _MIN_HEALTHCHECK_NS:
+            raise BuildError(f"HEALTHCHECK --{flag} cannot be less than 1ms (line {lineno}).")
+        check[field] = nanoseconds
+    if "retries" in flags:
+        retries = _healthcheck_retries(str(flags["retries"]), lineno)
+        if retries:
+            check["Retries"] = retries
+    cfg["Healthcheck"] = check
 
 
 def do_onbuild(engine: typing.Any, instr: dict[str, typing.Any]) -> None:

@@ -43,6 +43,30 @@ def test_split_args_quoted_value():
     assert parsing.split_args("FOO='https://example.com/file.zip'") == [("FOO", "https://example.com/file.zip")]
 
 
+# ── parsing.parse_duration_ns ─────────────────────────────────────────────────
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("0", 0),
+        ("30s", 30_000_000_000),
+        ("1m30s", 90_000_000_000),
+        ("1.5h", 5_400_000_000_000),
+        ("500ms", 500_000_000),
+        ("250us", 250_000),
+        ("100ns", 100),
+        (" 5m ", 300_000_000_000),
+    ],
+)
+def test_parse_duration_ns(value, expected):
+    assert parsing.parse_duration_ns("--interval", value, 3) == expected
+
+
+@pytest.mark.parametrize("value", ["", "30", "s", "30sec", "-5s", "1m30", "abc"])
+def test_parse_duration_ns_rejects(value):
+    with pytest.raises(BuildError, match="not a duration"):
+        parsing.parse_duration_ns("--interval", value, 3)
+
+
 # ── parsing.parse_kv_list ─────────────────────────────────────────────────────
 def test_parse_kv_list_equals_form():
     assert parsing.parse_kv_list("A=1 B=2") == [("A", "1"), ("B", "2")]
