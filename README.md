@@ -414,9 +414,39 @@ Build an image from a Dockerfile, like `docker build` but without Docker. `PATH`
 | `-v`, `--verbose` | Show each instruction and full `RUN` output. |
 | `-q`, `--quiet` | Only show errors. |
 
-`RUN` steps need root because they execute inside the half-built image. `RUN --mount` with `type=bind`, `cache`, `tmpfs`, `secret`, and `ssh` is supported. `RUN --network=none`, `RUN --security`, `COPY --link`, and `COPY --parents` are not, and fail with a clear error.
+`RUN` steps need root because they execute inside the half-built image.
+
+#### Dockerfile support
+
+Every instruction is supported: `ADD`, `ARG`, `CMD`, `COPY`, `ENTRYPOINT`, `ENV`, `EXPOSE`, `FROM`, `HEALTHCHECK`, `LABEL`, `MAINTAINER`, `ONBUILD`, `RUN`, `SHELL`, `STOPSIGNAL`, `USER`, `VOLUME`, `WORKDIR`. So are multi-stage builds with named stages, `ARG` and `ENV` expansion, the `# escape` and `# check` parser directives, and here-docs.
+
+| Feature | What it does here |
+|---|---|
+| `RUN --mount` | `type=bind`, `cache`, `tmpfs`, `secret` and `ssh`. Every field is variable-expanded, so `target=$DIR` works. |
+| `RUN --network` | `host` and `default`. The container always shares your network. |
+| `COPY` / `ADD` flags | `--from`, `--chown`, `--chmod`, and `--parents` on `COPY`. |
+| `ADD` sources | Files, folders, `http://` and `https://` URLs, and tar archives, which are unpacked as Docker unpacks them. |
+| Here-docs | On `RUN`, `COPY` and `ADD`. A `RUN` body starting with `#!` runs as a script under the interpreter it names; a `COPY <<EOF /etc/conf` writes the body to that file. |
+| `ONBUILD` | Recorded for whoever builds `FROM` your image. Triggers fire once, for the next build, and are not passed on again. |
+| `HEALTHCHECK` | Recorded in the image, options and all, for a runtime that runs checks. chroot-distro never runs one. |
+| `SHELL` | Sets what a shell-form `RUN`, `CMD` and `ENTRYPOINT` are wrapped in. JSON form only, like Docker. |
+
+These fail with a clear error rather than being ignored, because each one would otherwise build something other than what the Dockerfile says:
+
+| Not supported | Reason |
+|---|---|
+| `RUN --network=none` | Needs network namespaces, which chroot-distro does not provide. |
+| `RUN --security` | Comes after the isolation work. |
+| `COPY --link` | A BuildKit-only way of rebasing layers. |
+| `COPY --checksum`, `ADD --keep-git-dir` | Not implemented. |
+| `ADD` from a git repository | Not implemented. Clone it yourself and `COPY` the result. |
+| Cache import and export, provenance, SBOM, named and remote contexts | Not implemented. |
+
+A `# syntax=` line naming anything but `docker/dockerfile` asks for a frontend program that this cannot fetch or run. The build warns and reads the file as an ordinary Dockerfile.
 
 A `.dockerignore` file in the context excludes files from `COPY` and `ADD`, with Docker's own rules: `*` and `?` stop at a `/`, `**` spans any number of folders, `!` puts a file back, the last matching line decides, and naming a folder covers everything inside it.
+
+#### Platforms and output
 
 `FROM --platform` picks one stage's platform, so `FROM --platform=$BUILDPLATFORM` builds that stage for your own CPU while the image stays the platform the build targets. An emulator is then only needed for a stage that has a `RUN` *and* targets a foreign CPU. `TARGETPLATFORM`, `TARGETOS`, `TARGETARCH`, `TARGETVARIANT` and the matching `BUILD*` names are set automatically, and like Docker they live outside the stages: a bare `ARG TARGETARCH` inside a stage is what lets a `RUN` there read one.
 
