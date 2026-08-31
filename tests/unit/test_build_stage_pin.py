@@ -26,6 +26,7 @@ if sys.version_info >= (3, 14):
 else:
     from backports.zstd import tarfile
 
+from chroot_distro.arch import Platform
 from chroot_distro.helpers import layer_diff
 from chroot_distro.helpers.build_engine import copy_step, handlers, run_step
 from chroot_distro.helpers.build_engine.stage import Stage
@@ -279,7 +280,12 @@ def test_a_copy_from_image_is_pulled_into_the_scratch_descriptor(scratch, monkey
             os.open("pulled", os.O_CREAT | os.O_WRONLY, dir_fd=rootfs_fd), "wb"
         ).close(),
     )
-    engine = SimpleNamespace(tmp_root=str(root), tmp_root_fd=fd, quiet=True, target_arch_pd="x86_64")
+    engine = SimpleNamespace(
+        tmp_root=str(root),
+        tmp_root_fd=fd,
+        quiet=True,
+        target_platform=Platform("linux", "amd64"),
+    )
     moved = _repoint(root, decoy)
 
     path, pulled_fd = copy_step._pull_throwaway_image(engine, "alpine:latest")

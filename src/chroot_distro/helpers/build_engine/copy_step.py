@@ -470,6 +470,11 @@ def _pull_throwaway_image(engine: typing.Any, image_ref: str) -> tuple[str, int]
     directory is created off the scratch root, and the emptiness check, the pull
     and every read the instruction then makes go through the descriptor: an
     image this build has no say over is what lands in there.
+
+    The platform is the build's target and not the platform of the stage doing
+    the copying, which is how Docker resolves an external `--from` too: a stage
+    running on the build platform to assemble a target rootfs has to receive the
+    target's files, and a stage that wants native ones names a FROM of its own.
     """
     slot = hashlib.sha256(image_ref.encode()).hexdigest()[:16]
     rootfs, rootfs_fd = _open_scratch_dir(engine, "copyfrom-" + slot)
@@ -479,7 +484,7 @@ def _pull_throwaway_image(engine: typing.Any, image_ref: str) -> tuple[str, int]
         if not engine.quiet:
             log_info(f"COPY --from='{image_ref}': fetching external image...")
         try:
-            pull_image(image_ref, rootfs_fd, engine.target_arch_pd)
+            pull_image(image_ref, rootfs_fd, engine.target_platform.to_arch())
         except (OSError, RuntimeError) as exc:
             raise BuildError(f"COPY --from={image_ref}: {exc}") from exc
     except BaseException:
