@@ -17,7 +17,9 @@ import tarfile
 import pytest
 
 from chroot_distro import atomic
+from chroot_distro.arch import Platform
 from chroot_distro.helpers import oci_writer
+from chroot_distro.helpers.build_engine import PlatformResult
 
 IMAGE_CONFIG = {"architecture": "amd64", "os": "linux", "config": {"Cmd": ["/bin/sh"]}}
 
@@ -28,7 +30,13 @@ def _write(out_path):
         "config": {"digest": "sha256:" + "0" * 64, "size": 0},
         "layers": [],
     }
-    oci_writer.write_oci_archive(out_path, manifest, IMAGE_CONFIG, "test:latest")
+    result = PlatformResult(
+        platform=Platform("linux", "amd64"),
+        manifest=manifest,
+        image_config=IMAGE_CONFIG,
+        layers=[],
+    )
+    oci_writer.write_oci_archive(out_path, [result], "test:latest")
 
 
 @pytest.fixture

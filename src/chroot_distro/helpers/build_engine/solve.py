@@ -153,7 +153,7 @@ def solve_platform(request: BuildRequest) -> PlatformResult:
         manifest, image_config = build_manifest_and_config(
             stage.image_config,
             stage.layers,
-            request.target_platform.architecture,
+            request.target_platform,
         )
         return PlatformResult(
             platform=request.target_platform,

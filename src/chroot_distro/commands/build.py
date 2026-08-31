@@ -300,7 +300,7 @@ def command_build(args: typing.Any) -> None:
                 try:
                     if not quiet:
                         log_info(f"Writing OCI archive to '{out_abs}'...")
-                    write_oci_archive(out_abs, result.manifest, result.image_config, primary_tag)
+                    write_oci_archive(out_abs, [result], primary_tag)
                 except (OSError, RuntimeError) as exc:
                     log_error(f"Cannot write '{out_file}': {exc}")
                     sys.exit(1)

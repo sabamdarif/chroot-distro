@@ -1,20 +1,33 @@
 # SPDX-License-Identifier: GPL-3.0-only
 # Copyright (C) 2025-2026 Md Arif
-"""Turn a finished build into the documents a registry, `docker load`, and `install` read.
+"""Turn finished solves into the documents a registry, `docker load`, and `install` read.
 
-Three outputs, one source. `build_manifest_and_config` hashes the config with
-`canonical_json` and puts that digest in the manifest, so the descriptor describes the
-exact bytes that will be shipped; `history` comes from the engine verbatim, since it
-already appended one entry per dispatched instruction. `store_in_cache` writes under the
-same key `helpers/docker/cache.py` computes, which is the whole reason a `build`
-followed by an `install` of the same reference needs no network. `write_oci_archive`
-packages the layout as a tarball.
+One config and one manifest per platform, and one index over all of them.
+`build_manifest_and_config` is the per-platform half: it takes the whole platform
+rather than an architecture name, so `os`, `architecture` and `variant` all come from
+one value and a base image's own variant cannot outlive the platform it was adopted
+for. It hashes the config with `canonical_json` and puts that digest in the manifest,
+so the descriptor describes the exact bytes that will be shipped; `history` comes from
+the engine verbatim, since it already appended one entry per dispatched instruction.
+`store_in_cache` writes under the same key `helpers/docker/cache.py` computes, which is
+the whole reason a `build` followed by an `install` of the same reference needs no
+network.
+
+`write_oci_archive` packages a whole matrix: one manifest and one config blob per
+result, one `index.json` descriptor per result carrying the platform it was built for,
+and each layer blob once however many platforms name it. A result whose config answers
+for another platform than its descriptor claims is refused rather than published, since
+a registry hands a puller the image whose descriptor matched and nothing downstream
+checks the two against each other.
 
 The archive carries a Docker-legacy `manifest.json` beside the OCI layout, because
-`docker load` given only the layout falls back to a per-directory legacy import loop
-that misreads it. `oci-layout` is the first member so this program's own format probe
-recognises the archive on the entry it sees first. Every entry is written with mode
-0644, mtime 0 and uid/gid 0, so the same image packages to the same bytes.
+`docker load` without one either refuses the archive or falls back to a legacy import
+loop that misreads the layout. That format describes a single image, so for a matrix it
+describes the first platform asked for and `index.json` answers for the rest.
+`oci-layout` is the first member so this program's own format probe recognises the
+archive on the entry it sees first, the blobs follow in name order, and every entry is
+written with mode 0644, mtime 0 and uid/gid 0, so the same images package to the same
+bytes.
 
 A manifest whose config digest disagrees with the bytes about to be written is corrected
 rather than published inconsistent, and a layer blob missing from the cache raises
@@ -47,29 +60,40 @@ from chroot_distro.helpers.docker.media import (
     canonical_json,
 )
 
+if typing.TYPE_CHECKING:
+    from chroot_distro.helpers.build_engine.solve import PlatformResult
+
 
 def build_manifest_and_config(
     image_config: dict[str, typing.Any],
     layers: list[dict[str, typing.Any]],
-    arch_name: str,
+    platform: Platform,
 ) -> tuple[dict[str, typing.Any], dict[str, typing.Any]]:
-    """Assemble the OCI image manifest and image config blobs.
+    """Assemble one platform's OCI image manifest and image config blobs.
 
     `image_config` is the in-progress config dict managed by the
     build engine: its `history` array is taken verbatim (the engine
     appends one entry per dispatched instruction so the count of
     non-empty-layer entries already matches len(layers)). `layers` is
     the ordered list of {"digest", "size", "diff_id"} entries for
-    this image. `arch_name` is the Docker arch name (e.g. "arm64",
-    "amd64", "386").
+    this image.
 
-    Returns (manifest_dict, image_config_dict). The image_config has
-    `architecture`, `os`, and `rootfs.diff_ids` populated and carries
-    whatever `history` the engine produced.
+    *platform* is what the image answers for, and `os`, `architecture` and
+    `variant` are all written from it: a base image adopted from another platform
+    brought its own along, and one left standing would describe the built image as
+    something it is not.
+
+    Returns (manifest_dict, image_config_dict). The image_config has the platform
+    and `rootfs.diff_ids` populated and carries whatever `history` the engine
+    produced.
     """
     config = dict(image_config)
-    config["architecture"] = arch_name
-    config["os"] = config.get("os", "linux")
+    config["os"] = platform.os
+    config["architecture"] = platform.architecture
+    if platform.variant:
+        config["variant"] = platform.variant
+    else:
+        config.pop("variant", None)
     config["rootfs"] = {
         "type": "layers",
         "diff_ids": [layer["diff_id"] for layer in layers],
@@ -158,20 +182,20 @@ def _detect_tar_mode(path: str) -> str:
 
 def write_oci_archive(
     out_path: str,
-    manifest: dict[str, typing.Any],
-    image_config: dict[str, typing.Any],
+    results: typing.Sequence["PlatformResult"],
     image_ref: str,
 ) -> None:
-    """Write an OCI image-layout tarball.
+    """Write an OCI image-layout tarball describing every result in *results*.
 
-    The layer blobs are expected to live in LAYER_CACHE_DIR under their
-    standard digest-named filenames (the build engine writes them
-    there). The function copies the blob bytes into the archive.
+    One image manifest and one image config blob per result, and one `index.json`
+    whose descriptors name the platform each was built for, in the order the
+    results were asked for. The layer blobs are expected to live in
+    LAYER_CACHE_DIR under their standard digest-named filenames (the build engine
+    writes them there); this function copies the blob bytes into the archive, once
+    per digest, so two platforms that produced the same bytes name one blob.
 
-    A Docker-legacy `manifest.json` is also written at the archive
-    root so the tarball is consumable by `docker load`, which falls
-    back to a buggy 'per-directory legacy import' loop when only the
-    OCI layout is present.
+    A Docker-legacy `manifest.json` is also written at the archive root, for the
+    reason and with the one-platform limit the module docstring gives.
 
     The archive is packed into the descriptor `atomic_write` staged rather than
     into a second open of the temporary's name. The name is one this program
@@ -181,38 +205,54 @@ def write_oci_archive(
     unlinked and replaced with a symlink, which the rename then publishes over
     whatever it pointed at.
     """
-    mode = _detect_tar_mode(out_path)
-    config_bytes = canonical_json(image_config)
-    manifest_bytes = canonical_json(manifest)
-    config_digest_hex = hashlib.sha256(config_bytes).hexdigest()
-    manifest_digest_hex = hashlib.sha256(manifest_bytes).hexdigest()
+    if not results:
+        raise RuntimeError("No platform result to package; cannot write OCI archive.")
 
-    # Manifest's config.digest must match what we just hashed.
-    if manifest["config"]["digest"] != "sha256:" + config_digest_hex:
-        manifest = dict(manifest)
-        manifest["config"] = dict(manifest["config"])
-        manifest["config"]["digest"] = "sha256:" + config_digest_hex
-        manifest["config"]["size"] = len(config_bytes)
+    mode = _detect_tar_mode(out_path)
+    documents: dict[str, bytes] = {}
+    layer_blobs: dict[str, str] = {}
+    descriptors: list[dict[str, typing.Any]] = []
+    docker_manifest: list[dict[str, typing.Any]] = []
+
+    for position, result in enumerate(results):
+        _check_config_platform(result.platform, result.image_config)
+        manifest, config_bytes, config_digest_hex = _consistent_manifest(result)
         manifest_bytes = canonical_json(manifest)
         manifest_digest_hex = hashlib.sha256(manifest_bytes).hexdigest()
-
-    index = {
-        "schemaVersion": 2,
-        "mediaType": OCI_INDEX_MEDIA,
-        "manifests": [
+        documents[f"blobs/sha256/{manifest_digest_hex}"] = manifest_bytes
+        documents[f"blobs/sha256/{config_digest_hex}"] = config_bytes
+        for layer in manifest["layers"]:
+            hex_digest = layer["digest"].split(":", 1)[1]
+            src = layer_cache_path(layer["digest"])
+            if not os.path.isfile(src):
+                raise RuntimeError(
+                    f"Layer blob {layer['digest']} is missing from the cache; cannot package OCI archive."
+                )
+            layer_blobs[f"blobs/sha256/{hex_digest}"] = src
+        descriptors.append(
             {
                 "mediaType": OCI_MANIFEST_MEDIA,
                 "digest": "sha256:" + manifest_digest_hex,
                 "size": len(manifest_bytes),
+                "platform": _index_platform(result.platform),
                 "annotations": {
                     "org.opencontainers.image.ref.name": image_ref,
                 },
             }
-        ],
+        )
+        # The legacy format holds one image, and the first platform asked for is
+        # the one a caller stated a preference for.
+        if position == 0:
+            docker_manifest = _build_docker_manifest(manifest, config_digest_hex, image_ref)
+
+    index = {
+        "schemaVersion": 2,
+        "mediaType": OCI_INDEX_MEDIA,
+        "manifests": descriptors,
     }
     index_bytes = canonical_json(index)
     oci_layout_bytes = canonical_json({"imageLayoutVersion": "1.0.0"})
-    docker_manifest_bytes = canonical_json(_build_docker_manifest(manifest, config_digest_hex, image_ref))
+    docker_manifest_bytes = canonical_json(docker_manifest)
 
     out_abs = os.path.abspath(out_path)
     with (
@@ -224,24 +264,58 @@ def write_oci_archive(
         _add_bytes(tf, "oci-layout", oci_layout_bytes)
         _add_bytes(tf, "index.json", index_bytes)
         _add_bytes(tf, "manifest.json", docker_manifest_bytes)
-        _add_bytes(
-            tf,
-            f"blobs/sha256/{manifest_digest_hex}",
-            manifest_bytes,
-        )
-        _add_bytes(
-            tf,
-            f"blobs/sha256/{config_digest_hex}",
-            config_bytes,
-        )
-        for layer in manifest["layers"]:
-            hex_digest = layer["digest"].split(":", 1)[1]
-            src = layer_cache_path(layer["digest"])
-            if not os.path.isfile(src):
-                raise RuntimeError(
-                    f"Layer blob {layer['digest']} is missing from the cache; cannot package OCI archive."
-                )
-            _add_file(tf, src, f"blobs/sha256/{hex_digest}")
+        for arcname, document in sorted(documents.items()):
+            _add_bytes(tf, arcname, document)
+        for arcname, src in sorted(layer_blobs.items()):
+            _add_file(tf, src, arcname)
+
+
+def _consistent_manifest(result: "PlatformResult") -> tuple[dict[str, typing.Any], bytes, str]:
+    """Return (manifest, config bytes, config digest hex) that agree with each other.
+
+    A manifest whose config descriptor does not address the config bytes about to
+    be written is corrected here, since that digest is what a consumer verifies
+    the blob it reads against. The result is left alone: it is the caller's, and a
+    second output would correct it again.
+    """
+    config_bytes = canonical_json(result.image_config)
+    config_digest_hex = hashlib.sha256(config_bytes).hexdigest()
+    manifest = result.manifest
+    if manifest["config"]["digest"] != "sha256:" + config_digest_hex:
+        manifest = dict(manifest)
+        manifest["config"] = dict(manifest["config"])
+        manifest["config"]["digest"] = "sha256:" + config_digest_hex
+        manifest["config"]["size"] = len(config_bytes)
+    return manifest, config_bytes, config_digest_hex
+
+
+def _index_platform(platform: Platform) -> dict[str, str]:
+    """The `platform` object of an index descriptor: a variant only where there is one."""
+    field = {"architecture": platform.architecture, "os": platform.os}
+    if platform.variant:
+        field["variant"] = platform.variant
+    return field
+
+
+def _check_config_platform(platform: Platform, image_config: dict[str, typing.Any]) -> None:
+    """Refuse an image config that answers for a platform other than *platform*.
+
+    The descriptor written for it says what its manifest is for, and that is what
+    a registry matches a puller against, so a config disagreeing with it hands the
+    wrong image to whoever asked for this platform. Only what the config states is
+    compared: a field it leaves out claims nothing.
+    """
+    for field, expected in (
+        ("os", platform.os),
+        ("architecture", platform.architecture),
+        ("variant", platform.variant),
+    ):
+        declared = image_config.get(field, expected)
+        if declared != expected:
+            raise RuntimeError(
+                f"Image config declares {field} '{declared}', not the '{platform}' its "
+                f"descriptor describes; cannot package OCI archive."
+            )
 
 
 def _build_docker_manifest(
@@ -249,10 +323,12 @@ def _build_docker_manifest(
     config_digest_hex: str,
     image_ref: str,
 ) -> list[dict[str, typing.Any]]:
-    """Build the Docker-legacy `manifest.json` content.
+    """Build the Docker-legacy `manifest.json` content for one image.
 
     Used by `docker load` to find the image's config blob and ordered
-    layer list inside the archive. Paths are tarball-relative.
+    layer list inside the archive. Paths are tarball-relative. The format has no
+    platform of its own and no way to name a second image for the same tag, which
+    is why one platform's manifest reaches it and the others do not.
     """
     layer_paths = []
     layer_sources = {}
