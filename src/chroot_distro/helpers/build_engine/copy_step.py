@@ -23,6 +23,9 @@ the tree, then hands back descriptors walked down O_NOFOLLOW rather than the pat
 it resolved. The last component is left unresolved deliberately, because COPY
 copies a symlink as a symlink instead of reading through it.
 
+A fourth kind reaches no tree at all: a `<<TAG` operand is an inline here-doc
+whose body is the file's content and whose tag is its name.
+
 The write side re-walks for the same reason, and also leaves its last component
 alone, so every kind drops a link standing at the name before writing: an ADD'd
 tar shipping `etc -> <host dir>` and then an `etc/passwd` member is the case that
@@ -36,6 +39,7 @@ the instruction is meant to produce.
 import contextlib
 import hashlib
 import http.client
+import io
 import os
 import re
 import shutil
@@ -71,6 +75,7 @@ from chroot_distro.helpers.docker import (
     layer_cache_path,
     pull_image,
 )
+from chroot_distro.helpers.dockerfile import expand_vars
 from chroot_distro.helpers.layer_diff import MapSources, write_files_layer
 from chroot_distro.helpers.tar_extract import safe_resolve_parts
 from chroot_distro.message import log_info
@@ -206,12 +211,13 @@ def _open_scratch_dir(engine: typing.Any, name: str) -> tuple[str, int]:
 
 
 class _Spool:
-    """The directory ADD stages content it did not find as a file in.
+    """The directory an instruction stages content it did not find as a file in.
 
-    A URL's body and each regular member of an auto-extracted archive are
-    written here and then read twice more, once to materialise them into the
-    rootfs and once to pack them into the layer. Both of those reads go through
-    the descriptor this holds, so the only name lookup is the create.
+    A URL's body, each regular member of an auto-extracted archive and a
+    here-doc's body are written here and then read twice more, once to
+    materialise them into the rootfs and once to pack them into the layer. Both
+    of those reads go through the descriptor this holds, so the only name lookup
+    is the create.
     """
 
     __slots__ = ("_seq", "fd", "path")
@@ -353,6 +359,10 @@ def _do_copy_or_add(
     sources = tokens[:-1]
     dest = tokens[-1]
 
+    heredocs = {hd["tag"]: hd for hd in instr.get("heredocs") or []}
+    if _heredoc_tag(dest) is not None:
+        raise BuildError(f"{instr['name']} cannot take a here-doc as its destination (line {instr['lineno']}).")
+
     allowed = {"chown", "chmod", "from"}
     if instr["name"] == "COPY":
         allowed.add("parents")
@@ -386,15 +396,16 @@ def _do_copy_or_add(
             from_rootfs_fd = ref_stage.rootfs_fd
 
     resolved = []
-    if from_rootfs is None:
-        for src in sources:
-            if allow_url and looks_like_url(src):
-                resolved.append(("url", src))
-            else:
-                resolved.append(("ctx", src))
-    else:
-        for src in sources:
+    for src in sources:
+        tag = _heredoc_tag(src)
+        if tag is not None and tag in heredocs:
+            resolved.append(("heredoc", tag))
+        elif from_rootfs is not None:
             resolved.append(("rootfs", src))
+        elif allow_url and looks_like_url(src):
+            resolved.append(("url", src))
+        else:
+            resolved.append(("ctx", src))
 
     is_dir_dest = dest.endswith("/") or len(sources) > 1
     if not dest.startswith("/"):
@@ -404,12 +415,15 @@ def _do_copy_or_add(
     mode_override = int(chmod, 8) if chmod and re.match(r"^[0-7]+$", chmod) else None
 
     file_map: dict[str, typing.Any] = {}
-    spool = _Spool(*_open_scratch_dir(engine, "add-spool")) if allow_url or auto_extract else None
+    spool = _Spool(*_open_scratch_dir(engine, "add-spool")) if allow_url or auto_extract or heredocs else None
     try:
         for kind, src in resolved:
             if kind == "url":
                 assert spool is not None
                 _copy_url(src, dest, file_map, uid, gid, mode_override, spool)
+            elif kind == "heredoc":
+                assert spool is not None
+                _copy_heredoc(engine, heredocs[src], dest, is_dir_dest, file_map, uid, gid, mode_override, spool)
             elif kind == "ctx":
                 _copy_from_context(
                     engine,
@@ -461,6 +475,54 @@ def _do_copy_or_add(
         if owned_fd is not None:
             with contextlib.suppress(OSError):
                 os.close(owned_fd)
+
+
+# A source operand that is a here-doc opener. The quotes a tag may carry are
+# gone by the time an operand reaches this: split_operands shlex-splits them, so
+# `<<"EOF"` arrives as `<<EOF`, and whether it was quoted is recorded on the
+# here-doc itself.
+_HEREDOC_SOURCE_RE = re.compile(r"^\d*<<-?\s*([A-Za-z_][A-Za-z0-9_]*)$")
+
+
+def _heredoc_tag(operand: str) -> str | None:
+    """The tag *operand* opens a here-doc for, or None."""
+    m = _HEREDOC_SOURCE_RE.match(operand)
+    return m.group(1) if m else None
+
+
+def _copy_heredoc(
+    engine: typing.Any,
+    heredoc: dict[str, typing.Any],
+    dest: str,
+    is_dir_dest: bool,
+    file_map: dict[str, typing.Any],
+    uid: int,
+    gid: int,
+    mode_override: int | None,
+    spool: _Spool,
+) -> None:
+    """COPY/ADD an inline here-doc: its body is the content, its tag the name.
+
+    An unquoted tag expands the body against the stage's scope, which is the
+    shell's rule for a here-doc and Docker's for this one, and `<<"EOF"` takes it
+    literally. The timestamp is the epoch rather than the clock: the body is part
+    of the Dockerfile, so two builds of it have to pack the same bytes.
+    """
+    body = heredoc["body"]
+    if heredoc.get("expand"):
+        body = expand_vars(body, engine.expansion_scope())
+    arcname = _dest_arcname(heredoc["tag"], dest, is_dir_dest)
+    spooled, _written = spool.stream(io.BytesIO(body.encode()))
+    _spool_entry(
+        file_map,
+        arcname,
+        spool,
+        spooled,
+        mode_override if mode_override is not None else 0o644,
+        uid,
+        gid,
+        0,
+    )
 
 
 def _pull_throwaway_image(engine: typing.Any, image_ref: str) -> tuple[str, int]:
