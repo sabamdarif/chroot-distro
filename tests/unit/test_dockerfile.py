@@ -234,6 +234,17 @@ def test_a_quoted_heredoc_tag_takes_its_body_literally():
     assert instructions[1]["heredocs"][0]["expand"] is True
 
 
+def test_two_heredocs_on_one_instruction_each_keep_their_body():
+    # The second body starts where the first one's closing tag ended; counting
+    # from the instruction line again ate its first line.
+    _, instructions = parse_dockerfile("RUN cat <<A <<B\none\nA\ntwo\nB\nRUN after\n")
+    (first, second) = instructions[0]["heredocs"]
+    assert (first["tag"], first["body"]) == ("A", "one\n")
+    assert (second["tag"], second["body"]) == ("B", "two\n")
+    # And the instruction after the last body is still read.
+    assert [i["value"] for i in instructions] == ["cat <<A <<B", "after"]
+
+
 def test_parse_dockerfile_syntax_error():
     content = "INVALID_INSTRUCTION arg"
     with pytest.raises(DockerfileSyntaxError) as exc_info:

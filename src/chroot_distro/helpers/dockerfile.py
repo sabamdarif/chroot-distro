@@ -234,22 +234,21 @@ def _parse_instructions(raw_lines: list[str], start_idx: int, escape_char: str) 
         value = rest.strip()
 
         heredocs = []
-        if name in _HEREDOC_INSTRUCTIONS:
-            here_tags = _extract_heredoc_tags(value)
-            for strip_indent, expand, tag in here_tags:
-                body, i = _collect_heredoc_body(raw_lines, i + 1, tag, strip_indent)
-                heredocs.append(
-                    {
-                        "tag": tag,
-                        "strip_indent": strip_indent,
-                        "expand": expand,
-                        "body": body,
-                    }
-                )
-            if not here_tags:
-                i += 1
-        else:
-            i += 1
+        here_tags = _extract_heredoc_tags(value) if name in _HEREDOC_INSTRUCTIONS else []
+        # Past the instruction's own line first, then one body after another:
+        # each starts where the one before it stopped, which is the line after
+        # its closing tag, so a second `<<TAG` does not lose its first line.
+        i += 1
+        for strip_indent, expand, tag in here_tags:
+            body, i = _collect_heredoc_body(raw_lines, i, tag, strip_indent)
+            heredocs.append(
+                {
+                    "tag": tag,
+                    "strip_indent": strip_indent,
+                    "expand": expand,
+                    "body": body,
+                }
+            )
 
         exec_form, parsed_value = _try_exec_form(value)
 
