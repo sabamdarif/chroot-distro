@@ -3,10 +3,13 @@
 # what a runtime pulling the image reads, so a flag dropped on the way in is an
 # image that does not say what its Dockerfile said.
 
+import json
 from types import SimpleNamespace
 
 import pytest
 
+from chroot_distro.helpers.build_engine import engine as engine_mod
+from chroot_distro.helpers.build_engine.engine import BuildEngine
 from chroot_distro.helpers.build_engine.errors import BuildError
 from chroot_distro.helpers.build_engine.handlers import HANDLERS
 from chroot_distro.helpers.dockerfile import parse_dockerfile
@@ -143,3 +146,60 @@ def test_stopsignal_and_user_are_recorded():
     assert cfg["StopSignal"] == "SIGTERM"
     assert cfg["User"] == "app:app"
     assert engine.current.user == "app:app"
+
+
+# ── the config a stage takes from its base ────────────────────────────────────
+_BASE_CONFIG = {
+    "config": {
+        "Env": ["PATH=/opt/bin", "LANG=C.UTF-8"],
+        "WorkingDir": "/srv",
+        "User": "app",
+        "Shell": ["/bin/bash", "-c"],
+        "Cmd": ["/bin/serve"],
+        "Entrypoint": ["/entry"],
+        "Labels": {"a": "1"},
+    }
+}
+
+
+def _built(monkeypatch, tmp_path, text):
+    """Build *text* against a base image carrying `_BASE_CONFIG`."""
+    monkeypatch.setattr(engine_mod, "log_info", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        engine_mod,
+        "pull_image",
+        lambda *_a, **_k: {"image_config": json.loads(json.dumps(_BASE_CONFIG)), "manifest": {}},
+    )
+    engine = BuildEngine(
+        build_dir=str(tmp_path),
+        tmp_root=str(tmp_path / "tmp"),
+        target_arch_pd="x86_64",
+        user_build_args={},
+        target_stage=None,
+        verbose=False,
+        quiet=True,
+        no_cache=False,
+        emulator=None,
+    )
+    _, instructions = parse_dockerfile(text)
+    engine.run(instructions)
+    return engine
+
+
+def test_a_stage_seeds_itself_from_the_config_it_adopted(monkeypatch, tmp_path):
+    # These four decide what a RUN step runs, who as, and where.
+    stage = _built(monkeypatch, tmp_path, "FROM img:1\n").current
+    assert stage.env == {"PATH": "/opt/bin", "LANG": "C.UTF-8"}
+    assert stage.workdir == "/srv"
+    assert stage.user == "app"
+    assert stage.shell == ["/bin/bash", "-c"]
+
+
+def test_a_stage_from_a_stage_copies_the_config_rather_than_sharing_it(monkeypatch, tmp_path):
+    engine = _built(monkeypatch, tmp_path, "FROM img:1 AS one\nFROM one AS two\nLABEL b=2\n")
+    one, two = engine.stages["one"], engine.stages["two"]
+
+    assert two.image_config["config"]["Labels"] == {"a": "1", "b": "2"}
+    assert one.image_config["config"]["Labels"] == {"a": "1"}
+    assert two.image_config["config"]["Cmd"] == ["/bin/serve"]
+    assert (two.workdir, two.user, two.shell) == ("/srv", "app", ["/bin/bash", "-c"])
