@@ -23,7 +23,9 @@ Two record fields need a check before use. `value` is a list only when
 strings and never otherwise; `flags["mount"]` is a list only when the flag
 repeated, since `--mount` is the one repeatable flag and every other one is
 last-writer-wins. An ONBUILD record carries the wrapped inner record as its
-`value`.
+`value`, and that inner record's `raw` is the trigger *as an image config stores
+it*: no leading ONBUILD, here-doc bodies appended, because whoever builds FROM
+the image parses that text back as a Dockerfile line of their own.
 
 `expand_vars` keeps unset and empty distinct: a None in the env mapping means
 unset, which is what `${VAR-default}` and `${VAR+value}` test, while `:-` and
@@ -68,6 +70,11 @@ _INSTRUCTIONS: frozenset[str] = frozenset(
 # Instructions that may carry a here-doc body (<<TAG ... TAG).
 _HEREDOC_INSTRUCTIONS: frozenset[str] = frozenset({"ADD", "COPY", "RUN"})
 
+# Instructions an ONBUILD may not wrap: another ONBUILD (chaining), and the two
+# that answer for the build rather than for the image it produces. Docker
+# refuses all three.
+_ONBUILD_FORBIDDEN: frozenset[str] = frozenset({"ONBUILD", "FROM", "MAINTAINER"})
+
 # Parser-directive names recognised at the top of a Dockerfile. All
 # other `# k=v` lines after the first non-directive line become
 # normal comments.
@@ -89,7 +96,7 @@ def parse_dockerfile(text: str | bytes) -> tuple[dict[str, str], list[dict[str, 
             "flags":      dict,        # --key=value flags before the value
             "value":      str | list,  # raw value, or list when exec form
             "exec_form":  bool,        # True iff value parsed as JSON array
-            "heredocs":   list,        # list of {"tag", "strip_indent", "body"}
+            "heredocs":   list,        # list of {"tag", "strip_indent", "expand", "body"}
             "lineno":     int,         # 1-based source line of the first token
             "raw":        str,         # joined (continuation-merged) source
         }
@@ -221,14 +228,7 @@ def _parse_instructions(raw_lines: list[str], start_idx: int, escape_char: str) 
         # ordinary instruction and wrapped below.
         is_onbuild = name == "ONBUILD"
         if is_onbuild:
-            inner_match = re.match(r"^\s*(\S+)\s*(.*)$", rest)
-            if not inner_match:
-                raise DockerfileSyntaxError(f"ONBUILD without inner instruction at line {line_no}.")
-            inner_name = inner_match.group(1).upper()
-            if inner_name not in _INSTRUCTIONS or inner_name == "ONBUILD":
-                raise DockerfileSyntaxError(f"Invalid ONBUILD inner instruction '{inner_name}' at line {line_no}.")
-            name = inner_name
-            rest = inner_match.group(2)
+            name, rest = _onbuild_inner(rest, line_no)
 
         flags, rest = _parse_flags(rest)
         value = rest.strip()
@@ -236,12 +236,13 @@ def _parse_instructions(raw_lines: list[str], start_idx: int, escape_char: str) 
         heredocs = []
         if name in _HEREDOC_INSTRUCTIONS:
             here_tags = _extract_heredoc_tags(value)
-            for strip_indent, tag in here_tags:
+            for strip_indent, expand, tag in here_tags:
                 body, i = _collect_heredoc_body(raw_lines, i + 1, tag, strip_indent)
                 heredocs.append(
                     {
                         "tag": tag,
                         "strip_indent": strip_indent,
+                        "expand": expand,
                         "body": body,
                     }
                 )
@@ -259,7 +260,7 @@ def _parse_instructions(raw_lines: list[str], start_idx: int, escape_char: str) 
             "exec_form": exec_form,
             "heredocs": heredocs,
             "lineno": line_no,
-            "raw": accumulated,
+            "raw": _onbuild_expression(accumulated, heredocs) if is_onbuild else accumulated,
         }
 
         if is_onbuild:
@@ -278,6 +279,36 @@ def _parse_instructions(raw_lines: list[str], start_idx: int, escape_char: str) 
             instructions.append(record)
 
     return instructions
+
+
+_ONBUILD_PREFIX_RE = re.compile(r"(?i)^\s*ONBUILD\s+")
+
+
+def _onbuild_inner(rest: str, line_no: int) -> tuple[str, str]:
+    """Split the instruction an ONBUILD wraps off *rest*. (name, remainder)."""
+    m = re.match(r"^\s*(\S+)\s*(.*)$", rest)
+    if not m:
+        raise DockerfileSyntaxError(f"ONBUILD without inner instruction at line {line_no}.")
+    inner_name = m.group(1).upper()
+    if inner_name in _ONBUILD_FORBIDDEN:
+        raise DockerfileSyntaxError(f"'{inner_name}' is not allowed as an ONBUILD trigger at line {line_no}.")
+    if inner_name not in _INSTRUCTIONS:
+        raise DockerfileSyntaxError(f"Invalid ONBUILD inner instruction '{inner_name}' at line {line_no}.")
+    return inner_name, m.group(2)
+
+
+def _onbuild_expression(accumulated: str, heredocs: list[dict[str, typing.Any]]) -> str:
+    """The trigger text an ONBUILD records, as an image config stores one.
+
+    Whoever builds FROM the image parses this back as a Dockerfile line, so the
+    leading ONBUILD has to go (a trigger that kept it would read as
+    `ONBUILD ONBUILD`) and a here-doc body has to travel with it (a `RUN <<EOF`
+    with nothing after it is an unterminated body).
+    """
+    expression = _ONBUILD_PREFIX_RE.sub("", accumulated)
+    for heredoc in heredocs:
+        expression += "\n" + heredoc["body"] + heredoc["tag"]
+    return expression
 
 
 def _ends_with_escape(line: str, escape_char: str) -> bool:
@@ -378,11 +409,16 @@ def _shlex_consumed_len(source: str, parsed_token: str) -> int:
     return len(parsed_token)
 
 
-def _extract_heredoc_tags(value: str) -> list[tuple[bool, str]]:
-    """Return [(strip_indent_bool, tag_name), ...] for here-doc openers."""
+def _extract_heredoc_tags(value: str) -> list[tuple[bool, bool, str]]:
+    """Return [(strip_indent, expand, tag_name), ...] for here-doc openers.
+
+    A quoted tag (`<<"EOF"`) means the body is taken literally, an unquoted one
+    that `$VAR` in it expands, which is the shell's rule and Docker's. Only the
+    COPY/ADD side acts on it: a RUN body is the shell's to expand.
+    """
     tags = []
     for m in _HEREDOC_RE.finditer(value):
-        tags.append((bool(m.group(1)), m.group(3)))
+        tags.append((bool(m.group(1)), not m.group(2), m.group(3)))
     return tags
 
 

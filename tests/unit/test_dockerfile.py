@@ -47,6 +47,48 @@ RUN echo `
     assert instructions[1]["value"] == "echo hello"
 
 
+# ── the parser directives, and where their zone ends ──────────────────────────
+def test_the_check_directive_is_recognised():
+    directives, instructions = parse_dockerfile("# check=skip=JSONArgsRecommended\nFROM alpine\n")
+    assert directives == {"check": "skip=JSONArgsRecommended"}
+    assert [i["name"] for i in instructions] == ["FROM"]
+
+
+def test_all_three_directives_together():
+    content = "# syntax=docker/dockerfile:1\n# escape=`\n# check=error=true\nFROM alpine\n"
+    directives, _ = parse_dockerfile(content)
+    assert directives == {"syntax": "docker/dockerfile:1", "escape": "`", "check": "error=true"}
+
+
+def test_an_escape_the_spec_does_not_allow_falls_back_to_backslash():
+    # Only a backslash or a backtick is an escape character; anything else is
+    # an ordinary comment, and the continuation below still has to work.
+    directives, instructions = parse_dockerfile("# escape=@\nFROM alpine\nRUN echo \\\n  hi\n")
+    assert "escape" not in directives
+    assert instructions[1]["value"] == "echo hi"
+
+
+def test_a_directive_after_an_ordinary_comment_is_a_comment():
+    directives, _ = parse_dockerfile("# hello\n# escape=`\nFROM alpine\nRUN echo x\n")
+    assert directives == {}
+
+
+def test_a_duplicate_directive_ends_the_zone():
+    directives, _ = parse_dockerfile("# escape=`\n# escape=\\\\\n# syntax=docker/dockerfile:1\nFROM alpine\n")
+    assert directives == {"escape": "`"}
+
+
+def test_an_unknown_key_ends_the_zone():
+    directives, _ = parse_dockerfile("# frontend=other\n# syntax=docker/dockerfile:1\nFROM alpine\n")
+    assert directives == {}
+
+
+def test_a_directive_after_an_instruction_is_a_comment():
+    directives, instructions = parse_dockerfile("FROM alpine\n# syntax=docker/dockerfile:1\nRUN echo x\n")
+    assert directives == {}
+    assert [i["name"] for i in instructions] == ["FROM", "RUN"]
+
+
 def test_parse_dockerfile_line_continuations_and_comments():
     content = r"""
 FROM debian
@@ -125,6 +167,40 @@ def test_parse_dockerfile_onbuild():
     assert inner["value"] == "echo nested"
 
 
+def test_an_onbuild_trigger_is_recorded_without_its_onbuild():
+    # The inner record's `raw` is what the image config stores, and whoever
+    # builds FROM that image parses it back: with the prefix kept it would read
+    # as `ONBUILD ONBUILD`.
+    _, instructions = parse_dockerfile("onbuild  RUN echo nested\n")
+    assert instructions[0]["value"]["raw"] == "RUN echo nested"
+
+
+def test_an_onbuild_trigger_keeps_its_heredoc_body():
+    _, instructions = parse_dockerfile("ONBUILD RUN <<EOF\necho hi\nEOF\n")
+    inner = instructions[0]["value"]
+    assert inner["raw"] == "RUN <<EOF\necho hi\nEOF"
+    # And what it records parses back to the instruction it was.
+    _, again = parse_dockerfile(inner["raw"] + "\n")
+    assert again[0]["name"] == "RUN"
+    assert again[0]["heredocs"][0]["body"] == "echo hi\n"
+
+
+@pytest.mark.parametrize("inner", ["ONBUILD", "FROM", "MAINTAINER"])
+def test_an_instruction_that_may_not_be_a_trigger(inner):
+    with pytest.raises(DockerfileSyntaxError, match="not allowed as an ONBUILD trigger"):
+        parse_dockerfile(f"FROM alpine\nONBUILD {inner} x\n")
+
+
+def test_an_onbuild_without_an_inner_instruction():
+    with pytest.raises(DockerfileSyntaxError, match="without inner instruction"):
+        parse_dockerfile("FROM alpine\nONBUILD\n")
+
+
+def test_an_onbuild_of_an_unknown_instruction():
+    with pytest.raises(DockerfileSyntaxError, match="Invalid ONBUILD inner instruction"):
+        parse_dockerfile("FROM alpine\nONBUILD NOPE x\n")
+
+
 def test_parse_dockerfile_heredocs():
     content = """
 RUN <<EOF
@@ -150,6 +226,12 @@ RUN <<-EOF
     assert instructions[1]["heredocs"][0]["tag"] == "EOF"
     assert instructions[1]["heredocs"][0]["strip_indent"] is True
     assert instructions[1]["heredocs"][0]["body"] == 'echo "tabs stripped"\n'
+
+
+def test_a_quoted_heredoc_tag_takes_its_body_literally():
+    _, instructions = parse_dockerfile('COPY <<"EOF" /a\n$HOME\nEOF\nCOPY <<EOF2 /b\n$HOME\nEOF2\n')
+    assert instructions[0]["heredocs"][0]["expand"] is False
+    assert instructions[1]["heredocs"][0]["expand"] is True
 
 
 def test_parse_dockerfile_syntax_error():
