@@ -4,6 +4,7 @@
 
 from chroot_distro.helpers.docker.cache import (
     all_layers_cached,
+    is_valid_digest,
     layer_cache_path,
     load_manifest_cache,
     manifest_cache_path,
@@ -45,6 +46,7 @@ __all__ = (
     "download_blob",
     "env_basic_auth",
     "get_auth_token",
+    "is_valid_digest",
     "layer_cache_path",
     "load_manifest_cache",
     "manifest_cache_path",

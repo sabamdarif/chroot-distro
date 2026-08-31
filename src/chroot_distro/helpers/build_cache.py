@@ -21,7 +21,10 @@ bound read-write into every non-isolated container. So the directory is walked
 with O_NOFOLLOW rather than joined, the read is capped, and a read that could
 not finish is refused instead of parsed, because a prefix of a JSON document
 parses as no index at all and `record()` would then write over the entries it
-had merely declined to read.
+had merely declined to read. For the same reason `lookup()` hands back only an
+entry shaped like one: the fields are read as a layer to apply and as the
+manifest a build publishes, and a miss costs a rebuild where a malformed entry
+costs a traceback or a stranger's file.
 
 Only `record()` locks, because only it does a read-modify-write. `lookup()`
 reads and `discard_index()` unlinks without one: neither can observe a torn
@@ -41,6 +44,7 @@ import typing
 from chroot_distro import dirfd, locking
 from chroot_distro.atomic import atomic_write
 from chroot_distro.constants import BASE_CACHE_DIR, RUNTIME_DIR
+from chroot_distro.helpers.docker import is_valid_digest
 
 _INDEX_PATH = os.path.join(BASE_CACHE_DIR, "build_cache_index.json")
 _INDEX_LOCK_PATH = _INDEX_PATH + ".lock"
@@ -205,14 +209,36 @@ def _save_index(data: dict[str, typing.Any]) -> None:
 
 
 def lookup(recipe_hash: str | None) -> dict[str, typing.Any] | None:
-    """Return the cache entry dict for `recipe_hash`, or None."""
+    """Return the usable cache entry for `recipe_hash`, or None.
+
+    The shape is checked here rather than at the caller, because this is where
+    the document is parsed: an entry names a layer to apply and the size and
+    diff_id that go into the manifest the build publishes, so a `layer_digest`
+    that is not a digest reaches `layer_cache_path` as a filename and a missing
+    `size` reaches a registry. The index is this program's own, but the entry
+    standing under its name need not be (the module docstring says why), and
+    neither is a record written by a version that spelled one differently.
+
+    A malformed entry is a miss, not a failure: rebuilding the step is always
+    correct, and a build must not end in a traceback over what a cache holds.
+    """
     if not recipe_hash:
         return None
     data = _load_index()
     res = data.get("entries", {}).get(recipe_hash)
-    if isinstance(res, dict):
+    if isinstance(res, dict) and _entry_is_usable(res):
         return res
     return None
+
+
+def _entry_is_usable(entry: dict[str, typing.Any]) -> bool:
+    """True when *entry* holds every field `do_run` reads back out of it."""
+    if not is_valid_digest(entry.get("layer_digest")) or not is_valid_digest(entry.get("diff_id")):
+        return False
+    size = entry.get("size")
+    if not isinstance(size, int) or isinstance(size, bool) or size < 0:
+        return False
+    return isinstance(entry.get("image_config_patch", {}), dict)
 
 
 def index_path() -> str:

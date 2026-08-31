@@ -33,9 +33,19 @@ from chroot_distro.helpers.docker.refs import parse_image_ref
 _DIGEST_RE = re.compile(r"^[A-Za-z0-9]+(?:[+_.\-][A-Za-z0-9]+)*:[A-Fa-f0-9]+$")
 
 
+def is_valid_digest(digest: object) -> bool:
+    """Return True when *digest* is a well-formed `algorithm:hex` digest.
+
+    The predicate every reader of a digest that arrived in someone else's
+    document wants: the build cache index refuses an entry whose layer digest is
+    not one, rather than letting it reach a filename.
+    """
+    return isinstance(digest, str) and bool(_DIGEST_RE.match(digest))
+
+
 def validate_digest(digest: str) -> str:
     """Return *digest* unchanged when well-formed; raise otherwise."""
-    if not isinstance(digest, str) or not _DIGEST_RE.match(digest):
+    if not is_valid_digest(digest):
         raise RuntimeError(f"Malformed digest: {digest!r}")
     return digest
 

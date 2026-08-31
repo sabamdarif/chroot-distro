@@ -9,6 +9,12 @@ import pytest
 from chroot_distro import atomic
 from chroot_distro.helpers import build_cache
 
+# An entry names a layer to apply and the diff_id that goes into the published
+# manifest, and lookup() hands back only an entry whose fields are shaped like
+# ones, so a test recording a step has to record digests.
+LAYER = "sha256:" + "1a" * 32
+DIFF = "sha256:" + "2b" * 32
+
 
 def _redirect(monkeypatch, tmp_path):
     index = tmp_path / "build_cache_index.json"
@@ -26,11 +32,11 @@ def test_lookup_none_and_missing(monkeypatch, tmp_path):
 
 def test_record_then_lookup_roundtrip(monkeypatch, tmp_path):
     _redirect(monkeypatch, tmp_path)
-    build_cache.record("h1", "sha256:layer", "sha256:diff", 42, {"Env": ["A=1"]})
+    build_cache.record("h1", LAYER, DIFF, 42, {"Env": ["A=1"]})
     entry = build_cache.lookup("h1")
     assert entry is not None
-    assert entry["layer_digest"] == "sha256:layer"
-    assert entry["diff_id"] == "sha256:diff"
+    assert entry["layer_digest"] == LAYER
+    assert entry["diff_id"] == DIFF
     assert entry["size"] == 42
     assert entry["image_config_patch"] == {"Env": ["A=1"]}
     assert entry["created"].endswith("Z")
@@ -38,8 +44,44 @@ def test_record_then_lookup_roundtrip(monkeypatch, tmp_path):
 
 def test_record_defaults_empty_patch(monkeypatch, tmp_path):
     _redirect(monkeypatch, tmp_path)
-    build_cache.record("h2", "d", "i", 0)
+    build_cache.record("h2", LAYER, DIFF, 0)
     assert build_cache.lookup("h2")["image_config_patch"] == {}
+
+
+# ── an entry that is not shaped like one ──────────────────────────────────────
+#
+# Every field below is read straight back out: the layer digest becomes a
+# filename under the layer cache, and the size and diff_id go into the manifest
+# the build publishes. A miss costs a rebuild; believing one of these costs a
+# traceback out of `build`, or a stranger's file packed as this step's layer.
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        {},
+        {"layer_digest": LAYER},
+        {"layer_digest": "sha256:not-hex", "diff_id": DIFF, "size": 1},
+        {"layer_digest": "../../etc/passwd", "diff_id": DIFF, "size": 1},
+        {"layer_digest": LAYER, "diff_id": "", "size": 1},
+        {"layer_digest": LAYER, "diff_id": DIFF, "size": "big"},
+        {"layer_digest": LAYER, "diff_id": DIFF, "size": True},
+        {"layer_digest": LAYER, "diff_id": DIFF, "size": -1},
+        {"layer_digest": LAYER, "diff_id": DIFF, "size": 1, "image_config_patch": ["Env"]},
+    ],
+)
+def test_a_malformed_entry_is_a_miss(monkeypatch, tmp_path, entry):
+    index = _redirect(monkeypatch, tmp_path)
+    index.write_text(json.dumps({"version": 1, "entries": {"h": entry}}))
+
+    assert build_cache.lookup("h") is None
+
+
+def test_an_entry_without_a_patch_is_still_usable(monkeypatch, tmp_path):
+    index = _redirect(monkeypatch, tmp_path)
+    index.write_text(json.dumps({"version": 1, "entries": {"h": {"layer_digest": LAYER, "diff_id": DIFF, "size": 0}}}))
+
+    assert build_cache.lookup("h") is not None
 
 
 def test_load_index_recovers_from_corrupt(monkeypatch, tmp_path):
@@ -119,7 +161,7 @@ def test_recipe_hash_perturbed_by_mount_flag():
 def test_a_planted_symlink_over_the_index_is_not_read(monkeypatch, tmp_path):
     index = _redirect(monkeypatch, tmp_path)
     outside = tmp_path / "outside.json"
-    outside.write_text(json.dumps({"version": 1, "entries": {"h": {"layer_digest": "sha256:evil"}}}))
+    outside.write_text(json.dumps({"version": 1, "entries": {"h": {"layer_digest": LAYER, "diff_id": DIFF, "size": 1}}}))
     index.symlink_to(outside)
 
     assert build_cache.lookup("h") is None
@@ -155,7 +197,7 @@ def test_a_planted_symlink_over_the_lock_is_replaced(monkeypatch, tmp_path):
     lock = tmp_path / (index.name + ".lock")
     lock.symlink_to(outside)
 
-    build_cache.record("h", "sha256:layer", "sha256:diff", 1)
+    build_cache.record("h", LAYER, DIFF, 1)
 
     assert build_cache.lookup("h") is not None
     assert not lock.is_symlink()
@@ -170,7 +212,7 @@ def test_a_lock_name_that_cannot_be_cleared_still_records_the_step(monkeypatch, 
     planted.mkdir()
     (planted / "occupied").write_text("x")
 
-    build_cache.record("h", "sha256:layer", "sha256:diff", 1)
+    build_cache.record("h", LAYER, DIFF, 1)
 
     assert build_cache.lookup("h") is not None
     assert (planted / "occupied").exists()
@@ -217,7 +259,7 @@ def _nested(monkeypatch, tmp_path):
 def test_a_nested_cache_directory_is_created_and_used(monkeypatch, tmp_path):
     index = _nested(monkeypatch, tmp_path)
 
-    build_cache.record("h", "sha256:layer", "sha256:diff", 1)
+    build_cache.record("h", LAYER, DIFF, 1)
 
     assert index.is_file()
     assert build_cache.lookup("h") is not None
@@ -231,7 +273,7 @@ def test_a_symlinked_cache_directory_is_refused_not_followed(monkeypatch, tmp_pa
     os.symlink(str(outside), str(index.parent))
 
     with pytest.raises(OSError):
-        build_cache.record("h", "sha256:layer", "sha256:diff", 1)
+        build_cache.record("h", LAYER, DIFF, 1)
 
     assert os.listdir(str(outside)) == []
     assert build_cache.lookup("h") is None
@@ -260,11 +302,11 @@ def test_an_index_over_the_cap_is_refused_not_truncated(monkeypatch, tmp_path):
 
 def test_an_index_at_the_cap_still_reads(monkeypatch, tmp_path):
     index = _redirect(monkeypatch, tmp_path)
-    payload = json.dumps({"version": 1, "entries": {"h": {"layer_digest": "sha256:a"}}}).encode()
+    payload = json.dumps({"version": 1, "entries": {"h": {"layer_digest": LAYER, "diff_id": DIFF, "size": 0}}}).encode()
     monkeypatch.setattr(build_cache, "_MAX_INDEX_BYTES", len(payload))
     index.write_bytes(payload)
 
-    assert build_cache.lookup("h") == {"layer_digest": "sha256:a"}
+    assert build_cache.lookup("h") == {"layer_digest": LAYER, "diff_id": DIFF, "size": 0}
 
 
 def test_a_padded_index_is_refused_by_size_alone(monkeypatch, tmp_path):
@@ -303,7 +345,7 @@ def test_recording_over_an_oversized_index_replaces_it(monkeypatch, tmp_path):
     monkeypatch.setattr(build_cache, "_MAX_INDEX_BYTES", 4096)
     index.write_bytes(b"[" * 8192)
 
-    build_cache.record("h", "sha256:layer", "sha256:diff", 1)
+    build_cache.record("h", LAYER, DIFF, 1)
 
-    assert build_cache.lookup("h")["layer_digest"] == "sha256:layer"
+    assert build_cache.lookup("h")["layer_digest"] == LAYER
     assert index.stat().st_size < 4096
