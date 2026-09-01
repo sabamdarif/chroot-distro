@@ -373,3 +373,62 @@ def test_kill_by_name_still_works(mock_log, mock_mount, mock_session, mock_isdir
     command_kill(args)
 
     mock_log.assert_called_once_with("Container 'ubuntu' is not running.")
+
+
+@patch("chroot_distro.commands.kill.namespace.get_live_holder", return_value=None)
+@patch("chroot_distro.commands.kill.container_rootfs", return_value="/mock/containers/ubuntu/rootfs")
+@patch("os.path.isdir", return_value=True)
+@patch("chroot_distro.commands.kill.ContainerLock")
+@patch("chroot_distro.commands.kill.session")
+@patch("chroot_distro.commands.kill.mount_manager")
+@patch("chroot_distro.commands.kill.log_info")
+@patch("chroot_distro.commands.kill.warn")
+@patch("chroot_distro.commands.kill.crit_error")
+@patch("chroot_distro.syscalls.umount.native_umount")
+@patch("chroot_distro.commands.kill.os.kill")
+@patch("chroot_distro.commands.kill.time.sleep")
+@patch("chroot_distro.commands.kill.time.time")
+def test_kill_reports_a_process_that_survived_sigkill(
+    mock_time,
+    mock_sleep,
+    mock_kill,
+    mock_native_umount,
+    mock_crit_error,
+    mock_warn,
+    mock_log,
+    mock_mount,
+    mock_session,
+    mock_lock,
+    mock_isdir,
+    mock_rootfs,
+    *_mocks,
+):
+    """Clean mounts plus a live process is a failure, not a success."""
+    args = MagicMock()
+    args.container_or_pid = "ubuntu"
+
+    # A PID that outlives both signals, and is still there on the final re-read.
+    mock_session.get_active_chroot_pids.return_value = [1000]
+    mock_mount.get_active_mounts.side_effect = [
+        ["/mock/containers/ubuntu/rootfs/proc"],
+        [],
+        [],
+        [],
+        [],
+        [],
+    ]
+
+    mock_lock_instance = MagicMock()
+    mock_lock_instance.acquire.return_value = True
+    mock_lock.return_value = mock_lock_instance
+
+    mock_time.side_effect = [0, 5, 0, 5, 0, 5, 0, 5]
+
+    with pytest.raises(SystemExit) as exc:
+        command_kill(args)
+
+    assert exc.value.code == 1
+    mock_warn.assert_any_call("Some processes could not be killed: [1000]")
+    assert "survived SIGKILL" in mock_crit_error.call_args[0][0]
+    for call_args in mock_log.call_args_list:
+        assert "successfully killed" not in call_args[0][0]

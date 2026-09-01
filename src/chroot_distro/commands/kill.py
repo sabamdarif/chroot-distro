@@ -10,12 +10,14 @@ processes are gone and released in the `finally`.
 The escalation is ordered, and mounts come before signals: standard unmount, lazy
 unmount, then the image's own StopSignal with SIGKILL after a grace period, then
 unmount and lazy again, then MNT_FORCE. Trying the mounts first means a session that
-merely finished is let go instead of killed. Only when MNT_FORCE also leaves
-something behind does the command fail, naming both the mounts and the PIDs.
+merely finished is let go instead of killed. The command fails when MNT_FORCE still
+leaves a mount behind, naming both the mounts and the PIDs, and equally when the
+mounts came away but a process survived SIGKILL.
 
 Every umount goes through the holder when one is alive, since a mount made inside
 its namespace is not visible from here. The session count, mount options, holder and
-isolation mode are cleared last, and only on success.
+isolation mode are cleared once the mounts are gone, so a surviving process fails the
+command without also leaving stale bookkeeping.
 
 The positional argument may be a PID from `ps`, resolved through the session
 registry, so a host PID owning no container is refused rather than signalled.
@@ -127,6 +129,8 @@ def command_kill(args) -> None:
     if not acquired:
         log_info(f"Container '{container_name}' is busy (active sessions exist). Forcing cleanup...")
 
+    survivors: list[int] = []
+
     try:
         active_mounts = mount_manager.get_active_mounts(rootfs_dir, holder=holder)
         if active_mounts:
@@ -160,6 +164,7 @@ def command_kill(args) -> None:
                     remaining = _wait_until_gone(container_name, _SIGKILL_WAIT_SECS)
                     if remaining:
                         warn(f"Some processes could not be killed: {remaining}")
+                        survivors = remaining
 
             if not acquired:
                 acquired = lock.acquire()
@@ -197,6 +202,17 @@ def command_kill(args) -> None:
         if holder is not None:
             namespace.release_holder(container_name)
             namespace.clear_isolation_mode(container_name)
+
+        # The SIGKILL survivors are re-read from /proc rather than trusted: one
+        # that was in uninterruptible sleep then may well be gone by now.
+        if survivors:
+            survivors = session.get_active_chroot_pids(container_name)
+        if survivors:
+            crit_error(
+                f"Unmounted container '{container_name}', but processes {survivors} "
+                f"survived SIGKILL and are still inside its rootfs."
+            )
+            sys.exit(1)
 
         log_info(f"Container '{container_name}' successfully killed and unmounted.")
 
