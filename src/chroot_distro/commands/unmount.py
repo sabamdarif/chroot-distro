@@ -41,6 +41,8 @@ def command_unmount(args) -> None:
         crit_error(f"container '{container_name}' is not installed.")
         sys.exit(1)
 
+    failed = False
+
     with ContainerLock(container_name, exclusive=True, command="unmount"):
         active_pids = session.get_active_chroot_pids(container_name)
         if active_pids:
@@ -75,6 +77,7 @@ def command_unmount(args) -> None:
                 remaining_pids = session.get_active_chroot_pids(container_name)
                 if remaining_pids:
                     warn(f"Some processes could not be stopped: {remaining_pids}")
+                    failed = True
 
         log_info(f"Setting active sessions count for '{container_name}' to 0.")
         session.reset(container_name)
@@ -104,5 +107,9 @@ def command_unmount(args) -> None:
         remaining_mounts = mount_manager.get_active_mounts(rootfs_dir)
         if remaining_mounts:
             warn(f"Some active mounts remain: {remaining_mounts}")
+            failed = True
         else:
             log_info(f"Container '{container_name}' successfully unmounted.")
+
+    if failed:
+        sys.exit(1)

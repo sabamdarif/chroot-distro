@@ -26,7 +26,7 @@ import chroot_distro.helpers.session as session
 from chroot_distro.commands.install import command_install
 from chroot_distro.commands.remove import _remove_path
 from chroot_distro.locking import ContainerLock
-from chroot_distro.message import crit_error, log_error, log_info, warn
+from chroot_distro.message import crit_error, log_info, warn
 from chroot_distro.names import require_valid_name
 from chroot_distro.paths import container_manifest, container_rootfs
 
@@ -74,7 +74,7 @@ def command_reset(args) -> None:
         log_info(f"Removing rootfs of '{container_name}'...")
 
         if not _remove_path(rootfs_dir):
-            log_error("Finished with errors. Some files could not be deleted. Proceeding anyway.")
+            warn("Finished with errors. Some files could not be deleted. Proceeding anyway.")
             with contextlib.suppress(OSError):
                 shutil.rmtree(rootfs_dir, ignore_errors=True)
 

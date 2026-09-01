@@ -312,7 +312,8 @@ def _run_install(
                 with atomic_write(container_manifest(install_name), mode=0o644) as fh:
                     json.dump(manifest_data, fh, indent=2)
             except OSError as exc:
-                log_error(f"Warning: could not write manifest.json: {exc}")
+                crit_error(f"could not write manifest.json for '{install_name}': {exc}")
+                sys.exit(1)
 
         if os.path.isdir(os.path.join(rootfs_dir, "etc")):
             log_info("Updating '/etc/resolv.conf'...")

@@ -74,6 +74,52 @@ def test_unmount_no_active_sessions(mock_log, mock_mount, mock_session, mock_loc
 @patch("chroot_distro.commands.unmount.session")
 @patch("chroot_distro.commands.unmount.mount_manager")
 @patch("chroot_distro.commands.unmount.log_info")
+@patch("chroot_distro.commands.unmount.warn")
+def test_unmount_unstoppable_processes_exits_1(mock_warn, mock_log, mock_mount, mock_session, mock_lock, mock_isdir, mock_rootfs, *_mocks):
+    """When processes refuse to die, unmount warns and exits 1."""
+    args = MagicMock()
+    args.container_name = "alpine"
+
+    mock_session.get_active_chroot_pids.return_value = [123]
+    mock_mount.get_active_mounts.return_value = []
+
+    with pytest.raises(SystemExit) as exc_info:
+        command_unmount(args)
+
+    assert exc_info.value.code == 1
+    mock_warn.assert_called_once_with("Some processes could not be stopped: [123]")
+
+
+@patch("chroot_distro.commands.unmount.namespace.get_live_holder", return_value=None)
+@patch("chroot_distro.commands.unmount.container_rootfs", return_value="/mock/containers/alpine/rootfs")
+@patch("os.path.isdir", return_value=True)
+@patch("chroot_distro.commands.unmount.ContainerLock")
+@patch("chroot_distro.commands.unmount.session")
+@patch("chroot_distro.commands.unmount.mount_manager")
+@patch("chroot_distro.commands.unmount.log_info")
+@patch("chroot_distro.commands.unmount.warn")
+def test_unmount_remaining_mounts_exits_1(mock_warn, mock_log, mock_mount, mock_session, mock_lock, mock_isdir, mock_rootfs, *_mocks):
+    """When mounts remain after unmount_all, unmount warns and exits 1."""
+    args = MagicMock()
+    args.container_name = "alpine"
+
+    mock_session.get_active_chroot_pids.return_value = []
+    mock_mount.get_active_mounts.return_value = ["/proc/test"]
+
+    with pytest.raises(SystemExit) as exc_info:
+        command_unmount(args)
+
+    assert exc_info.value.code == 1
+    mock_warn.assert_called_once_with("Some active mounts remain: ['/proc/test']")
+
+
+@patch("chroot_distro.commands.unmount.namespace.get_live_holder", return_value=None)
+@patch("chroot_distro.commands.unmount.container_rootfs", return_value="/mock/containers/alpine/rootfs")
+@patch("os.path.isdir", return_value=True)
+@patch("chroot_distro.commands.unmount.ContainerLock")
+@patch("chroot_distro.commands.unmount.session")
+@patch("chroot_distro.commands.unmount.mount_manager")
+@patch("chroot_distro.commands.unmount.log_info")
 @patch("os.kill")
 @patch("chroot_distro.commands.unmount.time")
 def test_unmount_with_active_sessions_sigterm(

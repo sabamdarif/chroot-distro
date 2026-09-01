@@ -1,3 +1,4 @@
+import io
 import os
 from unittest.mock import patch
 
@@ -9,7 +10,21 @@ def _spare_fd(*args, **kwargs):
     return os.open(os.devnull, os.O_RDONLY)
 
 
-@patch("chroot_distro.commands.install.pull_image")
+def _spare_atomic_write(*args, **kwargs):
+    """A context manager standing in for the staged manifest write."""
+    return io.StringIO()
+
+
+@patch(
+    "chroot_distro.commands.install.pull_image",
+    return_value={
+        "image_ref": "alpine:latest",
+        "arch": "x86_64",
+        "manifest": {},
+        "image_config": {},
+    },
+)
+@patch("chroot_distro.commands.install.atomic_write", side_effect=_spare_atomic_write)
 @patch("chroot_distro.commands.install.open_container_rootfs", side_effect=_spare_fd)
 @patch("chroot_distro.commands.install._write_incomplete_marker")
 @patch("chroot_distro.commands.install.os.makedirs")
@@ -17,7 +32,7 @@ def _spare_fd(*args, **kwargs):
 @patch("chroot_distro.commands.install.ContainerLock")
 @patch("chroot_distro.commands.install.log_info")
 def test_run_install_workers_log(
-    mock_log, mock_lock, mock_isdir, mock_makedirs, mock_marker, mock_rootfs_fd, mock_pull_image
+    mock_log, mock_lock, mock_isdir, mock_makedirs, mock_marker, mock_rootfs_fd, mock_atomic, mock_pull_image
 ):
     # Case 1: Workers is default (4), should not print workers info
     with patch("chroot_distro.commands.install.layer_download_workers", return_value=4):
