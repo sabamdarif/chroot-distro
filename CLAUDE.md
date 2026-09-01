@@ -407,6 +407,7 @@ the caller (`build_engine/constants.is_host_exec_var`, applied in
 | -------------------------------------- | ------------------------------------------------------ |
 | `helpers/dockerfile.py`                | Dockerfile text to instruction records                 |
 | `helpers/build_cache.py`               | step results keyed by recipe hash                      |
+| `helpers/build_cache_io.py`            | a portable copy of that cache: one directory out or in |
 | `helpers/build_engine/__init__.py`     | the engine's surface                                   |
 | `helpers/build_engine/constants.py`    | the tables consulted before dispatch                   |
 | `helpers/build_engine/errors.py`       | the exception that ends a build                        |
