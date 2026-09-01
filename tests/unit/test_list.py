@@ -143,6 +143,25 @@ def _make_container(containers, name, *, incomplete=False):
         (containers / name / ".install-incomplete").touch()
 
 
+def test_iter_container_names_enoent_empty(monkeypatch):
+    """A missing containers directory is the normal fresh state, not an error."""
+    import errno
+
+    import chroot_distro.commands.list_cmd as list_cmd
+
+    def _enoent_listdir(*_args, **_kwargs):
+        raise OSError(errno.ENOENT, "No such file or directory")
+
+    monkeypatch.setattr("os.listdir", _enoent_listdir)
+
+    mock_warn = MagicMock()
+    monkeypatch.setattr(list_cmd, "warn", mock_warn)
+
+    _iter_container_names = list_cmd._iter_container_names
+    assert _iter_container_names() == ([], [])
+    mock_warn.assert_not_called()
+
+
 def test_iter_container_names_separates_incomplete(tmp_path, monkeypatch):
     """Leftovers from interrupted installs must not be listed as installed."""
     containers = tmp_path / "containers"

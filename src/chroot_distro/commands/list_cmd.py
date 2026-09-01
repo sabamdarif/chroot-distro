@@ -60,7 +60,7 @@ def _iter_container_names() -> tuple[list[str], list[str]]:
     except OSError as exc:
         if exc.errno in (errno.EACCES, errno.EPERM):
             warn(f"Permission denied: cannot read containers directory '{CONTAINERS_DIR}'")
-        else:
+        elif exc.errno != errno.ENOENT:
             warn(f"Failed to list containers directory '{CONTAINERS_DIR}': {exc}")
         return [], []
     installed = [e for e in entries if not is_install_incomplete(e)]
