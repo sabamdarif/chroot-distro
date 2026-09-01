@@ -66,6 +66,7 @@ def command_clear_cache(args) -> None:
 
     log_info("Clearing cache...")
 
+    failed = False
     for entry in os.scandir(BASE_CACHE_DIR):
         try:
             if entry.is_dir(follow_symlinks=False):
@@ -80,8 +81,13 @@ def command_clear_cache(args) -> None:
                 os.remove(entry.path)
         except OSError as exc:
             log_error(f"Cannot remove '{entry.path}': {exc}")
+            failed = True
 
     log_info(f"Reclaimed {fmt_size(total)} of disk space.")
+
+    if failed:
+        log_error("Finished with errors. Some files probably were not deleted.")
+        sys.exit(1)
 
 
 def _sweep_build_cache(args) -> None:

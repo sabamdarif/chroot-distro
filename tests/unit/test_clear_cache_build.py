@@ -201,3 +201,22 @@ def test_verbose_names_the_index_and_each_blob(cache_dirs, capsys):
     err = capsys.readouterr().err
     assert "build_cache_index.json" in err
     assert DIGEST.replace(":", "_") in err
+
+
+def test_download_cache_failure_to_remove_exits_1(tmp_path, monkeypatch, capsys):
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    (cache / "stuck").write_bytes(b"x")
+    monkeypatch.setattr("chroot_distro.commands.clear_cache.BASE_CACHE_DIR", str(cache))
+
+    def _deny_remove(path, *args, **kwargs):
+        raise OSError(13, "Permission denied")
+
+    monkeypatch.setattr("chroot_distro.commands.clear_cache.os.remove", _deny_remove)
+
+    args = SimpleNamespace(build_cache=False, verbose=False, quiet=False)
+    with pytest.raises(SystemExit) as exc:
+        command_clear_cache(args)
+
+    assert exc.value.code == 1
+    assert "Permission denied" in capsys.readouterr().err
