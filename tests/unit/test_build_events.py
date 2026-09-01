@@ -85,6 +85,7 @@ def test_run_cache_hit_emits_event(tmp_path):
         build_platform=Platform("linux", "amd64"),
         isolation_mode="none",
         stages={},
+        step_recipes=set(),
     )
     hit = {"layer_digest": "sha256:x", "size": 1, "diff_id": "sha256:y"}
     instr = {"name": "RUN", "flags": {}, "value": "echo", "exec_form": False, "heredocs": [], "lineno": 1}

@@ -416,6 +416,9 @@ class BuildEngine:
         self.stage_plans: list[StagePlan] = []
         self.global_args: dict[str, str] = {}
         self.declared_global: set[str] = set()
+        # The recipe hash of every RUN this run dispatched, hit or built. What
+        # `--cache-to` exports is the index entries these name.
+        self.step_recipes: set[str] = set()
         self.ignore_patterns = load_dockerignore(self.build_dir)
         # LD_* names the Dockerfile set and the host-side chroot exec was
         # refused (run_step._refuse_host_exec). Kept per build so a name is

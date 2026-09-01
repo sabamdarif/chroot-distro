@@ -27,10 +27,14 @@ entry shaped like one: the fields are read as a layer to apply and as the
 manifest a build publishes, and a miss costs a rebuild where a malformed entry
 costs a traceback or a stranger's file.
 
-Only `record()` locks, because only it does a read-modify-write. `lookup()`
-reads and `discard_index()` unlinks without one: neither can observe a torn
-file, and where flock is unsupported the update falls back to last-writer-wins,
-which costs one entry.
+`record()` and `merge_entries()` lock, because they are the read-modify-write
+cycles. `lookup()` and `entries_for()` read and `discard_index()` unlinks without
+one: none of them can observe a torn file, and where flock is unsupported the
+update falls back to last-writer-wins, which costs one entry.
+
+`entries_for()` and `merge_entries()` are the two halves `build_cache_io` moves a
+portable copy of this index through, and `entry_is_usable` is public because that
+module reads the same records this one does.
 """
 
 import contextlib
@@ -229,12 +233,28 @@ def lookup(recipe_hash: str | None) -> dict[str, typing.Any] | None:
         return None
     data = _load_index()
     res = data.get("entries", {}).get(recipe_hash)
-    if isinstance(res, dict) and _entry_is_usable(res):
+    if isinstance(res, dict) and entry_is_usable(res):
         return res
     return None
 
 
-def _entry_is_usable(entry: dict[str, typing.Any]) -> bool:
+def entries_for(recipes: typing.Iterable[str]) -> dict[str, dict[str, typing.Any]]:
+    """The usable entries for *recipes*, out of one read of the index.
+
+    `lookup()` per recipe would parse the file once per build step. Held to the
+    same shape and for the same reason, since an entry leaving here is a record
+    another machine reads back out.
+    """
+    entries = _load_index().get("entries", {})
+    found: dict[str, dict[str, typing.Any]] = {}
+    for recipe in recipes:
+        entry = entries.get(recipe)
+        if isinstance(entry, dict) and entry_is_usable(entry):
+            found[recipe] = entry
+    return found
+
+
+def entry_is_usable(entry: dict[str, typing.Any]) -> bool:
     """True when *entry* holds every field `do_run` reads back out of it."""
     if not is_valid_digest(entry.get("layer_digest")) or not is_valid_digest(entry.get("diff_id")):
         return False
@@ -312,6 +332,33 @@ def record(
             "created": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }
         _save_index(data)
+
+
+def merge_entries(entries: dict[str, dict[str, typing.Any]]) -> int:
+    """Add *entries* to the index, returning how many of them were new.
+
+    A recipe hash already recorded is left alone. What stands there names a layer
+    this machine built, and an entry offered to this function came out of a
+    directory nobody vouches for, so the local record is the one to keep.
+
+    Locked for the reason `record()` is: it is the same read-modify-write, and
+    two builds importing different directories at once would otherwise drop one
+    of the two sets.
+    """
+    if not entries:
+        return 0
+    added = 0
+    with _index_lock():
+        data = _load_index()
+        recorded = data.setdefault("entries", {})
+        for recipe, entry in entries.items():
+            if recipe in recorded:
+                continue
+            recorded[recipe] = entry
+            added += 1
+        if added:
+            _save_index(data)
+    return added
 
 
 def _canonical_value(value: typing.Any) -> str:

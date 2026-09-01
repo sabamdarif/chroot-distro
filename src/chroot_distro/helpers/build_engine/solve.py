@@ -77,12 +77,18 @@ class PlatformResult:
     Self-contained by the time a caller holds one: the scratch tree is gone, the
     layers name blobs in the layer cache, and the two documents are the bytes to
     publish.
+
+    `step_recipes` is the one thing here that is not part of the image: the recipe
+    hash of every RUN the solve dispatched, which is what `--cache-to` looks the
+    exportable cache entries up by. It is the solve that knows them, and the
+    result is the only thing that leaves one.
     """
 
     platform: Platform
     manifest: dict[str, typing.Any]
     image_config: dict[str, typing.Any]
     layers: list[dict[str, typing.Any]]
+    step_recipes: frozenset[str] = frozenset()
 
 
 def solve_platforms(request: BuildRequest, platforms: typing.Sequence[Platform]) -> list[PlatformResult]:
@@ -160,6 +166,7 @@ def solve_platform(request: BuildRequest) -> PlatformResult:
             manifest=manifest,
             image_config=image_config,
             layers=list(stage.layers),
+            step_recipes=frozenset(engine.step_recipes),
         )
     finally:
         # The stage descriptors point inside the tree about to be removed, and

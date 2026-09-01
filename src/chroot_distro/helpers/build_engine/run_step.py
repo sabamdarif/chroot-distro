@@ -127,6 +127,7 @@ def do_run(engine: typing.Any, instr: dict[str, typing.Any]) -> None:
 
     extra = _run_extra_inputs(engine, stage, mounts)
     recipe = compute_recipe_hash(stage.parent_layer_digest, instr, extra_inputs=extra)
+    engine.step_recipes.add(recipe)
     if not engine.no_cache:
         hit = cache_lookup(recipe)
         if hit is not None:
