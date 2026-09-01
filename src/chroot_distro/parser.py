@@ -402,6 +402,20 @@ def _build(sub):
         default=[],
         metavar="ID[=SOCK]",
     )
+    p.add_argument(
+        "--cache-from",
+        dest="cache_from",
+        action="append",
+        default=[],
+        metavar="type=local,src=DIR",
+    )
+    p.add_argument(
+        "--cache-to",
+        dest="cache_to",
+        action="append",
+        default=[],
+        metavar="type=local,dest=DIR",
+    )
     p.add_argument("--no-cache", dest="no_cache", action="store_true")
     p.add_argument(
         "--progress",

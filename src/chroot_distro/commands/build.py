@@ -38,6 +38,11 @@ One exclusive `BuildLock` per (tag, platform) is held for the whole build, taken
 in lock-path order so two concurrent builds with overlapping but differently
 spelled tag sets cannot deadlock each other.
 
+`--cache-from` is imported inside those locks and before the solve, so every step
+that can be served from the directory is; `--cache-to` is written afterwards, out
+of the recipe hashes the results carry. Only `type=local` exists, and
+`_parse_cache_specs` says why the type is spelled out rather than assumed.
+
 A `BuildError` or an `OSError` out of the solve is a build failure and ends as
 one quoted line rather than a traceback: the engine's walks report a per-entry
 failure and carry on, so an OSError that reaches here is a walk losing its
@@ -79,9 +84,11 @@ from chroot_distro.constants import (
 )
 from chroot_distro.helpers import namespace
 from chroot_distro.helpers.binfmt import ensure_handler
+from chroot_distro.helpers.build_cache_io import export_cache, import_cache
 from chroot_distro.helpers.build_engine import (
     BuildError,
     BuildRequest,
+    PlatformResult,
     StagePlan,
     plan_stages,
     solve_platforms,
@@ -114,6 +121,8 @@ def command_build(args: typing.Any) -> None:
     emulator = getattr(args, "emulator", None) or ""
     outputs = list(getattr(args, "outputs", []) or [])
     install_as = getattr(args, "install_as", None)
+    cache_from = _parse_cache_specs(getattr(args, "cache_from", None) or [], "--cache-from", "src")
+    cache_to = _parse_cache_specs(getattr(args, "cache_to", None) or [], "--cache-to", "dest")
 
     if dockerfile_path is not None and not dockerfile_path:
         crit_error("Dockerfile path cannot be empty.")
@@ -248,6 +257,11 @@ def command_build(args: typing.Any) -> None:
             crit_error(f"file '{out_abs}' already exists. Please specify a different name.")
             sys.exit(1)
 
+    for dest in cache_to:
+        if os.path.exists(dest) and not os.path.isdir(dest):
+            crit_error(f"--cache-to dest '{dest}' exists and is not a directory.")
+            sys.exit(1)
+
     # Acquire one exclusive BuildLock per (tag, platform) for the duration of the
     # build: the manifest cache entry a build publishes is per pair, so that is
     # what two of them can collide on. Sorted by lock path so two concurrent
@@ -260,6 +274,11 @@ def command_build(args: typing.Any) -> None:
     with ExitStack() as lock_stack:
         for lock in build_locks:
             lock_stack.enter_context(lock)
+
+        if cache_from and no_cache:
+            warn("--no-cache leaves no step to serve from cache, so --cache-from is not imported.")
+        elif cache_from:
+            _import_cache_dirs(cache_from, quiet)
 
         tmp_root, tmp_parent_fd, tmp_root_fd = _make_build_tmp()
 
@@ -324,6 +343,8 @@ def command_build(args: typing.Any) -> None:
                 except (OSError, RuntimeError) as exc:
                     log_error(f"Cannot write '{out_file}': {exc}")
                     sys.exit(1)
+
+            _export_cache_dirs(cache_to, results, quiet)
 
             if not quiet:
                 log_info("Build complete.")
@@ -417,6 +438,78 @@ def _resolve_target_platforms(raw: list[str], override_arch: str) -> list[Platfo
             sys.exit(1)
         return [named]
     return ordered or [get_device_platform()]
+
+
+def _parse_cache_specs(raw: list[str], option: str, key: str) -> list[str]:
+    """Parse `type=local,<key>=DIR` items into the directories, in order.
+
+    `type=local` is spelled out rather than assumed. A bare value names a registry
+    reference to buildx, so taking one here as a directory would give the same
+    command line two readings the day a registry type exists. Repeats and
+    duplicates behave like `--output`'s: every distinct directory once, in the
+    order it was first named.
+    """
+    out: list[str] = []
+    for item in raw:
+        fields: dict[str, str] = {}
+        for part in item.split(","):
+            name, _, value = part.partition("=")
+            fields[name.strip()] = value
+        kind = fields.pop("type", "")
+        path = fields.pop(key, "")
+        if kind != "local":
+            crit_error(f"{option} type '{kind}' is not supported; the only cache this program moves is 'type=local'.")
+            sys.exit(1)
+        if not path or fields:
+            crit_error(f"invalid {option} '{item}' (expected type=local,{key}=DIR).")
+            sys.exit(1)
+        resolved = os.path.abspath(os.path.expanduser(path))
+        if resolved not in out:
+            out.append(resolved)
+    return out
+
+
+def _import_cache_dirs(dirs: list[str], quiet: bool) -> None:
+    """Merge every `--cache-from` directory into this machine's build cache.
+
+    A directory that is not there yet is the first build in a fresh checkout,
+    which is the case a shared cache directory exists for, so it is reported and
+    not refused. One that is there and is not a cache directory ends the build,
+    since it was named on the command line. An entry that cannot be verified is
+    dropped and its step rebuilds, which is worth a line and not a failure.
+    """
+    for path in dirs:
+        try:
+            added, refused = import_cache(path)
+        except (OSError, ValueError) as exc:
+            crit_error(f"cannot import the build cache at '{path}': {quote_path(str(exc))}.")
+            sys.exit(1)
+        if refused:
+            warn(f"Ignored {refused} cache entr{'y' if refused == 1 else 'ies'} in '{path}' that could not be verified.")
+        if not quiet:
+            log_info(f"Imported {added} cached step(s) from '{path}'.")
+
+
+def _export_cache_dirs(dirs: list[str], results: list[PlatformResult], quiet: bool) -> None:
+    """Write every `--cache-to` directory from the steps this build dispatched.
+
+    One set across the whole matrix: two platforms sharing a step share its entry,
+    and a directory describing it twice is not a thing this format can hold.
+    Failure ends the command the way a `--output` that cannot be written does; the
+    image is already published, so what is lost is the next build's head start,
+    and a CI job that asked for a cache has to hear that it has none.
+    """
+    if not dirs:
+        return
+    recipes = {recipe for result in results for recipe in result.step_recipes}
+    for path in dirs:
+        try:
+            steps, size = export_cache(path, recipes)
+        except (OSError, ValueError) as exc:
+            log_error(f"Cannot export the build cache to '{path}': {quote_path(str(exc))}.")
+            sys.exit(1)
+        if not quiet:
+            log_info(f"Exported {steps} cached step(s) ({fmt_size(size)}) to '{path}'.")
 
 
 def _install_platform(platforms: list[Platform]) -> Platform:
