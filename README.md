@@ -410,6 +410,8 @@ Build an image from a Dockerfile, like `docker build` but without Docker. `PATH`
 | `--secret id=NAME[,src=PATH]` | Give a secret to `RUN --mount=type=secret` steps. Without `src=`, the value comes from the environment variable `NAME`. Secrets never end up in the image. |
 | `--ssh ID[=SOCK]` | Give an SSH agent socket to `RUN --mount=type=ssh` steps. Default socket is `$SSH_AUTH_SOCK`. |
 | `--no-cache` | Rebuild every step from scratch instead of reusing cached steps. |
+| `--cache-from type=local,src=DIR` | Reuse the cached steps a `--cache-to` saved in `DIR`. Can be given more than once. |
+| `--cache-to type=local,dest=DIR` | Save this build's cached steps into `DIR`, for another machine or a later run. Can be given more than once. |
 | `--progress MODE` | Output style: `auto`, `plain`, `tty`, or `rawjson`. |
 | `-v`, `--verbose` | Show each instruction and full `RUN` output. |
 | `-q`, `--quiet` | Only show errors. |
@@ -440,7 +442,8 @@ These fail with a clear error rather than being ignored, because each one would 
 | `COPY --link` | A BuildKit-only way of rebasing layers. |
 | `COPY --checksum`, `ADD --keep-git-dir` | Not implemented. |
 | `ADD` from a git repository | Not implemented. Clone it yourself and `COPY` the result. |
-| Cache import and export, provenance, SBOM, named and remote contexts | Not implemented. |
+| `--cache-from` or `--cache-to` other than `type=local` | Only a folder is supported, see [Cache import and export](#cache-import-and-export). |
+| Provenance, SBOM, named and remote contexts | Not implemented. |
 
 A `# syntax=` line naming anything but `docker/dockerfile` asks for a frontend program that this cannot fetch or run. The build warns and reads the file as an ordinary Dockerfile.
 
@@ -462,6 +465,24 @@ Where those images end up:
 chroot-distro build -t myapp:1.0 --install-as myapp .
 chroot-distro build -t myapp:1.0 --platform linux/amd64,linux/arm64 -o myapp.oci.tar .
 ```
+
+#### Cache import and export
+
+`build` remembers every `RUN` it executed, but only on the machine that ran it. `--cache-to` writes what this build's steps produced into a folder, and `--cache-from` reads such a folder back, so a fresh CI runner can start with the cache the last one finished with.
+
+```sh
+chroot-distro build -t myapp:1.0 \
+    --cache-from type=local,src=.buildcache \
+    --cache-to type=local,dest=.buildcache .
+```
+
+`type=local` is the only kind there is: a plain folder, holding a `build-cache.json` that lists the steps and a `blobs/` folder with one file per layer. Both options can be given more than once.
+
+- Only the steps this build ran are exported, so the folder carries no layer from a build that has nothing to do with it.
+- An export adds to what the folder already holds and nothing ever removes anything, so a shared folder only grows. Delete it to start over.
+- A folder that is not there yet is not an error: the first build reports that it imported nothing and carries on. A folder that is there and is not a cache folder stops the build.
+- Every layer is checked against its own checksums on the way in, and one that does not match is dropped so its step rebuilds. What that cannot check is whether the folder tells the truth about which step a layer belongs to, so point `--cache-from` only at a folder you trust, the same as with `docker buildx`.
+- `--no-cache` skips the import, since no step would consult it. The export still runs, and records what the build rebuilt.
 
 ### push
 
@@ -501,7 +522,9 @@ Every `RUN` a build executes is recorded against the layer it produced, so a lat
 chroot-distro clear-cache --build-cache
 ```
 
-This removes the index and then deletes the layers nothing else points at. The layers of images you still have are kept, so what goes is the build's own bookkeeping, the intermediates no image held on to, and any leftover blob from a killed download. The next `build` re-runs every step. It refuses to run while another `chroot-distro` command holds a lock, since a build in progress has recorded steps whose layers this would unpin. To skip cache lookups for a single build without deleting anything, use `build --no-cache` instead — note that it still records what it builds.
+This removes the index and then deletes the layers nothing else points at. The layers of images you still have are kept, so what goes is the build's own bookkeeping, the intermediates no image held on to, and any leftover blob from a killed download. The next `build` re-runs every step. It refuses to run while another `chroot-distro` command holds a lock, since a build in progress has recorded steps whose layers this would unpin. To skip cache lookups for a single build without deleting anything, use `build --no-cache` instead, which still records what it builds.
+
+A folder written by `build --cache-to` is yours, not part of this cache, so nothing here touches it. Delete that folder yourself when you want it gone.
 
 ### remove
 

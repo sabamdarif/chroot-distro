@@ -412,6 +412,12 @@ complete -c chroot-distro -f -n '__fish_seen_subcommand_from build' \
 complete -c chroot-distro -f -n '__fish_seen_subcommand_from build' \
     -l ssh                -d 'Expose an SSH agent socket to RUN --mount=type=ssh (repeatable)'
 complete -c chroot-distro -f -n '__fish_seen_subcommand_from build' \
+    -l cache-from      -r -d 'Import cached steps from a directory (repeatable)' \
+    -a 'type=local,src='
+complete -c chroot-distro -f -n '__fish_seen_subcommand_from build' \
+    -l cache-to        -r -d 'Export the cached steps of this build to a directory (repeatable)' \
+    -a 'type=local,dest='
+complete -c chroot-distro -f -n '__fish_seen_subcommand_from build' \
     -l no-cache           -d 'Disable per-instruction build cache'
 complete -c chroot-distro -f -n '__fish_seen_subcommand_from build' \
     -l progress        -r -d 'Build output style' \

@@ -327,6 +327,8 @@ _chroot_distro() {
 				'--install-as[install image as a local container after build]:name:_chroot_distro_containers' \
 				'*--secret[expose a secret to RUN --mount=type=secret (repeatable)]:spec' \
 				'*--ssh[expose an SSH agent socket to RUN --mount=type=ssh (repeatable)]::spec' \
+				'*--cache-from[import cached steps from a directory (repeatable)]:spec:(type=local,src=)' \
+				'*--cache-to[export the cached steps of this build to a directory (repeatable)]:spec:(type=local,dest=)' \
 				'--no-cache[disable per-instruction build cache]' \
 				'--progress[build output style]:mode:(auto plain tty rawjson)' \
 				'(-v --verbose -q --quiet)'{-v,--verbose}'[echo each instruction and stream RUN output]' \

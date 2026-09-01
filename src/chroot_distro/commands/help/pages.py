@@ -125,6 +125,21 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
             ),
             ("--no-cache", "Disable build-step caching. Each instruction is executed fresh."),
             (
+                "--cache-from [type=local,src=DIR]",
+                "Import the cached steps a --cache-to wrote into DIR before "
+                "building. A directory that is not there yet imports nothing "
+                "and is not an error; one that is there and is not a cache "
+                "directory ends the build. Every layer is verified against its "
+                "own digest and diff_id on the way in. Skipped under "
+                "--no-cache. Repeatable.",
+            ),
+            (
+                "--cache-to [type=local,dest=DIR]",
+                "Export the steps this build dispatched into DIR, so another "
+                "machine can serve them with --cache-from. Only this build's "
+                "steps, added to whatever DIR already holds. Repeatable.",
+            ),
+            (
                 "--progress [auto|plain|tty|rawjson]",
                 "Build output style: plain one-line-per-step, tty live "
                 "redraw, or rawjson (one JSON event per line on stdout). "
@@ -139,6 +154,7 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
             f"{PROGRAM_NAME} build -t myapp --install-as myapp .",
             f"{PROGRAM_NAME} build -f Dockerfile.arm --architecture aarch64 .",
             f"{PROGRAM_NAME} build -t myapp:1.0 --platform linux/amd64,linux/arm64 -o myapp.oci.tar .",
+            f"{PROGRAM_NAME} build -t myapp --cache-to type=local,dest=.buildcache .",
         ],
         "footer": [
             {
@@ -184,7 +200,9 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
                     "RUN --security; COPY --link, --parents) are rejected with "
                     "an error. A multi-platform image index is written to an "
                     "--output archive only; 'push' uploads one platform at a "
-                    "time, chosen with its own --architecture."
+                    "time, chosen with its own --architecture. Cache import and "
+                    "export cover 'type=local' and no other; provenance, SBOM "
+                    "and named or remote contexts are not implemented."
                 ),
             },
         ],
