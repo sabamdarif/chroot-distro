@@ -205,7 +205,13 @@ def test_run_pins_the_step_to_the_stage_descriptor(staged, tmp_path, monkeypatch
 
     monkeypatch.setattr(run_step, "_run_plain", fake_run_plain)
 
-    engine = SimpleNamespace(quiet=True, verbose=False, isolation_mode="none", tmp_root=str(tmp_path))
+    engine = SimpleNamespace(
+        quiet=True,
+        verbose=False,
+        isolation_mode="none",
+        tmp_root=str(tmp_path),
+        build_platform=Platform("linux", "amd64"),
+    )
     assert run_step._exec_chroot(engine, stage, ["true"], None) == 0
 
     assert seen["stage"] is stage

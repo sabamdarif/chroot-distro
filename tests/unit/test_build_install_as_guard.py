@@ -86,7 +86,10 @@ def test_foreign_build_with_run_refuses_without_an_emulator(build_dir, monkeypat
     assert "RUN steps cannot execute" in capsys.readouterr().err
 
 
-def test_foreign_build_without_run_warns_but_can_finish(build_dir, monkeypatch, capsys):
+def test_foreign_build_without_run_says_nothing_about_an_emulator(build_dir, monkeypatch, capsys):
+    # `FROM alpine` alone execs nothing, so the preflight has nothing to refuse
+    # and nothing to advise: the cross-compile shape must not be told to install
+    # QEMU it will never call. run_step asks again if a step does reach an exec.
     monkeypatch.setattr("chroot_distro.commands.build.get_device_platform", lambda: Platform("linux", "amd64"))
     monkeypatch.setattr("chroot_distro.commands.build.needs_emulation", lambda _arch: True)
     monkeypatch.setattr(
@@ -101,7 +104,7 @@ def test_foreign_build_without_run_warns_but_can_finish(build_dir, monkeypatch, 
     with pytest.raises(ChrootDistroError, match="reached the build"):
         command_build(SimpleNamespace(path=str(build_dir), override_arch="aarch64", quiet=True))
 
-    assert "no emulator was registered" in capsys.readouterr().err
+    assert "no emulator was registered" not in capsys.readouterr().err
 
 
 def test_a_run_on_the_build_platform_needs_no_emulator(build_dir, monkeypatch, capsys):

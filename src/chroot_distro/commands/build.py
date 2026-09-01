@@ -19,7 +19,9 @@ two together have to name the same one platform.
 question follows from its answer: a handler is only required for a stage whose
 platform this host cannot execute *and* which carries a RUN, so the cross-compile
 shape (a native builder stage, a foreign stage that only assembles files) needs
-no emulator.
+no emulator. Only the Dockerfile's own RUN lines are visible here, which is what
+makes this a fast fail before any pull or lock; `build_engine/run_step` asks again
+at the exec itself, for the step an ONBUILD fired.
 
 What is validated here becomes one `BuildRequest`, and
 `build_engine/solve.solve_platforms` turns it into one `PlatformResult` per
@@ -205,17 +207,20 @@ def command_build(args: typing.Any) -> None:
         stage_plans.extend(plans)
 
     # Every RUN step chroots into its own stage's rootfs, so a stage built for a
-    # foreign platform needs the same handler a foreign login does. A stage that
-    # runs nothing never execs a guest binary, so there it is only a warning.
+    # foreign platform needs the same handler a foreign login does. Refused here
+    # only for a RUN the Dockerfile itself carries, which buys the fast fail before
+    # any pull or lock; a stage that runs nothing says nothing, and the engine asks
+    # again at the exec for the step an ONBUILD fired.
     for platform, runs in _foreign_platforms(stage_plans):
-        interpreter, reason = ensure_handler(platform.to_arch())
-        if interpreter is not None:
+        if not runs:
             continue
-        detail = f"Building for '{platform}' on a '{build_platform}' host, and no emulator was registered ({reason})."
-        if runs:
-            crit_error(f"{detail} RUN steps cannot execute.")
+        interpreter, reason = ensure_handler(platform.to_arch())
+        if interpreter is None:
+            crit_error(
+                f"Building for '{platform}' on a '{build_platform}' host, and no "
+                f"emulator was registered ({reason}). RUN steps cannot execute."
+            )
             sys.exit(1)
-        warn(detail)
 
     install_platform = target_platforms[0]
     if install_as:

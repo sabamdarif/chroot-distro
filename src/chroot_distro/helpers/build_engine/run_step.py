@@ -35,6 +35,10 @@ plain host-namespace bind set; a step with stdin and a kernel without
 mount-namespace support both fall back to the plain path. Either way the
 chroot happens in the child, as the last thing before the exec so the namespaces
 are already joined, and onto the stage's pinned descriptor where there is one.
+`_require_emulator` gates all of it: `build`'s preflight only sees the Dockerfile's
+own RUN lines, so a foreign-arch step with no binfmt_misc handler is refused here
+instead, which is also what leaves a cached foreign step working (nothing execs for
+a cache hit).
 
 The plain path applies its binds from the host's mount namespace, so every target
 is a name an image chose: `_mount_point` resolves one the way the guest sees it,
@@ -63,6 +67,7 @@ from chroot_distro.atomic import publish_file
 from chroot_distro.constants import (
     DEFAULT_PATH_ENV,
 )
+from chroot_distro.helpers.binfmt import ensure_handler
 from chroot_distro.helpers.build_cache import (
     compute_recipe_hash,
 )
@@ -293,6 +298,25 @@ def _exec_mode(engine: typing.Any, stage: typing.Any) -> str:
     return "emulated" if foreign else "native"
 
 
+def _require_emulator(engine: typing.Any, stage: typing.Any) -> None:
+    """Refuse a foreign-arch step this host has no binfmt_misc handler for.
+
+    `build`'s preflight reads the Dockerfile's own RUN lines, so it cannot see a
+    step a base image's ONBUILD fired; that one arrives here instead. Asked at the
+    exec itself rather than per stage, which is also what keeps a cached foreign
+    step working on a host with no emulator: nothing execs for a cache hit.
+    """
+    arch = stage.platform.to_arch()
+    if not needs_emulation(arch, engine.build_platform.to_arch()):
+        return
+    interpreter, reason = ensure_handler(arch)
+    if interpreter is None:
+        raise BuildError(
+            f"cannot run a step for '{stage.platform}' on a '{engine.build_platform}' "
+            f"host: no emulator was registered ({reason})."
+        )
+
+
 def _exec_chroot(
     engine: typing.Any,
     stage: typing.Any,
@@ -301,6 +325,7 @@ def _exec_chroot(
     mounts: list[RunMount] | None = None,
 ) -> int:
     """Run *command* chrooted into *stage*'s rootfs; return its exit code."""
+    _require_emulator(engine, stage)
     rootfs = stage.rootfs_dir
 
     from chroot_distro.commands.login.chroot_cmd import build_chroot_config

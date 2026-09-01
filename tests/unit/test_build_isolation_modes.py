@@ -3,6 +3,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from chroot_distro.arch import Platform
 from chroot_distro.commands.build import _resolve_build_isolation_mode
 from chroot_distro.helpers import isolation
 from chroot_distro.helpers.build_engine import run_step
@@ -54,6 +55,7 @@ def _engine(mode, tmp_path):
         ssh_sockets={},
         stages={},
         build_dir=str(tmp_path),
+        build_platform=Platform("linux", "amd64"),
     )
 
 
@@ -69,6 +71,7 @@ def _stage(tmp_path):
         env={},
         declared_args=set(),
         args={},
+        platform=Platform("linux", "amd64"),
     )
 
 

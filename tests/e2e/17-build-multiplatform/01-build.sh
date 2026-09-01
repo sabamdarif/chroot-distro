@@ -4,10 +4,10 @@
 # Multi-platform build: two platforms, one archive, one installed container.
 # Needs: 00-context.sh (/tmp/multi-build).
 #
-# The runner is amd64 and no emulator is assumed, so the arm64 half of this
-# warns that none is registered and builds anyway: its stages carry no RUN.
-# --install-as therefore has exactly one platform it can install, which is the
-# one the next steps read back.
+# The runner is amd64 and no emulator is assumed, so the arm64 half of this builds
+# without one: its stages carry no RUN, so nothing execs and nothing is said about
+# an emulator that would never be called. --install-as therefore has exactly one
+# platform it can install, which is the one the next steps read back.
 
 set -eo pipefail
 

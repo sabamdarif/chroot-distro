@@ -87,7 +87,9 @@ class StagePlan:
     """What one FROM decides before anything is pulled.
 
     `runs` is whether the stage carries an instruction that execs a guest
-    binary, which is what decides whether its platform needs an emulator.
+    binary, which is what lets `build` refuse a foreign platform before the
+    first pull. It reads the Dockerfile only, so a step a base image's ONBUILD
+    fires leaves it False; `run_step._require_emulator` catches that one.
     """
 
     name: str

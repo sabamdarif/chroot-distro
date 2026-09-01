@@ -137,3 +137,49 @@ def test_a_leftover_holding_the_group_open_is_killed_when_it_ignores_sigterm(sub
         if proc.poll() is None:
             proc.kill()
         proc.wait()
+
+
+# ── the emulator gate ─────────────────────────────────────────────────────────
+# `build`'s preflight reads the Dockerfile's RUN lines, so a step a base image's
+# ONBUILD fired is the one that reaches an exec unannounced. This is where it is
+# caught, which is also why a native stage must not pay for the question.
+def _gate_pair(stage_arch, build_arch):
+    from types import SimpleNamespace
+
+    from chroot_distro.arch import platform_from_arch
+
+    engine = SimpleNamespace(build_platform=platform_from_arch(build_arch))
+    stage = SimpleNamespace(platform=platform_from_arch(stage_arch))
+    return engine, stage
+
+
+def test_a_foreign_step_without_a_handler_is_refused_at_the_exec(monkeypatch):
+    from chroot_distro.helpers.build_engine.errors import BuildError
+
+    monkeypatch.setattr(
+        run_step, "ensure_handler", lambda _arch: (None, "no QEMU user-mode emulator for 'aarch64' is installed")
+    )
+    engine, stage = _gate_pair("aarch64", "x86_64")
+
+    with pytest.raises(BuildError) as exc:
+        run_step._require_emulator(engine, stage)
+
+    assert "no emulator was registered" in str(exc.value)
+    assert "aarch64" in str(exc.value)
+
+
+def test_a_foreign_step_with_a_handler_goes_ahead(monkeypatch):
+    monkeypatch.setattr(run_step, "ensure_handler", lambda arch: (f"/usr/bin/qemu-{arch}", ""))
+    engine, stage = _gate_pair("aarch64", "x86_64")
+
+    run_step._require_emulator(engine, stage)
+
+
+def test_a_native_step_never_asks_for_a_handler(monkeypatch):
+    def unexpected(_arch):
+        raise AssertionError("a native stage asked for an emulator")
+
+    monkeypatch.setattr(run_step, "ensure_handler", unexpected)
+    engine, stage = _gate_pair("x86_64", "x86_64")
+
+    run_step._require_emulator(engine, stage)
