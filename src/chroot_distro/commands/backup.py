@@ -15,9 +15,10 @@ directories, across the live rootfs, so no entry can refuse the walk that follow
 
 Compression comes from the output extension unless `--compression` names one, and
 `.tar.lz`/`.tar.lz4` are refused rather than quietly written as plain tar. With no
-`--output` the archive is streamed (`w|`) to stdout, which is refused on a tty. A
-half-written output file is removed on error and on Ctrl-C, so a failed backup does
-not sit there looking like an archive.
+`--output` the archive is streamed (`w|`) to stdout, which is refused on a tty. An
+entry that cannot be read fails the whole backup rather than leaving a gap in the
+archive, and a half-written output file is removed on error and on Ctrl-C, so a
+failed backup does not sit there looking like an archive.
 """
 
 import contextlib
@@ -123,22 +124,26 @@ def _add_path(
     src: str,
     arcname: str,
     on_read=None,
-) -> None:
-    """Add *src* to *tf* as *arcname*, stripping ownership info."""
+) -> bool:
+    """Add *src* to *tf* as *arcname*, stripping ownership info.
+
+    Returns False when the entry could not be archived, so the caller can
+    turn a dropped file into a failed backup instead of a silent gap.
+    """
     try:
         st = os.lstat(src)
     except OSError as exc:
         warn(f"Failed to lstat {src}: {exc}")
-        return
+        return False
     m = st.st_mode
     if stat.S_ISBLK(m) or stat.S_ISCHR(m) or stat.S_ISFIFO(m) or stat.S_ISSOCK(m):
-        return
+        return True
 
     try:
         info = tf.gettarinfo(src, arcname=arcname)
     except OSError as exc:
         warn(f"Failed to get tar info for {src}: {exc}")
-        return
+        return False
     info.uid = 0
     info.gid = 0
     info.uname = ""
@@ -149,8 +154,10 @@ def _add_path(
                 tf.addfile(info, _ReadCounter(fh, on_read) if on_read else fh)
         except OSError as exc:
             warn(f"Failed to backup file {src}: {exc}")
+            return False
     else:
         tf.addfile(info)
+    return True
 
 
 def _fix_permissions(rootfs_dir: str) -> None:
@@ -301,11 +308,20 @@ def _run_backup(
             if output_path
             else tarfile.open(fileobj=sys.stdout.buffer, mode=tar_mode)  # type: ignore[call-overload]
         ) as tf:
+            dropped = 0
             for src, arc in entries:
-                _add_path(tf, src, arc, on_read=_on_read)
+                if not _add_path(tf, src, arc, on_read=_on_read):
+                    dropped += 1
                 _on_entry(arc)
 
         clear_bar()
+        if dropped:
+            plural = "entry" if dropped == 1 else "entries"
+            log_error(f"Finished with errors. {dropped} {plural} could not be archived.")
+            if output_path:
+                with contextlib.suppress(OSError):
+                    os.remove(output_path)
+            sys.exit(1)
         log_info("Finished backing up.")
 
     except KeyboardInterrupt:

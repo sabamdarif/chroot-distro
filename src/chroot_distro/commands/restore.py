@@ -22,7 +22,10 @@ One container per archive: the first valid member fixes the target and takes its
 exclusive lock, and a member naming a second one ends the command. A hard link is
 extracted as a copy, and device nodes, fifos and anything else unexpected are
 skipped. A directory the archive wants unreadable is created wide and chmod'ed back
-in reverse order at the end, so extraction can still descend into it.
+in reverse order at the end, so extraction can still descend into it. A member that
+could not be written still lets the modes and the manifest land before the command
+fails, so what was restored is finished and a partial result is never reported as a
+success.
 """
 
 import contextlib
@@ -302,6 +305,8 @@ def command_restore(args) -> None:
             tf_fileobj = sys.stdin.buffer
             tf_mode = f"r|{comp}"
 
+        failed = False
+
         with tarfile.open(fileobj=tf_fileobj, mode=tf_mode) as tf:  # type: ignore[call-overload]
             for member in tf:
                 if member.isblk() or member.ischr() or member.isfifo():
@@ -412,6 +417,7 @@ def command_restore(args) -> None:
                                 os.chmod(dest, stat.S_IMODE(member.mode))
                     except OSError as exc:
                         warn(f"Failed to extract hard link fallback {member.name} to {dest}: {exc}")
+                        failed = True
 
                 elif member.isreg():
                     fobj = tf.extractfile(member)
@@ -433,6 +439,7 @@ def command_restore(args) -> None:
                             os.chmod(dest, stat.S_IMODE(member.mode))
                     except OSError as exc:
                         warn(f"Failed to extract file {member.name} to {dest}: {exc}")
+                        failed = True
                     finally:
                         fobj.close()
 
@@ -468,6 +475,9 @@ def command_restore(args) -> None:
             _write_manifest(*pending_manifest)
 
         clear_bar()
+        if failed:
+            log_error("Finished with errors. Some files could not be restored.")
+            sys.exit(1)
         log_info("Finished restoring the container.")
 
     except KeyboardInterrupt:
