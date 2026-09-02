@@ -137,6 +137,26 @@ def test_guest_ships_library_ignores_leftover_bind_stub(tmp_path):
     assert nvidia._guest_ships_library(str(real)) is True
 
 
+# ── _walk_host_libraries ──────────────────────────────────────────────────────
+def test_walk_host_libraries_covers_subdirectories_once(tmp_path, monkeypatch):
+    lib = tmp_path / "lib"
+    (lib / "vdpau").mkdir(parents=True)
+    (lib / "libnvidia-ml.so.1").write_bytes(b"\x7fELF\x02")
+    (lib / "vdpau" / "libvdpau_nvidia.so.1").write_bytes(b"\x7fELF\x02")
+    (lib / "libpng16.so.16").write_bytes(b"\x7fELF\x02")
+    (tmp_path / "lib64").symlink_to(lib)
+    monkeypatch.setattr(nvidia, "_HOST_LIB_ROOTS", (str(lib), str(tmp_path / "lib64")))
+
+    found = sorted(nvidia._walk_host_libraries())
+
+    # lib64 is another name for lib, so nothing under it is yielded a second
+    # time, and a library no pattern names is never yielded at all.
+    assert found == [
+        str(lib / "libnvidia-ml.so.1"),
+        str(lib / "vdpau" / "libvdpau_nvidia.so.1"),
+    ]
+
+
 # ── get_bindings: one host library, several guest names ───────────────────────
 def test_get_bindings_keeps_every_guest_name_of_one_source():
     source = "/usr/lib/libGLX_nvidia.so.610.57.04"

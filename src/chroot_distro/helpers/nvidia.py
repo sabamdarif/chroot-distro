@@ -41,9 +41,12 @@ non-fatal: an image without one simply keeps whatever cache it had.
 
 from __future__ import annotations
 
+import fnmatch
 import glob
 import logging
 import os
+import re
+from collections.abc import Iterator
 
 from chroot_distro.syscalls.chroot import chroot_and_run
 
@@ -144,6 +147,11 @@ _NVIDIA_LIB_PATTERNS = (
     "libnvoptix*",
 )
 
+# The patterns as one alternation, so a basename is tested against all of them in
+# a single match: a merged-usr host keeps six figures of files under /usr/lib and
+# a separate pass per pattern over that tree costs seconds.
+_NVIDIA_LIB_RE = re.compile("|".join(fnmatch.translate(pattern) for pattern in _NVIDIA_LIB_PATTERNS))
+
 # Vendor-neutral GLVND dispatch libraries. These are provided by the
 # container's own Mesa/GLVND stack and must NEVER be bound from the host:
 # the host copies are frequently symlinks resolving to vendor-specific
@@ -222,6 +230,14 @@ _HOST_LIB_DIRS = (
     "/usr/lib/",
 )
 
+# Where the search starts. A multiarch directory gets no entry of its own because
+# it sits under /usr/lib and the walk reaches it; only a sibling tree needs one.
+_HOST_LIB_ROOTS = (
+    "/usr/lib",
+    "/usr/lib32",
+    "/usr/lib64",
+)
+
 
 def _host_lib_to_guest_path(host_path: str, lib64: str, lib32: str | None) -> str | None:
     """Map a host library path to the equivalent guest library path.
@@ -255,6 +271,27 @@ def _guest_ships_library(guest_abs: str) -> bool:
         return False
 
 
+def _walk_host_libraries() -> Iterator[str]:
+    """Yield every path under `_HOST_LIB_ROOTS` whose basename names an NVIDIA library.
+
+    A root that is another name for one already walked is skipped, since /usr/lib64
+    is a symlink to /usr/lib on an Arch-family host. Symlinked subdirectories are
+    followed, because a distro may keep the libraries behind one.
+    """
+    walked: set[str] = set()
+    for root in _HOST_LIB_ROOTS:
+        if not os.path.isdir(root):
+            continue
+        real_root = os.path.realpath(root)
+        if real_root in walked:
+            continue
+        walked.add(real_root)
+        for dirpath, _dirnames, filenames in os.walk(root, followlinks=True):
+            for name in filenames:
+                if _NVIDIA_LIB_RE.match(name):
+                    yield os.path.join(dirpath, name)
+
+
 def find_nvidia_libraries(rootfs: str) -> list[tuple[str, str]]:
     """Find NVIDIA ``.so`` files on the host and map them to guest paths.
 
@@ -264,49 +301,42 @@ def find_nvidia_libraries(rootfs: str) -> list[tuple[str, str]]:
     binds: list[tuple[str, str]] = []
     seen_guests: set[str] = set()
 
-    host_lib_dirs = set()
-    for candidate in ("/usr/lib/x86_64-linux-gnu", "/usr/lib/i386-linux-gnu", "/usr/lib64", "/usr/lib32", "/usr/lib"):
-        if os.path.isdir(candidate):
-            host_lib_dirs.add(candidate)
+    for lib_path in _walk_host_libraries():
+        if not os.path.isfile(lib_path):
+            continue
 
-    for lib_dir in sorted(host_lib_dirs):
-        for pattern in _NVIDIA_LIB_PATTERNS:
-            for lib_path in glob.glob(os.path.join(lib_dir, "**", pattern), recursive=True):
-                if not os.path.isfile(lib_path):
-                    continue
+        # The container's own GLVND stack owns these; see
+        # _GLVND_NEUTRAL_BASENAMES.
+        if _is_glvnd_neutral(lib_path):
+            continue
 
-                # The container's own GLVND stack owns these; see
-                # _GLVND_NEUTRAL_BASENAMES.
-                if _is_glvnd_neutral(lib_path):
-                    continue
+        real_path = lib_path
+        if os.path.islink(lib_path):
+            real_path = os.path.realpath(lib_path)
+            if not os.path.isfile(real_path):
+                continue
 
-                real_path = lib_path
-                if os.path.islink(lib_path):
-                    real_path = os.path.realpath(lib_path)
-                    if not os.path.isfile(real_path):
-                        continue
+        # Skip zero-byte sources: a real library is never empty, and
+        # binding one leaves an empty stub that ldconfig rejects.
+        try:
+            if os.path.getsize(real_path) == 0:
+                continue
+        except OSError:
+            continue
 
-                # Skip zero-byte sources: a real library is never empty, and
-                # binding one leaves an empty stub that ldconfig rejects.
-                try:
-                    if os.path.getsize(real_path) == 0:
-                        continue
-                except OSError:
-                    continue
+        guest_path = _host_lib_to_guest_path(lib_path, lib64, lib32)
+        if guest_path is None:
+            continue
 
-                guest_path = _host_lib_to_guest_path(lib_path, lib64, lib32)
-                if guest_path is None:
-                    continue
+        if guest_path in seen_guests:
+            continue
+        seen_guests.add(guest_path)
 
-                if guest_path in seen_guests:
-                    continue
-                seen_guests.add(guest_path)
+        # A parent bind mount or the image's own package may provide it.
+        if _guest_ships_library(os.path.join(rootfs, guest_path.lstrip("/"))):
+            continue
 
-                # A parent bind mount or the image's own package may provide it.
-                if _guest_ships_library(os.path.join(rootfs, guest_path.lstrip("/"))):
-                    continue
-
-                binds.append((real_path, guest_path))
+        binds.append((real_path, guest_path))
 
     return binds
 
