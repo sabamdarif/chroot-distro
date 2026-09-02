@@ -9,9 +9,13 @@ GPL-3.0, then rewritten for chroot-distro's bind lists and path mapping.
 A proprietary NVIDIA userspace has to match the kernel module exactly, so the
 guest cannot ship its own: the host's libraries, ICD descriptors and CLI tools
 are bound in, and `_host_lib_to_guest_path` remaps each one onto the library
-directory layout `_detect_guest_lib_dirs` found in the image (multiarch, lib64,
-or plain lib). WSL2 is the second supported shape, where the libraries live under
-`/usr/lib/wsl` and that whole directory is bound instead.
+directory `_detect_guest_lib_dirs` found in the image (multiarch, lib64, or plain
+lib) for the file's own ELF class. The class comes from the file because no host
+layout puts it in the directory name the same way: Debian keeps both in
+`/usr/lib/<triplet>`, Fedora keeps 64-bit in `/usr/lib64` and 32-bit in
+`/usr/lib`, Arch keeps 64-bit in `/usr/lib` and 32-bit in `/usr/lib32`. WSL2 is
+the second supported shape, where the libraries live under `/usr/lib/wsl` and
+that whole directory is bound instead.
 
 Three exclusions are the load-bearing part, and each one is a guest that broke:
 
@@ -26,10 +30,13 @@ Three exclusions are the load-bearing part, and each one is a guest that broke:
   from a walk of `/etc` matching the name "nvidia", which would carry unrelated
   host files into the container.
 
-A guest path that already exists is left alone, since a parent bind may already
-provide it. `run_ldconfig_in_chroot` runs the *guest's* own `ldconfig` through
-`chroot_and_run` to refresh its cache after the binds, and stays non-fatal: an
-image without one simply keeps whatever cache it had.
+A guest path that already holds something is left alone, since a parent bind or
+the image's own package may provide it, but a zero-byte one is this program's own
+leftover: `mount_manager` creates an empty file as a bind target and the unmount
+leaves it, so treating that as the image's library would starve every session
+after the first. `run_ldconfig_in_chroot` runs the *guest's* own `ldconfig`
+through `chroot_and_run` to refresh its cache after the binds, and stays
+non-fatal: an image without one simply keeps whatever cache it had.
 """
 
 from __future__ import annotations
@@ -160,11 +167,14 @@ def _is_glvnd_neutral(path: str) -> bool:
     return any(base == name or base.startswith(name + ".") for name in _GLVND_NEUTRAL_BASENAMES)
 
 
-def _detect_guest_lib_dirs(rootfs: str) -> tuple[str, str]:
+def _detect_guest_lib_dirs(rootfs: str) -> tuple[str, str | None]:
     """Determine the guest's 64-bit and 32-bit library directories.
 
     Returns ``(lib64_dir, lib32_dir)`` as absolute guest paths
-    (e.g. ``"/usr/lib/x86_64-linux-gnu/"``).
+    (e.g. ``"/usr/lib/x86_64-linux-gnu/"``). *lib32_dir* is None when the image
+    has no 32-bit directory of its own: a host 32-bit library would otherwise
+    either land in a multiarch tree the guest never had or collide with its
+    64-bit namesake in a merged /usr/lib.
     """
     # Multi-arch layout (Debian/Ubuntu)
     if os.path.isdir(os.path.join(rootfs, "usr/lib/x86_64-linux-gnu")):
@@ -181,24 +191,68 @@ def _detect_guest_lib_dirs(rootfs: str) -> tuple[str, str]:
     if os.path.isdir(os.path.join(rootfs, "usr/lib32")):
         lib32 = "/usr/lib32/"
 
+    if lib32 == lib64 or not os.path.isdir(os.path.join(rootfs, lib32.strip("/"))):
+        return lib64, None
+
     return lib64, lib32
 
 
-def _host_lib_to_guest_path(host_path: str, lib64: str, lib32: str) -> str:
+def _is_elf64(path: str) -> bool:
+    """Return True when *path* is a 64-bit object (ELF ``EI_CLASS`` is ELFCLASS64).
+
+    Anything that is not a readable ELF file counts as 64-bit: the guest's
+    primary library directory is where an unrecognised file does the least harm.
+    """
+    try:
+        with open(path, "rb") as fh:
+            header = fh.read(5)
+    except OSError:
+        return True
+    if len(header) < 5 or header[:4] != b"\x7fELF":
+        return True
+    return header[4] == 2
+
+
+# Host library directories, most specific first so /usr/lib/ stays the catch-all.
+_HOST_LIB_DIRS = (
+    "/usr/lib/x86_64-linux-gnu/",
+    "/usr/lib/i386-linux-gnu/",
+    "/usr/lib64/",
+    "/usr/lib32/",
+    "/usr/lib/",
+)
+
+
+def _host_lib_to_guest_path(host_path: str, lib64: str, lib32: str | None) -> str | None:
     """Map a host library path to the equivalent guest library path.
 
-    Follows the same remapping distrobox-init does.
+    The destination directory follows the file's ELF class, not the name of the
+    host directory holding it, and everything below that directory is kept so a
+    ``vdpau/`` or ``nvidia/xorg/`` subdirectory survives the move. None means the
+    guest has nowhere to put it; a path under no known library directory is
+    returned unchanged.
     """
-    path = host_path
-    path = path.replace("/usr/lib/x86_64-linux-gnu/", lib64)
-    path = path.replace("/usr/lib/i386-linux-gnu/", lib32)
-    path = path.replace("/usr/lib64/", lib64)
-    path = path.replace("/usr/lib32/", lib32)
-    # Nothing above matched, so this is a multilib host whose 32-bit libs
-    # live in a plain /usr/lib.
-    if path == host_path:
-        path = path.replace("/usr/lib/", lib32)
-    return path
+    guest_dir = lib64 if _is_elf64(host_path) else lib32
+    if guest_dir is None:
+        return None
+    for host_dir in _HOST_LIB_DIRS:
+        if host_path.startswith(host_dir):
+            return guest_dir + host_path[len(host_dir) :]
+    return host_path
+
+
+def _guest_ships_library(guest_abs: str) -> bool:
+    """Return True when the guest already holds a real library at *guest_abs*.
+
+    A zero-byte file is not one: `mount_manager` creates an empty file as the
+    target of a single-file bind and the unmount leaves it behind, so the stub
+    (or a soname symlink the guest's ldconfig pointed at one) has to be bound
+    over rather than mistaken for the image's own library.
+    """
+    try:
+        return os.stat(guest_abs).st_size > 0
+    except OSError:
+        return False
 
 
 def find_nvidia_libraries(rootfs: str) -> list[tuple[str, str]]:
@@ -241,14 +295,15 @@ def find_nvidia_libraries(rootfs: str) -> list[tuple[str, str]]:
                     continue
 
                 guest_path = _host_lib_to_guest_path(lib_path, lib64, lib32)
+                if guest_path is None:
+                    continue
 
                 if guest_path in seen_guests:
                     continue
                 seen_guests.add(guest_path)
 
-                # A parent bind mount may already provide it.
-                guest_abs = os.path.join(rootfs, guest_path.lstrip("/"))
-                if os.path.exists(guest_abs):
+                # A parent bind mount or the image's own package may provide it.
+                if _guest_ships_library(os.path.join(rootfs, guest_path.lstrip("/"))):
                     continue
 
                 binds.append((real_path, guest_path))
@@ -303,14 +358,21 @@ def find_nvidia_configs() -> list[tuple[str, str]]:
 def find_nvidia_binaries() -> list[tuple[str, str]]:
     """Find NVIDIA CLI tools (nvidia-smi, etc.) on the host.
 
-    Returns ``(host_path, guest_path)`` pairs.
+    Returns ``(host_path, guest_path)`` pairs. A search directory that is only
+    another name for one already walked (`/bin` -> `/usr/bin` on a merged-usr
+    host) is skipped, so one tool does not arrive under four guest paths.
     """
     binds: list[tuple[str, str]] = []
     search_dirs = ("/usr/bin", "/usr/sbin", "/bin", "/sbin")
+    seen_dirs: set[str] = set()
 
     for d in search_dirs:
         if not os.path.isdir(d):
             continue
+        real_dir = os.path.realpath(d)
+        if real_dir in seen_dirs:
+            continue
+        seen_dirs.add(real_dir)
         try:
             for entry in os.listdir(d):
                 if "nvidia" in entry.lower():

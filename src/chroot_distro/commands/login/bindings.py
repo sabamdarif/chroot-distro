@@ -632,11 +632,16 @@ def get_bindings(
 
     if nvidia_integration:
         nvidia_binds, _nvidia_env = nvidia_helper.get_nvidia_integration(rootfs)
-        bound_srcs = {src for src, _ in binds}
+        # Deduplicated by destination, never by source: one host library is the
+        # file behind every one of its guest names (libfoo.so, libfoo.so.1,
+        # libfoo.so.1.2.3), and dropping the repeats loses the soname a loader
+        # actually opens.
+        bound_dsts = {"/" + dst.strip("/") for _src, dst in binds}
         for src, dst in nvidia_binds:
-            if src not in bound_srcs and os.path.exists(src):
+            norm_dst = "/" + dst.strip("/")
+            if norm_dst not in bound_dsts and os.path.exists(src):
                 binds.append((src, dst))
-                bound_srcs.add(src)
+                bound_dsts.add(norm_dst)
 
     # A custom bind overrides a system bind on destination conflict, matching
     # Docker/Podman --volume semantics.
