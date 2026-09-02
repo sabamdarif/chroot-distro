@@ -448,7 +448,6 @@ the caller (`build_engine/constants.is_host_exec_var`, applied in
 | `helpers/wayland.py`        | the Wayland half                                          |
 | `helpers/sound.py`          | the audio half                                            |
 | `helpers/xauthority.py`     | the `.Xauthority` format, so no `xauth` binary is needed  |
-| `helpers/gpu.py`            | ICD and loader descriptors for the Mesa stack             |
 | `helpers/nvidia.py`         | the proprietary driver's libraries, ICDs and tools        |
 | `helpers/android.py`        | the Termux-side fixups, and nothing on Linux              |
 | `helpers/rootfs.py`         | the guest `/etc` files this program writes                |

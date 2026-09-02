@@ -106,7 +106,6 @@ from chroot_distro.constants import (
     TERMUX_HOME,
     TERMUX_PREFIX,
 )
-from chroot_distro.helpers import gpu as gpu_helper
 from chroot_distro.helpers import isolation
 from chroot_distro.helpers.android import ensure_data_suid, termux_home_owner_ids
 from chroot_distro.helpers.display import (
@@ -628,25 +627,12 @@ def _command_login_inner_once(container_name: str, args) -> None:
     run_inner = getattr(args, "_run_inner", None)
 
     # NVIDIA auto-detect (host Linux only; --isolated would defeat it by
-    # binding host devices/libraries).
+    # binding host devices/libraries). AMD and Intel need nothing here: their
+    # render nodes arrive with the /dev bind and the guest's own Mesa ships the
+    # ICD descriptors that name its own drivers.
     has_nvidia = False
     if not IS_TERMUX and not minimal and not max_isolation:
         has_nvidia = detect_nvidia_gpu()
-
-    # AMD/Intel: bind the host's ICD/loader-config descriptors read-only so
-    # the container's own Mesa stack can enumerate /dev/dri. Driver .so files
-    # are NOT bound: shadowing the container's Mesa corrupts its loader.
-    if not IS_TERMUX and not minimal and not max_isolation:
-        existing_guest = {"/" + dst.strip("/") for dst in bind_options_map} | {
-            "/" + bindings._split_bind_spec(spec)[1].strip("/") for spec in raw_custom_binds
-        }
-        for src, dst in gpu_helper.find_gpu_icd_binds(rootfs):
-            norm_dst = "/" + dst.strip("/")
-            if norm_dst in existing_guest:
-                continue
-            custom_binds.append(f"{src}:{dst}")
-            bind_options_map[norm_dst] = "ro"
-            existing_guest.add(norm_dst)
 
     if dist_type == "termux":
         if not login_wd:
