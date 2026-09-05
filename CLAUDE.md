@@ -348,13 +348,12 @@ there the env vars are the whole interface.
 | `helpers/isolation.py`          | compose namespaces plus chroot, for all three callers               |
 | `helpers/isolation_warnings.py` | turn a missing namespace into advice                                |
 | `helpers/namespace.py`          | which namespaces this host can give, and the holder that keeps them |
-| `helpers/max_iso_holder.py`     | nothing live: superseded standalone PID 1                           |
 | `syscalls/__init__.py`          | the constant re-exports                                             |
 | `syscalls/_constants.py`        | kernel constants and the namespace maps                             |
 | `syscalls/_libc.py`             | the one libc handle, `check_syscall`, two backports                 |
 | `syscalls/mount.py`             | binds, filesystem mounts, propagation changes                       |
 | `syscalls/umount.py`            | umount2(2)                                                          |
-| `syscalls/chroot.py`            | four ways to enter a chroot, plus `spawn_detached`                  |
+| `syscalls/chroot.py`            | three ways to enter a chroot, plus `spawn_detached`                  |
 | `syscalls/unshare.py`           | make namespaces, and hold them open                                 |
 | `syscalls/nsenter.py`           | join namespaces with setns(2)                                       |
 | `syscalls/idmap.py`             | idmapped mounts, so no rootfs needs chowning                        |

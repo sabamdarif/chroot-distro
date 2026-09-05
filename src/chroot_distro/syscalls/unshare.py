@@ -3,12 +3,11 @@
 """Create namespaces with unshare(2), and hold them open.
 
 unshare(2) has one rule that shapes everything here: it only puts *children* in a
-new PID namespace, never the caller. So `unshare_and_fork` forks when CLONE_NEWPID
-is in the flags and the child comes back as PID 1, and `create_holder_process`
-forks twice, which is why it returns a `HolderPids` pair: the *holder* is the
-grandchild whose namespaces are joined or killed, the *launcher* is this process's
-own child and therefore the one to wait for. A child that becomes PID 1 also resets
-mount propagation to MS_REC|MS_PRIVATE, or every mount made inside would propagate
+new PID namespace, never the caller. So `create_holder_process` forks twice, which
+is why it returns a `HolderPids` pair: the *holder* is the grandchild whose
+namespaces are joined or killed, the *launcher* is this process's own child and
+therefore the one to wait for. A child that becomes PID 1 also resets mount
+propagation to MS_REC|MS_PRIVATE, or every mount made inside would propagate
 straight back to the host namespace.
 
 A holder exists because namespaces die with their last member. Given a *rootfs* it
@@ -53,66 +52,6 @@ from chroot_distro.syscalls._libc import (
 )
 
 log = logging.getLogger(__name__)
-
-
-def native_unshare(flags: int) -> None:
-    """Call ``unshare(2)`` directly.
-
-    Args:
-        flags: A bitmask of ``CLONE_NEW*`` constants specifying which
-            namespaces to unshare.
-
-    Raises:
-        OSError: If the underlying ``unshare(2)`` syscall fails (e.g.
-            ``EPERM``, ``EINVAL``).
-    """
-    py_unshare(flags)
-
-
-def unshare_and_fork(
-    flags: int,
-    *,
-    propagation: int = MS_REC | MS_PRIVATE,
-) -> int:
-    """Unshare namespaces and fork if a PID namespace is included.
-
-    When ``CLONE_NEWPID`` is present in *flags* the first child process
-    created after ``unshare(2)`` becomes PID 1 in the new PID namespace.
-    This function handles the fork transparently:
-
-    * **Parent** - returns the child's PID (positive integer).
-    * **Child**  - resets mount propagation to *propagation* and returns 0.
-
-    If ``CLONE_NEWPID`` is **not** in *flags* no fork occurs and the
-    function returns ``0`` in the (sole) calling process.
-
-    Args:
-        flags: ``CLONE_NEW*`` bitmask passed to ``unshare(2)``.
-        propagation: Mount-propagation flags applied in the child process
-            after the fork.  Defaults to ``MS_REC | MS_PRIVATE`` so that
-            subsequent mounts are invisible to the parent mount namespace.
-
-    Returns:
-        The child PID in the parent process, or ``0`` in the child (or in
-        the calling process when no fork takes place).
-
-    Raises:
-        OSError: If ``unshare(2)`` or ``fork(2)`` fails.
-    """
-    py_unshare(flags)
-
-    if not (flags & CLONE_NEWPID):
-        return 0
-
-    pid = os.fork()
-    if pid > 0:
-        return pid
-
-    # Child (PID 1 inside the new PID namespace).
-    with contextlib.suppress(OSError):
-        libc_mount(None, b"/", None, propagation, None)
-
-    return 0
 
 
 def probe_namespace_support(flags: int) -> int:

@@ -5,41 +5,6 @@ from chroot_distro.syscalls import unshare
 from chroot_distro.syscalls._constants import CLONE_NEWNS, CLONE_NEWPID
 
 
-# ── native_unshare delegates to py_unshare ───────────────────────────────────────
-def test_native_unshare_delegates():
-    with patch.object(unshare, "py_unshare") as mock:
-        unshare.native_unshare(CLONE_NEWNS)
-    mock.assert_called_once_with(CLONE_NEWNS)
-
-
-# ── unshare_and_fork: no PID ns -> no fork, returns 0 ─────────────────────────────
-def test_unshare_and_fork_no_pidns_returns_zero():
-    with patch.object(unshare, "py_unshare") as mock_unshare, patch("os.fork") as mock_fork:
-        rc = unshare.unshare_and_fork(CLONE_NEWNS)
-    assert rc == 0
-    mock_unshare.assert_called_once_with(CLONE_NEWNS)
-    mock_fork.assert_not_called()
-
-
-# ── unshare_and_fork: PID ns -> parent gets child pid ─────────────────────────────
-def test_unshare_and_fork_pidns_parent_returns_child_pid():
-    with patch.object(unshare, "py_unshare"), patch("os.fork", return_value=4321):
-        rc = unshare.unshare_and_fork(CLONE_NEWPID)
-    assert rc == 4321
-
-
-# ── unshare_and_fork: PID ns child branch sets propagation, returns 0 ─────────────
-def test_unshare_and_fork_pidns_child_returns_zero():
-    with (
-        patch.object(unshare, "py_unshare"),
-        patch("os.fork", return_value=0),
-        patch.object(unshare, "libc_mount") as mock_mount,
-    ):
-        rc = unshare.unshare_and_fork(CLONE_NEWPID)
-    assert rc == 0
-    mock_mount.assert_called_once()
-
-
 # ── probe_namespace_support: aggregates supported bits from child exit codes ──────
 def test_probe_namespace_support_reports_supported():
     # Fork returns a fake child pid; waitpid reports exit 0 (supported).

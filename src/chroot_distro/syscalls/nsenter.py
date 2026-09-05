@@ -4,11 +4,11 @@
 
 A namespace is joined by opening `/proc/<pid>/ns/<name>` and handing that
 descriptor to setns(2). The whole of nsenter(1) this program needs is here, in
-four shapes: `enter_namespaces` moves the current process, `enter_and_exec` and
-`run_in_namespaces` fork and exec a command, and `call_in_namespaces` forks and
-runs a *Python* callable, which is what most callers actually want, since the work
-is a handful of syscalls and the only reason to leave this process was to be
-somewhere else when they run.
+three shapes: `enter_namespaces` moves the current process, `enter_and_run_with_pty`
+forks and execs a command on a pty, and `call_in_namespaces` forks and runs a
+*Python* callable, which is what most callers actually want, since the work is a
+handful of syscalls and the only reason to leave this process was to be somewhere
+else when they run.
 
 The order matters, and one pass is not enough. Entering the mount or PID namespace
 of a process inside a user namespace fails until the user namespace itself has been
@@ -32,8 +32,6 @@ from __future__ import annotations
 import contextlib
 import logging
 import os
-import signal
-import subprocess
 import typing
 
 from chroot_distro.syscalls._constants import (
@@ -177,231 +175,6 @@ def enter_namespaces(target_pid: int, namespaces: int) -> None:
         for fd in fds.values():
             with contextlib.suppress(OSError):
                 os.close(fd)
-
-
-def enter_and_exec(
-    target_pid: int,
-    namespaces: int,
-    command: list[str],
-    *,
-    env: dict[str, str] | None = None,
-    fork_for_pid: bool = True,
-) -> int:
-    """Fork, enter namespaces, and ``execvpe`` a command.
-
-    The function forks a child process that calls
-    :func:`enter_namespaces` and then replaces itself with *command* via
-    :func:`os.execvpe`.
-
-    When *fork_for_pid* is ``True`` **and** :data:`CLONE_NEWPID` is among
-    the requested namespaces, an additional fork is performed *after*
-    entering namespaces.  This causes the ``exec``-ed process to see
-    itself as PID 1 (or higher) inside the new PID namespace, which is
-    the expected behavior for most container work-loads.
-
-    The parent process waits for the (outer) child and returns its exit
-    code.
-
-    Args:
-        target_pid: PID of the process whose namespaces to enter.
-        namespaces: Bitmask of ``CLONE_NEW*`` flags.
-        command: Command and arguments to execute (``argv``).
-        env: Optional environment mapping.  Defaults to :data:`os.environ`.
-        fork_for_pid: Whether to double-fork when a PID namespace is
-            requested.  Defaults to ``True``.
-
-    Returns:
-        Exit code of the executed command (0-255).
-
-    Raises:
-        OSError: If forking or entering namespaces fails.
-    """
-    child_pid = os.fork()
-    if child_pid == 0:
-        # --- child ---
-        try:
-            enter_namespaces(target_pid, namespaces)
-
-            if fork_for_pid and (namespaces & CLONE_NEWPID):
-                # Double-fork so the exec'd process is PID >1 in the
-                # new PID namespace.
-                inner_pid = os.fork()
-                if inner_pid != 0:
-                    # Middle process, whose only job is the exit code.
-                    _, status = os.waitpid(inner_pid, 0)
-                    os._exit(os.WEXITSTATUS(status) if os.WIFEXITED(status) else 128 + os.WTERMSIG(status))
-
-            os.execvpe(command[0], command, env if env is not None else os.environ)
-        except BaseException:
-            os._exit(127)
-    else:
-        # --- parent ---
-        _, status = os.waitpid(child_pid, 0)
-        if os.WIFEXITED(status):
-            return os.WEXITSTATUS(status)
-        return 128 + os.WTERMSIG(status)
-
-
-def run_in_namespaces(
-    target_pid: int,
-    namespaces: int,
-    command: list[str],
-    *,
-    capture_output: bool = False,
-    text: bool = False,
-    timeout: int | None = None,
-    env: dict[str, str] | None = None,
-) -> subprocess.CompletedProcess:
-    """Enter namespaces and run a command, returning a :class:`~subprocess.CompletedProcess`.
-
-    The function forks a child process that enters the target namespaces
-    and ``exec``-s *command*.  When *capture_output* is ``True``, pipes
-    are set up for ``stdout`` and ``stderr`` and their contents are
-    collected in the parent.
-
-    Args:
-        target_pid: PID of the process whose namespaces to enter.
-        namespaces: Bitmask of ``CLONE_NEW*`` flags.
-        command: Command and arguments to execute (``argv``).
-        capture_output: If ``True``, capture stdout and stderr via
-            pipes.
-        text: If ``True``, decode captured stdout/stderr as UTF-8 with
-            ``errors='replace'``.
-        timeout: Optional timeout in seconds.  If the child has not
-            exited within *timeout* seconds, it is sent ``SIGKILL`` and
-            :class:`subprocess.TimeoutExpired` is raised.
-        env: Optional environment mapping.  Defaults to :data:`os.environ`.
-
-    Returns:
-        A :class:`subprocess.CompletedProcess` instance whose
-        :attr:`~subprocess.CompletedProcess.args` is *command* and whose
-        :attr:`~subprocess.CompletedProcess.returncode` is the child's
-        exit status.
-
-    Raises:
-        subprocess.TimeoutExpired: If *timeout* is exceeded.
-        OSError: If forking or pipe creation fails.
-    """
-    stdout_r: int | None = None
-    stdout_w: int | None = None
-    stderr_r: int | None = None
-    stderr_w: int | None = None
-
-    if capture_output:
-        stdout_r, stdout_w = os.pipe()
-        stderr_r, stderr_w = os.pipe()
-
-    child_pid = os.fork()
-
-    if child_pid == 0:
-        # --- child ---
-        try:
-            if capture_output:
-                assert stdout_w is not None
-                assert stderr_w is not None
-                os.dup2(stdout_w, 1)
-                os.dup2(stderr_w, 2)
-                for fd in (stdout_r, stdout_w, stderr_r, stderr_w):
-                    if fd is not None:
-                        with contextlib.suppress(OSError):
-                            os.close(fd)
-
-            enter_namespaces(target_pid, namespaces)
-            os.execvpe(command[0], command, env if env is not None else os.environ)
-        except BaseException:
-            os._exit(127)
-    else:
-        # --- parent ---
-        # The parent's write ends have to go, or the reads below never see
-        # EOF when the child exits.
-        if capture_output:
-            assert stdout_w is not None
-            assert stderr_w is not None
-            os.close(stdout_w)
-            os.close(stderr_w)
-
-        stdout_data: bytes | str | None = None
-        stderr_data: bytes | str | None = None
-
-        _timed_out = False
-        old_handler = None
-
-        try:
-            if timeout is not None:
-
-                def _alarm_handler(signum: int, frame: object) -> None:
-                    nonlocal _timed_out
-                    _timed_out = True
-
-                old_handler = signal.signal(signal.SIGALRM, _alarm_handler)
-                signal.alarm(timeout)
-
-            if capture_output:
-                assert stdout_r is not None
-                assert stderr_r is not None
-                # One pipe is drained before the other: the child can write to
-                # both at once, but the kernel buffers what is not read yet.
-                stdout_chunks: list[bytes] = []
-                stderr_chunks: list[bytes] = []
-                with open(stdout_r, "rb", closefd=True) as f_out:
-                    # The file object owns the fd now; the finally below must
-                    # not close it a second time.
-                    stdout_r = None
-                    stdout_chunks.append(f_out.read())
-                with open(stderr_r, "rb", closefd=True) as f_err:
-                    stderr_r = None
-                    stderr_chunks.append(f_err.read())
-
-                raw_stdout = b"".join(stdout_chunks)
-                raw_stderr = b"".join(stderr_chunks)
-
-                if text:
-                    stdout_data = raw_stdout.decode("utf-8", errors="replace")
-                    stderr_data = raw_stderr.decode("utf-8", errors="replace")
-                else:
-                    stdout_data = raw_stdout
-                    stderr_data = raw_stderr
-
-            _, status = os.waitpid(child_pid, 0)
-
-            if timeout is not None and old_handler is not None:
-                signal.alarm(0)
-                signal.signal(signal.SIGALRM, old_handler)
-                if _timed_out:
-                    # SIGALRM normally interrupts waitpid, so getting here
-                    # means the alarm fired first and the child is still up.
-                    try:
-                        os.kill(child_pid, signal.SIGKILL)
-                        os.waitpid(child_pid, 0)
-                    except OSError as exc:
-                        log.debug("Failed to kill or wait for timed out child process %s: %s", child_pid, exc)
-                    raise subprocess.TimeoutExpired(command, float(timeout))
-
-            returncode = os.WEXITSTATUS(status) if os.WIFEXITED(status) else -os.WTERMSIG(status)
-
-        except InterruptedError:
-            try:
-                os.kill(child_pid, signal.SIGKILL)
-                os.waitpid(child_pid, 0)
-            except OSError as exc:
-                log.debug("Failed to kill or wait for child process %s on interrupt: %s", child_pid, exc)
-            if timeout is not None and old_handler is not None:
-                signal.alarm(0)
-                signal.signal(signal.SIGALRM, old_handler)
-            raise subprocess.TimeoutExpired(command, float(timeout or 0)) from None
-
-        finally:
-            for fd in (stdout_r, stderr_r):
-                if fd is not None:
-                    with contextlib.suppress(OSError):
-                        os.close(fd)
-
-        return subprocess.CompletedProcess(
-            args=command,
-            returncode=returncode,
-            stdout=stdout_data,
-            stderr=stderr_data,
-        )
 
 
 def call_in_namespaces(

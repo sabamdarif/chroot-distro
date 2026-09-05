@@ -2,11 +2,11 @@
 # Copyright (C) 2025-2026 Md Arif
 """Enter a chroot and become the target identity, in place of the chroot binary.
 
-Four entry points, differing only in what the caller wants back.
-`native_chroot` and `enter_chroot` act on the *current* process, so the caller is
-one that is about to exec or exit; `chroot_and_exec` and `chroot_and_run` fork
-first and return the child's exit code or its captured output, leaving the parent
-free to decrement the session count and tear the mounts down.
+Three entry points, differing only in what the caller wants back.
+`enter_chroot` acts on the *current* process, so the caller is one that is about
+to exec or exit; `chroot_and_exec` and `chroot_and_run` fork first and return the
+child's exit code or its captured output, leaving the parent free to decrement the
+session count and tear the mounts down.
 `spawn_detached` forks a child meant to outlive this process.
 
 The order of the identity change is coreutils' own and is not negotiable:
@@ -53,78 +53,6 @@ _TIOCGWINSZ = 0x5413
 _TIOCSWINSZ = 0x5414
 
 
-def native_chroot(
-    newroot: str,
-    *,
-    command: list[str] | None = None,
-    uid: int | None = None,
-    gid: int | None = None,
-    groups: list[int] | None = None,
-    skip_chdir: bool = False,
-) -> None:
-    """Change root to *newroot* and optionally exec *command*.
-
-    This is a faithful port of GNU coreutils ``chroot.c``:
-
-    1. ``chroot(newroot)``
-    2. ``chdir("/")``, unless *skip_chdir* is True
-    3. ``setgroups(groups)``, if *groups* is provided
-    4. ``setgid(gid)``, if *gid* is provided
-    5. ``setuid(uid)``, if *uid* is provided
-    6. ``os.execvp(command[0], command)``, if *command* is provided
-
-    .. note::
-
-       If *command* is provided this function **does not return** (the
-       current process image is replaced).  If *command* is ``None`` the
-       function returns after setting up the chroot environment.
-
-    Parameters
-    ----------
-    newroot:
-        Path to the new root directory.
-    command:
-        Command to execute after chroot.  If ``None``, no exec is
-        performed and the function returns.
-    uid:
-        User ID to switch to (via ``setuid``).
-    gid:
-        Group ID to switch to (via ``setgid``).
-    groups:
-        Supplementary group list (via ``setgroups``).
-    skip_chdir:
-        If True, do not ``chdir("/")`` after chroot.
-
-    Raises
-    ------
-    OSError
-        On any syscall failure.
-    FileNotFoundError
-        If *newroot* does not exist.
-    """
-    if not os.path.isdir(newroot):
-        raise FileNotFoundError(f"chroot: cannot change root directory to '{newroot}': No such file or directory")
-
-    os.chroot(newroot)
-
-    if not skip_chdir:
-        os.chdir("/")
-
-    # Order matches coreutils chroot.c: setgroups, setgid, setuid. Groups and
-    # gid have to go before the uid, or the process can no longer drop them.
-    if groups is not None:
-        os.setgroups(groups)
-
-    if gid is not None:
-        os.setgid(gid)
-
-    if uid is not None:
-        os.setuid(uid)
-
-    if command is not None:
-        _try_exec(command, dict(os.environ))
-
-
 def enter_chroot(
     rootfs: str,
     *,
@@ -168,10 +96,10 @@ def chroot_and_exec(
 ) -> int:
     """Fork, chroot into *rootfs*, and exec *command* in the child.
 
-    Unlike :func:`native_chroot` which replaces the current process,
-    this function forks first and returns the child's exit code.  The
-    parent process is unaffected and can perform cleanup (session
-    counter decrement, mount teardown, etc.).
+    Unlike :func:`enter_chroot` which acts on the current process, this
+    function forks first and returns the child's exit code.  The parent
+    process is unaffected and can perform cleanup (session counter
+    decrement, mount teardown, etc.).
 
     When stdin is a terminal, a fresh PTY pair is allocated so the child
     has its own controlling terminal (enabling job control, ttyname(),
@@ -386,53 +314,6 @@ def spawn_detached(
             os._exit(127)
 
     return child_pid
-
-
-def run_with_pty(
-    argv: list[str],
-    *,
-    env: dict[str, str] | None = None,
-) -> int:
-    """Fork+exec *argv* with a fresh PTY for job control.
-
-    When stdin is a terminal, allocates a new PTY pair so the child has
-    its own controlling terminal (enabling job control, ttyname(), etc.)
-    while the parent relays data between the original terminal and the
-    PTY master.  Falls back to a plain fork+exec when stdin is not a tty.
-
-    Returns the child's exit code.
-    """
-    use_pty = os.isatty(0)
-    master_fd = slave_fd = -1
-
-    if use_pty:
-        master_fd, slave_fd = os.openpty()
-        _copy_terminal_size(0, master_fd)
-
-    child_pid = os.fork()
-
-    if child_pid == 0:
-        # --- Child ---
-        try:
-            if use_pty:
-                _setup_child_pty(master_fd, slave_fd)
-            run_env = dict(os.environ)
-            if env is not None:
-                run_env = env
-            os.execvpe(argv[0], argv, run_env)
-        except Exception as exc:
-            try:
-                sys.stderr.write(f"run_with_pty: {exc}\n")
-                sys.stderr.flush()
-            except Exception:
-                pass
-            os._exit(127)
-
-    # --- Parent ---
-    if use_pty:
-        os.close(slave_fd)
-        return _pty_relay(master_fd, child_pid)
-    return _wait_for_child_with_signals(child_pid)
 
 
 def _copy_terminal_size(src_fd: int, dst_fd: int) -> None:

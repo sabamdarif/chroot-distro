@@ -36,19 +36,6 @@ def test_enter_namespaces_open_failure_raises():
         raise AssertionError("expected OSError for inaccessible namespace")
 
 
-# ── enter_and_exec: fork machinery (setns fails unprivileged -> child exits 127) ──
-def test_enter_and_exec_child_failure_returns_127():
-    rc = nsenter.enter_and_exec(2**30, CLONE_NEWNS, ["/bin/true"], fork_for_pid=False)
-    assert rc == 127
-
-
-# ── run_in_namespaces: capture path with failing child ───────────────────────────
-def test_run_in_namespaces_capture_failure():
-    result = nsenter.run_in_namespaces(2**30, CLONE_NEWNS, ["/bin/true"], capture_output=True, text=True)
-    assert isinstance(result, subprocess.CompletedProcess)
-    assert result.returncode == 127
-
-
 # ── two-pass entry ordering: user namespace is deferred to pass 2 ────────────────
 def test_enter_namespaces_defers_user_ns():
     # Mock the syscall layer so no real setns happens; assert user ns is only

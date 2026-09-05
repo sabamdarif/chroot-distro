@@ -115,12 +115,6 @@ def test_try_exec_retries_via_interpreter(tmp_path):
     assert calls[1][1] == [str(interp), str(binary), "arg"]
 
 
-# ── native_chroot: pre-syscall validation ───────────────────────────────────────
-def test_native_chroot_missing_root_raises(tmp_path):
-    with pytest.raises(FileNotFoundError):
-        chroot.native_chroot(str(tmp_path / "does-not-exist"))
-
-
 # ── fork-based machinery (no root needed: chroot fails → child exits 127) ────────
 def test_chroot_and_run_captures_child_failure(tmp_path):
     # A non-root process cannot chroot; the child hits the except branch and
