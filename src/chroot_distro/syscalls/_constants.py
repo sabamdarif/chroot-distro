@@ -57,20 +57,8 @@ MS_NODIRATIME: int = 2048
 MS_BIND: int = 4096
 """Bind mount."""
 
-MS_MOVE: int = 8192
-"""Move an existing mount point."""
-
 MS_REC: int = 16384
 """Recursive (used with MS_BIND and propagation flags)."""
-
-MS_SILENT: int = 32768
-"""Suppress certain kernel warning messages."""
-
-MS_POSIXACL: int = 1 << 16
-"""VFS does not apply the umask."""
-
-MS_UNBINDABLE: int = 1 << 17
-"""Make mount unbindable."""
 
 MS_PRIVATE: int = 1 << 18
 """Make mount private (no propagation)."""
@@ -84,14 +72,8 @@ MS_SHARED: int = 1 << 20
 MS_RELATIME: int = 1 << 21
 """Update atime relative to mtime/ctime."""
 
-MS_KERNMOUNT: int = 1 << 22
-"""Internal kernel mount."""
-
 MS_I_VERSION: int = 1 << 23
 """Update inode I_version field."""
-
-MS_STRICTATIME: int = 1 << 24
-"""Always perform atime updates."""
 
 MS_LAZYTIME: int = 1 << 25
 """Update the in-memory timestamps only, deferring disk writes."""
@@ -104,19 +86,10 @@ MNT_FORCE: int = 1
 MNT_DETACH: int = 2
 """Lazy unmount (disconnect from hierarchy, clean up when last ref drops)."""
 
-MNT_EXPIRE: int = 4
-"""Mark for expiry."""
-
-UMOUNT_NOFOLLOW: int = 8
-"""Don't follow symlinks when unmounting."""
-
 # clone / unshare / setns namespace flags, from <linux/sched.h>
 
 CLONE_NEWTIME: int = 0x00000080
 """New time namespace."""
-
-CLONE_VM: int = 0x00000100
-"""Share virtual memory (not used for namespaces, included for completeness)."""
 
 CLONE_NEWNS: int = 0x00020000
 """New mount namespace."""
@@ -193,12 +166,6 @@ S_IFCHR: int = 0o020000
 CAP_DAC_OVERRIDE: int = 1
 """Override file DAC (read/write/execute) permission checks."""
 
-CAP_DAC_READ_SEARCH: int = 2
-"""Override file read permission and directory search."""
-
-CAP_FOWNER: int = 3
-"""Override ownership restrictions on file operations."""
-
 CAP_SETGID: int = 6
 """Allow setgid(2) and supplementary group manipulation."""
 
@@ -240,24 +207,11 @@ PR_CAPBSET_DROP: int = 24
 
 # prctl(2) constants, from <linux/prctl.h>
 
-PR_SET_KEEPCAPS: int = 8
-"""Keep capabilities across UID transitions."""
-
 PR_CAP_AMBIENT: int = 47
 """Ambient capability operations."""
 
 PR_CAP_AMBIENT_IS_SET: int = 1
 """Check if an ambient capability is set."""
-
-PR_CAP_AMBIENT_RAISE: int = 2
-"""Add a capability to the ambient set."""
-
-PR_CAP_AMBIENT_LOWER: int = 3
-"""Remove a capability from the ambient set."""
-
-PR_CAP_AMBIENT_CLEAR_ALL: int = 4
-"""Clear the entire ambient capability set."""
-
 
 def cli_flags_to_bitmask(flags: list[str]) -> int:
     """Convert a list of CLI-style namespace flags to a CLONE_* bitmask.

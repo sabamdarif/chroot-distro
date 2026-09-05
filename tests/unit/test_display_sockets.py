@@ -5,16 +5,8 @@ from unittest.mock import patch
 from chroot_distro.commands.login.bindings import get_bindings
 from chroot_distro.helpers.display import (
     _socket_from_dbus_address,
-    _socket_from_pulse_server,
     resolve_display_socket_binds,
 )
-
-
-def test_socket_from_pulse_server():
-    assert _socket_from_pulse_server("unix:/run/user/1000/pulse/native") == "/run/user/1000/pulse/native"
-    assert _socket_from_pulse_server("unix:path=/run/user/1000/pulse/native") == "/run/user/1000/pulse/native"
-    assert _socket_from_pulse_server("tcp:127.0.0.1:4713") is None
-    assert _socket_from_pulse_server("127.0.0.1") is None
 
 
 def test_socket_from_dbus_address():

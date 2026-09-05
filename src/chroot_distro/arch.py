@@ -3,10 +3,10 @@
 """CPU architecture: what the host is, what an image is, what a rootfs turned out to be.
 
 Three naming schemes meet here. This program's own (`aarch64`, `arm`, `i686`,
-`x86_64`, `riscv64`), `uname -m`'s (which spells 32-bit ARM `armv7l`, hence
-`ARCH_UNAME_M` for the guest's `uname` and the collapse of `armv7l`/`armv8l` to
-`arm` on the way in), and Docker's platform strings, which `normalize_arch`
-accepts bare or `linux/`-prefixed and answers `None` for rather than guessing.
+`x86_64`, `riscv64`), `uname -m`'s (which spells 32-bit ARM `armv7l`, collapsed
+along with `armv8l` to `arm` on the way in), and Docker's platform strings, which
+`normalize_arch` accepts bare or `linux/`-prefixed and answers `None` for rather
+than guessing.
 
 `detect_installed_arch` reads the `e_machine` field out of the first shell or
 busybox it finds in the rootfs, because that is ground truth: a container may
@@ -248,10 +248,3 @@ def get_device_platform() -> Platform:
 
 
 # Machine string reported by `uname -m` for each arch.
-ARCH_UNAME_M = {
-    "aarch64": "aarch64",
-    "arm": "armv7l",
-    "i686": "i686",
-    "x86_64": "x86_64",
-    "riscv64": "riscv64",
-}

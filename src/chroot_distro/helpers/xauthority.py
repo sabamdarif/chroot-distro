@@ -43,14 +43,10 @@ from typing import BinaryIO
 
 log = logging.getLogger(__name__)
 
-FAMILY_INTERNET: int = 0
 """IPv4 connection."""
 
 FAMILY_LOCAL: int = 256
 """Local / Unix-domain socket connection."""
-
-FAMILY_INTERNET6: int = 6
-"""IPv6 connection."""
 
 FAMILY_WILD: int = 65535
 """Wildcard: matches any connection family."""

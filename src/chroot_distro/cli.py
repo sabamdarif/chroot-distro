@@ -31,7 +31,6 @@ one-line message and exit code 1. A bare `Exception` gets the same treatment wit
 "unexpected error" prefix, so no traceback ever reaches a user.
 """
 
-import argparse
 import importlib
 import os
 import signal
@@ -48,11 +47,6 @@ from chroot_distro.parser import (
     build_parser,
     parse_cli_args,
 )
-
-
-def command_stub(args: argparse.Namespace) -> None:
-    raise NotImplementedError(f"Command '{args.command}' is not yet implemented.")
-
 
 # "module:function" refs; imported on dispatch (tests patch in callables).
 _COMMAND_HANDLERS: dict[str, str | Callable] = {

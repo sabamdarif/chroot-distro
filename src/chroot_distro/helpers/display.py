@@ -62,22 +62,6 @@ def _resolve_dbus_env() -> dict[str, str]:
     return env
 
 
-def _socket_from_pulse_server(pulse_server: str) -> str | None:
-    """Extract a unix socket path from a PULSE_SERVER value, if any.
-
-    Accepts forms like ``unix:/run/user/1000/pulse/native`` and
-    ``unix:path=/run/user/1000/pulse/native``. Returns None for network
-    (tcp:) servers or unparseable values.
-    """
-    if not pulse_server.startswith("unix:"):
-        return None
-    rest = pulse_server[len("unix:") :]
-    if rest.startswith("path="):
-        rest = rest[len("path=") :]
-    rest = rest.split(",", 1)[0]
-    return rest or None
-
-
 def _socket_from_dbus_address(dbus_addr: str) -> str | None:
     """Extract a unix socket path from a DBUS_SESSION_BUS_ADDRESS value."""
     if "unix:path=" not in dbus_addr:
