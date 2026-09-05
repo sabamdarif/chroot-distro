@@ -41,7 +41,6 @@ import logging
 import os
 import shutil
 import signal
-import ssl
 import threading
 import urllib.error
 import urllib.parse
@@ -65,7 +64,6 @@ from chroot_distro.helpers.download import (
     _probe_url,
     _ProbeResult,
     _Segment,
-    is_retryable_http_error,
     retry_http,
 )
 from chroot_distro.helpers.tar_extract import extract_tar_to_rootfs
@@ -74,29 +72,11 @@ from chroot_distro.progress import REDRAW_THRESHOLD_BYTES, AggregateByteProgress
 
 log = logging.getLogger(__name__)
 
-_MAX_RETRIES = 3
-_RETRY_BACKOFF = (2, 5, 10)  # seconds to wait between retries
-
 # 256 KiB per I/O call balances syscall overhead against memory use and gives
 # threads more time between lock acquisitions on the shared progress counter.
 _READ_CHUNK = 262144
 
 # Transient network and SSL issues, all worth retrying.
-_RETRYABLE = (
-    ssl.SSLError,
-    ConnectionResetError,
-    ConnectionAbortedError,
-    BrokenPipeError,
-    TimeoutError,
-    OSError,
-)
-
-
-def _is_retryable(exc: BaseException) -> bool:
-    """Return True if *exc* looks like a transient network failure."""
-    return is_retryable_http_error(exc)
-
-
 def _probe_blob(url: str, headers: dict[str, str], insecure: bool = False) -> _ProbeResult | None:
     """Send HEAD (or fallback GET Range:0-0) to discover size + Range support.
 

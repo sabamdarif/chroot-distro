@@ -22,13 +22,13 @@ def test_with_digest_appends_query():
     assert push._with_digest("https://r/upload?state=1", "sha256:d") == ("https://r/upload?state=1&digest=sha256%3Ad")
 
 
-def test_is_retriable():
-    assert push._is_retriable(urllib.error.HTTPError("u", 500, "e", {}, None))
-    assert push._is_retriable(urllib.error.HTTPError("u", 429, "e", {}, None))
-    assert not push._is_retriable(urllib.error.HTTPError("u", 404, "e", {}, None))
-    assert push._is_retriable(ConnectionResetError())
-    assert push._is_retriable(TimeoutError())
-    assert not push._is_retriable(ValueError("nope"))
+def test_is_retryable():
+    assert push._is_retryable(urllib.error.HTTPError("u", 500, "e", {}, None))
+    assert push._is_retryable(urllib.error.HTTPError("u", 429, "e", {}, None))
+    assert not push._is_retryable(urllib.error.HTTPError("u", 404, "e", {}, None))
+    assert push._is_retryable(ConnectionResetError())
+    assert push._is_retryable(TimeoutError())
+    assert not push._is_retryable(ValueError("nope"))
 
 
 def test_push_chunk_size_env_override(monkeypatch):

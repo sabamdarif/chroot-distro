@@ -15,7 +15,7 @@ from chroot_distro.helpers.download import (
     _compute_segments,
     _concat_chunks,
     _download_segment,
-    _is_retriable,
+    _is_retryable,
     _probe_server,
     _ProbeResult,
     _RangeNotSupportedError,
@@ -588,39 +588,39 @@ class TestTwoStageRangeDetection:
 
 
 # ---------------------------------------------------------------------------
-# _is_retriable tests
+# _is_retryable tests
 # ---------------------------------------------------------------------------
 
 
 class TestIsRetriable:
-    """Tests for _is_retriable() expanded coverage."""
+    """Tests for _is_retryable() expanded coverage."""
 
     def test_timeout_error(self):
-        assert _is_retriable(TimeoutError("connection timed out")) is True
+        assert _is_retryable(TimeoutError("connection timed out")) is True
 
     def test_ssl_error(self):
-        assert _is_retriable(ssl.SSLError("SSL handshake failed")) is True
+        assert _is_retryable(ssl.SSLError("SSL handshake failed")) is True
 
     def test_connection_reset(self):
-        assert _is_retriable(ConnectionResetError("reset by peer")) is True
+        assert _is_retryable(ConnectionResetError("reset by peer")) is True
 
     def test_broken_pipe(self):
-        assert _is_retriable(BrokenPipeError("broken pipe")) is True
+        assert _is_retryable(BrokenPipeError("broken pipe")) is True
 
     def test_os_error(self):
-        assert _is_retriable(OSError("network unreachable")) is True
+        assert _is_retryable(OSError("network unreachable")) is True
 
     def test_http_500(self):
         exc = urllib.error.HTTPError("http://x", 500, "Server Error", {}, None)
-        assert _is_retriable(exc) is True
+        assert _is_retryable(exc) is True
 
     def test_http_404_not_retriable(self):
         exc = urllib.error.HTTPError("http://x", 404, "Not Found", {}, None)
-        assert _is_retriable(exc) is False
+        assert _is_retryable(exc) is False
 
     def test_value_error_not_retriable(self):
-        assert _is_retriable(ValueError("bad value")) is False
+        assert _is_retryable(ValueError("bad value")) is False
 
     def test_url_error_with_timeout_reason(self):
         exc = urllib.error.URLError(TimeoutError("timed out"))
-        assert _is_retriable(exc) is True
+        assert _is_retryable(exc) is True

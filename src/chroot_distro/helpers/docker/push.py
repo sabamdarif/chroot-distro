@@ -31,7 +31,6 @@ without them.
 
 import hashlib
 import os
-import ssl
 import sys
 import time
 import typing
@@ -78,16 +77,6 @@ from chroot_distro.progress import (
 _DEFAULT_PUSH_CHUNK_SIZE = 10 * 1024 * 1024
 
 # Connection/transport errors worth retrying.
-_TRANSIENT_ERRORS = (
-    ssl.SSLError,
-    ConnectionResetError,
-    ConnectionAbortedError,
-    BrokenPipeError,
-    TimeoutError,
-    OSError,
-)
-
-
 def _push_chunk_size() -> int:
     raw = os.environ.get("CD_PUSH_CHUNK_SIZE", "").strip()
     if raw.isdigit() and int(raw) > 0:
@@ -101,7 +90,7 @@ def _push_max_retries() -> int:
     return download_max_retries()
 
 
-def _is_retriable(exc: BaseException) -> bool:
+def _is_retryable(exc: BaseException) -> bool:
     """Return True for transient registry or connection failures."""
     return is_retryable_http_error(exc)
 
@@ -345,7 +334,7 @@ def _upload_blob_chunked(
                         next_url = resp.headers.get("Location", "")
                         acked = _range_end(resp.headers.get("Range", ""))
                 except BaseException as exc:
-                    if not _is_retriable(exc) or attempt >= max_retries:
+                    if not _is_retryable(exc) or attempt >= max_retries:
                         raise
                     attempt += 1
                     delay = min(2**attempt, 30)

@@ -9,7 +9,7 @@ import pytest
 from chroot_distro.constants import download_max_retries, download_rate_limit
 from chroot_distro.helpers.download import (
     _download_segment,
-    _is_retriable,
+    _is_retryable,
     _Segment,
 )
 from chroot_distro.progress import AggregateByteProgress
@@ -120,15 +120,15 @@ class TestSpeedTracking:
 class TestSegmentReconnection:
     """Test per-chunk segment level reconnection and recovery."""
 
-    def test_is_retriable(self):
+    def test_is_retryable(self):
         # Transient errors should be retriable
-        assert _is_retriable(ConnectionResetError())
-        assert _is_retriable(TimeoutError())
-        assert _is_retriable(urllib.error.HTTPError("http://ex.com", 503, "Service Unavailable", {}, None))
+        assert _is_retryable(ConnectionResetError())
+        assert _is_retryable(TimeoutError())
+        assert _is_retryable(urllib.error.HTTPError("http://ex.com", 503, "Service Unavailable", {}, None))
 
         # Non-transient errors
-        assert not _is_retriable(ValueError())
-        assert not _is_retriable(urllib.error.HTTPError("http://ex.com", 404, "Not Found", {}, None))
+        assert not _is_retryable(ValueError())
+        assert not _is_retryable(urllib.error.HTTPError("http://ex.com", 404, "Not Found", {}, None))
 
     def test_reconnection_success_after_failure(self, tmp_path):
         seg_path = str(tmp_path / "chunk0.tmp")

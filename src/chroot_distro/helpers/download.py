@@ -229,21 +229,11 @@ _SOCKET_TIMEOUT = 30  # seconds, so a stalled read() cannot pin a thread forever
 # retries up to _max_retries times internally.
 _MAX_RECONNECTIONS = 10
 
-_TRANSIENT_ERRORS = (
-    ssl.SSLError,
-    ConnectionResetError,
-    ConnectionAbortedError,
-    BrokenPipeError,
-    TimeoutError,
-    OSError,
-)
-
-
 def _ua_headers() -> dict[str, str]:
     return {"User-Agent": f"{PROGRAM_NAME}/{PROGRAM_VERSION}"}
 
 
-def _is_retriable(exc: BaseException) -> bool:
+def _is_retryable(exc: BaseException) -> bool:
     """Return True for transient server or connection failures."""
     return is_retryable_http_error(exc)
 
@@ -596,7 +586,7 @@ def _download_segment(
                     raise _RangeNotSupportedError(
                         f"Server returned 416 Range Not Satisfiable for segment {seg.index}"
                     ) from exc
-                if _is_retriable(exc) and attempt < max_retries:
+                if _is_retryable(exc) and attempt < max_retries:
                     _interruptible_sleep(retry_delays[attempt], abort_event)
                     if os.path.isfile(seg.tmp_path):
                         downloaded = os.path.getsize(seg.tmp_path)
@@ -607,7 +597,7 @@ def _download_segment(
             except BaseException as exc:
                 if abort_event.is_set():
                     raise KeyboardInterrupt from exc
-                if _is_retriable(exc) and attempt < max_retries:
+                if _is_retryable(exc) and attempt < max_retries:
                     _interruptible_sleep(retry_delays[attempt], abort_event)
                     if os.path.isfile(seg.tmp_path):
                         downloaded = os.path.getsize(seg.tmp_path)
@@ -638,29 +628,6 @@ def _concat_chunks(segments: list[_Segment], dest: str) -> None:
                 shutil.copyfileobj(inp, out, length=1 << 20)
         out.flush()
         os.fsync(out.fileno())
-
-
-def _concat_chunks_inplace(segments: list[_Segment], dest: str) -> None:
-    """Chunk-0 append assembly.
-
-    Appends subsequent chunks into chunk0 in-place, then renames to *dest*.
-    Saves disk space (no full-size temp copy) but is less crash-safe than
-    :func:`_concat_chunks`.
-    """
-    ordered = sorted(segments, key=lambda s: s.index)
-    base = ordered[0].tmp_path
-    with open(base, "ab") as out:
-        for seg in ordered[1:]:
-            with open(seg.tmp_path, "rb") as inp:
-                while True:
-                    buf = inp.read(1 << 15)  # 32 KiB
-                    if not buf:
-                        break
-                    out.write(buf)
-            os.remove(seg.tmp_path)
-        out.flush()
-        os.fsync(out.fileno())
-    os.replace(base, dest)
 
 
 def _download_multi(
@@ -898,7 +865,7 @@ def _download_single_loop(
             raise
         except BaseException as exc:
             clear_bar()
-            if _is_retriable(exc) and attempt < max_retries:
+            if _is_retryable(exc) and attempt < max_retries:
                 last_exc = exc
                 continue
 
