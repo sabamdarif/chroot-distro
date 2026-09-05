@@ -14,10 +14,9 @@ reported as missing either, since the generic line would be a lie: the specific
 `USERNS_MOUNTS_REJECTED_WARNING` replaces it, and the CLONE_NEWUSER bit is cleared
 before formatting.
 
-Silence is the normal case: a working run prints nothing, and the tier line
-(`format_isolation_tier_line`) is for `info`, a diagnostics command, not for login.
-The tier strings are duplicated from `helpers/namespace.py` as plain strings on
-purpose, because `namespace` imports this module and the reverse would be a cycle.
+Silence is the normal case: a working run prints nothing. The isolation tier is
+described only by `info`, a diagnostics command, which owns that prose itself
+(`commands/info._isolation_tier_status`) rather than duplicating it here.
 """
 
 from __future__ import annotations
@@ -186,18 +185,6 @@ def emit_isolation_warnings(
     sys.stderr.write(summary + "\n")
 
 
-# Tier codes mirror chroot_distro.helpers.namespace.ISOLATION_TIER_* so the
-# login and info paths describe the same thing. Kept as plain strings here to
-# avoid importing namespace (which imports this module).
-_TIER_DESCRIPTIONS: dict[str, str] = {
-    "B": "full user-namespace isolation: container uids are remapped to an "
-    "unprivileged host range and capabilities are namespace-scoped",
-    "A": "user-namespace isolation: capabilities are namespace-scoped; "
-    "container root still maps to host root (uids are not remapped)",
-    "C": "reduced isolation: no user namespace; dangerous capabilities are "
-    "dropped from the bounding set instead (container root == host root)",
-}
-
 USERNS_MOUNTS_REJECTED_WARNING = (
     "⚠ WARNING: A user namespace is available but this kernel rejects "
     "mounts inside it; continuing without user-namespace isolation "
@@ -205,11 +192,3 @@ USERNS_MOUNTS_REJECTED_WARNING = (
 )
 
 
-def format_isolation_tier_line(tier: str) -> str:
-    """Return a one-line description of isolation *tier* (A/B/C).
-
-    Used by ``info`` (a diagnostics command where the detail is wanted). It is
-    intentionally *not* printed during a normal login: a working run stays
-    silent; only genuine gaps emit anything.
-    """
-    return f"Isolation tier {tier}: {_TIER_DESCRIPTIONS.get(tier, 'unknown')}"

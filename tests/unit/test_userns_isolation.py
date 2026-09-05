@@ -88,12 +88,6 @@ def test_bind_is_recursive_sys_and_dev_under_userns():
 # ── warnings / tier reporting ────────────────────────────────────────────────
 
 
-def test_tier_line_mentions_tier():
-    assert "tier A" in iw.format_isolation_tier_line("A")
-    assert "tier B" in iw.format_isolation_tier_line("B")
-    assert "tier C" in iw.format_isolation_tier_line("C")
-
-
 def test_emit_warnings_replaces_userns_line_when_mounts_rejected(capsys):
     # CLONE_NEWUSER missing because in-userns mounts were rejected: the generic
     # "not available" line is suppressed in favour of the specific note.
