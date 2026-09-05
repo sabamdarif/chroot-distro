@@ -99,14 +99,6 @@ _ENHANCEMENT_NS_FLAGS: int = (
 
 _ALL_PROBE_FLAGS: int = _MANDATORY_NS_FLAGS | _RECOMMENDED_NS_FLAGS | _ENHANCEMENT_NS_FLAGS
 
-_REQUIRED_NS_FLAGS: int = _MANDATORY_NS_FLAGS | _RECOMMENDED_NS_FLAGS
-_OPTIONAL_NS_FLAGS: int = _ENHANCEMENT_NS_FLAGS
-
-# probe_namespace_support() and _FLAG_TO_NS_FILE speak unshare(1) long-flag
-# names, so the probe sets are strings rather than bits.
-_REQUIRED_PROBE_FLAGS = ("--mount",)
-_OPTIONAL_PROBE_FLAGS: tuple[str, ...] = ("--pid", "--uts", "--ipc", "--user", "--cgroup")
-
 ISOLATION_MODE_NAMESPACE = "namespace"
 ISOLATION_MODE_HOST = "host"
 
@@ -434,22 +426,6 @@ def probe_unshare_flags() -> int:
     return supported
 
 
-def probe_namespace_support(flags: tuple[str, ...] = _REQUIRED_PROBE_FLAGS) -> list[str]:
-    """Return the subset of *flags* the kernel does NOT support.
-
-    Backward-compatible API that accepts CLI-style flag strings.
-    An empty list means every requested namespace is available.
-    """
-    bitmask = cli_flags_to_bitmask(list(flags))
-    supported = _probe_ns_support(bitmask)
-    missing: list[str] = []
-    for flag in flags:
-        clone_bit = cli_flags_to_bitmask([flag])
-        if not (supported & clone_bit):
-            missing.append(flag)
-    return missing
-
-
 def read_isolation_mode(container_name: str) -> str | None:
     path = _isolation_mode_file(container_name)
     if not os.path.isfile(path):
@@ -593,39 +569,6 @@ def _is_legacy_sleep_holder(pid: int) -> bool:
 
 
 # Maps each unshare long flag to the /proc/<pid>/ns/<name> entry.
-_FLAG_TO_NS_FILE = {
-    "--mount": "mnt",
-    "--uts": "uts",
-    "--ipc": "ipc",
-    "--pid": "pid",
-    "--cgroup": "cgroup",
-    "--net": "net",
-    "--user": "user",
-}
-
-
-def filter_flags_by_ns_files(pid: int, flags: list[str]) -> list[str]:
-    """Return *flags* keeping only those whose /proc/<pid>/ns/<name> exists.
-
-    Backward-compatible API for callers still using CLI-flag strings.
-    """
-    kept: list[str] = []
-    for flag in flags:
-        ns_name = _FLAG_TO_NS_FILE.get(flag)
-        if ns_name is None:
-            kept.append(flag)
-            continue
-        ns_path = f"/proc/{pid}/ns/{ns_name}"
-        try:
-            fd = os.open(ns_path, os.O_RDONLY)
-        except OSError as exc:
-            log.debug("Dropping namespace flag %s: cannot open %s (%s)", flag, ns_path, exc)
-            continue
-        os.close(fd)
-        kept.append(flag)
-    return kept
-
-
 def _read_proc_mounts() -> bytes:
     """The mount table as the caller's mount namespace sees it."""
     with open("/proc/mounts", "rb") as fh:

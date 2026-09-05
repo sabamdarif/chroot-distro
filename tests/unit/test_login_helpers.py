@@ -1053,32 +1053,6 @@ def test_special_mounts_max_isolation_fresh_pseudo_fs():
     assert len(shm) == 1
 
 
-def test_filter_flags_by_ns_files_drops_unopenable_cgroup():
-    """A flag whose /proc/<pid>/ns/<name> cannot be opened must be dropped,
-    mirroring Android kernels where nsenter fails to open the cgroup ns."""
-    from chroot_distro.helpers import namespace as ns
-
-    flags = ["--mount", "--uts", "--ipc", "--pid", "--cgroup"]
-
-    def fake_open(path, *a, **k):
-        if path.endswith("/ns/cgroup"):
-            raise OSError(2, "No such file or directory")
-        return 99
-
-    with patch.object(ns.os, "open", side_effect=fake_open), patch.object(ns.os, "close"):
-        kept = ns.filter_flags_by_ns_files(1234, flags)
-    assert "--cgroup" not in kept
-    assert kept == ["--mount", "--uts", "--ipc", "--pid"]
-
-
-def test_filter_flags_by_ns_files_keeps_all_when_openable():
-    from chroot_distro.helpers import namespace as ns
-
-    flags = ["--mount", "--pid", "--cgroup"]
-    with patch.object(ns.os, "open", return_value=7), patch.object(ns.os, "close"):
-        assert ns.filter_flags_by_ns_files(1, flags) == flags
-
-
 def test_holder_live_ns_flags_drops_unopenable_ipc_at_call_time():
     """A namespace whose ns file is unopenable right now must be dropped, but
     the essential mount namespace is always kept."""

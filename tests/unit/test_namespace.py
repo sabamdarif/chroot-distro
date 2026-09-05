@@ -67,27 +67,6 @@ def test_probe_unshare_flags_requires_mount(mock_probe):
     assert ns.probe_unshare_flags() == CLONE_NEWNS | CLONE_NEWPID
 
 
-@patch("chroot_distro.helpers.namespace._probe_ns_support")
-def test_probe_namespace_support_reports_missing(mock_probe):
-    # With the tiered architecture, _REQUIRED_PROBE_FLAGS only contains
-    # "--mount".  When mount NS is unsupported, it should be reported.
-    mock_probe.return_value = CLONE_NEWPID  # mount NS NOT supported
-    missing = ns.probe_namespace_support(ns._REQUIRED_PROBE_FLAGS)
-    assert "--mount" in missing
-
-    # When mount NS IS supported, required probe returns empty.
-    mock_probe.return_value = CLONE_NEWNS | CLONE_NEWPID
-    missing = ns.probe_namespace_support(ns._REQUIRED_PROBE_FLAGS)
-    assert missing == []
-
-    # Optional probe flags include pid, uts, ipc, user, cgroup.
-    mock_probe.return_value = CLONE_NEWNS | CLONE_NEWPID
-    missing = ns.probe_namespace_support(ns._OPTIONAL_PROBE_FLAGS)
-    assert "--uts" in missing
-    assert "--ipc" in missing
-    assert "--pid" not in missing
-
-
 @patch("chroot_distro.helpers.namespace._idmapped_mounts_supported", return_value=False)
 @patch("chroot_distro.helpers.namespace._userns_mounts_ok_cached", return_value=True)
 @patch("chroot_distro.helpers.namespace._probe_ns_support")
