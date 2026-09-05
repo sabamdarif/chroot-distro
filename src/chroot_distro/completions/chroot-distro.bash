@@ -43,8 +43,10 @@ _chroot_distro() {
 	local cur prev words cword
 	_init_completion || return
 
+	# `setup` and `daemon` are host administration, deliberately not offered here.
 	local -r _all_commands="install add i in ins remove rm rename reset login sh list li ls
         backup bak bkp restore clear-cache clear cl copy cp sync run build push
+        kill k stop ps diff search find se info version-info nf
         unmount umount um help h he hel"
 
 	# Complete the subcommand itself
@@ -68,6 +70,9 @@ _chroot_distro() {
 	bak | bkp) command=backup ;;
 	clear | cl) command=clear-cache ;;
 	cp) command=copy ;;
+	k | stop) command="kill" ;;
+	find | se) command=search ;;
+	version-info | nf) command=info ;;
 	umount | um) command=unmount ;;
 	h | he | hel) command=help ;;
 	esac
@@ -337,8 +342,49 @@ _chroot_distro() {
 		;;
 
 	# -----------------------------------------------------------------------
+	kill)
+		if [[ "${cur}" == -* ]]; then
+			_chroot_distro_compgen_words "-h --help" "${cur}"
+		else
+			_chroot_distro_compgen_words "$(_chroot_distro_get_containers)" "${cur}"
+		fi
+		;;
+
+	# -----------------------------------------------------------------------
+	ps)
+		_chroot_distro_compgen_words "-q --quiet -h --help" "${cur}"
+		;;
+
+	# -----------------------------------------------------------------------
+	diff)
+		if [[ "${cur}" == -* ]]; then
+			_chroot_distro_compgen_words "-h --help" "${cur}"
+		else
+			_chroot_distro_compgen_words "$(_chroot_distro_get_containers)" "${cur}"
+		fi
+		;;
+
+	# -----------------------------------------------------------------------
+	search)
+		case "${prev}" in
+		-l | --limit)
+			return
+			;;
+		esac
+		if [[ "${cur}" == -* ]]; then
+			_chroot_distro_compgen_words "-l --limit -q --quiet -h --help" "${cur}"
+		fi
+		;;
+
+	# -----------------------------------------------------------------------
+	info)
+		_chroot_distro_compgen_words "-h --help" "${cur}"
+		;;
+
+	# -----------------------------------------------------------------------
 	help)
-		local topics="install remove rename reset login list backup restore clear-cache copy sync run build push unmount"
+		local topics="install remove rename reset login list backup restore clear-cache copy sync run build push
+                    kill ps diff search info unmount"
 		_chroot_distro_compgen_words "${topics}" "${cur}"
 		;;
 

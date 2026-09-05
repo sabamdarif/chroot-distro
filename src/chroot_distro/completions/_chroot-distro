@@ -57,6 +57,7 @@ _chroot_distro_canonical_cmd() {
 	umount | um) print -r unmount ;;
 	k | stop) print -r kill ;;
 	find | se) print -r search ;;
+	version-info | nf) print -r info ;;
 	h | he | hel) print -r help ;;
 	*) print -r "${1}" ;;
 	esac
@@ -116,6 +117,9 @@ _chroot_distro() {
 			'search:search Docker Hub for images'
 			'find:alias for search'
 			'se:alias for search'
+			'info:show host and container diagnostics'
+			'version-info:alias for info'
+			'nf:alias for info'
 			'help:show help'
 			'h:alias for help'
 			'he:alias for help'
@@ -346,12 +350,18 @@ _chroot_distro() {
 			;;
 
 		# -----------------------------------------------------------
+		info)
+			_arguments \
+				'(-h --help)'{-h,--help}'[show help]'
+			;;
+
+		# -----------------------------------------------------------
 		help)
 			local -a topics
 			topics=(
 				install remove rename reset login list
 				backup restore clear-cache copy sync run
-				build push unmount kill ps diff search
+				build push unmount kill ps diff search info
 			)
 			_describe 'topic' topics
 			;;
