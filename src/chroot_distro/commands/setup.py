@@ -336,6 +336,7 @@ def _uninstall_service() -> None:
 
 
 def command_setup(args: argparse.Namespace) -> None:
+    """The `setup` command: install the daemon and group, or dismantle them."""
     if IS_TERMUX:
         # No root init system to host the daemon; Termux elevates via su.
         raise ChrootDistroError(
