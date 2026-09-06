@@ -165,6 +165,7 @@ class MapSources:
         return dirfd.open_regular_at(self._fd, rel[-1], os.O_RDONLY)
 
     def close(self) -> None:
+        """Release the held directory descriptor and reset the walk state."""
         if self._fd is not None:
             with contextlib.suppress(OSError):
                 os.close(self._fd)
