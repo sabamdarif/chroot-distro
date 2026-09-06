@@ -141,6 +141,7 @@ def parse_duration_ns(what: str, value: str, lineno: int) -> int:
 
 
 def looks_like_url(s: str) -> bool:
+    """True when *s* is an http(s) URL rather than a plain path."""
     return s.startswith(("http://", "https://"))
 
 

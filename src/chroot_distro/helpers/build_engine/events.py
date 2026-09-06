@@ -26,6 +26,8 @@ from chroot_distro.message import C, log_info, msg
 
 @dataclasses.dataclass
 class BuildEvent:
+    """One event in a build's output stream, emitted by the engine, rendered by a reporter."""
+
     kind: str
     step_no: int = 0
     step_total: int = 0
@@ -38,7 +40,11 @@ class BuildEvent:
 
 
 class Reporter(typing.Protocol):
-    def emit(self, ev: BuildEvent) -> None: ...
+    """The surface a build reporter presents to the engine."""
+
+    def emit(self, ev: BuildEvent) -> None:
+        """Render or forward one build event."""
+        ...
 
 
 def _label(ev: BuildEvent) -> str:
@@ -60,13 +66,14 @@ class NullReporter:
     """--quiet: swallow everything."""
 
     def emit(self, ev: BuildEvent) -> None:
-        pass
+        """Swallow the event: --quiet renders nothing."""
 
 
 class PlainReporter:
     """One log_info line per event; keeps today's `Step N/M: INSTR …` format."""
 
     def emit(self, ev: BuildEvent) -> None:
+        """Print one log_info line for *ev* in the `Step N/M: …` format."""
         if ev.kind == "step_started":
             raw = _truncate(ev.text)
             parts = raw.split(None, 1)
@@ -106,6 +113,7 @@ class TTYReporter:
         self._inflight = ""
 
     def emit(self, ev: BuildEvent) -> None:
+        """Redraw the in-flight step for *ev* on the last terminal line."""
         if ev.kind == "step_started":
             self._cached = False
             self._inflight = f"{C['CYAN']}{_head(ev)}{C['RST']} {_truncate(ev.text, 80)}"
@@ -139,6 +147,7 @@ class JSONReporter:
         self._stream = stream if stream is not None else sys.stdout
 
     def emit(self, ev: BuildEvent) -> None:
+        """Write *ev* as one JSON object line."""
         self._stream.write(json.dumps(dataclasses.asdict(ev), sort_keys=True) + "\n")
         self._stream.flush()
 
@@ -155,6 +164,7 @@ class PlatformReporter:
         self._platform = platform
 
     def emit(self, ev: BuildEvent) -> None:
+        """Forward *ev* to *inner*, stamped with this solve's platform."""
         self._inner.emit(dataclasses.replace(ev, platform=self._platform))
 
 
