@@ -64,11 +64,13 @@ class ByteCounter:
         self.count = 0
 
     def read(self, size=-1):
+        """Read from the wrapped stream, tallying bytes into ``count``."""
         data = self._fh.read(size)
         self.count += len(data)
         return data
 
     def readinto(self, buf):
+        """Read into *buf*, tallying bytes into ``count``."""
         n = self._fh.readinto(buf)
         self.count += n
         return n
@@ -253,6 +255,7 @@ class AggregateByteProgress:
         draw_bytes_bar(0, total, label=label, noun="downloaded")
 
     def add(self, nbytes: int) -> None:
+        """Add *nbytes* to the running total, redrawing the bar when due."""
         with self._lock:
             self._done += nbytes
             now = time.monotonic()
@@ -291,4 +294,5 @@ class AggregateByteProgress:
             return self._speed_locked()
 
     def clear(self) -> None:
+        """Erase the progress line."""
         clear_bar()
