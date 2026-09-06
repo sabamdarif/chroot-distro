@@ -427,6 +427,7 @@ def probe_unshare_flags() -> int:
 
 
 def read_isolation_mode(container_name: str) -> str | None:
+    """The stored isolation mode for *container_name*, or None when unset or unreadable."""
     path = _isolation_mode_file(container_name)
     if not os.path.isfile(path):
         return None
@@ -439,11 +440,13 @@ def read_isolation_mode(container_name: str) -> str | None:
 
 
 def write_isolation_mode(container_name: str, mode: str) -> None:
+    """Persist *mode* as *container_name*'s isolation mode."""
     with open(_isolation_mode_file(container_name), "w") as fh:
         fh.write(mode)
 
 
 def clear_isolation_mode(container_name: str) -> None:
+    """Drop *container_name*'s stored isolation mode if set."""
     with contextlib.suppress(OSError):
         os.remove(_isolation_mode_file(container_name))
 
@@ -589,9 +592,9 @@ class NamespaceHolder:
     # so that alone cannot tell the two apart.
     is_foreground: bool = False
 
-    # Only ever printed, for the nsenter(1) prefix `--get-chroot-cmd` shows.
     @property
     def nsenter_flags(self) -> list[str]:
+        """The namespaces as an nsenter(1) CLI prefix, printed only for --get-chroot-cmd."""
         return bitmask_to_cli_flags(self.ns_flags)
 
     def _live_ns_flags(self) -> int:
