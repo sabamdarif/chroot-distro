@@ -1047,13 +1047,15 @@ def _command_login_inner_once(container_name: str, args) -> None:
             write_resolv_conf(rootfs)
             if use_namespaces:
                 try:
-                    # Detached and max-isolation runs must use the plain
-                    # holder + nsenter: the synchronized foreground holder
-                    # execs the command itself, so it can't be backgrounded
-                    # and can't chroot first (leaving the /proc/1/root escape
-                    # open).
+                    # A detached run must use the plain holder + nsenter: the
+                    # synchronized foreground holder execs the command itself,
+                    # so it can't be backgrounded. A foreground run uses the
+                    # foreground holder even under max isolation, because it
+                    # chroots into the rootfs itself (_exec_foreground's
+                    # enter_chroot) before execing, so the command is PID 1 and
+                    # the chroot /proc/1/root escape stays closed.
                     _detach_run = getattr(args, "detach", False) and run_inner is not None
-                    if run_inner is not None and not _detach_run and not max_isolation:
+                    if run_inner is not None and not _detach_run:
                         from chroot_distro.syscalls.chroot import _copy_terminal_size
 
                         pipe_r, pipe_w = os.pipe()
