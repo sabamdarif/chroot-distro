@@ -188,20 +188,20 @@ def atomic_replace(path: str, *, suffix: str = ".tmp", mode: int | None = None) 
 def atomic_write(
     path: str,
     *,
-    binary: bool = False,
+    binary_mode: bool = False,
     suffix: str = ".tmp",
     mode: int | None = None,
 ) -> Iterator[typing.IO[typing.Any]]:
     """Open a temp file for writing; flush, fsync, and rename on success.
 
-    Yields an open file handle (text or binary depending on *binary*).
+    Yields an open file handle (text or binary depending on *binary_mode*).
     On successful exit the data is flushed and fsynced before the temp file
     is renamed into *path*, guaranteeing that the destination never contains
     a partially-written file, even after a crash.
     """
     with _staged(path, suffix, mode) as (fd, _tmp):
         try:
-            with open(fd, "wb" if binary else "w", closefd=True) as fh:
+            with open(fd, "wb" if binary_mode else "w", closefd=True) as fh:
                 yield fh
                 fh.flush()
                 os.fsync(fh.fileno())

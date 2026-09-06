@@ -94,7 +94,7 @@ def export_cache(dest: str, recipes: typing.Iterable[str]) -> tuple[int, int]:
         if not stat.S_ISREG(st.st_mode):
             continue
         if not _blob_already_there(blobs_dir, name, st.st_size):
-            with open(src, "rb") as fh, atomic_write(os.path.join(blobs_dir, name), binary=True, mode=0o644) as out:
+            with open(src, "rb") as fh, atomic_write(os.path.join(blobs_dir, name), binary_mode=True, mode=0o644) as out:
                 shutil.copyfileobj(fh, out, _READ_CHUNK)
         exported[recipe] = entry
         total += st.st_size

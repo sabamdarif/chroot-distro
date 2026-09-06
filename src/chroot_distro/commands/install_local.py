@@ -160,7 +160,7 @@ def _oci_cache_layer(tf, member_map, digest):
         raise RuntimeError(f"OCI layer blob is not a regular file: {blob_path}")
     cache_path = layer_cache_path(digest)
     try:
-        with atomic_write(cache_path, binary=True) as out:
+        with atomic_write(cache_path, binary_mode=True) as out:
             shutil.copyfileobj(fobj, out)
     finally:
         fobj.close()

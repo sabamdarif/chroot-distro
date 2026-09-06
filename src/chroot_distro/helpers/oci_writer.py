@@ -256,7 +256,7 @@ def write_oci_archive(
 
     out_abs = os.path.abspath(out_path)
     with (
-        atomic_write(out_abs, binary=True) as tmp_fh,
+        atomic_write(out_abs, binary_mode=True) as tmp_fh,
         tarfile.open(fileobj=tmp_fh, mode=mode) as tf,  # type: ignore[call-overload]
     ):
         # oci-layout first so our own install probe detects the

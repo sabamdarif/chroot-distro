@@ -591,7 +591,7 @@ def _pack_stream(
 
     digest_tee: _ProgressHashTee | None = None
     try:
-        with atomic_write(out_path, binary=True) as out_fh:
+        with atomic_write(out_path, binary_mode=True) as out_fh:
             digest_tee = _ProgressHashTee(out_fh, digest_h)
 
             compressor: typing.Any
