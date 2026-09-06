@@ -71,6 +71,7 @@ class AuthStrippingRedirectHandler(urllib.request.HTTPRedirectHandler):
     """
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
+        """Forward the redirect, dropping Authorization on a cross-host hop."""
         new_req = super().redirect_request(req, fp, code, msg, headers, newurl)
         if new_req is None:
             return None
