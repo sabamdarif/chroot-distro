@@ -123,10 +123,10 @@ def tty_safe_for_writes() -> bool:
 _quiet = False
 
 
-def set_quiet(value: bool) -> None:
+def set_quiet(enabled: bool) -> None:
     """Enable or disable quiet mode for the rest of the process."""
     global _quiet  # noqa: PLW0603
-    _quiet = bool(value)
+    _quiet = bool(enabled)
 
 
 def is_quiet() -> bool:
