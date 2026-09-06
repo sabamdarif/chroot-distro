@@ -250,7 +250,6 @@ class AggregateByteProgress:
         self._label = label
         self._last_shown = 0
         self._samples: deque[tuple[float, int]] = deque()
-        self._start_time = time.monotonic()
         draw_bytes_bar(0, total, label=label, noun="downloaded")
 
     def add(self, nbytes: int) -> None:
