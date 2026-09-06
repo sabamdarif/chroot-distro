@@ -44,7 +44,6 @@ class NamespaceInfo:
     kernel_config: str
     severity: str  # "critical", "high", "medium", "low"
     impacts: tuple[str, ...]
-    fixes: tuple[str, ...]
 
 
 NAMESPACE_INFO: dict[int, NamespaceInfo] = {
@@ -58,11 +57,6 @@ NAMESPACE_INFO: dict[int, NamespaceInfo] = {
             "Files created via sudo are owned by host uid 0",
             "Capabilities inside container apply to host kernel",
         ),
-        fixes=(
-            "Enable CONFIG_USER_NS in kernel config",
-            "Set /proc/sys/kernel/unprivileged_userns_clone to 1",
-            "Check SELinux policy allows user namespace creation",
-        ),
     ),
     CLONE_NEWPID: NamespaceInfo(
         name="PID namespace",
@@ -73,7 +67,6 @@ NAMESPACE_INFO: dict[int, NamespaceInfo] = {
             "Host processes visible inside container via /proc",
             "Container processes can send signals to host processes",
         ),
-        fixes=("Enable CONFIG_PID_NS in kernel config",),
     ),
     CLONE_NEWUTS: NamespaceInfo(
         name="UTS namespace",
@@ -81,7 +74,6 @@ NAMESPACE_INFO: dict[int, NamespaceInfo] = {
         kernel_config="CONFIG_UTS_NS",
         severity="low",
         impacts=("Container shares host's hostname",),
-        fixes=("Enable CONFIG_UTS_NS in kernel config",),
     ),
     CLONE_NEWIPC: NamespaceInfo(
         name="IPC namespace",
@@ -89,7 +81,6 @@ NAMESPACE_INFO: dict[int, NamespaceInfo] = {
         kernel_config="CONFIG_IPC_NS",
         severity="medium",
         impacts=("Container shares host SysV IPC and POSIX message queues",),
-        fixes=("Enable CONFIG_IPC_NS in kernel config",),
     ),
     CLONE_NEWCGROUP: NamespaceInfo(
         name="Cgroup namespace",
@@ -97,7 +88,6 @@ NAMESPACE_INFO: dict[int, NamespaceInfo] = {
         kernel_config="CONFIG_CGROUP_NS",
         severity="low",
         impacts=("Container can see host cgroup hierarchy",),
-        fixes=("Enable CONFIG_CGROUP_NS in kernel config",),
     ),
 }
 
@@ -190,5 +180,3 @@ USERNS_MOUNTS_REJECTED_WARNING = (
     "mounts inside it; continuing without user-namespace isolation "
     "(capability-drop mode). Container root still maps to host root."
 )
-
-
