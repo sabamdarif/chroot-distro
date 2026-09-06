@@ -76,6 +76,14 @@ from chroot_distro.progress import (
 # chunks; smaller blobs use the monolithic PUT path.
 _DEFAULT_PUSH_CHUNK_SIZE = 10 * 1024 * 1024
 
+# HTTP success range for a pushed object, and the auth-denied codes that
+# become `push_denied_msg` whether or not credentials were supplied.
+_OK_RANGE = range(200, 300)
+_DENIED_CODES = (401, 403)
+
+# Redraw the upload bar at most every 256 KiB moved.
+_PROGRESS_THROTTLE_BYTES = 262144
+
 # Connection/transport errors worth retrying.
 def _push_chunk_size() -> int:
     raw = os.environ.get("CD_PUSH_CHUNK_SIZE", "").strip()
@@ -129,7 +137,7 @@ def _blob_exists(
         try:
             op = auth_opener() if not insecure else opener(insecure)
             with op.open(req) as resp:
-                return bool(200 <= resp.status < 300)
+                return resp.status in _OK_RANGE
         except urllib.error.HTTPError as exc:
             if exc.code == 404:
                 return False
@@ -152,7 +160,7 @@ class _ProgressReader:
     def _maybe_draw(self, final: bool = False) -> None:
         if not self._tty:
             return
-        if not final and self.sent - self._last_shown < 262144:
+        if not final and self.sent - self._last_shown < _PROGRESS_THROTTLE_BYTES:
             return
         self._last_shown = self.sent
         pfx = f"{C['BLUE']}[{C['GREEN']}*{C['BLUE']}] {C['CYAN']}"
@@ -202,7 +210,7 @@ def _upload_blob_bytes(
         )
         op = auth_opener() if not insecure else opener(insecure)
         with op.open(put_req) as resp:
-            if not 200 <= resp.status < 300:
+            if resp.status not in _OK_RANGE:
                 raise RuntimeError(f"Blob upload failed for {digest}: HTTP {resp.status}")
 
     _with_retry(_do, f"upload {digest[:19]}")
@@ -273,7 +281,7 @@ def _upload_blob_monolithic(
             )
             op = auth_opener() if not insecure else opener(insecure)
             with op.open(put_req) as resp:
-                if not 200 <= resp.status < 300:
+                if resp.status not in _OK_RANGE:
                     raise RuntimeError(f"Blob upload failed for {digest}: HTTP {resp.status}")
 
     _with_retry(_do, f"upload {label or digest[:19]}")
@@ -329,7 +337,7 @@ def _upload_blob_chunked(
                 try:
                     op = auth_opener() if not insecure else opener(insecure)
                     with op.open(patch_req) as resp:
-                        if not 200 <= resp.status < 300:
+                        if resp.status not in _OK_RANGE:
                             raise RuntimeError(f"Chunk upload failed for {digest}: HTTP {resp.status}")
                         next_url = resp.headers.get("Location", "")
                         acked = _range_end(resp.headers.get("Range", ""))
@@ -364,7 +372,7 @@ def _upload_blob_chunked(
                 )
                 op = auth_opener() if not insecure else opener(insecure)
                 with op.open(put_req) as resp:
-                    if not 200 <= resp.status < 300:
+                    if resp.status not in _OK_RANGE:
                         raise RuntimeError(f"Blob finalize failed for {digest}: HTTP {resp.status}")
 
             _with_retry(_finalize, f"finalize {label or digest[:19]}")
@@ -424,7 +432,7 @@ def _put_manifest(
         req = urllib.request.Request(url, data=body, method="PUT", headers=headers)
         op = auth_opener() if not insecure else opener(insecure)
         with op.open(req) as resp:
-            if not 200 <= resp.status < 300:
+            if resp.status not in _OK_RANGE:
                 raise RuntimeError(f"Manifest upload failed: HTTP {resp.status}")
             return str(resp.headers.get("Docker-Content-Digest", ""))
 
@@ -519,7 +527,7 @@ def push_image(image_ref: str, arch: str, insecure: bool = False) -> dict[str, t
             )
             bytes_uploaded += size
         except urllib.error.HTTPError as exc:
-            if exc.code in (401, 403):
+            if exc.code in _DENIED_CODES:
                 raise RuntimeError(push_denied_msg(image_ref, exc.code)) from exc
             raise
 
