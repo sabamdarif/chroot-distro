@@ -548,7 +548,7 @@ class BuildEngine:
         if name in EXPANDS_VARS:
             return self._expand_instruction(instr)
         if name == "RUN":
-            return self._expand_instruction(instr, value=False)
+            return self._expand_instruction(instr, expand_value=False)
         return instr
 
     def _run_with_history(
@@ -588,12 +588,12 @@ class BuildEngine:
         cfg = self.current.image_config
         cfg.setdefault("history", []).append(entry)
 
-    def _expand_instruction(self, instr: dict[str, typing.Any], *, value: bool = True) -> dict[str, typing.Any]:
+    def _expand_instruction(self, instr: dict[str, typing.Any], *, expand_value: bool = True) -> dict[str, typing.Any]:
         """Return a copy of instr with its flags, and by default its `value`, expanded."""
         env = self.expansion_scope()
         new = dict(instr)
         raw_value = instr.get("value", "")
-        if value and isinstance(raw_value, str):
+        if expand_value and isinstance(raw_value, str):
             new["value"] = expand_vars(raw_value, env)
 
         def _expand_flag(v: typing.Any) -> typing.Any:
