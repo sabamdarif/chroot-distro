@@ -79,12 +79,14 @@ def _hrule(width: int, char: str, color: str | None = None) -> str:
 
 
 def section(label: str) -> None:
+    """Print a blank-line-separated section header."""
     msg()
     msg(f"{C['UBCYAN']}{label}{C['RST']}")
     msg()
 
 
 def paragraph(text: str, width: int, indent: int = 2, color: str | None = None) -> None:
+    """Print *text* wrapped to *width*, indented and colored."""
     color = color or C["CYAN"]
     pad = " " * indent
     avail = max(8, width - indent)
@@ -96,6 +98,7 @@ def paragraph(text: str, width: int, indent: int = 2, color: str | None = None) 
 
 
 def usage_line(usage: str, width: int) -> None:
+    """Print the program usage line, wrapping only the subcommand tail."""
     parts = usage.split(" ", 1)
     sub = parts[0]
     rest = parts[1] if len(parts) > 1 else ""
@@ -114,6 +117,7 @@ def usage_line(usage: str, width: int) -> None:
 
 
 def aliases_block(aliases) -> None:
+    """Print the alias list as one indented line."""
     sep = f"{C['CYAN']}, {C['RST']}"
     parts = [f"{C['UGREEN']}{a}{C['RST']}" for a in aliases]
     msg(f"  {C['CYAN']}Aliases:{C['RST']} {sep.join(parts)}")
@@ -129,6 +133,7 @@ def _options_stacked(options, width: int) -> None:
 
 
 def options_block(options, width: int) -> None:
+    """Print the options list, stacked or side-by-side to fit *width*."""
     if not options:
         return
     if width < NARROW_BREAKPOINT:
@@ -158,6 +163,7 @@ def options_block(options, width: int) -> None:
 
 
 def commands_block(commands, width: int) -> None:
+    """Print the commands list, stacking to fit *width*."""
     if not commands:
         return
     longest = max(len(entry[0]) for entry in commands)
@@ -197,6 +203,7 @@ def commands_block(commands, width: int) -> None:
 
 
 def shell_block(examples, width: int) -> None:
+    """Print *examples* as indented shell command blocks."""
     avail = max(12, width - 4)
     wrap_avail = max(4, avail - 2)
     for ex in examples:
@@ -211,6 +218,7 @@ def shell_block(examples, width: int) -> None:
 
 
 def bullets_block(bullets, width: int) -> None:
+    """Print the bullet/comment list, stacking to fit *width*."""
     if not bullets:
         return
     longest = max(len(label) for label, _ in bullets)
