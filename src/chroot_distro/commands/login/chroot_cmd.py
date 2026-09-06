@@ -33,7 +33,7 @@ log = logging.getLogger(__name__)
 @dataclass
 class ChrootConfig:
     """Chroot invocation parameters for
-    :func:`chroot_distro.syscalls.chroot.chroot_and_exec`."""
+    :func:`chroot_distro.syscalls.chroot.chroot_and_run`."""
 
     rootfs: str
     command: list[str] = field(default_factory=list)

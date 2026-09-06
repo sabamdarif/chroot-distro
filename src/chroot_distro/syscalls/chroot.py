@@ -4,9 +4,9 @@
 
 Three entry points, differing only in what the caller wants back.
 `enter_chroot` acts on the *current* process, so the caller is one that is about
-to exec or exit; `chroot_and_exec` and `chroot_and_run` fork first and return the
-child's exit code or its captured output, leaving the parent free to decrement the
-session count and tear the mounts down.
+to exec or exit; `chroot_and_run` forks first and returns the child's exit code or
+its captured output, leaving the parent free to decrement the session count and
+tear the mounts down.
 `spawn_detached` forks a child meant to outlive this process.
 
 The order of the identity change is coreutils' own and is not negotiable:
@@ -84,65 +84,6 @@ def enter_chroot(
         os.setuid(uid)
 
 
-def chroot_and_exec(
-    rootfs: str,
-    command: list[str],
-    *,
-    env: dict[str, str] | None = None,
-    uid: int | None = None,
-    gid: int | None = None,
-    groups: list[int] | None = None,
-    workdir: str = "/",
-) -> int:
-    """Fork, chroot into *rootfs*, and exec *command* in the child.
-
-    Unlike :func:`enter_chroot` which acts on the current process, this
-    function forks first and returns the child's exit code.  The parent
-    process is unaffected and can perform cleanup (session counter
-    decrement, mount teardown, etc.).
-
-    When stdin is a terminal, a fresh PTY pair is allocated so the child
-    has its own controlling terminal (enabling job control, ttyname(),
-    etc.) while the parent relays data between the original terminal and
-    the PTY master.
-    """
-    use_pty = os.isatty(0)
-    master_fd = slave_fd = -1
-
-    if use_pty:
-        master_fd, slave_fd = os.openpty()
-        _copy_terminal_size(0, master_fd)
-
-    child_pid = os.fork()
-
-    if child_pid == 0:
-        # --- Child process ---
-        try:
-            if use_pty:
-                _setup_child_pty(master_fd, slave_fd)
-
-            if env is not None:
-                os.environ.clear()
-                os.environ.update(env)
-
-            enter_chroot(rootfs, uid=uid, gid=gid, groups=groups, workdir=workdir)
-
-            _try_exec(command, dict(os.environ))
-        except Exception as exc:
-            try:
-                sys.stderr.write(f"chroot_and_exec: {exc}\n")
-                sys.stderr.flush()
-            except Exception as stderr_exc:
-                log.debug("Failed to write chroot_and_exec failure to stderr: %s", stderr_exc)
-            os._exit(127)
-
-    # --- Parent process ---
-    if use_pty:
-        os.close(slave_fd)
-        return _pty_relay(master_fd, child_pid)
-    return _wait_for_child_with_signals(child_pid)
-
-
 def chroot_and_run(
     rootfs: str,
     command: list[str],
@@ -159,9 +100,8 @@ def chroot_and_run(
 ) -> subprocess.CompletedProcess:
     """Fork, chroot, exec command, and capture output.
 
-    Similar to :func:`chroot_and_exec` but returns a
-    :class:`subprocess.CompletedProcess` with captured stdout/stderr
-    when *capture_output* is True.
+    Returns a :class:`subprocess.CompletedProcess` with captured
+    stdout/stderr when *capture_output* is True.
 
     Parameters
     ----------
