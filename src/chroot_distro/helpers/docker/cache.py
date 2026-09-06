@@ -105,7 +105,7 @@ def save_manifest_cache(
         json.dump(payload, fh)
 
 
-def load_manifest_cache(image_ref: str, platform: Platform):
+def load_manifest_cache(image_ref: str, platform: Platform) -> tuple[dict[str, typing.Any] | None, str | None, dict[str, typing.Any]]:
     """Return (manifest, repo, image_config) from cache.
 
     On a cache miss (or read/parse error) returns ``(None, None, {})``. An entry

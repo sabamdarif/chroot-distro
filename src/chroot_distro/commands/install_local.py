@@ -167,7 +167,7 @@ def _oci_cache_layer(tf, member_map, digest):
     return cache_path
 
 
-def _extract_oci(tf, member_map, rootfs_fd, dist_arch):
+def _extract_oci(tf, member_map, rootfs_fd, dist_arch) -> dict[str, object]:
     index = _oci_read_json(tf, member_map, "index.json")
     index_manifests = index.get("manifests", [])
     if not index_manifests:
@@ -219,7 +219,7 @@ def _extract_oci(tf, member_map, rootfs_fd, dist_arch):
     }
 
 
-def install_from_local_file(archive_path: str, rootfs_fd: int, dist_arch: str):
+def install_from_local_file(archive_path: str, rootfs_fd: int, dist_arch: str) -> dict | None:
     """Open *archive_path*, detect its format, and extract into *rootfs_fd*.
 
     The rootfs is a **descriptor**: `install` walks containers/<name>/rootfs

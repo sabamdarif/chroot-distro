@@ -144,24 +144,24 @@ def msg(*args):
     print(*args, file=sys.stderr)
 
 
-def log_info(text: str):
+def log_info(text: str) -> None:
     """Emit a `[*] text` info line. No-op under --quiet."""
     if _quiet:
         return
     msg(f"{C['BLUE']}[{C['GREEN']}*{C['BLUE']}] {C['CYAN']}{text}{C['RST']}")
 
 
-def log_error(text: str):
+def log_error(text: str) -> None:
     """Emit a `[!] text` error line. Always shown, even under --quiet."""
     msg(f"{C['BLUE']}[{C['RED']}!{C['BLUE']}] {C['CYAN']}{text}{C['RST']}")
 
 
-def warn(text: str):
+def warn(text: str) -> None:
     """Emit a 'Warning: text' line in yellow."""
     msg(f"{C['BYELLOW']}Warning: {C['YELLOW']}{text}{C['RST']}")
 
 
-def crit_error(text: str):
+def crit_error(text: str) -> None:
     """Emit an 'Error: text' line in red."""
     msg(f"{C['BRED']}Error: {C['RED']}{text}{C['RST']}")
 

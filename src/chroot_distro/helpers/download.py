@@ -48,6 +48,7 @@ import socket
 import ssl
 import threading
 import time
+import typing
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -186,7 +187,7 @@ def retry_http(
     max_retries: int = 5,
     retry_delay: float = 5,
     abort_event: "threading.Event | None" = None,
-):
+) -> typing.Any:
     """Run *operation* (a zero-arg callable performing one HTTP request),
     retrying transient failures with a delay and a logged notice.
 

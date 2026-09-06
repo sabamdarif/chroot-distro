@@ -82,7 +82,7 @@ class AuthStrippingRedirectHandler(urllib.request.HTTPRedirectHandler):
         return new_req
 
 
-def opener(insecure: bool = False):
+def opener(insecure: bool = False) -> urllib.request.OpenerDirector:
     """Build and return a new opener that strips Auth across hosts.
 
     The *insecure* variant additionally installs an HTTPS handler whose SSL
