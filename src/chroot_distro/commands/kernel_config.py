@@ -81,7 +81,6 @@ KERNEL_FLAG_GROUPS: tuple[KernelFlagGroup, ...] = (
             KernelFlag("UTS_NS", "UTS namespace (container hostname)", required=True),
             KernelFlag("IPC_NS", "IPC namespace", required=True),
             KernelFlag("USER_NS", "user namespace (uid remapping, capability scoping)", required=False),
-            KernelFlag("NET_NS", "network namespace (not yet used)", required=False),
         ),
     ),
     KernelFlagGroup(
@@ -296,7 +295,6 @@ def probe_flag_runtime(name: str) -> str:
         "PID_NS": ("pid",),
         "UTS_NS": ("uts",),
         "IPC_NS": ("ipc",),
-        "NET_NS": ("net",),
         "CGROUP_NS": ("cgroup",),
     }
     if name in ns_map:

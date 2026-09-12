@@ -30,15 +30,11 @@ def test_parse_kernel_config_recognizes_y_m_and_not_set():
     assert parsed["NAMESPACES"] == kc.CONFIG_BUILTIN
     assert parsed["CGROUP_NS"] == kc.CONFIG_MODULE
     assert parsed["USER_NS"] == kc.CONFIG_MISSING
-    # An option absent from the text is simply not in the dict.
-    assert "NET_NS" not in parsed
 
 
 def test_lookup_flag_handles_unknown_and_absent():
     parsed = kc.parse_kernel_config(_SAMPLE)
     assert kc.lookup_flag(parsed, "PID_NS") == kc.CONFIG_BUILTIN
-    # Absent from a readable config -> treated as missing.
-    assert kc.lookup_flag(parsed, "NET_NS") == kc.CONFIG_MISSING
     # No config at all -> unknown.
     assert kc.lookup_flag(None, "PID_NS") == kc.CONFIG_UNKNOWN
 
@@ -99,7 +95,6 @@ def test_probe_flag_runtime_namespaces_from_dir_listing():
     with patch.object(kc, "_ns_dir_entries", return_value={"mnt", "pid", "uts", "ipc"}):
         assert kc.probe_flag_runtime("PID_NS") == kc.PROBE_PRESENT
         assert kc.probe_flag_runtime("NAMESPACES") == kc.PROBE_PRESENT
-        assert kc.probe_flag_runtime("NET_NS") == kc.PROBE_ABSENT
 
 
 def test_probe_flag_runtime_namespaces_lexists_fallback():
