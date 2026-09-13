@@ -148,7 +148,7 @@ def test_binfmt_qemu_status_ok_with_handler():
 
 
 def test_namespace_status_warns_when_the_kernel_lacks_namespaces():
-    with patch.object(info, "probe_flag_runtime", return_value=info.PROBE_ABSENT):
+    with patch.object(info, "probe_feature", return_value=info.PROBE_ABSENT):
         value, level = info._namespace_status()
     assert level == "warn"
     assert "--isolated" in value
@@ -156,7 +156,7 @@ def test_namespace_status_warns_when_the_kernel_lacks_namespaces():
 
 def test_namespace_status_reports_userns_separately():
     with (
-        patch.object(info, "probe_flag_runtime", return_value=info.PROBE_PRESENT),
+        patch.object(info, "probe_feature", return_value=info.PROBE_PRESENT),
         patch.object(info, "_userns_enabled", return_value=False),
     ):
         value, level = info._namespace_status()
@@ -233,21 +233,21 @@ def test_userns_enabled_states():
 
     with (
         patch("builtins.open", side_effect=fake_open_error),
-        patch.object(info, "probe_flag_runtime", return_value="present"),
+        patch.object(info, "probe_feature", return_value="present"),
     ):
         assert info._userns_enabled() is True
 
     # Case 4: max_user_namespaces is missing/unreadable, and probe says absent
     with (
         patch("builtins.open", side_effect=fake_open_error),
-        patch.object(info, "probe_flag_runtime", return_value="absent"),
+        patch.object(info, "probe_feature", return_value="absent"),
     ):
         assert info._userns_enabled() is False
 
     # Case 5: max_user_namespaces is missing/unreadable, and probe says unknown
     with (
         patch("builtins.open", side_effect=fake_open_error),
-        patch.object(info, "probe_flag_runtime", return_value="unknown"),
+        patch.object(info, "probe_feature", return_value="unknown"),
     ):
         assert info._userns_enabled() is None
 

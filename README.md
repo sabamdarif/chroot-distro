@@ -378,7 +378,9 @@ chroot-distro info
 Aliases: version-info, nf
 ```
 
-Print a diagnostics report: versions, device details, host capabilities, installed containers, and basic health checks. Attach it when filing a bug report.
+Print a diagnostics report: versions, device details, host capabilities, kernel support, installed containers, and basic health checks. Attach it when filing a bug report.
+
+It always runs as root, and stops with an error when root cannot be obtained. The kernel support section is probed by trying each feature, not read from a kernel build config, so it reports what the running kernel does.
 
 ### help
 

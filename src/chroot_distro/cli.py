@@ -13,10 +13,10 @@ everything after it belongs to the guest command.
 Root policy is decided here and nowhere else. `help`, `search` and `daemon` never
 elevate; `daemon` additionally refuses to elevate itself, because it is started by an
 init system and self-elevation could recurse through the socket it serves. On Termux
-`list` and `ps` read only /proc and container metadata so they stay unprivileged, and
-`info` elevates only when root is already available. On Linux everything else
-elevates, because containers live in root's data dir and a rootless read would look in
-the wrong place.
+`list` and `ps` read only /proc and container metadata so they stay unprivileged.
+Everything else elevates, `info` included: its kernel answers come from probes that
+need root, and a rootless report would be the one a bug cannot be filed with. There is
+no rootless fallback, so a command that needs root and cannot get it fails here.
 
 Startup latency is a feature, so imports are lazy: handlers are `"module:function"`
 strings resolved on dispatch, help pages and `elevate` are imported inside the branch
@@ -223,8 +223,8 @@ def main() -> None:
     # `search` is network-only. `list` and `ps` only read /proc and container
     # metadata, so they are exempt on Termux; on Linux containers are installed
     # by root and live in root's data dir, so they still elevate there to read
-    # the right location. `info` elevates only when root is available, for the
-    # kernel config, and runs rootless otherwise.
+    # the right location. `info` always elevates: its kernel probes and the
+    # data directories are root's, and a partial report is worse than none.
     if canonical == "daemon" and os.getuid() != 0:
         # The daemon is started by the init system and must already be
         # root; never self-elevate it (that could recurse through itself).
@@ -235,12 +235,7 @@ def main() -> None:
     if canonical in ("help", "search", "daemon"):
         requires_root = False
     elif IS_TERMUX:
-        if canonical == "info":
-            from chroot_distro.elevate import is_root_available
-
-            requires_root = is_root_available()
-        elif canonical not in ("list", "ps"):
-            requires_root = True
+        requires_root = canonical not in ("list", "ps")
     else:
         requires_root = True
 

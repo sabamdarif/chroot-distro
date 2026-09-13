@@ -134,13 +134,12 @@ def test_main_termux_clears_preload():
 
 
 @patch("chroot_distro.cli.IS_TERMUX", True)
-def test_main_termux_info_auto_elevation():
+def test_main_termux_info_always_elevates():
+    # 'info' is root-only on Termux too: its kernel probes need root.
     mock_info = MagicMock()
-    # 1. root is available: should elevate
     with (
         patch("sys.argv", ["chroot-distro", "info"]),
         patch("os.getuid", return_value=1000),
-        patch("chroot_distro.elevate.is_root_available", return_value=True),
         patch("chroot_distro.elevate.elevate_or_die", side_effect=RootRequiredError("mock error")) as mock_elevate,
         patch.dict("chroot_distro.cli._COMMAND_HANDLERS", {"info": mock_info}),
     ):
@@ -150,18 +149,21 @@ def test_main_termux_info_auto_elevation():
         mock_elevate.assert_called_once()
         mock_info.assert_not_called()
 
-    # 2. root is not available: should run rootlessly (no elevate)
-    mock_info.reset_mock()
+
+@patch("chroot_distro.cli.IS_TERMUX", False)
+def test_main_info_fails_when_root_is_unobtainable():
+    # No rootless fallback: the command errors out instead of reporting less.
+    mock_info = MagicMock()
     with (
         patch("sys.argv", ["chroot-distro", "info"]),
         patch("os.getuid", return_value=1000),
-        patch("chroot_distro.elevate.is_root_available", return_value=False),
-        patch("chroot_distro.elevate.elevate_or_die") as mock_elevate,
+        patch("chroot_distro.elevate.elevate_or_die", side_effect=RootRequiredError("no root here")),
         patch.dict("chroot_distro.cli._COMMAND_HANDLERS", {"info": mock_info}),
     ):
-        main()
-        mock_elevate.assert_not_called()
-        mock_info.assert_called_once()
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+        assert exc_info.value.code == 1
+        mock_info.assert_not_called()
 
 
 @patch("chroot_distro.cli.IS_TERMUX", False)

@@ -454,7 +454,7 @@ the caller (`build_engine/constants.is_host_exec_var`, applied in
 | `helpers/binfmt.py`         | the binfmt_misc entry a foreign-arch guest runs on        |
 | `arch.py`                   | host arch, image arch, and what a rootfs turned out to be |
 | `commands/info.py`          | one report a bug can be filed with                        |
-| `commands/kernel_config.py` | what the running kernel was built with                    |
+| `commands/kernel_config.py` | which kernel features work here, probed by trying them     |
 
 ### Output and shared utilities
 

@@ -1,132 +1,78 @@
-import gzip
 from unittest.mock import mock_open, patch
 
 import chroot_distro.commands.info as info
 import chroot_distro.commands.kernel_config as kc
-
-_SAMPLE = "\n".join(
-    [
-        "# Auto-generated kernel config",
-        "CONFIG_NAMESPACES=y",
-        "CONFIG_PID_NS=y",
-        "CONFIG_UTS_NS=y",
-        "CONFIG_IPC_NS=y",
-        "# CONFIG_USER_NS is not set",
-        "CONFIG_PROC_FS=y",
-        "CONFIG_SYSFS=y",
-        "CONFIG_TMPFS=y",
-        "CONFIG_CGROUPS=y",
-        "CONFIG_CGROUP_NS=m",
-    ]
-)
 
 
 def _capture(lines):
     return lambda *a: lines.append(a[0] if a else "")
 
 
-def test_parse_kernel_config_recognizes_y_m_and_not_set():
-    parsed = kc.parse_kernel_config(_SAMPLE)
-    assert parsed["NAMESPACES"] == kc.CONFIG_BUILTIN
-    assert parsed["CGROUP_NS"] == kc.CONFIG_MODULE
-    assert parsed["USER_NS"] == kc.CONFIG_MISSING
-
-
-def test_lookup_flag_handles_unknown_and_absent():
-    parsed = kc.parse_kernel_config(_SAMPLE)
-    assert kc.lookup_flag(parsed, "PID_NS") == kc.CONFIG_BUILTIN
-    # No config at all -> unknown.
-    assert kc.lookup_flag(None, "PID_NS") == kc.CONFIG_UNKNOWN
-
-
-def test_find_kernel_config_reads_plain_file(tmp_path):
-    cfg = tmp_path / ".config"
-    cfg.write_text(_SAMPLE)
-    with patch.dict(kc.os.environ, {"CONFIG": str(cfg)}, clear=False):
-        path, text = kc.find_kernel_config()
-    assert path == str(cfg)
-    assert "CONFIG_NAMESPACES=y" in text
-
-
-def test_find_kernel_config_reads_gzip(tmp_path):
-    cfg = tmp_path / "config.gz"
-    with gzip.open(cfg, "wt", encoding="utf-8") as fh:
-        fh.write(_SAMPLE)
-    with patch.dict(kc.os.environ, {"CONFIG": str(cfg)}, clear=False):
-        path, text = kc.find_kernel_config()
-    assert path == str(cfg)
-    assert "CONFIG_PID_NS=y" in text
-
-
-def test_find_kernel_config_returns_none_when_absent(tmp_path):
-    missing = tmp_path / "does-not-exist"
+# ── probe_feature: namespaces ────────────────────────────────────────────────────
+def test_namespace_absent_when_not_listed_and_no_fork():
+    """A namespace missing from /proc/self/ns is a negative answer on its own."""
     with (
-        patch.dict(kc.os.environ, {"CONFIG": str(missing)}, clear=False),
-        patch.object(kc, "_candidate_config_paths", return_value=[]),
+        patch.object(kc, "_ns_dir_entries", return_value={"mnt"}),
+        patch.object(kc, "_namespace_works") as works,
     ):
-        path, text = kc.find_kernel_config()
-    assert path is None
-    assert text is None
+        assert kc.probe_feature("pid") == kc.PROBE_ABSENT
+        works.assert_not_called()
 
 
-def test_render_kernel_config_reports_missing_required():
-    # PID_NS is required and missing in this partial config.
-    partial = "\n".join(
-        [
-            "CONFIG_NAMESPACES=y",
-            "CONFIG_PROC_FS=y",
-            "CONFIG_SYSFS=y",
-            "CONFIG_UNIX98_PTYS=y",
-        ]
-    )
-    lines: list[str] = []
-    with (
-        patch.object(info, "find_kernel_config", return_value=("/proc/config.gz", partial)),
-        patch.object(info, "msg", side_effect=_capture(lines)),
-    ):
-        info._render_kernel_config()
-    blob = "\n".join(lines)
-    assert "CONFIG_PID_NS" in blob
-    assert "cannot work fully without" in blob
+def test_namespace_present_only_when_unshare_succeeds():
+    """Presence in /proc/self/ns is not enough: the flag has to be accepted."""
+    for accepted, expected in ((kc.CLONE_NEWPID, kc.PROBE_PRESENT), (0, kc.PROBE_ABSENT)):
+        with (
+            patch.object(kc, "_ns_dir_entries", return_value={"mnt", "pid"}),
+            patch.object(kc, "_namespace_works", return_value=bool(accepted)),
+        ):
+            assert kc.probe_feature("pid") == expected
 
 
-def test_probe_flag_runtime_namespaces_from_dir_listing():
-    # Namespace present when listed under /proc/self/ns (the reliable path).
-    with patch.object(kc, "_ns_dir_entries", return_value={"mnt", "pid", "uts", "ipc"}):
-        assert kc.probe_flag_runtime("PID_NS") == kc.PROBE_PRESENT
-        assert kc.probe_flag_runtime("NAMESPACES") == kc.PROBE_PRESENT
-
-
-def test_probe_flag_runtime_namespaces_lexists_fallback():
-    # When the dir cannot be listed, fall back to lexists on the link itself.
+def test_namespace_probed_when_listing_unavailable():
+    """An unlistable /proc/self/ns is not an answer, so the flag is tried."""
     with (
         patch.object(kc, "_ns_dir_entries", return_value=None),
-        patch.object(kc.os.path, "lexists", side_effect=lambda p: p.endswith("/ns/pid")),
+        patch.object(kc, "_namespace_works", return_value=True) as works,
     ):
-        assert kc.probe_flag_runtime("PID_NS") == kc.PROBE_PRESENT
-        assert kc.probe_flag_runtime("UTS_NS") == kc.PROBE_ABSENT
+        assert kc.probe_feature("uts") == kc.PROBE_PRESENT
+        works.assert_called_once_with(kc.CLONE_NEWUTS)
 
 
-def test_probe_flag_runtime_filesystems():
-    # Present when listed in /proc/filesystems.
-    with patch.object(kc, "_proc_filesystems", return_value={"proc", "sysfs", "tmpfs"}):
-        assert kc.probe_flag_runtime("PROC_FS") == kc.PROBE_PRESENT
-        # devtmpfs not listed and no mount hint -> absent.
-        with patch.object(kc.os.path, "isdir", return_value=False):
-            assert kc.probe_flag_runtime("DEVTMPFS") == kc.PROBE_ABSENT
+# ── probe_feature: filesystems ───────────────────────────────────────────────────
+def test_filesystem_present_from_proc_filesystems():
+    with (
+        patch.object(kc, "_proc_filesystems", return_value={"proc", "sysfs", "tmpfs"}),
+        patch.object(kc.os.path, "isdir", return_value=False),
+    ):
+        assert kc.probe_feature("proc") == kc.PROBE_PRESENT
+        # Not listed and nothing mounted at the hint -> a real absence.
+        assert kc.probe_feature("devtmpfs") == kc.PROBE_ABSENT
 
-    # Fallback to mounts when /proc/filesystems is unreadable (None)
+
+def test_filesystem_present_from_mount_hint():
+    with (
+        patch.object(kc, "_proc_filesystems", return_value=set()),
+        patch.object(kc.os.path, "isdir", side_effect=lambda p: p == "/dev/pts"),
+    ):
+        assert kc.probe_feature("devpts") == kc.PROBE_PRESENT
+        assert kc.probe_feature("tmpfs") == kc.PROBE_ABSENT  # no hint to check
+
+
+def test_filesystem_unknown_when_proc_unreadable():
+    """"Cannot tell" stays distinct from "absent" when nothing can be read."""
     with (
         patch.object(kc, "_proc_filesystems", return_value=None),
         patch.object(kc, "_has_fs_in_mounts", return_value=True),
     ):
-        assert kc.probe_flag_runtime("TMPFS") == kc.PROBE_PRESENT
+        assert kc.probe_feature("tmpfs") == kc.PROBE_PRESENT
 
     with (
         patch.object(kc, "_proc_filesystems", return_value=None),
         patch.object(kc, "_has_fs_in_mounts", return_value=False),
+        patch.object(kc.os.path, "isdir", return_value=False),
     ):
-        assert kc.probe_flag_runtime("TMPFS") == kc.PROBE_UNKNOWN
+        assert kc.probe_feature("tmpfs") == kc.PROBE_UNKNOWN
 
 
 def test_has_fs_in_mounts():
@@ -136,110 +82,99 @@ def test_has_fs_in_mounts():
         assert kc._has_fs_in_mounts("devtmpfs") is False
 
 
-def test_probe_flag_runtime_filesystem_uses_mount_hint_when_unreadable():
-    # /proc/filesystems unreadable (None) but the canonical mount exists.
+# ── probe_feature: cgroups and the unknown key ───────────────────────────────────
+def test_cgroup_filesystem_from_type_or_mount_dir():
     with (
-        patch.object(kc, "_proc_filesystems", return_value=None),
-        patch.object(kc, "_has_fs_in_mounts", return_value=False),
-        patch.object(kc.os.path, "isdir", side_effect=lambda p: p == "/proc"),
+        patch.object(kc, "_proc_filesystems", return_value={"cgroup2"}),
+        patch.object(kc.os.path, "isdir", return_value=False),
     ):
-        assert kc.probe_flag_runtime("PROC_FS") == kc.PROBE_PRESENT
-        assert kc.probe_flag_runtime("TMPFS") == kc.PROBE_UNKNOWN
-
-
-def test_render_kernel_config_falls_back_to_runtime_probe():
-    """With no static config, the section must probe the live kernel rather
-    than giving up, and a confirmed-absent required flag still blocks."""
-    lines: list[str] = []
-
-    def fake_probe(name):
-        # PID_NS confirmed absent (required) -> must be flagged; others present.
-        return kc.PROBE_ABSENT if name == "PID_NS" else kc.PROBE_PRESENT
+        assert kc.probe_feature("cgroup-fs") == kc.PROBE_PRESENT
 
     with (
-        patch.object(info, "find_kernel_config", return_value=(None, None)),
-        patch.object(info, "probe_flag_runtime", side_effect=fake_probe),
+        patch.object(kc, "_proc_filesystems", return_value=set()),
+        patch.object(kc.os.path, "isdir", side_effect=lambda p: p == "/sys/fs/cgroup"),
+    ):
+        assert kc.probe_feature("cgroup-fs") == kc.PROBE_PRESENT
+
+    with (
+        patch.object(kc, "_proc_filesystems", return_value=set()),
+        patch.object(kc.os.path, "isdir", return_value=False),
+    ):
+        assert kc.probe_feature("cgroup-fs") == kc.PROBE_ABSENT
+
+
+def test_cgroup_namespace_answers_through_its_own_probe():
+    with (
+        patch.object(kc, "_ns_dir_entries", return_value={"mnt", "cgroup"}),
+        patch.object(kc, "_namespace_works", return_value=True),
+    ):
+        assert kc.probe_feature("cgroup") == kc.PROBE_PRESENT
+
+
+def test_unlisted_key_is_unknown():
+    assert kc.probe_feature("NOT_A_FEATURE") == kc.PROBE_UNKNOWN
+
+
+def test_devpts_multi_instance_answers_through_probe_feature():
+    with patch.object(kc, "probe_devpts_multi_instance", return_value=kc.PROBE_ABSENT):
+        assert kc.probe_feature("devpts-multi") == kc.PROBE_ABSENT
+
+
+# ── the rendered section ─────────────────────────────────────────────────────────
+def test_render_kernel_support_reports_missing_required():
+    def fake_probe(key):
+        return kc.PROBE_ABSENT if key == "pid" else kc.PROBE_PRESENT
+
+    lines: list[str] = []
+    with (
+        patch.object(info, "probe_feature", side_effect=fake_probe),
         patch.object(info, "msg", side_effect=_capture(lines)),
     ):
-        info._render_kernel_config()
+        info._render_kernel_support()
     blob = "\n".join(lines)
-    assert "probing the running kernel" in blob
-    assert "available (runtime)" in blob
+    assert "PID namespace" in blob
     assert "cannot work fully without" in blob
-    assert "CONFIG_PID_NS" in blob
+    assert "PID namespace" in blob.split("cannot work fully without")[1]
 
 
-def test_render_kernel_config_runtime_unknown_does_not_block():
-    """A merely-unknown required flag (probe inconclusive) must NOT be reported
-    as blocking isolation."""
+def test_render_kernel_support_unknown_does_not_block():
+    """A probe that could not decide is not evidence of a missing feature."""
     lines: list[str] = []
     with (
-        patch.object(info, "find_kernel_config", return_value=(None, None)),
-        patch.object(info, "probe_flag_runtime", return_value=kc.PROBE_UNKNOWN),
+        patch.object(info, "probe_feature", return_value=kc.PROBE_UNKNOWN),
         patch.object(info, "msg", side_effect=_capture(lines)),
     ):
-        info._render_kernel_config()
+        info._render_kernel_support()
     blob = "\n".join(lines)
     assert "cannot work fully without" not in blob
-    assert "All kernel options required for namespace isolation are present" in blob
+    assert "unknown" in blob
+    assert "All kernel features required for namespace isolation are available" in blob
 
 
-def test_render_kernel_config_all_present_is_ok():
-    full = "\n".join("CONFIG_" + flag.name + "=y" for group in kc.KERNEL_FLAG_GROUPS for flag in group.flags)
+def test_render_kernel_support_all_present_is_ok():
     lines: list[str] = []
     with (
-        patch.object(info, "find_kernel_config", return_value=("/boot/config-test", full)),
+        patch.object(info, "probe_feature", return_value=kc.PROBE_PRESENT),
         patch.object(info, "msg", side_effect=_capture(lines)),
     ):
-        info._render_kernel_config()
-    assert "All kernel options required for namespace isolation are present" in "\n".join(lines)
+        info._render_kernel_support()
+    assert "All kernel features required for namespace isolation are available" in "\n".join(lines)
 
 
-def test_probe_flag_runtime_userns():
-    # Case 1: max_user_namespaces exists and is > 0
-    mock_file = mock_open(read_data="1000\n").return_value
-    real_open = open
-
-    def fake_open_present(path, *a, **k):
-        if path == "/proc/sys/user/max_user_namespaces":
-            return mock_file
-        return real_open(path, *a, **k)
-
-    with patch("builtins.open", side_effect=fake_open_present):
-        assert kc.probe_flag_runtime("USER_NS") == kc.PROBE_PRESENT
-
-    # Case 2: max_user_namespaces exists and is 0
-    mock_file_zero = mock_open(read_data="0\n").return_value
-
-    def fake_open_absent(path, *a, **k):
-        if path == "/proc/sys/user/max_user_namespaces":
-            return mock_file_zero
-        return real_open(path, *a, **k)
-
-    with patch("builtins.open", side_effect=fake_open_absent):
-        assert kc.probe_flag_runtime("USER_NS") == kc.PROBE_ABSENT
-
-    # Case 3: max_user_namespaces is missing (OSError) and /proc/self/ns/user is present
-    def fake_open_oserror(path, *a, **k):
-        if path == "/proc/sys/user/max_user_namespaces":
-            raise OSError
-        return real_open(path, *a, **k)
-
+def test_render_kernel_support_states_the_devpts_shape():
+    lines: list[str] = []
     with (
-        patch("builtins.open", side_effect=fake_open_oserror),
-        patch.object(kc, "_ns_dir_entries", return_value={"mnt", "user"}),
+        patch.object(info, "probe_feature", return_value=kc.PROBE_ABSENT),
+        patch.object(info, "msg", side_effect=_capture(lines)),
     ):
-        assert kc.probe_flag_runtime("USER_NS") == kc.PROBE_PRESENT
-
-    # Case 4: max_user_namespaces is missing (OSError) and /proc/self/ns/user is absent
-    with (
-        patch("builtins.open", side_effect=fake_open_oserror),
-        patch.object(kc, "_ns_dir_entries", return_value={"mnt"}),
-    ):
-        assert kc.probe_flag_runtime("USER_NS") == kc.PROBE_ABSENT
+        info._render_kernel_support()
+    blob = "\n".join(lines)
+    assert "single shared instance" in blob
+    # Optional, so it must not be listed as blocking isolation.
+    assert "devpts multi-instance" not in blob.split("cannot work fully without")[-1]
 
 
-# ── kernel_version_tuple / probe_devpts_multi_instance ─────────────────────────
+# ── kernel_version_tuple / probe_devpts_multi_instance ───────────────────────────
 def test_kernel_version_tuple_parses_release():
     with patch.object(kc.os, "uname") as m:
         m.return_value.release = "4.4.302-gfbd6a732a614"

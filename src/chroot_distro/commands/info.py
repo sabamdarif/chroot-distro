@@ -3,9 +3,14 @@
 """`chroot-distro info`: one report a bug can be filed with, and nothing changed.
 
 Read-only from end to end: every value is read, probed or computed, never
-written. The command elevates when root is available, since `/proc/config.gz` and
-the data directories are root-owned, and stays useful without it by falling back
-to the runtime probes in `commands/kernel_config.py`.
+written. The command always runs as root, elevating when it has to, because the
+container data directories and most of the kernel probes are root's to read:
+`cli.py` refuses it outright when elevation is impossible, since a report that
+quietly answered from less is the one a bug cannot be filed with.
+
+The kernel support section comes from `commands/kernel_config.py`, which asks the
+running kernel what it can do rather than reading its build config, so the same
+question `login` answers by trying is answered here by trying.
 
 This is the file where `shutil.which` is a capability report rather than a call:
 `_detect_escalation_tool` says which of sudo, doas, pkexec or su exists so the
@@ -32,17 +37,11 @@ from dataclasses import dataclass, field
 
 from chroot_distro.arch import detect_installed_arch, get_device_cpu_arch, needs_emulation, supports_32bit
 from chroot_distro.commands.kernel_config import (
-    CONFIG_BUILTIN,
-    CONFIG_MODULE,
-    CONFIG_UNKNOWN,
-    KERNEL_FLAG_GROUPS,
+    KERNEL_FEATURE_GROUPS,
     PROBE_ABSENT,
     PROBE_PRESENT,
-    find_kernel_config,
-    lookup_flag,
-    parse_kernel_config,
-    probe_devpts_multi_instance,
-    probe_flag_runtime,
+    KernelFeature,
+    probe_feature,
 )
 from chroot_distro.commands.list_cmd import (
     _ensure_manifest_readable,
@@ -282,7 +281,7 @@ def _userns_enabled() -> bool | None:
         with open(path, encoding="utf-8") as fh:
             return int(fh.read().strip()) > 0
     except (OSError, ValueError):
-        probe = probe_flag_runtime("USER_NS")
+        probe = probe_feature("user")
         if probe == PROBE_PRESENT:
             return True
         if probe == PROBE_ABSENT:
@@ -294,10 +293,10 @@ def _namespace_status() -> tuple[str, str]:
     """Return (value, level) describing kernel namespace + userns support.
 
     Isolation is unshare(2) and setns(2) from this process, so there is no tool
-    to look for: what decides it is the kernel.  /proc/self/ns answers that
-    without root, which `info` may well be running without.
+    to look for: what decides it is whether the kernel creates the namespaces,
+    which is what `probe_feature` establishes.
     """
-    if probe_flag_runtime("NAMESPACES") == PROBE_ABSENT:
+    if probe_feature("mnt") == PROBE_ABSENT:
         return "not supported by this kernel (--isolated unavailable)", "warn"
     userns = _userns_enabled()
     if userns is False:
@@ -681,88 +680,49 @@ def _render_capabilities(caps: list[_Capability]) -> None:
         )
 
 
-def _flag_status(flag, parsed: dict | None) -> tuple[str, str, str, bool]:
-    """Resolve one kernel flag to (glyph, color, state_text, counts_as_missing).
+def _feature_status(feature: KernelFeature, probe: str) -> tuple[str, str, str, bool]:
+    """Resolve one probed feature to (glyph, color, state_text, counts_as_missing).
 
-    Uses the static kernel config when readable, else a live runtime probe.
-    *counts_as_missing* is True only for required + confirmed-absent options.
+    *counts_as_missing* is True only for a required feature the probe found
+    absent; "unknown" never counts, since an inconclusive probe is not evidence
+    of anything.
     """
-    # DEVPTS_MULTIPLE_INSTANCES: absent from configs >= 4.9 (always-on since
-    # 4.7) and vendor configs have been seen lying about it, so the runtime
-    # probe outranks the static config. Falls through on PROBE_UNKNOWN.
-    if flag.name == "DEVPTS_MULTIPLE_INSTANCES":
-        probe = probe_devpts_multi_instance()
-        if probe == PROBE_PRESENT:
-            return _OK, "GREEN", "per-mount instances", False
-        if probe == PROBE_ABSENT:
-            return _WARN, "YELLOW", "single shared instance (host /dev/pts is reused)", False
-
-    if parsed is not None:
-        status = lookup_flag(parsed, flag.name)
-        if status in (CONFIG_BUILTIN, CONFIG_MODULE):
-            state = "enabled" if status == CONFIG_BUILTIN else "enabled (module)"
-            return _OK, "GREEN", state, False
-        if status == CONFIG_UNKNOWN:
-            return "\u2022", "CYAN", "unknown", False
-        # Confirmed missing in a readable config.
-        if flag.required:
-            return _BAD, "RED", "missing (required)", True
-        return _WARN, "YELLOW", "missing (optional)", False
-
-    # No static config: probe the live kernel.
-    probe = probe_flag_runtime(flag.name)
     if probe == PROBE_PRESENT:
-        return _OK, "GREEN", "available (runtime)", False
+        if feature.key == "devpts-multi":
+            return _OK, "GREEN", "per-mount instances", False
+        return _OK, "GREEN", "available", False
     if probe == PROBE_ABSENT:
-        if flag.required:
+        if feature.key == "devpts-multi":
+            return _WARN, "YELLOW", "single shared instance (host /dev/pts is reused)", False
+        if feature.required:
             return _BAD, "RED", "unavailable (required)", True
         return _WARN, "YELLOW", "unavailable (optional)", False
     return "\u2022", "CYAN", "unknown", False
 
 
-def _render_kernel_config() -> None:
-    """Show which CONFIG_* options chroot-distro relies on are enabled.
+def _render_kernel_support() -> None:
+    """Show which kernel features chroot-distro relies on work on this host.
 
-    Prefers the static kernel build config; falls back to probing the
-    running kernel when it isn't readable (common on Android).
+    Every line is a probe against the running kernel, so the section reads the
+    same whether or not this kernel shipped a usable build config.
     """
-    _render_section("KERNEL CONFIG")
-    path, text = find_kernel_config()
-    parsed = parse_kernel_config(text) if text is not None else None
-
-    if parsed is not None:
-        msg(f"  {C['CYAN']}Read from {path}{C['RST']}")
-    else:
-        if IS_TERMUX:
-            msg(
-                f"  {C['CYAN']}Kernel config not readable (requires root). "
-                f"Probing the running kernel instead. For a definitive report, "
-                f"provide a config file via 'CONFIG=/path/to/.config {PROGRAM_NAME} info'.{C['RST']}"
-            )
-        else:
-            msg(
-                f"  {C['CYAN']}Kernel config not readable; probing the running "
-                f"kernel instead. For a definitive report run "
-                f"'CONFIG=/path/to/.config {PROGRAM_NAME} info' or as root.{C['RST']}"
-            )
+    _render_section("KERNEL SUPPORT")
 
     missing_required: list[str] = []
-    for group in KERNEL_FLAG_GROUPS:
-        if IS_TERMUX and group.title == "Cgroups":
-            continue
+    for group in KERNEL_FEATURE_GROUPS:
         msg()
         msg(f"  {C['WHITE']}{group.title}{C['RST']}")
-        label_w = max(len("CONFIG_" + flag.name) for flag in group.flags) + 1
-        for flag in group.flags:
-            glyph, color, state, counts_missing = _flag_status(flag, parsed)
+        label_w = max(len(feature.label) for feature in group.features) + 1
+        for feature in group.features:
+            probe = probe_feature(feature.key)
+            glyph, color, state, counts_missing = _feature_status(feature, probe)
             if counts_missing:
-                missing_required.append("CONFIG_" + flag.name)
-            label = "CONFIG_" + flag.name
+                missing_required.append(feature.label)
             msg(
                 f"    {C[color]}{glyph}{C['RST']} "
-                f"{C['CYAN']}{label + ':':<{label_w}}{C['RST']} "
+                f"{C['CYAN']}{feature.label + ':':<{label_w}}{C['RST']} "
                 f"{C['WHITE']}{state}{C['RST']} "
-                f"{C['CYAN']}({flag.purpose}){C['RST']}"
+                f"{C['CYAN']}({feature.purpose}){C['RST']}"
             )
 
     msg()
@@ -775,8 +735,8 @@ def _render_kernel_config() -> None:
     else:
         msg(
             f"  {C['GREEN']}{_OK}{C['RST']} "
-            f"{C['WHITE']}All kernel options required for namespace isolation "
-            f"are present.{C['RST']}"
+            f"{C['WHITE']}All kernel features required for namespace isolation "
+            f"are available.{C['RST']}"
         )
 
 
@@ -803,8 +763,7 @@ def _render_analysis(images: list[_ImageInfo]) -> None:
 def command_info(args) -> None:
     """Print a structured diagnostics report for bug reports and support.
 
-    Read-only. Elevates to root when available (to read /proc/config.gz and
-    root-owned data dirs); otherwise falls back to runtime probing.
+    Read-only. Runs as root, by the elevation `cli.py` performs before dispatch.
     """
     host_arch = get_device_cpu_arch()
     host = _gather_host_info()
@@ -815,7 +774,7 @@ def command_info(args) -> None:
     _render_basic()
     _render_host(host, host_arch)
     _render_capabilities(capabilities)
-    _render_kernel_config()
+    _render_kernel_support()
     _render_images(images)
     if images:
         msg()

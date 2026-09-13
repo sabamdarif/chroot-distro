@@ -2,11 +2,10 @@ from types import SimpleNamespace
 
 from chroot_distro.commands import info
 from chroot_distro.commands.kernel_config import (
-    CONFIG_BUILTIN,
-    CONFIG_MODULE,
-    CONFIG_UNKNOWN,
     PROBE_ABSENT,
     PROBE_PRESENT,
+    PROBE_UNKNOWN,
+    KernelFeature,
 )
 
 
@@ -94,48 +93,34 @@ def test_running_summary_counts_non_idle():
     assert info._running_summary(imgs) == 2
 
 
-# ── _flag_status ───────────────────────────────────────────────────────────────────
-def _flag(name="PID_NS", required=True):
-    return SimpleNamespace(name=name, required=required, purpose="x")
+# ── _feature_status ───────────────────────────────────────────────────────────────
+def _feature(key="pid", required=True):
+    return KernelFeature(key=key, label="PID namespace", purpose="x", required=required)
 
 
-def test_flag_status_builtin(monkeypatch):
-    monkeypatch.setattr(info, "lookup_flag", lambda parsed, name: CONFIG_BUILTIN)
-    glyph, color, state, missing = info._flag_status(_flag(), {"PID_NS": "y"})
-    assert color == "GREEN" and state == "enabled" and missing is False
+def test_feature_status_present(monkeypatch):
+    _g, color, state, missing = info._feature_status(_feature(), PROBE_PRESENT)
+    assert color == "GREEN" and state == "available" and missing is False
 
 
-def test_flag_status_module(monkeypatch):
-    monkeypatch.setattr(info, "lookup_flag", lambda parsed, name: CONFIG_MODULE)
-    _g, color, state, missing = info._flag_status(_flag(), {"PID_NS": "m"})
-    assert color == "GREEN" and state == "enabled (module)" and missing is False
-
-
-def test_flag_status_missing_required(monkeypatch):
-    monkeypatch.setattr(info, "lookup_flag", lambda parsed, name: "n")
-    _g, color, _s, missing = info._flag_status(_flag(required=True), {"PID_NS": "n"})
+def test_feature_status_absent_required(monkeypatch):
+    _g, color, _s, missing = info._feature_status(_feature(required=True), PROBE_ABSENT)
     assert color == "RED" and missing is True
 
 
-def test_flag_status_missing_optional(monkeypatch):
-    monkeypatch.setattr(info, "lookup_flag", lambda parsed, name: "n")
-    _g, color, _s, missing = info._flag_status(_flag(required=False), {"PID_NS": "n"})
+def test_feature_status_absent_optional(monkeypatch):
+    _g, color, _s, missing = info._feature_status(_feature(required=False), PROBE_ABSENT)
     assert color == "YELLOW" and missing is False
 
 
-def test_flag_status_unknown_in_config(monkeypatch):
-    monkeypatch.setattr(info, "lookup_flag", lambda parsed, name: CONFIG_UNKNOWN)
-    _g, color, state, missing = info._flag_status(_flag(), {})
+def test_feature_status_unknown_never_counts(monkeypatch):
+    _g, color, state, missing = info._feature_status(_feature(), PROBE_UNKNOWN)
     assert color == "CYAN" and state == "unknown" and missing is False
 
 
-def test_flag_status_runtime_present(monkeypatch):
-    monkeypatch.setattr(info, "probe_flag_runtime", lambda name: PROBE_PRESENT)
-    _g, color, state, missing = info._flag_status(_flag(), None)
-    assert color == "GREEN" and "runtime" in state and missing is False
-
-
-def test_flag_status_runtime_absent_required(monkeypatch):
-    monkeypatch.setattr(info, "probe_flag_runtime", lambda name: PROBE_ABSENT)
-    _g, color, _s, missing = info._flag_status(_flag(required=True), None)
-    assert color == "RED" and missing is True
+def test_feature_status_names_the_devpts_shape(monkeypatch):
+    feat = KernelFeature(key="devpts-multi", label="devpts multi-instance", purpose="x", required=False)
+    _g, _c, state, missing = info._feature_status(feat, PROBE_PRESENT)
+    assert state == "per-mount instances" and missing is False
+    _g, color, state, missing = info._feature_status(feat, PROBE_ABSENT)
+    assert color == "YELLOW" and "single shared instance" in state and missing is False

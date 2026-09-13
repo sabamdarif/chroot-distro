@@ -1,162 +1,126 @@
 # SPDX-License-Identifier: GPL-3.0-only
 # Copyright (C) 2025-2026 Md Arif
-"""What the running kernel was built with, for the `info` report.
+"""Which kernel features this host has, for the `info` report.
 
-`info` says whether isolation will work on this machine, and the answer is a
-kernel build option: without `CONFIG_PID_NS` there is no `--isolated`, and the
-program degrading quietly is exactly what a user then cannot explain. Only the
-options this program uses are checked, grouped by the feature each one powers,
-and the whole report is advisory: a missing required option explains a
-degradation, a missing optional one affects an extra.
+Every answer comes from the running kernel, never from its build config. A
+`CONFIG_*` line is a claim about how a kernel was compiled, vendor kernels
+contradict their own, and Android ships no config at all, so the question asked
+here is the one that decides whether a feature works: is the interface there, and
+does the call succeed. Namespaces are proved by creating one in a throw-away
+child, filesystems by `/proc/filesystems` and then the mount point itself, and the
+devpts question by mounting a scratch instance.
 
-The config is read from `/proc/config.gz` first, then the usual `/boot` and
-`/usr/src` locations, with `CONFIG=<path>` as an override, the name every kernel
-config checker uses. A locked-down Android kernel ships none of them, which is
-why `probe_flag_runtime` exists: it asks the running kernel instead, through
-`/proc/self/ns/*`, `/proc/filesystems` and `/proc/mounts`, and answers `unknown`
-for anything it has no mapping for rather than guessing. An unreadable
-`/proc/filesystems` is kept distinct from a readable one that lacks the type, so
+Only the features this program uses are checked, grouped by the feature each one
+powers, and the report is advisory: a missing required feature explains why
+`--isolated` degraded, a missing optional one affects an extra. A key that maps to
+no probe answers `unknown` rather than guessing, and an unreadable
+`/proc/filesystems` stays distinct from a readable one that lacks the type, so
 "cannot tell" is never reported as "absent".
 
 `probe_devpts_multi_instance` is the one probe that acts: below 4.7 it mounts a
-scratch `newinstance` devpts and looks for host ptys, because a vendor config can
-contradict itself and the mount is the authority. It needs root, unmounts and
-removes the scratch directory in a `finally`, and goes through the `syscalls`
-wrappers like everything else.
+scratch `newinstance` devpts and looks for host ptys, because vendor kernels
+disagree about that option and the mount is the authority. It needs root,
+unmounts and removes the scratch directory in a `finally`, and goes through the
+`syscalls` wrappers like everything else.
 """
 
 import contextlib
 import errno
-import gzip
+import functools
 import os
 import platform
 import re
 import tempfile
 from dataclasses import dataclass
 
-# Runtime-probe outcome, distinct from the static-config states above.
-#   "present" -> the feature is available right now on this running kernel
-#   "absent"  -> the feature is not available
-#   "unknown" -> could not be determined by probing
+from chroot_distro.syscalls._constants import (
+    CLONE_NEWCGROUP,
+    CLONE_NEWIPC,
+    CLONE_NEWNS,
+    CLONE_NEWPID,
+    CLONE_NEWUSER,
+    CLONE_NEWUTS,
+)
+from chroot_distro.syscalls.unshare import probe_namespace_support
+
+# Probe outcome, the only vocabulary the report needs.
+#   "present" -> the feature works on this kernel, right now
+#   "absent"  -> it does not work here
+#   "unknown" -> the probe could not decide
 PROBE_PRESENT = "present"
 PROBE_ABSENT = "absent"
 PROBE_UNKNOWN = "unknown"
 
-# Outcome of a single CONFIG_* lookup.
-#   "y"       -> built in (``=y``)
-#   "m"       -> built as a loadable module (``=m``)
-#   "n"       -> explicitly disabled / not set
-#   "unknown" -> the kernel config could not be read at all
-CONFIG_BUILTIN = "y"
-CONFIG_MODULE = "m"
-CONFIG_MISSING = "n"
-CONFIG_UNKNOWN = "unknown"
+# /proc/self/ns entry name -> the flag that creates it. The kernel names a
+# namespace by that file, so a probe key is the kernel's own name for it.
+NAMESPACE_PROBES: dict[str, int] = {
+    "mnt": CLONE_NEWNS,
+    "pid": CLONE_NEWPID,
+    "uts": CLONE_NEWUTS,
+    "ipc": CLONE_NEWIPC,
+    "user": CLONE_NEWUSER,
+    "cgroup": CLONE_NEWCGROUP,
+}
+
+# Filesystem type -> a path whose mount proves it is usable, or None when no
+# fixed path does (the type in /proc/filesystems is then the whole answer).
+FILESYSTEM_PROBES: dict[str, str | None] = {
+    "proc": "/proc",
+    "sysfs": "/sys",
+    "tmpfs": None,
+    "devtmpfs": None,
+    "devpts": "/dev/pts",
+}
 
 
 @dataclass(frozen=True)
-class KernelFlag:
-    """A kernel option chroot-distro checks for, and why it matters."""
+class KernelFeature:
+    """One kernel feature chroot-distro relies on, and how the report reads it."""
 
-    name: str  # without the CONFIG_ prefix, e.g. "PID_NS"
-    purpose: str  # short human description shown in the report
-    required: bool  # True if isolation cannot work without it
+    key: str  # a namespace name, a filesystem type, or a probe selector
+    label: str  # what a user sees, e.g. "PID namespace"
+    purpose: str  # what the feature is for, in one clause
+    required: bool  # True if a degradation follows when it is missing
 
 
 @dataclass(frozen=True)
-class KernelFlagGroup:
-    """A named group of related kernel options."""
+class KernelFeatureGroup:
+    """A named group of related kernel features."""
 
     title: str
-    flags: tuple[KernelFlag, ...]
+    features: tuple[KernelFeature, ...]
 
 
-# Options grouped by the chroot-distro feature they enable. Names are the
-# CONFIG_ suffix only; the CONFIG_ prefix is added when rendering.
-KERNEL_FLAG_GROUPS: tuple[KernelFlagGroup, ...] = (
-    KernelFlagGroup(
+KERNEL_FEATURE_GROUPS: tuple[KernelFeatureGroup, ...] = (
+    KernelFeatureGroup(
         title="Namespace isolation (--isolated, CD_USE_NS=1)",
-        flags=(
-            KernelFlag("NAMESPACES", "namespace support (umbrella)", required=True),
-            KernelFlag("PID_NS", "PID namespace (escape-proof /proc)", required=True),
-            KernelFlag("UTS_NS", "UTS namespace (container hostname)", required=True),
-            KernelFlag("IPC_NS", "IPC namespace", required=True),
-            KernelFlag("USER_NS", "user namespace (uid remapping, capability scoping)", required=False),
+        features=(
+            KernelFeature("mnt", "mount namespace", "isolation from host mounts", required=True),
+            KernelFeature("pid", "PID namespace", "escape-proof /proc", required=True),
+            KernelFeature("uts", "UTS namespace", "container hostname", required=True),
+            KernelFeature("ipc", "IPC namespace", "SysV IPC and POSIX message queues", required=True),
+            KernelFeature("user", "user namespace", "uid remapping, capability scoping", required=False),
         ),
     ),
-    KernelFlagGroup(
+    KernelFeatureGroup(
         title="Pseudo-filesystems (every chroot login)",
-        flags=(
-            KernelFlag("PROC_FS", "procfs (/proc)", required=True),
-            KernelFlag("SYSFS", "sysfs (/sys)", required=True),
-            KernelFlag("UNIX98_PTYS", "devpts (/dev/pts login ptys)", required=True),
-            KernelFlag(
-                "DEVPTS_MULTIPLE_INSTANCES",
-                "private container ptys (built-in on kernels >= 4.7)",
-                required=False,
-            ),
-            KernelFlag("DEVTMPFS", "devtmpfs (/dev population)", required=False),
-            KernelFlag("TMPFS", "tmpfs (fresh /dev, /dev/shm)", required=False),
+        features=(
+            KernelFeature("proc", "procfs", "/proc", required=True),
+            KernelFeature("sysfs", "sysfs", "/sys", required=True),
+            KernelFeature("devpts", "devpts", "/dev/pts login ptys", required=True),
+            KernelFeature("devpts-multi", "devpts multi-instance", "private container ptys", required=False),
+            KernelFeature("devtmpfs", "devtmpfs", "/dev population", required=False),
+            KernelFeature("tmpfs", "tmpfs", "fresh /dev, /dev/shm", required=False),
         ),
     ),
-    KernelFlagGroup(
+    KernelFeatureGroup(
         title="Cgroups",
-        flags=(
-            KernelFlag("CGROUPS", "cgroup support (umbrella)", required=False),
-            KernelFlag("CGROUP_NS", "cgroup namespace", required=False),
+        features=(
+            KernelFeature("cgroup-fs", "cgroup filesystem", "cgroup hierarchy under /sys/fs/cgroup", required=False),
+            KernelFeature("cgroup", "cgroup namespace", "container sees its own cgroup root", required=False),
         ),
     ),
 )
-
-_CANDIDATE_PATHS = (
-    "/proc/config.gz",
-    "/boot/config-{release}",
-    "/usr/src/linux-{release}/.config",
-    "/usr/src/linux/.config",
-)
-
-_LINE_RE = re.compile(r"^CONFIG_([A-Z0-9_]+)=([ymn])\b")
-_NOT_SET_RE = re.compile(r"^# CONFIG_([A-Z0-9_]+) is not set\b")
-
-
-def _candidate_config_paths() -> list[str]:
-    try:
-        release = os.uname().release
-    except (OSError, AttributeError):
-        release = platform.release()
-    return [p.format(release=release) for p in _CANDIDATE_PATHS]
-
-
-def _read_config_text(path: str) -> str | None:
-    """Return the decoded kernel config text at *path*, or None on failure.
-
-    Handles the gzipped ``/proc/config.gz`` transparently.
-    """
-    try:
-        if path.endswith(".gz"):
-            with gzip.open(path, "rt", encoding="utf-8", errors="replace") as fh:
-                return fh.read()
-        with open(path, encoding="utf-8", errors="replace") as fh:
-            return fh.read()
-    except (OSError, EOFError, gzip.BadGzipFile):
-        return None
-
-
-def find_kernel_config() -> tuple[str | None, str | None]:
-    """Locate and read the kernel build config.
-
-    Returns ``(path, text)``; both are None when no config could be read
-    (common on locked-down Android kernels that ship no ``/proc/config.gz``).
-    """
-    # CONFIG=<path> is the conventional override name among kernel config checkers.
-    override = os.environ.get("CONFIG")
-    candidates = ([override] if override else []) + _candidate_config_paths()
-    for path in candidates:
-        if not path or not os.path.exists(path):
-            continue
-        text = _read_config_text(path)
-        if text is not None:
-            return path, text
-    return None, None
 
 
 def kernel_version_tuple() -> tuple[int, int]:
@@ -174,10 +138,11 @@ def kernel_version_tuple() -> tuple[int, int]:
 def probe_devpts_multi_instance() -> str:
     """Whether each devpts mount is its own instance.
 
-    >= 4.7 always is (symbol removed in 4.9). Older kernels: mount a scratch
-    'newinstance' devpts: empty means per-mount instances, host ptys visible
-    means the single shared instance. Vendor config.gz can contradict itself,
-    so the mount probe is authoritative. Needs root, else PROBE_UNKNOWN.
+    >= 4.7 always is (the option was removed in 4.9). Older kernels: mount a
+    scratch 'newinstance' devpts; empty means per-mount instances, host ptys
+    visible means the single shared instance. Vendor kernels disagree with
+    themselves, so the mount probe is the authority. Needs root, else
+    PROBE_UNKNOWN.
     """
     if kernel_version_tuple() >= (4, 7):
         return PROBE_PRESENT
@@ -257,140 +222,85 @@ def _ns_dir_entries() -> set[str] | None:
         return None
 
 
-def _ns_file_present(name: str) -> bool:
-    """Return True if this process exposes /proc/self/ns/<name>.
+@functools.lru_cache(maxsize=len(NAMESPACE_PROBES))
+def _namespace_works(flag: int) -> bool:
+    """Whether unshare(2) accepts *flag* here, tried in a throw-away child.
 
-    Prefers a directory listing of /proc/self/ns; falls back to os.path.lexists
-    (which checks the link itself without stat-ing its target, so it works even
-    when the target is unreadable to an unprivileged caller).
+    Cached: the answer cannot change while this process lives, and the report
+    asks about the same namespace from more than one section.
+    """
+    return bool(probe_namespace_support(flag) & flag)
+
+
+def _probe_namespace(name: str, flag: int) -> str:
+    """Prove the *name* namespace works by creating it, the way `login` will.
+
+    The /proc/self/ns listing is a fork-free negative answer; creating the
+    namespace is what decides, since a kernel can refuse a flag for the caller's
+    own privileges even with the interface present. An unlistable directory is
+    not an answer, so it still forks.
     """
     entries = _ns_dir_entries()
-    if entries is not None:
-        return name in entries
-    return os.path.lexists(f"/proc/self/ns/{name}")
-
-
-def _userns_present() -> bool:
-    """Return True/False if user-namespace support is active."""
-    try:
-        with open("/proc/sys/user/max_user_namespaces", encoding="utf-8") as fh:
-            return int(fh.read().strip()) > 0
-    except (OSError, ValueError):
-        return _ns_file_present("user")
-
-
-def probe_flag_runtime(name: str) -> str:
-    """Best-effort live check that CONFIG_*name* is effective right now.
-
-    Used as a fallback when the static kernel config cannot be read (e.g. the
-    root-only /proc/config.gz on Android, with `info` running rootless).
-    Returns PROBE_PRESENT / PROBE_ABSENT / PROBE_UNKNOWN. Only the options
-    chroot-distro cares about are mapped; anything else returns PROBE_UNKNOWN
-    so the caller renders it as 'unknown' rather than guessing.
-    """
-    # Namespaces: the umbrella is present if any ns file exists; each specific
-    # namespace maps to its /proc/self/ns/<name> entry.
-    ns_map = {
-        "NAMESPACES": ("mnt", "pid", "uts", "ipc", "cgroup"),
-        "PID_NS": ("pid",),
-        "UTS_NS": ("uts",),
-        "IPC_NS": ("ipc",),
-        "CGROUP_NS": ("cgroup",),
-    }
-    if name in ns_map:
-        files = ns_map[name]
-        present = any(_ns_file_present(f) for f in files)
-        return PROBE_PRESENT if present else PROBE_ABSENT
-    if name == "USER_NS":
-        return PROBE_PRESENT if _userns_present() else PROBE_ABSENT
-
-    # Pseudo-filesystems: look them up in /proc/filesystems. The mounted
-    # pseudo-fs at its canonical path is also accepted, since /proc/filesystems
-    # only lists types not yet exhausted and a mounted fs is proof enough.
-    fs_map = {
-        "PROC_FS": ("proc", "/proc"),
-        "SYSFS": ("sysfs", "/sys"),
-        "TMPFS": ("tmpfs", None),
-        "DEVTMPFS": ("devtmpfs", None),
-        "UNIX98_PTYS": ("devpts", "/dev/pts"),
-    }
-    if name in fs_map:
-        fstype, mount_hint = fs_map[name]
-        fstypes = _proc_filesystems()
-        if fstypes is None:
-            # Could not read /proc/filesystems; check /proc/mounts first,
-            # then fall back to the mount hint.
-            if _has_fs_in_mounts(fstype):
-                return PROBE_PRESENT
-            if mount_hint and os.path.isdir(mount_hint):
-                return PROBE_PRESENT
-            return PROBE_UNKNOWN
-        if fstype in fstypes:
-            return PROBE_PRESENT
-        if mount_hint and os.path.isdir(mount_hint):
-            return PROBE_PRESENT
+    if entries is not None and name not in entries:
         return PROBE_ABSENT
+    return PROBE_PRESENT if _namespace_works(flag) else PROBE_ABSENT
 
-    # Cgroups: presence of the cgroup/cgroup2 filesystem and the mount point.
-    if name == "CGROUPS":
-        fstypes = _proc_filesystems()
-        has_dir = os.path.isdir("/sys/fs/cgroup")
-        if fstypes is None:
-            return PROBE_PRESENT if has_dir else PROBE_UNKNOWN
-        has_cg = ("cgroup" in fstypes) or ("cgroup2" in fstypes) or has_dir
-        return PROBE_PRESENT if has_cg else PROBE_ABSENT
 
+def _probe_filesystem(fstype: str, mount_hint: str | None) -> str:
+    """Whether *fstype* is usable now, by /proc/filesystems then its mount.
+
+    An unreadable /proc/filesystems leaves the mount table and the mount hint as
+    the only evidence, and reports PROBE_UNKNOWN when neither says anything.
+    """
+    fstypes = _proc_filesystems()
+    if fstypes is not None and fstype in fstypes:
+        return PROBE_PRESENT
+    if mount_hint and os.path.isdir(mount_hint):
+        return PROBE_PRESENT
+    if fstypes is None:
+        return PROBE_PRESENT if _has_fs_in_mounts(fstype) else PROBE_UNKNOWN
+    return PROBE_ABSENT
+
+
+def _probe_cgroup_fs() -> str:
+    """Whether a cgroup hierarchy is there: its fstype, or a live mount."""
+    fstypes = _proc_filesystems()
+    has_dir = os.path.isdir("/sys/fs/cgroup")
+    if fstypes is None:
+        return PROBE_PRESENT if has_dir else PROBE_UNKNOWN
+    if "cgroup" in fstypes or "cgroup2" in fstypes or has_dir:
+        return PROBE_PRESENT
+    return PROBE_ABSENT
+
+
+def probe_feature(key: str) -> str:
+    """Resolve one :data:`KERNEL_FEATURE_GROUPS` key to a probe outcome.
+
+    An unlisted key is PROBE_UNKNOWN: nothing here guesses at a feature it has no
+    way to test.
+    """
+    flag = NAMESPACE_PROBES.get(key)
+    if flag is not None:
+        return _probe_namespace(key, flag)
+    if key in FILESYSTEM_PROBES:
+        return _probe_filesystem(key, FILESYSTEM_PROBES[key])
+    if key == "cgroup-fs":
+        return _probe_cgroup_fs()
+    if key == "devpts-multi":
+        return probe_devpts_multi_instance()
     return PROBE_UNKNOWN
 
 
-def parse_kernel_config(text: str) -> dict[str, str]:
-    """Parse kernel config *text* into ``{NAME: 'y'|'m'|'n'}``.
-
-    NAME is the CONFIG_ suffix. Both ``CONFIG_X=y/m/n`` and the
-    ``# CONFIG_X is not set`` form are recognised.
-    """
-    result: dict[str, str] = {}
-    for raw in text.splitlines():
-        line = raw.strip()
-        if not line:
-            continue
-        match = _LINE_RE.match(line)
-        if match:
-            result[match.group(1)] = match.group(2)
-            continue
-        not_set = _NOT_SET_RE.match(line)
-        if not_set:
-            result[not_set.group(1)] = CONFIG_MISSING
-    return result
-
-
-def lookup_flag(parsed: dict[str, str] | None, name: str) -> str:
-    """Return the status of CONFIG_*name* given a parsed config.
-
-    Returns CONFIG_UNKNOWN when the config itself is unavailable, otherwise
-    one of CONFIG_BUILTIN / CONFIG_MODULE / CONFIG_MISSING. An option absent
-    from a readable config is treated as missing.
-    """
-    if parsed is None:
-        return CONFIG_UNKNOWN
-    return parsed.get(name, CONFIG_MISSING)
-
-
 __all__ = (
-    "CONFIG_BUILTIN",
-    "CONFIG_MISSING",
-    "CONFIG_MODULE",
-    "CONFIG_UNKNOWN",
-    "KERNEL_FLAG_GROUPS",
+    "FILESYSTEM_PROBES",
+    "KERNEL_FEATURE_GROUPS",
+    "NAMESPACE_PROBES",
     "PROBE_ABSENT",
     "PROBE_PRESENT",
     "PROBE_UNKNOWN",
-    "KernelFlag",
-    "KernelFlagGroup",
-    "find_kernel_config",
+    "KernelFeature",
+    "KernelFeatureGroup",
     "kernel_version_tuple",
-    "lookup_flag",
-    "parse_kernel_config",
     "probe_devpts_multi_instance",
-    "probe_flag_runtime",
+    "probe_feature",
 )

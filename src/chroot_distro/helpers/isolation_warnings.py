@@ -14,6 +14,10 @@ reported as missing either, since the generic line would be a lie: the specific
 `USERNS_MOUNTS_REJECTED_WARNING` replaces it, and the CLONE_NEWUSER bit is cleared
 before formatting.
 
+`kernel_config` names the option that provides a namespace, and the cgroup
+namespace has none of its own: it is compiled into `CONFIG_CGROUPS`, which is
+what that entry names.
+
 Silence is the normal case: a working run prints nothing. The isolation tier is
 described only by `info`, a diagnostics command, which owns that prose itself
 (`commands/info._isolation_tier_status`) rather than duplicating it here.
@@ -85,7 +89,7 @@ NAMESPACE_INFO: dict[int, NamespaceInfo] = {
     CLONE_NEWCGROUP: NamespaceInfo(
         name="Cgroup namespace",
         flag_name="CLONE_NEWCGROUP",
-        kernel_config="CONFIG_CGROUP_NS",
+        kernel_config="CONFIG_CGROUPS",
         severity="low",
         impacts=("Container can see host cgroup hierarchy",),
     ),
