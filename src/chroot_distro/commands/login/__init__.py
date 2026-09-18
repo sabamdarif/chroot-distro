@@ -77,6 +77,7 @@ from chroot_distro.commands.login.env import (
     read_cd_env,
     read_manifest_env,
     read_manifest_exposed_ports,
+    read_manifest_has_command,
     read_manifest_shell,
     read_manifest_user,
     read_manifest_volumes,
@@ -406,19 +407,17 @@ def _build_normal_env(rootfs, container_path, login_user, login_home, extra_env,
     return env
 
 
-def _check_shell_available(rootfs, container_path, login_shell, container_name):
-    """Verify *login_shell* exists in rootfs; return a fallback if found.
+def find_login_shell(rootfs, container_path, login_shell):
+    """The shell a login would exec in *rootfs*, or None when it has none.
 
-    Returns the original *login_shell* when it exists, or the image's
-    ``Shell[0]`` when that is available as a fallback.  Exits with an
-    error message if no usable shell can be found.
+    *login_shell* is the shell the session resolved for its user; the image's
+    ``Shell[0]`` is the fallback when that one is missing from the rootfs.
     """
     try:
-        shell_found = os.path.isfile(resolve_rootfs_path(rootfs, login_shell))
+        if os.path.isfile(resolve_rootfs_path(rootfs, login_shell)):
+            return login_shell
     except OSError:
-        shell_found = False
-    if shell_found:
-        return login_shell
+        pass
 
     manifest_shell = read_manifest_shell(container_path)
     if manifest_shell:
@@ -432,17 +431,21 @@ def _check_shell_available(rootfs, container_path, login_shell, container_name):
                 return manifest_shell
         except OSError as exc:
             log.debug("Failed to check if manifest shell is available: %s", exc)
+    return None
 
-    has_ep_or_cmd = False
-    try:
-        with open(os.path.join(container_path, "manifest.json")) as fh:
-            data = json.load(fh)
-        cfg = (data.get("image_config") or {}).get("config", {})
-        has_ep_or_cmd = bool((cfg.get("Entrypoint") or []) or (cfg.get("Cmd") or []))
-    except (OSError, ValueError) as exc:
-        log.debug("Failed to read image Entrypoint/Cmd config from manifest: %s", exc)
 
-    if has_ep_or_cmd:
+def _check_shell_available(rootfs, container_path, login_shell, container_name):
+    """Verify *login_shell* exists in rootfs; return a fallback if found.
+
+    Returns the original *login_shell* when it exists, or the image's
+    ``Shell[0]`` when that is available as a fallback.  Exits with an
+    error message if no usable shell can be found.
+    """
+    found = find_login_shell(rootfs, container_path, login_shell)
+    if found:
+        return found
+
+    if read_manifest_has_command(container_path):
         crit_error(
             f"shell '{login_shell}' is not available in container "
             f"'{container_name}'. The image defines an Entrypoint or "

@@ -1,8 +1,9 @@
 import io
+import json
 import os
 from unittest.mock import patch
 
-from chroot_distro.commands.install import _run_install
+from chroot_distro.commands.install import _print_start_hints, _run_install
 
 
 def _spare_fd(*args, **kwargs):
@@ -53,3 +54,42 @@ def test_run_install_workers_log(
         mock_log.assert_any_call("Installing 'alpine:latest' as 'my-container'...")
         # Verify it printed "Parallel download workers: 6"
         mock_log.assert_any_call("Parallel download workers: 6")
+
+
+def _installed_tree(tmp_path, *, shell: bool, entrypoint=None, cmd=None):
+    """A container directory holding a rootfs and a manifest.json."""
+    container = tmp_path / "c"
+    rootfs = container / "rootfs"
+    rootfs.mkdir(parents=True)
+    if shell:
+        (rootfs / "bin").mkdir()
+        (rootfs / "bin" / "sh").write_text("")
+    config = {}
+    if entrypoint is not None:
+        config["Entrypoint"] = entrypoint
+    if cmd is not None:
+        config["Cmd"] = cmd
+    (container / "manifest.json").write_text(json.dumps({"image_config": {"config": config}}))
+    return str(container), str(rootfs)
+
+
+def test_start_hints_skip_login_when_the_rootfs_has_no_shell(tmp_path, capsys):
+    # hello-world: an Entrypoint and nothing login could exec.
+    container, rootfs = _installed_tree(tmp_path, shell=False, entrypoint=["/hello"])
+
+    _print_start_hints("hello-world", container, rootfs)
+
+    err = capsys.readouterr().err
+    assert "run hello-world" in err
+    assert "login hello-world" not in err
+
+
+def test_start_hints_offer_login_and_run_when_a_shell_exists(tmp_path, capsys):
+    # alpine: a shell to log into, and a Cmd `run` can execute.
+    container, rootfs = _installed_tree(tmp_path, shell=True, cmd=["/bin/sh"])
+
+    _print_start_hints("alpine", container, rootfs)
+
+    err = capsys.readouterr().err
+    assert "login alpine" in err
+    assert "run alpine" in err

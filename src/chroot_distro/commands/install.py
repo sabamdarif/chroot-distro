@@ -39,6 +39,9 @@ import tempfile
 from chroot_distro.arch import get_device_cpu_arch, normalize_arch, platform_from_arch
 from chroot_distro.atomic import atomic_write
 from chroot_distro.commands.install_local import install_from_local_file
+from chroot_distro.commands.login import find_login_shell
+from chroot_distro.commands.login.env import read_manifest_has_command
+from chroot_distro.commands.login.passwd import read_passwd_field
 from chroot_distro.constants import (
     BASE_CACHE_DIR,
     DEFAULT_LAYER_DOWNLOAD_WORKERS,
@@ -212,6 +215,26 @@ def _write_incomplete_marker(marker_path: str) -> None:
         os.close(marker_fd)
 
 
+_HINT_WIDTH = len("Run entrypoint:")
+
+
+def _hint(label: str, command: str) -> None:
+    msg(f"{C['CYAN']}{label:<{_HINT_WIDTH}} {C['GREEN']}{command}{C['RST']}")
+
+
+def _print_start_hints(install_name: str, container_path: str, rootfs: str) -> None:
+    """Print the commands that work on an installed tree.
+
+    A rootfs with no shell takes the image's own Entrypoint/Cmd only, so a
+    login line there would name a command that always fails.
+    """
+    login_shell = read_passwd_field(rootfs, "root", 6) or "/bin/sh"
+    if find_login_shell(rootfs, container_path, login_shell) is not None:
+        _hint("Start shell:", f"{PROGRAM_NAME} login {install_name}")
+    if read_manifest_has_command(container_path):
+        _hint("Run entrypoint:", f"{PROGRAM_NAME} run {install_name}")
+
+
 def _run_install(
     install_name: str,
     image_ref: str,
@@ -243,9 +266,9 @@ def _run_install(
             msg()
             crit_error(f"container '{install_name}' already exists. Specify a different name with '--name NAME'.")
             msg()
-            msg(f"{C['CYAN']}Start shell: {C['GREEN']}{PROGRAM_NAME} login {install_name}{C['RST']}")
-            msg(f"{C['CYAN']}Reinstall:   {C['GREEN']}{PROGRAM_NAME} reset {install_name}{C['RST']}")
-            msg(f"{C['CYAN']}Uninstall:   {C['GREEN']}{PROGRAM_NAME} remove {install_name}{C['RST']}")
+            _print_start_hints(install_name, container_path, rootfs_dir)
+            _hint("Reinstall:", f"{PROGRAM_NAME} reset {install_name}")
+            _hint("Uninstall:", f"{PROGRAM_NAME} remove {install_name}")
             msg()
             sys.exit(1)
 
@@ -361,9 +384,5 @@ def _run_install(
 
     log_info("Finished installation.")
     msg()
-    entrypoint = (metadata.get("image_config") or {}).get("config", {}).get("Entrypoint") if metadata else None
-    shell_label = "Start shell:   " if entrypoint else "Start shell:"
-    msg(f"{C['CYAN']}{shell_label} {C['GREEN']}{PROGRAM_NAME} login {install_name}{C['RST']}")
-    if entrypoint:
-        msg(f"{C['CYAN']}Run entrypoint: {C['GREEN']}{PROGRAM_NAME} run {install_name}{C['RST']}")
+    _print_start_hints(install_name, container_path, rootfs_dir)
     msg()

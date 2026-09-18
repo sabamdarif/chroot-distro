@@ -230,6 +230,23 @@ def read_manifest_shell(container_dir: str) -> str | None:
     return None
 
 
+def read_manifest_has_command(container_dir: str) -> bool:
+    """True when the image defines an Entrypoint or Cmd that `run` can execute.
+
+    The shape rules are `run`'s own, a non-empty string (shell form) or a list
+    of strings, so a declared field of any other type reads as absent rather
+    than promising a command `run` would refuse.
+    """
+    config = _read_manifest_config(container_dir)
+    for key in ("Entrypoint", "Cmd"):
+        value = config.get(key)
+        if isinstance(value, str) and value:
+            return True
+        if isinstance(value, list) and value and all(isinstance(item, str) for item in value):
+            return True
+    return False
+
+
 def read_manifest_exposed_ports(container_dir: str) -> list[str]:
     """Return declared ExposedPorts (e.g. ``["8080/tcp", "443/tcp"]``), or []."""
     ports = _read_manifest_config(container_dir).get("ExposedPorts")
