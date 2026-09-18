@@ -121,6 +121,11 @@ export CD_DOCKER_AUTH=myuser:mypassword
 chroot-distro install myuser/private-image:tag
 ```
 
+The password half is a personal access token on most registries, Docker Hub and GHCR
+included, so `export CD_DOCKER_AUTH=myuser:ghp_xxxxxxxx` works the same way. The
+colon is the one thing that is required: a bare token with no username is refused,
+because the registry needs a name to run the token exchange against.
+
 Downloaded layers are cached, so installing the same image again works offline.
 
 A container for another CPU needs QEMU's user-mode emulator on the host: install
@@ -500,7 +505,9 @@ Upload an image you built with `build -t` to Docker Hub or another registry. Lay
 | `--allow-insecure` | Skip TLS certificate checks. Only for registries with self-signed certificates. |
 | `-q`, `--quiet` | Only show errors. |
 
-Set `CD_DOCKER_AUTH=username:password` before pushing to a private repository.
+Set `CD_DOCKER_AUTH=username:password` before pushing to a private repository. The
+password half can be a personal access token, which is what GHCR wants: a token with
+the `write:packages` scope in place of the password.
 
 ### clear-cache
 
@@ -570,7 +577,7 @@ All of these are optional.
 
 | Variable | Effect |
 |---|---|
-| `CD_DOCKER_AUTH` | Registry login as `username:password` (or `username:token`). The colon is required. Used by `install`, `build`, and `push`. |
+| `CD_DOCKER_AUTH` | Registry login as `username:password`, where the password is a personal access token on most registries. The colon is required, so a bare token is refused. Used by `install`, `build`, and `push`. |
 | `CD_DOWNLOAD_WORKERS` | How many layers to download at once (default 4, max 10). |
 | `CD_DOWNLOAD_RATE_LIMIT` | Download speed limit, like `5M` for 5 MiB/s. Default is unlimited. |
 | `CD_DOWNLOAD_MAX_RETRIES` | Retries per failed download (default 3, max 20). |

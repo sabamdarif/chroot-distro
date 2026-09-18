@@ -100,12 +100,13 @@ def command_help(args=None) -> None:
     paragraph(
         "To pull private Docker/OCI images, set credentials via "
         "CD_DOCKER_AUTH in 'username:password' format before "
-        "running the install command:",
+        "running the install command. The password half is a "
+        "personal access token on most registries, GHCR included:",
         width,
     )
     msg()
     shell_block(
-        ["export CD_DOCKER_AUTH=user:password", f"{PROGRAM_NAME} install ghcr.io/myorg/private-image:tag"],
+        ["export CD_DOCKER_AUTH=user:personal-access-token", f"{PROGRAM_NAME} install ghcr.io/myorg/private-image:tag"],
         width,
     )
     msg()

@@ -25,9 +25,11 @@ pre-signed CDN URLs that answer 400 if a Bearer token comes with them, and urlli
 forwards every header across a redirect. Dropping Authorization on a cross-host hop is
 also the right thing for a credential regardless of what the CDN would do.
 
-`CD_DOCKER_AUTH` is `username:password` and nothing else: registry auth is a token
-exchange that needs Basic credentials, so a bare token has nowhere to go and is
-refused with that explanation rather than sent and failed. Only transient failures are
+`CD_DOCKER_AUTH` is `username:secret` and nothing else, and the secret half is a
+password or a personal access token: every registry that issues tokens takes either
+in the same Basic header. What has nowhere to go is a bare token with no username,
+since registry auth is a token exchange that needs Basic credentials, so that form is
+refused with an explanation rather than sent and failed. Only transient failures are
 retried; an HTTP status, the expected 401 included, goes straight to the caller, which
 is the only layer that knows whether it means "authenticate" or "does not exist". The
 `*_denied_msg` helpers phrase that difference for a user, and branch on whether
@@ -144,12 +146,12 @@ def auth_denied_msg(image_ref: str, code: int) -> str:
     if os.environ.get("CD_DOCKER_AUTH"):
         return (
             f"Access denied to '{image_ref}' (HTTP {code}). "
-            f"Check that CD_DOCKER_AUTH=username:password is correct "
+            f"Check that CD_DOCKER_AUTH=username:password-or-token is correct "
             f"and the account has pull access to the image."
         )
     return (
         f"Unauthorized: '{image_ref}' does not exist or is a private image. "
-        f"Set CD_DOCKER_AUTH=username:password to authenticate."
+        f"Set CD_DOCKER_AUTH=username:password-or-token to authenticate."
     )
 
 
@@ -158,12 +160,12 @@ def push_denied_msg(image_ref: str, code: int) -> str:
     if os.environ.get("CD_DOCKER_AUTH"):
         return (
             f"Push denied for '{image_ref}' (HTTP {code}). "
-            f"Check that CD_DOCKER_AUTH=username:password is correct "
+            f"Check that CD_DOCKER_AUTH=username:password-or-token is correct "
             f"and the account has push access to the repository."
         )
     return (
         f"Push denied for '{image_ref}' (HTTP {code}). "
-        f"Set CD_DOCKER_AUTH=username:password to authenticate, or, "
+        f"Set CD_DOCKER_AUTH=username:password-or-token to authenticate, or, "
         f"for self-hosted registries that allow anonymous push, check "
         f"the registry configuration."
     )
@@ -196,7 +198,8 @@ def _request_body(open_fn, req, what: str) -> bytes:
 def env_basic_auth() -> str:
     """Return a Basic auth header value from CD_DOCKER_AUTH, or ''.
 
-    Accepts 'username:password'; the colon is the required separator.
+    Accepts 'username:password' or 'username:token'; the colon is the required
+    separator, and the secret half is passed through as given.
     """
     raw = os.environ.get("CD_DOCKER_AUTH", "")
     if not raw:
@@ -204,7 +207,8 @@ def env_basic_auth() -> str:
     if ":" not in raw:
         raise RuntimeError(
             "CD_DOCKER_AUTH must be in 'username:password' format "
-            "(e.g. 'myuser:mypassword' or 'myuser:ghp_xxx'). "
+            "(e.g. 'myuser:mypassword' or 'myuser:ghp_xxx', since a "
+            "personal access token takes the password's place). "
             "A bare token without a username cannot be used: registry "
             "auth requires a token exchange with Basic credentials."
         )
