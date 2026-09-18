@@ -39,7 +39,9 @@ Root access is required. On Termux, the root manager's `su` is used automaticall
 
 ## Introduction
 
-Chroot-Distro needs Python 3.10 or newer. It has no third-party dependencies.
+Chroot-Distro needs Python 3.10 or newer. It has no third-party dependencies, apart
+from `backports-zstd` below Python 3.14, which is what gives the standard library's
+`tarfile` zstd support.
 
 ### Install on Termux (Android)
 
@@ -109,7 +111,7 @@ Create a container. `IMAGE` can be:
 
 | Option | Description |
 |---|---|
-| `-n`, `--name NAME` | Give the container a custom name. Default is the image name. Needed to install the same image twice. |
+| `-n`, `--name NAME` | Give the container a custom name. Default is the image name. Needed to install the same image twice. `--override-alias` is an accepted alias. |
 | `-a`, `--architecture ARCH` | Install for a different CPU type (`aarch64`, `x86_64`, `linux/arm64`, ...). Default is your device's CPU. |
 | `--allow-insecure` | Skip TLS certificate checks when downloading. Only for registries with self-signed certificates. |
 | `-q`, `--quiet` | Only show errors. |
@@ -152,7 +154,7 @@ chroot-distro login ubuntu -- uname -a
 | Option | Description |
 |---|---|
 | `-u`, `--user USER` | Log in as this user instead of root. Accepts a name, `name:group`, a numeric `uid`, or `uid:gid`. |
-| `--isolated` | Maximum isolation: nothing from the host is shared, and the container gets its own mount, PID, UTS, and IPC namespaces. All `--shared-*` and `--bind` flags are ignored in this mode. Needs kernel namespace support. |
+| `--isolated` | Maximum isolation: nothing from the host is shared, and the container gets its own mount, PID, UTS, and IPC namespaces. All `--shared-*` and `--bind` flags are ignored in this mode. Needs kernel namespace support. `--isolate` is an accepted alias. |
 | `--minimal` | Bare minimum mode: only `/dev`, `/proc`, `/sys` (plus `/run`, `/dev/pts`, `/dev/shm` when present) and a stripped environment. Cannot be combined with `--isolated`. |
 | `--shared-home` | Make your host home folder available inside the container. |
 | `--shared-tmp` | Share the host `/tmp` with the container. By default the container gets its own empty `/tmp`. |
@@ -361,6 +363,7 @@ Search Docker Hub. Shows image name, stars, official status, and a short descrip
 | Option | Description |
 |---|---|
 | `-l`, `--limit N` | Show up to N results (default 25, max 100). |
+| `-q`, `--quiet` | Only show errors. |
 
 ### setup
 
@@ -551,7 +554,8 @@ Delete a container and all its data. There is no confirmation and no undo. Activ
 
 ## Storage layout
 
-Everything lives in one data folder:
+Everything lives in one data folder, plus a cache folder that is separate on Linux
+and nested inside the data folder on Termux:
 
 | Platform | Data folder | Cache folder |
 |---|---|---|
@@ -568,8 +572,13 @@ Inside the data folder:
 | `containers/<name>/manifest.json` | Image info used by `reset` and `run` |
 | `sessions/` | Active session records used by `ps` |
 | `locks/` | Lock files preventing conflicting commands |
-| `cache/oci_layers/` | Downloaded image layers |
-| `cache/oci_manifests/` | Downloaded image manifests |
+
+Inside the cache folder:
+
+| Path | Contents |
+|---|---|
+| `oci_layers/` | Downloaded image layers |
+| `oci_manifests/` | Downloaded image manifests |
 
 ## Environment variables
 
