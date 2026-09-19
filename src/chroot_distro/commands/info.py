@@ -21,10 +21,12 @@ uses, so the report and the real run cannot disagree.
 The per-image findings are the point of the analysis section: an empty rootfs, a
 missing `manifest.json` (which is what makes `reset`, `diff` and `run`
 unavailable), or an arch that needs emulation, which is then cross-checked
-against whether a QEMU binfmt handler is actually registered.
-`_has_rootfs_structure` stays lenient on purpose, since a distroless image
-legitimately ships no `/etc`, and a directory left over from an interrupted
-install is not listed as an image at all.
+against whether a QEMU binfmt handler is actually registered. Nothing judges the
+rootfs by its shape: a `scratch` image and a distroless one legitimately hold no
+base distribution and no shell at all, so the report says which containers those
+are and reads their arch out of the manifest instead of calling them broken. A
+directory left over from an interrupted install is not listed as an image either,
+which is what `paths.is_install_incomplete` settles.
 """
 
 import ctypes
@@ -49,6 +51,8 @@ from chroot_distro.commands.list_cmd import (
     _read_image_source,
     _rootfs_size_bytes,
 )
+from chroot_distro.commands.login.env import read_manifest_arch, read_manifest_has_command
+from chroot_distro.commands.login.passwd import resolve_rootfs_path
 from chroot_distro.constants import (
     BASE_CACHE_DIR,
     CANONICAL_PROGRAM_NAME,
@@ -62,7 +66,7 @@ from chroot_distro.constants import (
 from chroot_distro.helpers.binfmt import BINFMT_DIR, covered_arches
 from chroot_distro.locking import container_busy_status
 from chroot_distro.message import C, msg
-from chroot_distro.paths import container_manifest, container_rootfs
+from chroot_distro.paths import container_dir, container_manifest, container_rootfs
 from chroot_distro.progress import fmt_size, loading_line
 
 _NA = "unknown"
@@ -102,6 +106,8 @@ class _ImageInfo:
     status: str = _NA
     source_url: str = ""
     image_type: str = ""
+    has_shell: bool = True
+    has_command: bool = False
     findings: list[str] = field(default_factory=list)
 
 
@@ -512,28 +518,34 @@ def _read_manifest_labels(name: str) -> tuple[str, str]:
     )
 
 
-def _has_rootfs_structure(rootfs: str) -> bool:
-    """Return True when *rootfs* looks like a real root filesystem.
+_SHELL_CANDIDATES = ("/bin/sh", "/bin/bash", "/usr/bin/sh", "/usr/bin/bash")
 
-    A valid rootfs has at least one of the common top-level directories.
-    Distroless/minimal images may omit /etc entirely, so this stays lenient.
+
+def _has_shell(rootfs: str) -> bool:
+    """Return True when the rootfs itself ships a shell a login could exec.
+
+    A `scratch` image and a distroless one ship none, which is a property of the
+    image rather than a fault in it: `login` refuses such a container and points
+    at `run`. Symlinks resolve within the rootfs, so a shell reachable only
+    through a bind-mounted host prefix does not count.
     """
-    return any(os.path.isdir(os.path.join(rootfs, entry)) for entry in ("bin", "usr", "sbin", "lib", "etc", "system"))
+    for guest in _SHELL_CANDIDATES:
+        try:
+            path = resolve_rootfs_path(rootfs, guest)
+        except OSError:
+            continue
+        if os.path.isfile(path):
+            return True
+    return False
 
 
 def _analyze_image(info: _ImageInfo, host_arch: str) -> None:
     """Populate findings that help spot why an image may misbehave."""
-    rootfs = container_rootfs(info.name)
-
     if not os.path.isfile(container_manifest(info.name)):
         info.findings.append("no manifest.json (reset/diff/run unavailable)")
 
     if info.size_bytes == 0:
         info.findings.append("rootfs is empty (install may be incomplete)")
-    elif info.arch in (_NA, "") and not _has_rootfs_structure(rootfs):
-        # Flag only when no ELF binary AND no common top-level dir was found;
-        # minimal/distroless images legitimately lack /etc files.
-        info.findings.append("no recognizable rootfs layout (install may be incomplete)")
 
     if info.arch not in (_NA, "") and host_arch not in (_NA, "") and needs_emulation(info.arch, host_arch):
         info.findings.append(f"arch '{info.arch}' differs from host '{host_arch}' (needs emulation)")
@@ -549,15 +561,25 @@ def _gather_images(host_arch: str) -> list[_ImageInfo]:
         for index, name in enumerate(names, start=1):
             update(f"Scanning {name} ({index}/{total})...")
             info = _ImageInfo(name=name)
+            rootfs = container_rootfs(name)
+            container_path = container_dir(name)
             try:
-                info.size_bytes = _rootfs_size_bytes(container_rootfs(name))
+                info.size_bytes = _rootfs_size_bytes(rootfs)
                 info.size = fmt_size(info.size_bytes)
             except OSError:
                 info.size = "?"
             info.arch = detect_installed_arch(name)
+            if info.arch in (_NA, ""):
+                # A scratch or distroless rootfs ships no shell, which is what
+                # the probe's candidate list reads, so the manifest's claim is
+                # the only answer. Same precedence as `login`: the rootfs's own
+                # binaries first, the manifest's word second.
+                info.arch = read_manifest_arch(container_path) or _NA
             info.source = _read_image_source(name)
             info.status = container_busy_status(name)
             info.source_url, info.image_type = _read_manifest_labels(name)
+            info.has_shell = _has_shell(rootfs)
+            info.has_command = read_manifest_has_command(container_path)
             _analyze_image(info, host_arch)
             images.append(info)
     return images
@@ -651,7 +673,7 @@ def _render_images(images: list[_ImageInfo]) -> None:
     for line in _format_image_table(images):
         msg(line)
 
-    detailed = [i for i in images if i.source_url or i.image_type]
+    detailed = [i for i in images if i.source_url or i.image_type or not i.has_shell]
     if detailed:
         msg()
         for img in detailed:
@@ -660,6 +682,9 @@ def _render_images(images: list[_ImageInfo]) -> None:
                 msg(f"    {C['CYAN']}Source URL:{C['RST']} {img.source_url}")
             if img.image_type:
                 msg(f"    {C['CYAN']}Image type:{C['RST']} {img.image_type}")
+            if not img.has_shell:
+                how = "start it with 'run'" if img.has_command else "the image defines no Entrypoint or Cmd either"
+                msg(f"    {C['CYAN']}Shell:{C['RST']}    none ({how})")
 
 
 _CAP_GLYPH = {"ok": (_OK, "GREEN"), "warn": (_WARN, "YELLOW"), "bad": (_BAD, "RED"), "info": ("\u2022", "CYAN")}

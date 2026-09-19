@@ -51,7 +51,6 @@ session forever), `enter_and_run_with_pty` into a sleeping holder, and
 """
 
 import contextlib
-import json
 import logging
 import os
 import shlex
@@ -75,6 +74,7 @@ from chroot_distro.commands.login.env import (
     inject_env_profile,
     persistable_env,
     read_cd_env,
+    read_manifest_arch,
     read_manifest_env,
     read_manifest_exposed_ports,
     read_manifest_has_command,
@@ -225,7 +225,8 @@ def _resolve_login_user(rootfs: str, container_name: str, user_arg: str) -> dict
             uid = user_spec
         else:
             crit_error(
-                f"container '{container_name}' has no /etc/passwd; '--user' only accepts a numeric UID in this case."
+                f"container '{container_name}' has no /etc/passwd, so no user name can be "
+                f"resolved in it: pass a numeric UID instead, as '--user 1000'."
             )
             sys.exit(1)
         if group_spec is None:
@@ -234,9 +235,8 @@ def _resolve_login_user(rootfs: str, container_name: str, user_arg: str) -> dict
             gid = group_spec
         else:
             crit_error(
-                f"container '{container_name}' has no /etc/group; "
-                f"'--user' only accepts a numeric GID in group "
-                f"specification."
+                f"container '{container_name}' has no /etc/group, so no group name can be "
+                f"resolved in it: pass a numeric GID instead, as '--user 1000:1000'."
             )
             sys.exit(1)
         home = "/"
@@ -267,22 +267,6 @@ def _merge_image_path(image_path: str, system_path: str) -> str:
     return ":".join(merged)
 
 
-def _manifest_arch(container_path: str) -> str:
-    """Return the arch the manifest claims, or "" when it claims none."""
-    from chroot_distro.arch import normalize_arch
-
-    try:
-        with open(os.path.join(container_path, "manifest.json")) as fh:
-            data = json.load(fh)
-    except (OSError, ValueError) as exc:
-        log.debug("Could not read the manifest's architecture: %s", exc)
-        return ""
-    raw = data.get("arch") or (data.get("image_config") or {}).get("architecture", "")
-    if not raw:
-        return ""
-    return normalize_arch(raw) or raw
-
-
 def _ensure_guest_arch_runnable(container_path: str, rootfs: str) -> None:
     """Register a QEMU handler for a foreign-arch guest, or refuse to enter it.
 
@@ -303,7 +287,7 @@ def _ensure_guest_arch_runnable(container_path: str, rootfs: str) -> None:
     host_arch = get_device_cpu_arch()
     on_disk = detect_installed_arch(rootfs)
     confirmed = on_disk not in ("", "unknown") and needs_emulation(on_disk, host_arch)
-    claimed = _manifest_arch(container_path)
+    claimed = read_manifest_arch(container_path)
 
     if confirmed:
         guest_arch = on_disk

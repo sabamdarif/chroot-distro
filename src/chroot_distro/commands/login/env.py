@@ -203,6 +203,31 @@ def inherited_env_entries(stored: object) -> list[str]:
     ]
 
 
+def read_manifest_arch(container_dir: str) -> str:
+    """Return the arch the manifest records, or "" when it records none.
+
+    A top-level field of this program's own manifest rather than an OCI image
+    config one, with `image_config.architecture` as the fallback for a manifest
+    written before the field was. Normalized, so a pulled Docker name reads in
+    this program's spelling, and a manifest that is not an object or holds a
+    field of another type reads as no claim at all rather than raising.
+    """
+    from chroot_distro.arch import normalize_arch
+
+    try:
+        with open(os.path.join(container_dir, "manifest.json")) as fh:
+            data = json.load(fh)
+    except (OSError, ValueError) as exc:
+        log.debug("Could not read the manifest's architecture: %s", exc)
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    raw = data.get("arch") or (data.get("image_config") or {}).get("architecture", "")
+    if not isinstance(raw, str) or not raw:
+        return ""
+    return normalize_arch(raw) or raw
+
+
 def read_manifest_env(container_dir: str) -> list:
     """Return image Env entries from manifest.json, or [] if absent/invalid."""
     cfg = _read_manifest_config(container_dir)

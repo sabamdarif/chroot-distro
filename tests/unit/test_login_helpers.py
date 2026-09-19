@@ -1,3 +1,4 @@
+import json
 import os
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -9,7 +10,12 @@ from chroot_distro.commands.login import (
     _safe_hostname,
 )
 from chroot_distro.commands.login.chroot_cmd import build_chroot_config, chroot_display_argv
-from chroot_distro.commands.login.env import read_cd_env, resolve_override, resolve_term
+from chroot_distro.commands.login.env import (
+    read_cd_env,
+    read_manifest_arch,
+    resolve_override,
+    resolve_term,
+)
 
 
 def test_safe_hostname_valid_tokens():
@@ -1531,3 +1537,28 @@ def test_ensure_guest_arch_runnable_stays_quiet_for_a_32bit_guest_on_a_64bit_hos
 
     ensure.assert_not_called()
     warned.assert_not_called()
+
+
+def test_read_manifest_arch_reads_the_top_level_field(tmp_path):
+    (tmp_path / "manifest.json").write_text(json.dumps({"arch": "arm64", "image_config": {"architecture": "amd64"}}))
+    assert read_manifest_arch(str(tmp_path)) == "aarch64"
+
+
+def test_read_manifest_arch_falls_back_to_the_image_config(tmp_path):
+    (tmp_path / "manifest.json").write_text(json.dumps({"image_config": {"architecture": "amd64"}}))
+    assert read_manifest_arch(str(tmp_path)) == "x86_64"
+
+
+def test_read_manifest_arch_without_a_claim_is_empty(tmp_path):
+    (tmp_path / "manifest.json").write_text(json.dumps({"image_config": {}}))
+    assert read_manifest_arch(str(tmp_path)) == ""
+    assert read_manifest_arch(str(tmp_path / "missing")) == ""
+
+
+def test_read_manifest_arch_ignores_a_field_of_another_type(tmp_path):
+    # manifest.json is a document the build wrote but only half chose, so a
+    # non-string arch must read as no claim rather than reach normalize_arch.
+    (tmp_path / "manifest.json").write_text(json.dumps({"arch": 5}))
+    assert read_manifest_arch(str(tmp_path)) == ""
+    (tmp_path / "manifest.json").write_text(json.dumps(["not", "an", "object"]))
+    assert read_manifest_arch(str(tmp_path)) == ""

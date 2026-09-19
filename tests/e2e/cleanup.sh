@@ -14,6 +14,7 @@ sudo userdel hostonly 2>/dev/null || true
 # /tmp is sticky, and chown-host.txt now belongs to uid 4321,
 # so the runner's own account can no longer unlink it.
 sudo rm -rf /tmp/chown-src.txt /tmp/chown-host.txt /tmp/chown-tree
+rm -rf /tmp/scratch-build /tmp/scratch-login.out /tmp/scratch-login.err
 
 echo "=== Killing all sessions ==="
 sudo chroot-distro kill httpd 2>/dev/null || true
@@ -22,14 +23,14 @@ echo "=== Unmounting all containers ==="
 for name in httpd debian alpine alpine-test test-build test-build-adv \
             test-build-out test-build-out2 test-build-add debian-sec \
             termux-docker test-build-multi test-build-multi-arm \
-            test-build-cache; do
+            test-build-cache scratch-test; do
 	sudo chroot-distro unmount "$name" 2>/dev/null || true
 done
 echo "=== Removing all containers ==="
 for name in httpd debian alpine alpine-test test-build test-build-adv \
             test-build-out test-build-out2 test-build-add debian-sec \
             termux-docker test-build-multi test-build-multi-arm \
-            test-build-cache; do
+            test-build-cache scratch-test; do
 	sudo chroot-distro remove "$name" 2>/dev/null || true
 done
 echo "=== Final state ==="

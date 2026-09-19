@@ -68,29 +68,43 @@ def test_analyze_image_flags_empty_rootfs():
     assert any("rootfs is empty" in f for f in img.findings)
 
 
-def test_analyze_image_does_not_flag_minimal_rootfs():
-    # Distroless/termux-docker style: arch detected, but no /etc files.
-    img = info._ImageInfo(name="termux-docker", size_bytes=4096, arch="aarch64")
-    with (
-        patch("os.path.isfile", return_value=True),
-        patch("chroot_distro.commands.info.container_manifest", return_value="/x/manifest.json"),
-        patch("chroot_distro.commands.info.container_rootfs", return_value="/x/rootfs"),
-    ):
-        info._analyze_image(img, host_arch="aarch64")
-    assert not any("rootfs" in f for f in img.findings)
-
-
-def test_analyze_image_flags_unrecognizable_rootfs():
-    # No arch detected and no rootfs structure at all -> flagged.
-    img = info._ImageInfo(name="junk", size_bytes=4096, arch=info._NA)
+def test_analyze_image_leaves_a_shell_less_image_unflagged():
+    # A scratch or distroless image: no /bin, no /usr, no /etc, no shell. Having
+    # no base distribution is a property of the image, not a finding.
+    img = info._ImageInfo(name="hello-world", size_bytes=1024, arch="aarch64")
     with (
         patch("os.path.isfile", return_value=True),
         patch("os.path.isdir", return_value=False),
         patch("chroot_distro.commands.info.container_manifest", return_value="/x/manifest.json"),
-        patch("chroot_distro.commands.info.container_rootfs", return_value="/x/rootfs"),
     ):
         info._analyze_image(img, host_arch="aarch64")
-    assert any("no recognizable rootfs layout" in f for f in img.findings)
+    assert img.findings == []
+
+
+def test_gather_images_takes_the_arch_from_the_manifest_when_no_elf_answers():
+    # The probe's candidates are all shells, so a shell-less rootfs answers
+    # "unknown" and the manifest's claim is what the report has to show.
+    with (
+        patch.object(info, "_iter_container_names", return_value=(["hello-world"], [])),
+        patch.object(info, "_rootfs_size_bytes", return_value=1024),
+        patch.object(info, "container_rootfs", return_value="/x/rootfs"),
+        patch.object(info, "container_dir", return_value="/x"),
+        patch.object(info, "detect_installed_arch", return_value=info._NA),
+        patch.object(info, "read_manifest_arch", return_value="aarch64"),
+        patch.object(info, "_has_shell", return_value=False),
+        patch.object(info, "read_manifest_has_command", return_value=True),
+        patch.object(info, "container_busy_status", return_value="idle"),
+        patch.object(info, "_read_image_source", return_value="hello-world:latest"),
+        patch.object(info, "_read_manifest_labels", return_value=("", "")),
+        patch.object(info, "loading_line") as mock_loading,
+        patch("os.path.isfile", return_value=True),
+    ):
+        mock_loading.return_value.__enter__.return_value = lambda _text: None
+        images = info._gather_images(host_arch="x86_64")
+    assert images[0].arch == "aarch64"
+    # The manifest's arch is now what the emulation check compares, so the one
+    # finding left is the honest one.
+    assert images[0].findings == ["arch 'aarch64' differs from host 'x86_64' (needs emulation)"]
 
 
 def test_analyze_image_no_arch_flag_for_compatible_32bit():

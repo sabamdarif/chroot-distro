@@ -178,6 +178,8 @@ chroot-distro run [OPTIONS] CONTAINER [-- ARG ...]
 
 Run the start command (Entrypoint/Cmd) defined by the container's image, like `docker run`. Mainly for server images (nginx, nextcloud, databases). Only works for containers installed from Docker/OCI images.
 
+`run` is the only way into an image that ships no shell, a `scratch` image or a distroless one: an interactive session needs a shell the image does not have, so `login` refuses such a container and points here.
+
 `run` accepts all `login` options above, plus:
 
 | Option | Description |
@@ -389,6 +391,8 @@ Aliases: version-info, nf
 Print a diagnostics report: versions, device details, host capabilities, kernel support, installed containers, and basic health checks. Attach it when filing a bug report.
 
 It always runs as root, and stops with an error when root cannot be obtained. The kernel support section is probed by trying each feature, not read from a kernel build config, so it reports what the running kernel does.
+
+An image with no base distribution is described rather than flagged. A `scratch` image and a distroless one ship no shell, so nothing in the rootfs answers the architecture probe: the report reads the architecture out of the image manifest instead and says how the container is started.
 
 ### help
 
@@ -613,6 +617,7 @@ All of these are optional.
 - **`push` is single-architecture.** `build --platform` produces several platforms at once, but each is pushed on its own with `push -a`.
 - **Foreign architectures need the kernel's help.** Emulation goes through `binfmt_misc`, so a kernel built without `CONFIG_BINFMT_MISC` cannot run an image for another CPU. `chroot-distro info` reports it.
 - **Backups capture files only.** Running programs are not saved by `backup`/`restore`.
+- **Scratch and distroless images have no shell.** They ship no base distribution, so `login` refuses them and `run` is how they start: it executes the image's own Entrypoint/Cmd.
 - **Registry login is env-var only.** Set `CD_DOCKER_AUTH`. Docker's `config.json` credential helpers are not read.
 
 ## Donate

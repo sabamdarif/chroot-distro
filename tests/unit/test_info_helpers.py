@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from chroot_distro.commands import info
 from chroot_distro.commands.kernel_config import (
@@ -124,3 +125,31 @@ def test_feature_status_names_the_devpts_shape(monkeypatch):
     assert state == "per-mount instances" and missing is False
     _g, color, state, missing = info._feature_status(feat, PROBE_ABSENT)
     assert color == "YELLOW" and "single shared instance" in state and missing is False
+
+
+# ── _has_shell ──────────────────────────────────────────────────────────────────
+def test_has_shell_reads_a_shell_inside_the_rootfs(tmp_path):
+    (tmp_path / "bin").mkdir()
+    (tmp_path / "bin" / "sh").touch()
+    assert info._has_shell(str(tmp_path)) is True
+
+
+def test_has_shell_is_false_for_a_rootfs_that_ships_none(tmp_path):
+    # A scratch or distroless rootfs: the app's own files and nothing else.
+    (tmp_path / "hello.txt").write_text("hi")
+    assert info._has_shell(str(tmp_path)) is False
+
+
+def test_render_images_says_how_a_shell_less_image_is_started():
+    img = info._ImageInfo(
+        name="hello-world",
+        size="1.0 KiB",
+        arch="aarch64",
+        has_shell=False,
+        has_command=True,
+    )
+    with patch.object(info, "msg") as mock_msg:
+        info._render_images([img])
+    rendered = " ".join(str(c.args[0]) for c in mock_msg.call_args_list if c.args)
+    assert "Shell:" in rendered
+    assert "start it with 'run'" in rendered
