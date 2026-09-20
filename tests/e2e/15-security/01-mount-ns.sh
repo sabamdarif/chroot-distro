@@ -9,7 +9,7 @@ set -e
 # Host and container mount namespaces should differ
 host_mnt=$(readlink /proc/self/ns/mnt)
 container_mnt=$(sudo chroot-distro login debian-sec --isolated -- \
-  readlink /proc/self/ns/mnt)
+	readlink /proc/self/ns/mnt)
 echo "Host mnt ns: $host_mnt"
 echo "Container mnt ns: $container_mnt"
 if [ "$host_mnt" = "$container_mnt" ]; then

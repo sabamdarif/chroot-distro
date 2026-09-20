@@ -8,7 +8,7 @@ set -e
 # The --isolated login should produce isolation status output
 # showing which namespaces are active
 output=$(sudo chroot-distro login debian-sec --isolated -- \
-  echo "isolation-check" 2>&1)
+	echo "isolation-check" 2>&1)
 echo "$output"
 # On GitHub runners (full kernel support), we should see
 # successful isolation. The key test is that it doesn't

@@ -12,8 +12,8 @@ set -e
 
 rm -rf /tmp/scratch-build
 mkdir -p /tmp/scratch-build
-echo "chroot-distro-scratch-test" > /tmp/scratch-build/hello.txt
-cat > /tmp/scratch-build/Dockerfile << 'DOCKERFILE'
+echo "chroot-distro-scratch-test" >/tmp/scratch-build/hello.txt
+cat >/tmp/scratch-build/Dockerfile <<'DOCKERFILE'
 FROM scratch
 COPY hello.txt /hello.txt
 DOCKERFILE

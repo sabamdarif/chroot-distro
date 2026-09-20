@@ -13,7 +13,7 @@
 set -e
 
 mkdir -p /tmp/multi-build
-cat > /tmp/multi-build/Dockerfile << 'DOCKERFILE'
+cat >/tmp/multi-build/Dockerfile <<'DOCKERFILE'
 FROM --platform=$BUILDPLATFORM alpine:latest AS builder
 ARG TARGETPLATFORM
 ARG TARGETARCH

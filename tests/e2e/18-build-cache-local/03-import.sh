@@ -14,10 +14,10 @@ set -eo pipefail
 sudo chroot-distro clear-cache
 
 sudo chroot-distro build /tmp/cache-build \
-  -t test-build-cache:latest \
-  --cache-from type=local,src=/tmp/cache-dir \
-  --progress plain \
-  --install-as test-build-cache 2>&1 | tee /tmp/cache-import.log
+	-t test-build-cache:latest \
+	--cache-from type=local,src=/tmp/cache-dir \
+	--progress plain \
+	--install-as test-build-cache 2>&1 | tee /tmp/cache-import.log
 
 grep -q "Imported 1 cached step(s) from '/tmp/cache-dir'" /tmp/cache-import.log
 grep -q "CACHED" /tmp/cache-import.log

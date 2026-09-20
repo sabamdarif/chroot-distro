@@ -6,7 +6,7 @@
 set -e
 
 mkdir -p /tmp/sync-src
-echo "sync-test-content" > /tmp/sync-src/testfile.txt
+echo "sync-test-content" >/tmp/sync-src/testfile.txt
 sudo chroot-distro sync /tmp/sync-src alpine-test:/tmp/sync-dest
 output=$(sudo chroot-distro login alpine-test -- cat /tmp/sync-dest/testfile.txt)
 echo "$output"

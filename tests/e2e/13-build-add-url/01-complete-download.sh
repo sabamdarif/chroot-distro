@@ -7,12 +7,12 @@
 set -eo pipefail
 
 mkdir -p /tmp/add-build
-cat > /tmp/add-build/Dockerfile << 'DOCKERFILE'
+cat >/tmp/add-build/Dockerfile <<'DOCKERFILE'
 FROM alpine:latest
 ADD http://127.0.0.1:8099/good /downloaded.txt
 DOCKERFILE
 sudo chroot-distro build /tmp/add-build -t test-build-add:latest \
-  --progress plain --install-as test-build-add 2>&1 | tee /tmp/add-build.log
+	--progress plain --install-as test-build-add 2>&1 | tee /tmp/add-build.log
 output=$(sudo chroot-distro login test-build-add -- cat /downloaded.txt)
 echo "$output"
 echo "$output" | grep -qx "downloaded-by-add"

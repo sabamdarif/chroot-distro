@@ -10,7 +10,7 @@ set -e
 # initial user namespace (identity map "0 0 4294967295").
 host_userns=$(readlink /proc/self/ns/user)
 out=$(sudo chroot-distro login debian-sec --isolated -- sh -c \
-  'printf "NS=%s\n" "$(readlink /proc/self/ns/user)"; \
+	'printf "NS=%s\n" "$(readlink /proc/self/ns/user)"; \
    printf "MAP=%s\n" "$(tr -s " " < /proc/self/uid_map | sed "s/^ *//")"')
 echo "$out"
 cont_userns=$(echo "$out" | sed -n 's/^NS=//p')
@@ -25,7 +25,8 @@ if [ -z "$count" ] || [ "$count" = "4294967295" ]; then
 	echo "NOTE: user namespace unavailable here (Tier C fallback); uid-map check skipped."
 else
 	if [ "$host_userns" = "$cont_userns" ]; then
-		echo "FAIL: container shares the host user namespace (no uid isolation)"; exit 1
+		echo "FAIL: container shares the host user namespace (no uid isolation)"
+		exit 1
 	fi
 	echo "PASS: real user namespace active with a bounded uid_map ($uid_map)"
 fi

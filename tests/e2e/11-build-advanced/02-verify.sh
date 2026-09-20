@@ -31,9 +31,11 @@ got=$(run cat /opt/app/secret.sha)
 echo "PASS: secret was mounted during build"
 
 if run test -e /run/secrets/apikey; then
-	echo "FAIL: secret baked into image"; exit 1
+	echo "FAIL: secret baked into image"
+	exit 1
 fi
 if run test -e /build; then
-	echo "FAIL: builder stage leaked into final image"; exit 1
+	echo "FAIL: builder stage leaked into final image"
+	exit 1
 fi
 echo "PASS: no secret or builder-stage files in final image"

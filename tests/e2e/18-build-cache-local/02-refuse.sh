@@ -11,7 +11,7 @@
 set -e
 
 if sudo chroot-distro build /tmp/cache-build -t test-build-cache:latest \
-	--cache-from type=registry,ref=docker.io/example/cache 2> /tmp/cache-registry.err; then
+	--cache-from type=registry,ref=docker.io/example/cache 2>/tmp/cache-registry.err; then
 	echo "FAIL: a registry cache was accepted"
 	exit 1
 fi
@@ -20,9 +20,9 @@ grep -q "type=local" /tmp/cache-registry.err
 echo "PASS: only type=local is accepted"
 
 mkdir -p /tmp/not-a-cache
-echo "not an index" > /tmp/not-a-cache/build-cache.json
+echo "not an index" >/tmp/not-a-cache/build-cache.json
 if sudo chroot-distro build /tmp/cache-build -t test-build-cache:latest \
-	--cache-from type=local,src=/tmp/not-a-cache 2> /tmp/cache-bad.err; then
+	--cache-from type=local,src=/tmp/not-a-cache 2>/tmp/cache-bad.err; then
 	echo "FAIL: a folder that is not a cache folder was accepted"
 	exit 1
 fi

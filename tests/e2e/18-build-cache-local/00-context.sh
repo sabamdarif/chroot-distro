@@ -11,7 +11,7 @@ set -e
 
 rm -rf /tmp/cache-build /tmp/cache-dir /tmp/not-a-cache
 mkdir -p /tmp/cache-build
-cat > /tmp/cache-build/Dockerfile << 'DOCKERFILE'
+cat >/tmp/cache-build/Dockerfile <<'DOCKERFILE'
 FROM alpine:latest
 RUN echo "chroot-distro-cache-test" > /cached.txt
 DOCKERFILE

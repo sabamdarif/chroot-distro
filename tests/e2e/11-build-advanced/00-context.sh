@@ -13,17 +13,17 @@
 set -e
 
 mkdir -p /tmp/adv-build/app/src/lib /tmp/adv-build/config
-cat > /tmp/adv-build/app/src/main.sh << 'SH'
+cat >/tmp/adv-build/app/src/main.sh <<'SH'
 #!/bin/sh
 . /opt/app/bin/src/lib/util.sh
 greet
 SH
-cat > /tmp/adv-build/app/src/lib/util.sh << 'SH'
+cat >/tmp/adv-build/app/src/lib/util.sh <<'SH'
 greet() { echo "hello from util"; }
 SH
-echo "loglevel=debug" > /tmp/adv-build/config/app.conf
-echo "s3cr3t-api-key-do-not-bake" > /tmp/adv-secret.txt
-cat > /tmp/adv-build/Dockerfile << 'DOCKERFILE'
+echo "loglevel=debug" >/tmp/adv-build/config/app.conf
+echo "s3cr3t-api-key-do-not-bake" >/tmp/adv-secret.txt
+cat >/tmp/adv-build/Dockerfile <<'DOCKERFILE'
 ARG ALPINE_TAG=latest
 
 FROM alpine:${ALPINE_TAG} AS builder

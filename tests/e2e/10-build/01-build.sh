@@ -7,6 +7,6 @@
 set -e
 
 sudo chroot-distro build /tmp/test-build-context \
-  -t test-build:latest \
-  --install-as test-build
+	-t test-build:latest \
+	--install-as test-build
 echo "PASS: Build completed"

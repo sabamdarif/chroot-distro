@@ -12,11 +12,11 @@ sudo chroot-distro remove test-build-adv
 # cache-mount RUN re-executes and must see the marker
 # written by the first build.
 sudo chroot-distro build /tmp/adv-build \
-  -t test-build-adv:latest \
-  --build-arg APP_VERSION=2.5.2 \
-  --secret id=apikey,src=/tmp/adv-secret.txt \
-  --progress plain \
-  --install-as test-build-adv 2>&1 | tee /tmp/adv-build-2.log
+	-t test-build-adv:latest \
+	--build-arg APP_VERSION=2.5.2 \
+	--secret id=apikey,src=/tmp/adv-secret.txt \
+	--progress plain \
+	--install-as test-build-adv 2>&1 | tee /tmp/adv-build-2.log
 grep -q "CACHED" /tmp/adv-build-2.log
 echo "PASS: rebuild reused cached layers"
 

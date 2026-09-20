@@ -7,7 +7,7 @@
 set -e
 
 mkdir -p /tmp/test-build-context
-cat > /tmp/test-build-context/Dockerfile << 'DOCKERFILE'
+cat >/tmp/test-build-context/Dockerfile <<'DOCKERFILE'
 FROM alpine:latest
 RUN echo "chroot-distro-build-test" > /built.txt
 DOCKERFILE

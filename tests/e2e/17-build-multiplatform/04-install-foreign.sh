@@ -11,14 +11,14 @@
 set -eo pipefail
 
 sudo chroot-distro install test-build-multi:latest \
-  --architecture arm64 \
-  --name test-build-multi-arm 2>&1 | tee /tmp/multi-install-arm.log
+	--architecture arm64 \
+	--name test-build-multi-arm 2>&1 | tee /tmp/multi-install-arm.log
 
 grep -qi "is cached" /tmp/multi-install-arm.log
 echo "PASS: the arm64 platform installed from the local cache"
 
 # The ARCH column is read out of the rootfs's own ELF headers, so nothing here
 # executes the foreign guest.
-sudo chroot-distro info 2>&1 | tee /tmp/multi-info.txt > /dev/null
+sudo chroot-distro info 2>&1 | tee /tmp/multi-info.txt >/dev/null
 grep "test-build-multi-arm" /tmp/multi-info.txt | grep -q "aarch64"
 echo "PASS: the installed rootfs is the aarch64 one"

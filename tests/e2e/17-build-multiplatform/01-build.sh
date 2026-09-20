@@ -12,11 +12,11 @@
 set -eo pipefail
 
 sudo chroot-distro build /tmp/multi-build \
-  -t test-build-multi:latest \
-  --platform linux/amd64,linux/arm64 \
-  -o /tmp/multi-build.oci.tar \
-  --progress plain \
-  --install-as test-build-multi 2>&1 | tee /tmp/multi-build.log
+	-t test-build-multi:latest \
+	--platform linux/amd64,linux/arm64 \
+	-o /tmp/multi-build.oci.tar \
+	--progress plain \
+	--install-as test-build-multi 2>&1 | tee /tmp/multi-build.log
 
 grep -q "Layers (linux/amd64)" /tmp/multi-build.log
 grep -q "Layers (linux/arm64)" /tmp/multi-build.log

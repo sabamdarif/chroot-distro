@@ -6,7 +6,7 @@
 
 set -e
 
-if sudo chroot-distro login scratch-test > /tmp/scratch-login.out 2> /tmp/scratch-login.err; then
+if sudo chroot-distro login scratch-test >/tmp/scratch-login.out 2>/tmp/scratch-login.err; then
 	echo "FAIL: login entered a container whose image ships no shell"
 	exit 1
 fi

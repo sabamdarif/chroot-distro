@@ -10,7 +10,7 @@ sleep 9999 &
 bystander_pid=$!
 echo "Host bystander PID: $bystander_pid"
 output=$(sudo chroot-distro login debian-sec --isolated -- \
-  sh -c "kill -0 $bystander_pid 2>&1 || echo SIGNAL_BLOCKED")
+	sh -c "kill -0 $bystander_pid 2>&1 || echo SIGNAL_BLOCKED")
 echo "$output"
 kill $bystander_pid 2>/dev/null || true
 if echo "$output" | grep -q "SIGNAL_BLOCKED\|No such process"; then

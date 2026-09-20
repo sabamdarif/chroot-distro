@@ -7,7 +7,7 @@
 set -e
 
 out=$(sudo chroot-distro sync /tmp/chown-tree alpine-test:/tmp/chown-tree \
-  --chown appuser:appgrp -v 2>&1)
+	--chown appuser:appgrp -v 2>&1)
 echo "$out"
 if echo "$out" | grep -qE "Metadata:|file:|symlink:"; then
 	echo "FAIL: the destination already carries the requested owner, yet it was corrected again"

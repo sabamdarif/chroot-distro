@@ -15,5 +15,8 @@ sudo chroot-distro login alpine-test -- addgroup -g 1600 appgrp
 sudo chroot-distro login alpine-test -- adduser -D -u 1500 -G appgrp appuser
 ids=$(sudo chroot-distro login alpine-test -- sh -c 'printf "%s:%s" "$(id -u appuser)" "$(id -g appuser)"')
 echo "appuser ids: $ids"
-[ "$ids" = "1500:1600" ] || { echo "FAIL: expected 1500:1600, got $ids"; exit 1; }
+[ "$ids" = "1500:1600" ] || {
+	echo "FAIL: expected 1500:1600, got $ids"
+	exit 1
+}
 echo "PASS: guest account ready"

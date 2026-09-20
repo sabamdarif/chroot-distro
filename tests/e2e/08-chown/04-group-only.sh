@@ -9,7 +9,10 @@ set -e
 sudo chroot-distro sync /tmp/chown-tree alpine-test:/tmp/chown-tree --chown :0
 ids=$(sudo chroot-distro login alpine-test -- stat -c '%u:%g' /tmp/chown-tree/a.txt)
 echo "owner: $ids"
-[ "$ids" = "1500:0" ] || { echo "FAIL: expected 1500:0, got $ids"; exit 1; }
+[ "$ids" = "1500:0" ] || {
+	echo "FAIL: expected 1500:0, got $ids"
+	exit 1
+}
 
 # The uid arrives as -1 ("leave this one alone"); comparing that
 # against the destination's own would make every run report the

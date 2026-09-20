@@ -6,7 +6,7 @@
 set -e
 
 output=$(sudo chroot-distro login alpine --isolated -- \
-  sh -c 'cat /proc/1/root/etc/os-release 2>/dev/null || echo ESCAPE_BLOCKED')
+	sh -c 'cat /proc/1/root/etc/os-release 2>/dev/null || echo ESCAPE_BLOCKED')
 echo "$output"
 if echo "$output" | grep -qi "ID=ubuntu"; then
 	echo "FAIL: Chroot escape detected!"

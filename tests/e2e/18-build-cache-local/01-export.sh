@@ -12,10 +12,10 @@
 set -eo pipefail
 
 sudo chroot-distro build /tmp/cache-build \
-  -t test-build-cache:latest \
-  --cache-from type=local,src=/tmp/cache-dir \
-  --cache-to type=local,dest=/tmp/cache-dir \
-  --progress plain 2>&1 | tee /tmp/cache-export.log
+	-t test-build-cache:latest \
+	--cache-from type=local,src=/tmp/cache-dir \
+	--cache-to type=local,dest=/tmp/cache-dir \
+	--progress plain 2>&1 | tee /tmp/cache-export.log
 
 grep -q "Imported 0 cached step(s) from '/tmp/cache-dir'" /tmp/cache-export.log
 grep -q "Exported 1 cached step(s)" /tmp/cache-export.log

@@ -9,7 +9,7 @@ set -e
 sleep 9999 &
 host_pid=$!
 output=$(sudo chroot-distro login debian-sec --isolated -- \
-  sh -c "ls /proc/$host_pid/ 2>&1 || echo PID_HIDDEN")
+	sh -c "ls /proc/$host_pid/ 2>&1 || echo PID_HIDDEN")
 echo "$output"
 kill $host_pid 2>/dev/null || true
 if echo "$output" | grep -q "PID_HIDDEN\|No such file"; then
