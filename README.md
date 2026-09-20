@@ -1,37 +1,37 @@
 # Chroot-Distro
 
-Chroot-Distro lets you run real Linux systems (Ubuntu, Debian, Alpine, Arch, and more) inside Termux on a rooted Android device, or on any regular Linux machine.
+Chroot-Distro lets you run real Linux systems (Ubuntu, Debian, Alpine, Arch, and more) inside `Termux` (on a rooted Android device) or on any `Regular Linux` machine.
 
 It works in three simple steps: it downloads an image from Docker Hub (or extracts a tarball you give it), unpacks it into a folder, and enters it using the Linux kernel's own `chroot` and `mount` features. Because it talks to the kernel directly, everything runs at native speed. It can also build images from a Dockerfile and push them to a registry.
 
-Root access is required. On Termux, the root manager's `su` is used automatically. On regular Linux, a one-time `sudo chroot-distro setup` removes all future password prompts.
+**Root access is required.**
 
 ## Table of contents
 
 1. [Introduction](#introduction)
 2. [Commands reference](#commands-reference)
-   * [`install`](#install)
-   * [`login`](#login)
-   * [`run`](#run)
-   * [`list`](#list)
-   * [`ps`](#ps)
-   * [`copy`](#copy)
-   * [`sync`](#sync)
-   * [`rename`](#rename)
-   * [`unmount`](#unmount)
-   * [`kill`](#kill)
-   * [`reset`](#reset)
-   * [`backup`](#backup)
-   * [`restore`](#restore)
-   * [`diff`](#diff)
-   * [`search`](#search)
-   * [`setup`](#setup)
-   * [`info`](#info)
-   * [`help`](#help)
-   * [`build`](#build)
-   * [`push`](#push)
-   * [`clear-cache`](#clear-cache)
-   * [`remove`](#remove)
+    - [`install`](#install)
+    - [`login`](#login)
+    - [`run`](#run)
+    - [`list`](#list)
+    - [`ps`](#ps)
+    - [`copy`](#copy)
+    - [`sync`](#sync)
+    - [`rename`](#rename)
+    - [`unmount`](#unmount)
+    - [`kill`](#kill)
+    - [`reset`](#reset)
+    - [`backup`](#backup)
+    - [`restore`](#restore)
+    - [`diff`](#diff)
+    - [`search`](#search)
+    - [`setup`](#setup)
+    - [`info`](#info)
+    - [`help`](#help)
+    - [`build`](#build)
+    - [`push`](#push)
+    - [`clear-cache`](#clear-cache)
+    - [`remove`](#remove)
 3. [Storage layout](#storage-layout)
 4. [Environment variables](#environment-variables)
 5. [Limitations](#limitations)
@@ -40,8 +40,7 @@ Root access is required. On Termux, the root manager's `su` is used automaticall
 ## Introduction
 
 Chroot-Distro needs Python 3.10 or newer. It has no third-party dependencies, apart
-from `backports-zstd` below Python 3.14, which is what gives the standard library's
-`tarfile` zstd support.
+from `backports-zstd` for below Python 3.14, which is what gives the zstd support.
 
 ### Install on Termux (Android)
 
@@ -60,10 +59,10 @@ No `sudo` or `tsu` package is needed.
 
 ```sh
 sudo apt install python3-pip   # Debian/Ubuntu example
-sudo pip install chroot-distro
+sudo pip install chroot-distro --break-system-packages --root-user-action=ignore
 ```
 
-Install with `sudo` (system-wide), not `pip install --user`. The passwordless daemon runs the code as root, so it refuses user-writable installs.
+Install with `sudo` (system-wide), soy you can use it in a [passwordless](#passwordless-setup-linux-only) mode. If you don't want it then just install it normally.
 
 ### Passwordless setup (Linux only)
 
@@ -102,19 +101,19 @@ Aliases: add, i, in, ins
 
 Create a container. `IMAGE` can be:
 
-| Source | Example |
-|---|---|
-| Docker Hub image | `ubuntu:24.04`, `alpine` |
-| Other registry | `ghcr.io/foo/bar:latest` |
-| Local file | `./rootfs.tar.gz`, `./image.oci.tar` |
-| Web link | `https://example.com/rootfs.tar.xz` |
+| Source           | Example                              |
+| ---------------- | ------------------------------------ |
+| Docker Hub image | `ubuntu:24.04`, `alpine`             |
+| Other registry   | `ghcr.io/foo/bar:latest`             |
+| Local file       | `./rootfs.tar.gz`, `./image.oci.tar` |
+| Web link         | `https://example.com/rootfs.tar.xz`  |
 
-| Option | Description |
-|---|---|
-| `-n`, `--name NAME` | Give the container a custom name. Default is the image name. Needed to install the same image twice. `--override-alias` is an accepted alias. |
-| `-a`, `--architecture ARCH` | Install for a different CPU type (`aarch64`, `x86_64`, `linux/arm64`, ...). Default is your device's CPU. |
-| `--allow-insecure` | Skip TLS certificate checks when downloading. Only for registries with self-signed certificates. |
-| `-q`, `--quiet` | Only show errors. |
+| Option                      | Description                                                                                                                                   |
+| --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| `-n`, `--name NAME`         | Give the container a custom name. Default is the image name. Needed to install the same image twice. `--override-alias` is an accepted alias. |
+| `-a`, `--architecture ARCH` | Install for a different CPU type (`aarch64`, `x86_64`, `linux/arm64`, ...). Default is your device's CPU.                                     |
+| `--allow-insecure`          | Skip TLS certificate checks when downloading. Only for registries with self-signed certificates.                                              |
+| `-q`, `--quiet`             | Only show errors.                                                                                                                             |
 
 For private images, set `CD_DOCKER_AUTH` first:
 
@@ -123,19 +122,14 @@ export CD_DOCKER_AUTH=myuser:mypassword
 chroot-distro install myuser/private-image:tag
 ```
 
-The password half is a personal access token on most registries, Docker Hub and GHCR
-included, so `export CD_DOCKER_AUTH=myuser:ghp_xxxxxxxx` works the same way. The
-colon is the one thing that is required: a bare token with no username is refused,
-because the registry needs a name to run the token exchange against.
-
-Downloaded layers are cached, so installing the same image again works offline.
+You can also just pass the personal access token as well,
+so `export CD_DOCKER_AUTH=myuser:ghp_xxxxxxxx` works the same way.
 
 A container for another CPU needs QEMU's user-mode emulator on the host: install
-`qemu-user-static` (Linux) or `qemu-user-aarch64` and friends (Termux). `login`
+`qemu-user-static` (Linux) or `qemu-user-ARCH` (Termux), `login`
 then registers it with the kernel's `binfmt_misc` the first time you enter the
-container, and the registration stays until the host reboots. `chroot-distro
-info` lists which architectures are covered. Nothing to install for your CPU's
-own 32-bit half: `i686` on `x86_64` and `arm` on `aarch64` run directly.
+container, and the registration stays until the host reboots.
+`chroot-distro info` lists which architectures are covered.
 
 ### login
 
@@ -151,18 +145,18 @@ chroot-distro login ubuntu
 chroot-distro login ubuntu -- uname -a
 ```
 
-| Option | Description |
-|---|---|
-| `-u`, `--user USER` | Log in as this user instead of root. Accepts a name, `name:group`, a numeric `uid`, or `uid:gid`. |
-| `--isolated` | Maximum isolation: nothing from the host is shared, and the container gets its own mount, PID, UTS, and IPC namespaces. All `--shared-*` and `--bind` flags are ignored in this mode. Needs kernel namespace support. `--isolate` is an accepted alias. |
-| `--minimal` | Bare minimum mode: only `/dev`, `/proc`, `/sys` (plus `/run`, `/dev/pts`, `/dev/shm` when present) and a stripped environment. Cannot be combined with `--isolated`. |
-| `--shared-home` | Make your host home folder available inside the container. |
-| `--shared-tmp` | Share the host `/tmp` with the container. By default the container gets its own empty `/tmp`. |
-| `--shared-display` | Share the host screen (X11/Wayland), audio, and D-Bus, so GUI apps work. `--shared-x11` is an accepted alias. |
-| `-b`, `--bind SRC[:DEST[:OPTIONS]]` | Make any host folder available inside the container. Optional mount options like `ro` or `ro,nosuid`. Can be given more than once. |
-| `-w`, `--work-dir PATH` | Start in this folder instead of the user's home. |
-| `-e`, `--env VAR=VALUE` | Set an environment variable inside the container. Can be given more than once. |
-| `--get-chroot-cmd` | Print the exact chroot command that would run, without running it. |
+| Option                              | Description                                                                                                                                                                                                                                             |
+| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `-u`, `--user USER`                 | Log in as this user instead of root. Accepts a name, `name:group`, a numeric `uid`, or `uid:gid`.                                                                                                                                                       |
+| `--isolated`                        | Maximum isolation: nothing from the host is shared, and the container gets its own mount, PID, UTS, and IPC namespaces. All `--shared-*` and `--bind` flags are ignored in this mode. Needs kernel namespace support. `--isolate` is an accepted alias. |
+| `--minimal`                         | Bare minimum mode: only `/dev`, `/proc`, `/sys` (plus `/run`, `/dev/pts`, `/dev/shm` when present) and a stripped environment. Cannot be combined with `--isolated`.                                                                                    |
+| `--shared-home`                     | Make your host home folder available inside the container.                                                                                                                                                                                              |
+| `--shared-tmp`                      | Share the host `/tmp` with the container. By default the container gets its own empty `/tmp`.                                                                                                                                                           |
+| `--shared-display`                  | Share the host screen (X11/Wayland), audio, and D-Bus, so GUI apps work. `--shared-x11` is an accepted alias.                                                                                                                                           |
+| `-b`, `--bind SRC[:DEST[:OPTIONS]]` | Make any host folder available inside the container. Optional mount options like `ro` or `ro,nosuid`. Can be given more than once.                                                                                                                      |
+| `-w`, `--work-dir PATH`             | Start in this folder instead of the user's home.                                                                                                                                                                                                        |
+| `-e`, `--env VAR=VALUE`             | Set an environment variable inside the container. Can be given more than once.                                                                                                                                                                          |
+| `--get-chroot-cmd`                  | Print the exact chroot command that would run, without running it.                                                                                                                                                                                      |
 
 If you want namespace isolation but still keep all the normal shared folders, set `CD_USE_NS=1` instead of using `--isolated`.
 
@@ -182,10 +176,10 @@ Run the start command (Entrypoint/Cmd) defined by the container's image, like `d
 
 `run` accepts all `login` options above, plus:
 
-| Option | Description |
-|---|---|
-| `--entrypoint EXECUTABLE` | Run this program instead of the image's Entrypoint. Arguments after `--` become its arguments. |
-| `-d`, `--detach` | Run in the background and return immediately. Output goes to a log file (path is printed). Stop it with `chroot-distro kill CONTAINER`. |
+| Option                    | Description                                                                                                                             |
+| ------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `--entrypoint EXECUTABLE` | Run this program instead of the image's Entrypoint. Arguments after `--` become its arguments.                                          |
+| `-d`, `--detach`          | Run in the background and return immediately. Output goes to a log file (path is printed). Stop it with `chroot-distro kill CONTAINER`. |
 
 ```sh
 chroot-distro run nextcloud
@@ -201,10 +195,10 @@ Aliases: li, ls
 
 Show installed containers with their size, image source, and whether they are in use.
 
-| Option | Description |
-|---|---|
+| Option            | Description                                                                                          |
+| ----------------- | ---------------------------------------------------------------------------------------------------- |
 | `-v`, `--verbose` | Also show image details: source URL, image type, default user, working directory, and exposed ports. |
-| `-q`, `--quiet` | Print only container names, one per line. |
+| `-q`, `--quiet`   | Print only container names, one per line.                                                            |
 
 ### ps
 
@@ -214,8 +208,8 @@ chroot-distro ps [OPTIONS]
 
 Show active sessions: PID, container, type (`login` or `run`), user, uptime, and command. Detached sessions are marked with `*`.
 
-| Option | Description |
-|---|---|
+| Option          | Description                                       |
+| --------------- | ------------------------------------------------- |
 | `-q`, `--quiet` | Print only PIDs, one per line. Useful in scripts. |
 
 ### copy
@@ -229,13 +223,13 @@ Copy files between the host and a container, or between two containers. Containe
 
 Ownership (numeric uid/gid), permissions and timestamps are preserved; `--chown` sets the owner by name on the destination side instead. Symlinks are copied as symlinks; hardlinks become independent copies; device nodes, FIFOs and sockets are skipped with a warning.
 
-| Option | Description |
-|---|---|
-| `-r`, `--recursive` | Copy folders with everything inside them. |
-| `-m`, `--move` | Move instead of copy (source is deleted after). |
+| Option                 | Description                                                                                                                                                                                                                                                                                                                                         |
+| ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `-r`, `--recursive`    | Copy folders with everything inside them.                                                                                                                                                                                                                                                                                                           |
+| `-m`, `--move`         | Move instead of copy (source is deleted after).                                                                                                                                                                                                                                                                                                     |
 | `--chown USER[:GROUP]` | Give every transferred entry this owner instead of the source's ids. Names are looked up on the destination side — the container's `/etc/passwd` and `/etc/group` for a `name:path` destination, the host's otherwise — so `--chown arif` means whatever `arif` is over there. Numbers are used as they stand, and `:GROUP` changes only the group. |
-| `-v`, `--verbose` | Show each copied file. |
-| `-q`, `--quiet` | Only show errors. |
+| `-v`, `--verbose`      | Show each copied file.                                                                                                                                                                                                                                                                                                                              |
+| `-q`, `--quiet`        | Only show errors.                                                                                                                                                                                                                                                                                                                                   |
 
 ```sh
 chroot-distro copy ./file.txt ubuntu:/root/file.txt
@@ -252,13 +246,13 @@ Like `copy`, but only transfers files that changed. Always recursive. Files are 
 
 Ownership, permissions and timestamps are preserved for directories as well as files, and a change to any of them alone is applied without rewriting the file. With `--chown` the owner it names stands in for the source's, so a destination already carrying it is left alone.
 
-| Option | Description |
-|---|---|
-| `-c`, `--checksum` | Compare by checksum instead of modification time. Slower but more precise. |
-| `-d`, `--delete` | Also delete files at the destination that no longer exist at the source. |
+| Option                 | Description                                                                                                                                                                                                                                                                                                                                         |
+| ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `-c`, `--checksum`     | Compare by checksum instead of modification time. Slower but more precise.                                                                                                                                                                                                                                                                          |
+| `-d`, `--delete`       | Also delete files at the destination that no longer exist at the source.                                                                                                                                                                                                                                                                            |
 | `--chown USER[:GROUP]` | Give every transferred entry this owner instead of the source's ids. Names are looked up on the destination side — the container's `/etc/passwd` and `/etc/group` for a `name:path` destination, the host's otherwise — so `--chown arif` means whatever `arif` is over there. Numbers are used as they stand, and `:GROUP` changes only the group. |
-| `-v`, `--verbose` | Show each synced or deleted file. |
-| `-q`, `--quiet` | Only show errors. |
+| `-v`, `--verbose`      | Show each synced or deleted file.                                                                                                                                                                                                                                                                                                                   |
+| `-q`, `--quiet`        | Only show errors.                                                                                                                                                                                                                                                                                                                                   |
 
 ```sh
 chroot-distro sync ./dotfiles/ ubuntu:/home/user/ --chown user:user
@@ -272,8 +266,8 @@ chroot-distro rename OLDNAME NEWNAME
 
 Rename a container.
 
-| Option | Description |
-|---|---|
+| Option          | Description       |
+| --------------- | ----------------- |
 | `-q`, `--quiet` | Only show errors. |
 
 ### unmount
@@ -302,8 +296,8 @@ chroot-distro reset CONTAINER
 
 Wipe a container and reinstall it fresh from its original image. All data inside is lost. Only works for containers installed from Docker/OCI images.
 
-| Option | Description |
-|---|---|
+| Option          | Description       |
+| --------------- | ----------------- |
 | `-q`, `--quiet` | Only show errors. |
 
 ### backup
@@ -315,12 +309,12 @@ Aliases: bak, bkp
 
 Save a container as a TAR archive. Without `--output`, the archive goes to stdout so you can pipe it.
 
-| Option | Description |
-|---|---|
-| `-o`, `--output FILE` | Write to a file. Compression is picked from the extension (`.tar.gz`, `.tar.xz`, ...). Will not overwrite an existing file. |
-| `-c`, `--compress TYPE` | Force compression: `gzip`, `bzip2`, `xz`, or `none`. |
-| `-v`, `--verbose` | Show each archived file. |
-| `-q`, `--quiet` | Only show errors. |
+| Option                  | Description                                                                                                                 |
+| ----------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `-o`, `--output FILE`   | Write to a file. Compression is picked from the extension (`.tar.gz`, `.tar.xz`, ...). Will not overwrite an existing file. |
+| `-c`, `--compress TYPE` | Force compression: `gzip`, `bzip2`, `xz`, or `none`.                                                                        |
+| `-v`, `--verbose`       | Show each archived file.                                                                                                    |
+| `-q`, `--quiet`         | Only show errors.                                                                                                           |
 
 ```sh
 chroot-distro backup ubuntu -o ubuntu.tar.xz
@@ -335,10 +329,10 @@ chroot-distro restore [OPTIONS] [BACKUP_FILE]
 
 Bring back a container from a backup archive. Without a file, it reads from stdin. Compression is detected automatically.
 
-| Option | Description |
-|---|---|
+| Option            | Description               |
+| ----------------- | ------------------------- |
 | `-v`, `--verbose` | Show each extracted file. |
-| `-q`, `--quiet` | Only show errors. |
+| `-q`, `--quiet`   | Only show errors.         |
 
 ```sh
 chroot-distro restore ubuntu.tar.xz
@@ -362,10 +356,10 @@ Aliases: find, se
 
 Search Docker Hub. Shows image name, stars, official status, and a short description.
 
-| Option | Description |
-|---|---|
+| Option            | Description                                 |
+| ----------------- | ------------------------------------------- |
 | `-l`, `--limit N` | Show up to N results (default 25, max 100). |
-| `-q`, `--quiet` | Only show errors. |
+| `-q`, `--quiet`   | Only show errors.                           |
 
 ### setup
 
@@ -375,11 +369,11 @@ chroot-distro setup [OPTIONS]
 
 One-time passwordless setup on regular Linux. See [Passwordless setup](#passwordless-setup-linux-only). Not needed on Termux.
 
-| Option | Description |
-|---|---|
+| Option            | Description                                                                         |
+| ----------------- | ----------------------------------------------------------------------------------- |
 | `--user USERNAME` | Add this user to the `chroot-distro` group instead of the user who ran the command. |
-| `--uninstall` | Stop and remove the daemon service. The group is kept. |
-| `-q`, `--quiet` | Only show errors. |
+| `--uninstall`     | Stop and remove the daemon service. The group is kept.                              |
+| `-q`, `--quiet`   | Only show errors.                                                                   |
 
 ### info
 
@@ -411,24 +405,24 @@ chroot-distro build [OPTIONS] [PATH]
 
 Build an image from a Dockerfile, like `docker build` but without Docker. `PATH` is the folder with your Dockerfile (default: current folder). The result is stored locally, so `chroot-distro install <tag>` installs it offline.
 
-| Option | Description |
-|---|---|
-| `-f`, `--file PATH` | Use a Dockerfile at a different location. Pass `-` to read it from stdin. |
-| `-t`, `--tag REF` | Name the image (like `myapp:1.0`). Can be given more than once. |
-| `--build-arg K=V` | Set a build-time `ARG`. Can be given more than once. |
-| `-a`, `--architecture ARCH` | Build for a different CPU type. Default is your device's CPU. The one-platform spelling of `--platform`. |
-| `--platform LIST` | Build one image per platform, comma-separated (`linux/amd64,linux/arm64`). Can be given more than once. |
-| `--target STAGE` | Stop at a named stage of a multi-stage build. |
-| `-o`, `--output FILE` | Also save the image as an OCI tarball (`.oci.tar`, `.oci.tar.gz`, `.oci.tar.xz`). Can be given more than once. |
-| `--install-as NAME` | Install the built image as a container right after the build. |
-| `--secret id=NAME[,src=PATH]` | Give a secret to `RUN --mount=type=secret` steps. Without `src=`, the value comes from the environment variable `NAME`. Secrets never end up in the image. |
-| `--ssh ID[=SOCK]` | Give an SSH agent socket to `RUN --mount=type=ssh` steps. Default socket is `$SSH_AUTH_SOCK`. |
-| `--no-cache` | Rebuild every step from scratch instead of reusing cached steps. |
-| `--cache-from type=local,src=DIR` | Reuse the cached steps a `--cache-to` saved in `DIR`. Can be given more than once. |
-| `--cache-to type=local,dest=DIR` | Save this build's cached steps into `DIR`, for another machine or a later run. Can be given more than once. |
-| `--progress MODE` | Output style: `auto`, `plain`, `tty`, or `rawjson`. |
-| `-v`, `--verbose` | Show each instruction and full `RUN` output. |
-| `-q`, `--quiet` | Only show errors. |
+| Option                            | Description                                                                                                                                                |
+| --------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `-f`, `--file PATH`               | Use a Dockerfile at a different location. Pass `-` to read it from stdin.                                                                                  |
+| `-t`, `--tag REF`                 | Name the image (like `myapp:1.0`). Can be given more than once.                                                                                            |
+| `--build-arg K=V`                 | Set a build-time `ARG`. Can be given more than once.                                                                                                       |
+| `-a`, `--architecture ARCH`       | Build for a different CPU type. Default is your device's CPU. The one-platform spelling of `--platform`.                                                   |
+| `--platform LIST`                 | Build one image per platform, comma-separated (`linux/amd64,linux/arm64`). Can be given more than once.                                                    |
+| `--target STAGE`                  | Stop at a named stage of a multi-stage build.                                                                                                              |
+| `-o`, `--output FILE`             | Also save the image as an OCI tarball (`.oci.tar`, `.oci.tar.gz`, `.oci.tar.xz`). Can be given more than once.                                             |
+| `--install-as NAME`               | Install the built image as a container right after the build.                                                                                              |
+| `--secret id=NAME[,src=PATH]`     | Give a secret to `RUN --mount=type=secret` steps. Without `src=`, the value comes from the environment variable `NAME`. Secrets never end up in the image. |
+| `--ssh ID[=SOCK]`                 | Give an SSH agent socket to `RUN --mount=type=ssh` steps. Default socket is `$SSH_AUTH_SOCK`.                                                              |
+| `--no-cache`                      | Rebuild every step from scratch instead of reusing cached steps.                                                                                           |
+| `--cache-from type=local,src=DIR` | Reuse the cached steps a `--cache-to` saved in `DIR`. Can be given more than once.                                                                         |
+| `--cache-to type=local,dest=DIR`  | Save this build's cached steps into `DIR`, for another machine or a later run. Can be given more than once.                                                |
+| `--progress MODE`                 | Output style: `auto`, `plain`, `tty`, or `rawjson`.                                                                                                        |
+| `-v`, `--verbose`                 | Show each instruction and full `RUN` output.                                                                                                               |
+| `-q`, `--quiet`                   | Only show errors.                                                                                                                                          |
 
 `RUN` steps need root because they execute inside the half-built image.
 
@@ -436,28 +430,28 @@ Build an image from a Dockerfile, like `docker build` but without Docker. `PATH`
 
 Every instruction is supported: `ADD`, `ARG`, `CMD`, `COPY`, `ENTRYPOINT`, `ENV`, `EXPOSE`, `FROM`, `HEALTHCHECK`, `LABEL`, `MAINTAINER`, `ONBUILD`, `RUN`, `SHELL`, `STOPSIGNAL`, `USER`, `VOLUME`, `WORKDIR`. So are multi-stage builds with named stages, `ARG` and `ENV` expansion, the `# escape` and `# check` parser directives, and here-docs.
 
-| Feature | What it does here |
-|---|---|
-| `RUN --mount` | `type=bind`, `cache`, `tmpfs`, `secret` and `ssh`. Every field is variable-expanded, so `target=$DIR` works. |
-| `RUN --network` | `host` and `default`. The container always shares your network. |
-| `COPY` / `ADD` flags | `--from`, `--chown`, `--chmod`, and `--parents` on `COPY`. |
-| `ADD` sources | Files, folders, `http://` and `https://` URLs, and tar archives, which are unpacked as Docker unpacks them. |
-| Here-docs | On `RUN`, `COPY` and `ADD`. A `RUN` body starting with `#!` runs as a script under the interpreter it names; a `COPY <<EOF /etc/conf` writes the body to that file. |
-| `ONBUILD` | Recorded for whoever builds `FROM` your image. Triggers fire once, for the next build, and are not passed on again. |
-| `HEALTHCHECK` | Recorded in the image, options and all, for a runtime that runs checks. chroot-distro never runs one. |
-| `SHELL` | Sets what a shell-form `RUN`, `CMD` and `ENTRYPOINT` are wrapped in. JSON form only, like Docker. |
+| Feature              | What it does here                                                                                                                                                   |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `RUN --mount`        | `type=bind`, `cache`, `tmpfs`, `secret` and `ssh`. Every field is variable-expanded, so `target=$DIR` works.                                                        |
+| `RUN --network`      | `host` and `default`. The container always shares your network.                                                                                                     |
+| `COPY` / `ADD` flags | `--from`, `--chown`, `--chmod`, and `--parents` on `COPY`.                                                                                                          |
+| `ADD` sources        | Files, folders, `http://` and `https://` URLs, and tar archives, which are unpacked as Docker unpacks them.                                                         |
+| Here-docs            | On `RUN`, `COPY` and `ADD`. A `RUN` body starting with `#!` runs as a script under the interpreter it names; a `COPY <<EOF /etc/conf` writes the body to that file. |
+| `ONBUILD`            | Recorded for whoever builds `FROM` your image. Triggers fire once, for the next build, and are not passed on again.                                                 |
+| `HEALTHCHECK`        | Recorded in the image, options and all, for a runtime that runs checks. chroot-distro never runs one.                                                               |
+| `SHELL`              | Sets what a shell-form `RUN`, `CMD` and `ENTRYPOINT` are wrapped in. JSON form only, like Docker.                                                                   |
 
 These fail with a clear error rather than being ignored, because each one would otherwise build something other than what the Dockerfile says:
 
-| Not supported | Reason |
-|---|---|
-| `RUN --network=none` | Needs network namespaces, which chroot-distro does not provide. |
-| `RUN --security` | Comes after the isolation work. |
-| `COPY --link` | A BuildKit-only way of rebasing layers. |
-| `COPY --checksum`, `ADD --keep-git-dir` | Not implemented. |
-| `ADD` from a git repository | Not implemented. Clone it yourself and `COPY` the result. |
+| Not supported                                          | Reason                                                                               |
+| ------------------------------------------------------ | ------------------------------------------------------------------------------------ |
+| `RUN --network=none`                                   | Needs network namespaces, which chroot-distro does not provide.                      |
+| `RUN --security`                                       | Comes after the isolation work.                                                      |
+| `COPY --link`                                          | A BuildKit-only way of rebasing layers.                                              |
+| `COPY --checksum`, `ADD --keep-git-dir`                | Not implemented.                                                                     |
+| `ADD` from a git repository                            | Not implemented. Clone it yourself and `COPY` the result.                            |
 | `--cache-from` or `--cache-to` other than `type=local` | Only a folder is supported, see [Cache import and export](#cache-import-and-export). |
-| Provenance, SBOM, named and remote contexts | Not implemented. |
+| Provenance, SBOM, named and remote contexts            | Not implemented.                                                                     |
 
 A `# syntax=` line naming anything but `docker/dockerfile` asks for a frontend program that this cannot fetch or run. The build warns and reads the file as an ordinary Dockerfile.
 
@@ -465,7 +459,7 @@ A `.dockerignore` file in the context excludes files from `COPY` and `ADD`, with
 
 #### Platforms and output
 
-`FROM --platform` picks one stage's platform, so `FROM --platform=$BUILDPLATFORM` builds that stage for your own CPU while the image stays the platform the build targets. An emulator is then only needed for a stage that has a `RUN` *and* targets a foreign CPU. `TARGETPLATFORM`, `TARGETOS`, `TARGETARCH`, `TARGETVARIANT` and the matching `BUILD*` names are set automatically, and like Docker they live outside the stages: a bare `ARG TARGETARCH` inside a stage is what lets a `RUN` there read one.
+`FROM --platform` picks one stage's platform, so `FROM --platform=$BUILDPLATFORM` builds that stage for your own CPU while the image stays the platform the build targets. An emulator is then only needed for a stage that has a `RUN` _and_ targets a foreign CPU. `TARGETPLATFORM`, `TARGETOS`, `TARGETARCH`, `TARGETVARIANT` and the matching `BUILD*` names are set automatically, and like Docker they live outside the stages: a bare `ARG TARGETARCH` inside a stage is what lets a `RUN` there read one.
 
 `--platform linux/amd64,linux/arm64` builds one image per platform, one after another, in the order you asked. Two spellings of one platform (`linux/arm64` and `linux/aarch64`) are one image. `--architecture` names a single platform, so passing both is only allowed when they agree. Each platform is built completely on its own, and if one fails the build stops there and publishes nothing.
 
@@ -506,11 +500,11 @@ chroot-distro push [OPTIONS] IMAGE
 
 Upload an image you built with `build -t` to Docker Hub or another registry. Layers already on the registry are skipped.
 
-| Option | Description |
-|---|---|
-| `-a`, `--architecture ARCH` | Push the image built for that CPU type. Default is your device's CPU. |
-| `--allow-insecure` | Skip TLS certificate checks. Only for registries with self-signed certificates. |
-| `-q`, `--quiet` | Only show errors. |
+| Option                      | Description                                                                     |
+| --------------------------- | ------------------------------------------------------------------------------- |
+| `-a`, `--architecture ARCH` | Push the image built for that CPU type. Default is your device's CPU.           |
+| `--allow-insecure`          | Skip TLS certificate checks. Only for registries with self-signed certificates. |
+| `-q`, `--quiet`             | Only show errors.                                                               |
 
 Set `CD_DOCKER_AUTH=username:password` before pushing to a private repository. The
 password half can be a personal access token, which is what GHCR wants: a token with
@@ -525,11 +519,11 @@ Aliases: clear, cl
 
 Delete all cached downloads (image layers, manifests, build cache) and show how much space was freed. After this, installing an image needs the network again, and `diff` stops working for existing containers.
 
-| Option | Description |
-|---|---|
-| `--build-cache` | Drop the build cache index and the layer blobs only it was pinning. |
-| `-v`, `--verbose` | Show each deleted file. |
-| `-q`, `--quiet` | Only show errors. |
+| Option            | Description                                                         |
+| ----------------- | ------------------------------------------------------------------- |
+| `--build-cache`   | Drop the build cache index and the layer blobs only it was pinning. |
+| `-v`, `--verbose` | Show each deleted file.                                             |
+| `-q`, `--quiet`   | Only show errors.                                                   |
 
 Every `RUN` a build executes is recorded against the layer it produced, so a later build with the same parent, instruction and inputs reuses it. Nothing ever evicts those entries, and every edit to a Dockerfile strands the ones before it, so the build cache is the part that only grows.
 
@@ -551,73 +545,69 @@ Aliases: rm
 
 Delete a container and all its data. There is no confirmation and no undo. Active sessions are unmounted first.
 
-| Option | Description |
-|---|---|
+| Option            | Description             |
+| ----------------- | ----------------------- |
 | `-v`, `--verbose` | Show each deleted file. |
-| `-q`, `--quiet` | Only show errors. |
+| `-q`, `--quiet`   | Only show errors.       |
 
 ## Storage layout
 
 Everything lives in one data folder, plus a cache folder that is separate on Linux
 and nested inside the data folder on Termux:
 
-| Platform | Data folder | Cache folder |
-|---|---|---|
-| Termux | `$PREFIX/var/lib/chroot-distro/` | `$PREFIX/var/lib/chroot-distro/cache/` |
-| Regular Linux | `~/.local/share/chroot-distro/` | `~/.cache/chroot-distro/` |
+| Platform      | Data folder                      | Cache folder                           |
+| ------------- | -------------------------------- | -------------------------------------- |
+| Termux        | `$PREFIX/var/lib/chroot-distro/` | `$PREFIX/var/lib/chroot-distro/cache/` |
+| Regular Linux | `~/.local/share/chroot-distro/`  | `~/.cache/chroot-distro/`              |
 
 On regular Linux, commands run as root, so the folders are usually under `/root/` unless you set `XDG_DATA_HOME` / `XDG_CACHE_HOME`.
 
 Inside the data folder:
 
-| Path | Contents |
-|---|---|
-| `containers/<name>/rootfs/` | The container's filesystem |
-| `containers/<name>/manifest.json` | Image info used by `reset` and `run` |
-| `sessions/` | Active session records used by `ps` |
-| `locks/` | Lock files preventing conflicting commands |
+| Path                              | Contents                                   |
+| --------------------------------- | ------------------------------------------ |
+| `containers/<name>/rootfs/`       | The container's filesystem                 |
+| `containers/<name>/manifest.json` | Image info used by `reset` and `run`       |
+| `sessions/`                       | Active session records used by `ps`        |
+| `locks/`                          | Lock files preventing conflicting commands |
 
 Inside the cache folder:
 
-| Path | Contents |
-|---|---|
-| `oci_layers/` | Downloaded image layers |
+| Path             | Contents                   |
+| ---------------- | -------------------------- |
+| `oci_layers/`    | Downloaded image layers    |
 | `oci_manifests/` | Downloaded image manifests |
 
 ## Environment variables
 
 All of these are optional.
 
-| Variable | Effect |
-|---|---|
-| `CD_DOCKER_AUTH` | Registry login as `username:password`, where the password is a personal access token on most registries. The colon is required, so a bare token is refused. Used by `install`, `build`, and `push`. |
-| `CD_DOWNLOAD_WORKERS` | How many layers to download at once (default 4, max 10). |
-| `CD_DOWNLOAD_RATE_LIMIT` | Download speed limit, like `5M` for 5 MiB/s. Default is unlimited. |
-| `CD_DOWNLOAD_MAX_RETRIES` | Retries per failed download (default 3, max 20). |
-| `CD_USER` | Default user for `login`/`run` when `--user` is not given. |
-| `CD_WORKDIR` | Default working directory for `login`/`run` when `--work-dir` is not given. |
-| `CD_ENV` | Extra guest environment variables, one `VAR=VALUE` per line. `--env` wins on conflict. |
-| `CD_ENTRYPOINT` | Default entrypoint for `run` when `--entrypoint` is not given. |
-| `CD_USE_NS` | Set to `1` to give every `login`/`run` its own namespaces while keeping all normal shared folders. |
-| `CD_USE_ISOLATION` | Set to `1` to force maximum isolation, same as `--isolated`. Also the only way to isolate `build` `RUN` steps. |
-| `CD_FORCE_NO_COLORS` | Disable colored output. |
-| `TERMUX__PREFIX` | Override the Termux prefix path. |
-| `TERMUX__HOME` | Override the Termux home path used by `--shared-home`. |
-| `TERMUX_APP__PACKAGE_NAME` | Termux app package name (default `com.termux`). |
-| `XDG_DATA_HOME`, `XDG_CACHE_HOME` | Move the data and cache folders on regular Linux. |
+| Variable                          | Effect                                                                                                                                                                                              |
+| --------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CD_DOCKER_AUTH`                  | Registry login as `username:password`, where the password is a personal access token on most registries. The colon is required, so a bare token is refused. Used by `install`, `build`, and `push`. |
+| `CD_DOWNLOAD_WORKERS`             | How many layers to download at once (default 4, max 10).                                                                                                                                            |
+| `CD_DOWNLOAD_RATE_LIMIT`          | Download speed limit, like `5M` for 5 MiB/s. Default is unlimited.                                                                                                                                  |
+| `CD_DOWNLOAD_MAX_RETRIES`         | Retries per failed download (default 3, max 20).                                                                                                                                                    |
+| `CD_USER`                         | Default user for `login`/`run` when `--user` is not given.                                                                                                                                          |
+| `CD_WORKDIR`                      | Default working directory for `login`/`run` when `--work-dir` is not given.                                                                                                                         |
+| `CD_ENV`                          | Extra guest environment variables, one `VAR=VALUE` per line. `--env` wins on conflict.                                                                                                              |
+| `CD_ENTRYPOINT`                   | Default entrypoint for `run` when `--entrypoint` is not given.                                                                                                                                      |
+| `CD_USE_NS`                       | Set to `1` to give every `login`/`run` its own namespaces while keeping all normal shared folders.                                                                                                  |
+| `CD_USE_ISOLATION`                | Set to `1` to force maximum isolation, same as `--isolated`. Also the only way to isolate `build` `RUN` steps.                                                                                      |
+| `CD_FORCE_NO_COLORS`              | Disable colored output.                                                                                                                                                                             |
+| `TERMUX__PREFIX`                  | Override the Termux prefix path.                                                                                                                                                                    |
+| `TERMUX__HOME`                    | Override the Termux home path used by `--shared-home`.                                                                                                                                              |
+| `TERMUX_APP__PACKAGE_NAME`        | Termux app package name (default `com.termux`).                                                                                                                                                     |
+| `XDG_DATA_HOME`, `XDG_CACHE_HOME` | Move the data and cache folders on regular Linux.                                                                                                                                                   |
 
 ## Limitations
 
-- **Root is required.** The kernel's `chroot` and `mount` features need it. There is no rootless mode, and no support for non-rooted Android.
-- **Network is shared with the host by design.** Containers use your Wi-Fi, mobile data, and VPN directly. There is no network isolation, even with `--isolated`.
-- **GPU is shared by design.** GPU access is automatic whenever supported hardware is detected.
 - **No full init systems.** `systemd` and similar will not work inside containers. Individual long-running programs are fine.
-- **Isolation is partial.** `--isolated` covers mount, PID, UTS, and IPC namespaces. It is not a full container runtime like Docker or Podman.
-- **Builds are not full BuildKit.** `RUN` steps execute under chroot, and a few BuildKit features are rejected with an error.
+- **Isolation is partial.** `--isolated` covers mount, PID, UTS, and IPC namespaces (no network isolation). It is not a full container runtime like Docker or Podman.
+- **Builds are not full BuildKit.** `RUN` steps execute under chroot, few BuildKit features are not supported so they are rejected with an error.
 - **`push` is single-architecture.** `build --platform` produces several platforms at once, but each is pushed on its own with `push -a`.
 - **Foreign architectures need the kernel's help.** Emulation goes through `binfmt_misc`, so a kernel built without `CONFIG_BINFMT_MISC` cannot run an image for another CPU. `chroot-distro info` reports it.
 - **Backups capture files only.** Running programs are not saved by `backup`/`restore`.
-- **Scratch and distroless images have no shell.** They ship no base distribution, so `login` refuses them and `run` is how they start: it executes the image's own Entrypoint/Cmd.
 - **Registry login is env-var only.** Set `CD_DOCKER_AUTH`. Docker's `config.json` credential helpers are not read.
 
 ## Donate
