@@ -454,6 +454,10 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
             ("-h, --help", "Show this help."),
             ("-q, --quiet", "Print only container names, one per line."),
         ],
+        "examples": [
+            f"{PROGRAM_NAME} list",
+            f"{PROGRAM_NAME} list -q",
+        ],
     },
     "login": {
         "usage": "login [OPTIONS] CONTAINER [-- COMMAND]",
@@ -514,6 +518,13 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
             ("-w, --work-dir [PATH]", "Set the initial working directory."),
             ("-e, --env VAR=VALUE", "Set an environment variable. Can be specified multiple times."),
             ("--get-chroot-cmd", "Print the fully assembled chroot command line and exit without running it."),
+        ],
+        "examples": [
+            f"{PROGRAM_NAME} login ubuntu",
+            f"{PROGRAM_NAME} login -u user ubuntu",
+            f"{PROGRAM_NAME} login ubuntu -- ls -la /",
+            f"{PROGRAM_NAME} login --shared-display ubuntu",
+            f"{PROGRAM_NAME} login -b ~/project:/mnt/project ubuntu",
         ],
         "footer": [
             *(
@@ -610,6 +621,10 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
             ("-v, --verbose", "Log each deleted file."),
             ("-q, --quiet", "Suppress non-error output. Mutually exclusive with --verbose."),
         ],
+        "examples": [
+            f"{PROGRAM_NAME} remove ubuntu",
+            f"{PROGRAM_NAME} remove ubuntu debian",
+        ],
     },
     "unmount": {
         "usage": "unmount CONTAINER",
@@ -629,6 +644,9 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
             ("-h, --help", "Show this help."),
             ("-q, --quiet", "Suppress non-error output."),
         ],
+        "examples": [
+            f"{PROGRAM_NAME} rename ubuntu ubuntu-old",
+        ],
     },
     "reset": {
         "usage": "reset CONTAINER",
@@ -643,6 +661,9 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
             ("-h, --help", "Show this help."),
             ("-q, --quiet", "Suppress non-error output."),
         ],
+        "examples": [
+            f"{PROGRAM_NAME} reset ubuntu",
+        ],
     },
     "restore": {
         "usage": "restore [OPTIONS] [BACKUP_FILE]",
@@ -654,6 +675,12 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
             ("-h, --help", "Show this help."),
             ("-v, --verbose", "Log each extracted file."),
             ("-q, --quiet", "Suppress non-error output. Mutually exclusive with --verbose."),
+        ],
+        "examples": [
+            f"{PROGRAM_NAME} restore ubuntu.tar.xz",
+            f"{PROGRAM_NAME} restore ~/backups/ubuntu.tar.xz",
+            f"{PROGRAM_NAME} restore /path/to/ubuntu.tar.xz",
+            f"gpg -d ubuntu.tar.gpg | {PROGRAM_NAME} restore",
         ],
         "footer": [
             {
