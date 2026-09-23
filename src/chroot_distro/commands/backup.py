@@ -4,14 +4,16 @@
 
 The archive holds `<name>/manifest.json` and `<name>/rootfs/...`, so the container's
 name and its image identity travel with the files and `restore` needs to be told
-nothing. Ownership is flattened to 0:0 in the tar headers, since the uids in a rootfs
-mean nothing on another machine, and device nodes, fifos and sockets are dropped
-because a session mounts and creates /dev itself.
+nothing. Numeric ownership is preserved as recorded, since an OCI image with a
+non-root `USER` (or files owned by a service account) is broken by flattening it;
+only the owner/group *names* are dropped, so extraction is driven by the numeric ids
+on any host and never by a name the target `/etc/passwd` may lack. Device nodes, fifos
+and sockets are dropped because a session mounts and creates /dev itself.
 
 Only a shared `ContainerLock` is taken, but a container with a live session or an
 active mount is refused: a rootfs still being written to would be archived
-half-consistent. `_fix_permissions` then widens owner read, plus execute on
-directories, across the live rootfs, so no entry can refuse the walk that follows.
+half-consistent. Backup runs as root, which reads and traverses regardless of mode,
+so no permission widening of the live rootfs is needed before the walk.
 
 Compression comes from the output extension unless `--compression` names one, and
 `.tar.lz`/`.tar.lz4` are refused rather than quietly written as plain tar. With no
@@ -125,10 +127,13 @@ def _add_path(
     arcname: str,
     on_read=None,
 ) -> bool:
-    """Add *src* to *tf* as *arcname*, stripping ownership info.
+    """Add *src* to *tf* as *arcname*, stripping owner/group names.
 
-    Returns False when the entry could not be archived, so the caller can
-    turn a dropped file into a failed backup instead of a silent gap.
+    Numeric uid/gid are kept as recorded so a non-root image stays intact;
+    only the name fields are cleared, since they may not resolve on the
+    restoring host. Returns False when the entry could not be archived, so
+    the caller can turn a dropped file into a failed backup instead of a
+    silent gap.
     """
     try:
         st = os.lstat(src)
@@ -144,8 +149,6 @@ def _add_path(
     except OSError as exc:
         warn(f"Failed to get tar info for {src}: {exc}")
         return False
-    info.uid = 0
-    info.gid = 0
     info.uname = ""
     info.gname = ""
     if stat.S_ISREG(m):
@@ -158,30 +161,6 @@ def _add_path(
     else:
         tf.addfile(info)
     return True
-
-
-def _fix_permissions(rootfs_dir: str) -> None:
-    """Ensure all dirs and files in *rootfs_dir* are readable by owner."""
-    for dirpath, _dirs, files in os.walk(rootfs_dir):
-        try:
-            os.chmod(
-                dirpath,
-                os.stat(dirpath).st_mode | stat.S_IRUSR | stat.S_IXUSR,
-            )
-        except OSError as exc:
-            warn(f"Failed to set permissions on directory {dirpath}: {exc}")
-        for fname in files:
-            fpath = os.path.join(dirpath, fname)
-            try:
-                fst = os.lstat(fpath)
-                if stat.S_ISREG(fst.st_mode):
-                    mode = fst.st_mode
-                    if mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH):
-                        os.chmod(fpath, mode | stat.S_IRUSR | stat.S_IXUSR)
-                    else:
-                        os.chmod(fpath, mode | stat.S_IRUSR)
-            except OSError as exc:
-                warn(f"Failed to check or set permission on {fpath}: {exc}")
 
 
 def command_backup(args) -> None:
@@ -260,9 +239,6 @@ def _run_backup(
         log_info(f"Will write backup data to '{output_path}'.")
     else:
         log_info("Will write backup data to stdout.")
-
-    log_info("Fixing file permissions in rootfs...")
-    _fix_permissions(rootfs_dir)
 
     arc_prefix = container_name
     entries = []

@@ -90,10 +90,11 @@ def test_backup_and_restore_end_to_end(
             assert f"{container_name}/rootfs/usr/bin/hello" in names
             assert f"{container_name}/rootfs/bin_link" in names
 
-            # Check file ownership in tar is zeroed
+            # Numeric ownership is preserved (a non-root image must survive a
+            # round-trip); only the owner/group names are dropped.
             info = tf.getmember(f"{container_name}/rootfs/usr/bin/hello")
-            assert info.uid == 0
-            assert info.gid == 0
+            assert info.uid == os.getuid()
+            assert info.gid == os.getgid()
             assert info.uname == ""
             assert info.gname == ""
 
