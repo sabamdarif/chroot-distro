@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-only
 # Copyright (C) 2025-2026 Md Arif
-"""Extract a local archive into a rootfs: a plain tarball or an OCI image layout.
+"""Extract a local archive into a rootfs: a plain tarball, an OCI image layout, or a
+chroot-distro backup.
 
 The format is decided by streaming the first 500 members and looking for `oci-layout`,
 so a plain tarball is never indexed in full. A plain tarball's leading components are
@@ -8,6 +9,13 @@ stripped by a vote (`detect_strip_count` scores each depth by how many entries p
 known rootfs directory first), because tarballs are published both with and without a
 wrapper directory. An OCI archive is walked index to manifest to config, its layers
 cached under their digests and then applied in order.
+
+A chroot-distro backup is a plain tar whose members are `<name>/manifest.json` (always
+the first entry) and `<name>/rootfs/...`. It is recognised by that shape and its
+`manifest.json` is read back and returned as metadata, so `install` can write it out
+and `run` works; the rootfs is unpacked by the plain-tarball path with a fixed strip of
+2 (dropping `<name>/rootfs`, and the shorter manifest member falls outside that tree),
+since the voted strip ties toward 0 for a container name that is itself a rootfs dir.
 
 Every member read out of the outer archive must be a *regular* file, and that check is
 the point of this module: `tarfile.extractfile` follows hardlinks and symlinks within
@@ -36,7 +44,7 @@ from chroot_distro.helpers.docker import (
     validate_digest,
 )
 from chroot_distro.helpers.tar_extract import extract_tar_to_rootfs
-from chroot_distro.message import log_info
+from chroot_distro.message import log_info, warn
 from chroot_distro.progress import clear_bar, fmt_size, progress_active
 
 # Top-level directory names that signal a rootfs filesystem root.
@@ -219,6 +227,55 @@ def _extract_oci(tf, member_map, rootfs_fd, dist_arch) -> dict[str, object]:
     }
 
 
+def _detect_backup_manifest(member_names: list) -> str | None:
+    """Return the `<name>/manifest.json` member name if these look like a backup.
+
+    A chroot-distro backup nests everything under one top-level directory holding
+    `manifest.json` and a `rootfs/` tree. The manifest is always the first member,
+    so it is within the probe window even for a large rootfs.
+    """
+    manifest_name: str | None = None
+    top = ""
+    for name in member_names:
+        parts = str(name).lstrip("/").split("/")
+        if len(parts) == 2 and parts[1] == "manifest.json":
+            manifest_name, top = str(name), parts[0]
+            break
+    if manifest_name is None:
+        return None
+    rootfs_prefix = f"{top}/rootfs"
+    for name in member_names:
+        clean = str(name).lstrip("/").rstrip("/")
+        if clean == rootfs_prefix or clean.startswith(rootfs_prefix + "/"):
+            return manifest_name
+    return None
+
+
+def _read_backup_manifest(archive_path: str, manifest_name: str) -> dict | None:
+    """Read and parse a backup's `manifest.json` member, or None if unusable."""
+    with tarfile.open(archive_path, "r|*") as tf:
+        for m in tf:
+            if m.name.lstrip("/") != manifest_name.lstrip("/"):
+                continue
+            if not m.isreg():
+                # extractfile() follows hardlinks/symlinks within the archive; a
+                # non-regular manifest member could redirect this read elsewhere.
+                warn(f"backup manifest '{manifest_name}' is not a regular file; ignoring it.")
+                return None
+            fobj = tf.extractfile(m)
+            if fobj is None:
+                return None
+            try:
+                data = json.loads(fobj.read())
+            except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
+                warn(f"backup manifest '{manifest_name}' is not valid JSON ({exc}); ignoring it.")
+                return None
+            finally:
+                fobj.close()
+            return data if isinstance(data, dict) else None
+    return None
+
+
 def install_from_local_file(archive_path: str, rootfs_fd: int, dist_arch: str) -> dict | None:
     """Open *archive_path*, detect its format, and extract into *rootfs_fd*.
 
@@ -247,6 +304,11 @@ def install_from_local_file(archive_path: str, rootfs_fd: int, dist_arch: str) -
             member_map = {m.name: m for m in raw_members}
             return _extract_oci(tf, member_map, rootfs_fd, dist_arch)
 
-    strip = detect_strip_count(probe_names)
+    backup_manifest = _detect_backup_manifest(probe_names)
+    metadata = _read_backup_manifest(archive_path, backup_manifest) if backup_manifest else None
+
+    # A detected backup's layout is fixed (<name>/rootfs/...), so strip is 2 here
+    # rather than voted: detect_strip_count ties toward 0 for a name like "usr".
+    strip = 2 if backup_manifest else detect_strip_count(probe_names)
     extract_plain_tar(archive_path, strip, rootfs_fd)
-    return None
+    return metadata

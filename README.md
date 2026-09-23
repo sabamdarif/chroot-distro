@@ -321,6 +321,8 @@ chroot-distro backup ubuntu -o ubuntu.tar.xz
 chroot-distro backup ubuntu | gpg -c > ubuntu.tar.gpg
 ```
 
+> A backup archive also works as an [`install`](#install) source, which lets you bring it in under a new name with `--name`. `restore` reuses the name baked into the archive.
+
 ### restore
 
 ```
