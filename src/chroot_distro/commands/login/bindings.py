@@ -240,7 +240,7 @@ def _max_isolation_dev_specials() -> list[SpecialMount]:
             fstype="tmpfs",
             source="tmpfs",
             target="/dev",
-            options="mode=0755,size=64M",
+            options="mode=0755,size=64M,nosuid",
             mkdir=True,
             optional=False,
         )
@@ -279,10 +279,11 @@ def get_special_mounts(
     if max_isolation:
         specials.extend(_max_isolation_dev_specials())
 
-    # Fresh procfs in every mode (the host /proc is never bind-mounted);
-    # hardened with hidepid=2 under max isolation. Without a PID namespace it
-    # still shows the host's global PIDs.
-    proc_options = "hidepid=2,nosuid,nodev,noexec" if max_isolation else ""
+    # Fresh procfs in every mode (the host /proc is never bind-mounted).
+    # nosuid,nodev,noexec are plain VFS flags applied in every mode; hidepid=2
+    # is gated on max isolation because it only means anything with a PID
+    # namespace. Without one the procfs still shows the host's global PIDs.
+    proc_options = "hidepid=2,nosuid,nodev,noexec" if max_isolation else "nosuid,nodev,noexec"
     specials.append(
         SpecialMount(
             fstype="proc",
@@ -320,7 +321,7 @@ def get_special_mounts(
             fstype="devpts",
             source="devpts",
             target="/dev/pts",
-            options="gid=5,mode=620,ptmxmode=0666,newinstance",
+            options="gid=5,mode=620,ptmxmode=0666,newinstance,nosuid,noexec",
             mkdir=True,
             check="devpts",
             optional=False,  # PTYs are required for a functional chroot login
@@ -343,7 +344,7 @@ def get_special_mounts(
                 fstype="tmpfs",
                 source="tmpfs",
                 target="/dev/shm",
-                options="size=256M,mode=1777",
+                options="size=256M,mode=1777,nosuid,nodev,noexec",
                 mkdir=True,
                 optional=True,
             )

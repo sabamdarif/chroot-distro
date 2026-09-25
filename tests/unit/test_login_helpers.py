@@ -1113,6 +1113,49 @@ def test_special_mounts_max_isolation_proc_hidepid():
     assert "hidepid=2" in proc.options
 
 
+def test_special_mounts_generic_hardening_in_default_mode():
+    """nosuid,nodev,noexec are plain VFS flags applied in every mode, not only
+    under --isolated: /proc and devpts carry them even in the default login.
+
+    /dev/shm is only synthesised when the host lacks one, so os.path.exists is
+    told /dev/shm is missing to reach that branch here.
+    """
+    from chroot_distro.commands.login.bindings import get_special_mounts
+
+    with (
+        patch("os.path.exists", side_effect=lambda p: p != "/dev/shm"),
+        patch("chroot_distro.commands.login.bindings.IS_TERMUX", False),
+        patch("chroot_distro.commands.login.bindings._fs_supported", return_value=True),
+    ):
+        specials = get_special_mounts("/fake/rootfs", isolated=False, max_isolation=False)
+
+    proc = [s for s in specials if s.fstype == "proc"][0]
+    for flag in ("nosuid", "nodev", "noexec"):
+        assert flag in proc.options.split(",")
+
+    devpts = [s for s in specials if s.fstype == "devpts"][0]
+    assert "nosuid" in devpts.options.split(",")
+    assert "noexec" in devpts.options.split(",")
+
+    shm = [s for s in specials if s.target == "/dev/shm"][0]
+    for flag in ("nosuid", "nodev", "noexec"):
+        assert flag in shm.options.split(",")
+
+
+def test_special_mounts_max_isolation_dev_tmpfs_nosuid():
+    """The fresh /dev tmpfs under max isolation is mounted nosuid."""
+    from chroot_distro.commands.login.bindings import get_special_mounts
+
+    with (
+        patch("os.path.exists", return_value=True),
+        patch("chroot_distro.commands.login.bindings.IS_TERMUX", False),
+        patch("chroot_distro.commands.login.bindings._fs_supported", return_value=True),
+    ):
+        specials = get_special_mounts("/fake/rootfs", isolated=True, max_isolation=True)
+    dev = [s for s in specials if s.fstype == "tmpfs" and s.target == "/dev"][0]
+    assert "nosuid" in dev.options.split(",")
+
+
 def test_max_isolation_dev_nodes_table():
     """The minimal device-node table must include the core character devices."""
     from chroot_distro.commands.login.bindings import MAX_ISOLATION_DEV_NODES
