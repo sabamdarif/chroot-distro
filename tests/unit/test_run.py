@@ -8,7 +8,7 @@ import chroot_distro.commands.run as run_mod
 from chroot_distro.commands.run import _normalize_argv, _string_field, command_run
 
 # ---------------------------------------------------------------------------
-# _normalize_argv — shell-form guard, and the shapes a manifest may not hold
+# _normalize_argv: shell-form guard, and the shapes a manifest may not hold
 # ---------------------------------------------------------------------------
 
 
@@ -52,7 +52,7 @@ def test_string_field_reads_what_is_set_and_refuses_the_rest(capsys):
 
 
 # ---------------------------------------------------------------------------
-# command_run — argv resolution + override precedence
+# command_run: argv resolution + override precedence
 #
 # command_run hands off to command_login; we patch that out and capture the
 # resolved args so the pure resolution logic can be asserted in isolation.

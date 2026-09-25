@@ -82,7 +82,7 @@ def test_register_then_listed_then_pruned_on_close():
         assert "start_time" in rec
         assert os.path.exists(_session_path(os.getpid()))
     finally:
-        # Closing the handle releases the inherited lock — the session is now
+        # Closing the handle releases the inherited lock. The session is now
         # "dead" and must be pruned on the next listing.
         handle.close()
 

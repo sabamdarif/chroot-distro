@@ -105,7 +105,7 @@ def test_remove_with_active_sessions_sigterm(
     mock_rootfs,
     *_mocks,
 ):
-    """Processes exit after SIGTERM — no SIGKILL needed."""
+    """Processes exit after SIGTERM, no SIGKILL needed."""
     args = MagicMock()
     args.container_name = "alpine"
     args.verbose = False

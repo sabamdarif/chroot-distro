@@ -197,7 +197,7 @@ def test_move_replaces_a_destination_symlink_instead_of_writing_through_it(rootf
 def _refuse_rename_across_devices(monkeypatch):
     """Make rename(2) answer EXDEV, the one errno that has a fallback path.
 
-    Termux's common move — a rootfs onto /sdcard — is always cross-device, and a
+    Termux's common move, a rootfs onto /sdcard, is always cross-device, and a
     unit test cannot mount a second filesystem.
     """
 

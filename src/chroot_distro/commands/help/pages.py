@@ -29,18 +29,21 @@ from chroot_distro.constants import (
 _ISOLATED_OPT = (
     "--isolated",
     "Maximum isolation: bind NOTHING from the host plus Linux namespace "
-    "isolation (mount, PID, UTS, IPC via unshare/nsenter). The host /dev, "
-    "/sys and /proc are NOT bound; the container gets a fresh procfs, a "
-    "read-only sysfs and a fresh tmpfs /dev (null, zero, tty, random, "
-    "urandom, full) instead. The namespace holder (PID 1) is itself chrooted "
-    "into the rootfs and the procfs is mounted with hidepid=2, so there is no "
-    "host path to escape through (e.g. 'chroot /proc/1/root' no longer reaches "
-    "the host). Requires kernel "
-    "namespace support; aborts if unavailable. Sharing flags (--shared-home, "
-    "--shared-tmp, --shared-display, --bind) are ignored and a warning is "
-    "printed, since they would expose a host path. Use CD_USE_NS=1 instead if "
-    "you want namespace isolation but keep the default mounts. Not a full "
-    "container runtime (no network namespace).",
+    "isolation (mount, PID, UTS, IPC via unshare/nsenter). /sys is the one "
+    "exception, and only for a session with a user namespace: the kernel "
+    "refuses that session a fresh sysfs, so the host tree is bound there "
+    "instead. The host /dev and /proc are never bound; the container gets a "
+    "fresh procfs and a fresh tmpfs /dev (null, zero, tty, random, urandom, "
+    "full) instead. The namespace holder (PID 1) is itself chrooted into the "
+    "rootfs and the procfs is mounted with hidepid=2, so there is no host path "
+    "to escape through (e.g. 'chroot /proc/1/root' no longer reaches the "
+    "host). Needs the mount namespace; where the kernel lacks it the login "
+    "degrades to chroot-only isolation with a warning, which keeps the core "
+    "/dev, /sys and /dev/pts binds and loses that protection. Sharing flags "
+    "(--shared-home, --shared-tmp, --shared-display, --bind) are ignored and a "
+    "warning is printed, since they would expose a host path. "
+    "Use CD_USE_NS=1 instead if you want namespace isolation but keep the "
+    "default mounts. Not a full container runtime (no network namespace).",
 )
 _MINIMAL_OPT = (
     "--minimal",
@@ -485,25 +488,19 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
             _MINIMAL_OPT,
             (
                 "--shared-home",
-                "Bind host home directory into the container."
-                + (" Takes priority over Isolated Mode. Already included in default mode." if IS_TERMUX else ""),
+                "Bind host home directory into the container. Ignored under --isolated.",
             ),
             (
                 "--shared-tmp",
-                "Bind host tmp directory to /tmp."
-                + (
-                    " Takes priority over Isolated Mode. Already included in default mode."
-                    if IS_TERMUX
-                    else " On Linux, included by default unless --isolated."
-                ),
+                "Bind host tmp directory to /tmp. Ignored under --isolated.",
             ),
             (
                 "--shared-display",
-                "Share X11, Wayland, sound (PulseAudio/PipeWire), and D-Bus with the container."
+                "Share X11, Wayland, sound (PulseAudio/PipeWire), and D-Bus with the container. Ignored under --isolated."
                 + (
-                    " Takes priority over Isolated Mode. Already included in default mode. --shared-x11 accepted as alias."
+                    " --shared-x11 accepted as alias."
                     if IS_TERMUX
-                    else " On Linux, opt-in only. Forwards DISPLAY, XAUTHORITY, XDG_RUNTIME_DIR, WAYLAND_DISPLAY, PULSE_SERVER, and DBUS_SESSION_BUS_ADDRESS. --shared-x11 accepted as a backward-compatible alias."
+                    else " Forwards DISPLAY, XAUTHORITY, XDG_RUNTIME_DIR, WAYLAND_DISPLAY, PULSE_SERVER, and DBUS_SESSION_BUS_ADDRESS. --shared-x11 accepted as a backward-compatible alias."
                 ),
             ),
             (
@@ -512,8 +509,7 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
                 "is a comma-separated list of mount options applied via "
                 "remount (e.g. 'ro', 'ro,nosuid'); SELinux relabel flags z/Z "
                 "are accepted for docker-compat but ignored in a plain "
-                "chroot. Can be specified multiple times."
-                + (" Takes priority over Isolated Mode." if IS_TERMUX else " Honored in all modes."),
+                "chroot. Can be specified multiple times. Ignored under --isolated.",
             ),
             ("-w, --work-dir [PATH]", "Set the initial working directory."),
             ("-e, --env VAR=VALUE", "Set an environment variable. Can be specified multiple times."),
@@ -724,25 +720,19 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
             _MINIMAL_OPT,
             (
                 "--shared-home",
-                "Bind host home directory into the container."
-                + (" Takes priority over Isolated Mode. Already included in default mode." if IS_TERMUX else ""),
+                "Bind host home directory into the container. Ignored under --isolated.",
             ),
             (
                 "--shared-tmp",
-                "Bind host tmp directory to /tmp."
-                + (
-                    " Takes priority over Isolated Mode. Already included in default mode."
-                    if IS_TERMUX
-                    else " On Linux, included by default unless --isolated."
-                ),
+                "Bind host tmp directory to /tmp. Ignored under --isolated.",
             ),
             (
                 "--shared-display",
-                "Share X11, Wayland, sound (PulseAudio/PipeWire), and D-Bus with the container."
+                "Share X11, Wayland, sound (PulseAudio/PipeWire), and D-Bus with the container. Ignored under --isolated."
                 + (
-                    " Takes priority over Isolated Mode. Already included in default mode. --shared-x11 accepted as alias."
+                    " --shared-x11 accepted as alias."
                     if IS_TERMUX
-                    else " On Linux, opt-in only. Forwards DISPLAY, XAUTHORITY, XDG_RUNTIME_DIR, WAYLAND_DISPLAY, PULSE_SERVER, and DBUS_SESSION_BUS_ADDRESS. --shared-x11 accepted as a backward-compatible alias."
+                    else " Forwards DISPLAY, XAUTHORITY, XDG_RUNTIME_DIR, WAYLAND_DISPLAY, PULSE_SERVER, and DBUS_SESSION_BUS_ADDRESS. --shared-x11 accepted as a backward-compatible alias."
                 ),
             ),
             (
@@ -751,8 +741,7 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
                 "is a comma-separated list of mount options applied via "
                 "remount (e.g. 'ro', 'ro,nosuid'); SELinux relabel flags z/Z "
                 "are accepted for docker-compat but ignored in a plain "
-                "chroot. Can be specified multiple times."
-                + (" Takes priority over Isolated Mode." if IS_TERMUX else " Honored in all modes."),
+                "chroot. Can be specified multiple times. Ignored under --isolated.",
             ),
             ("-w, --work-dir [PATH]", "Set the initial working directory."),
             ("-e, --env VAR=VALUE", "Set an environment variable. Can be specified multiple times."),

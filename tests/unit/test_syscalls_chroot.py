@@ -102,7 +102,7 @@ def test_try_exec_retries_via_interpreter(tmp_path):
         calls.append((path, argv))
         if len(calls) == 1:
             raise OSError(errno.ENOENT, "not found")
-        # second call (via interpreter) "succeeds" — just return
+        # second call (via interpreter) "succeeds", just return
 
     with (
         patch("os.execvpe", side_effect=fake_execvpe),

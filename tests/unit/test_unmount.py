@@ -15,7 +15,7 @@ def test_parser_unmount():
     assert args.command == "unmount"
     assert args.container_name == "alpine"
 
-    # Test basic parsing of 'umount' alias — argparse stores the actual
+    # Test basic parsing of 'umount' alias. Argparse stores the actual
     # subcommand string used, not the canonical name.
     args = parser.parse_args(["umount", "debian"])
     assert args.command == "umount"
@@ -125,7 +125,7 @@ def test_unmount_remaining_mounts_exits_1(mock_warn, mock_log, mock_mount, mock_
 def test_unmount_with_active_sessions_sigterm(
     mock_time, mock_kill, mock_log, mock_mount, mock_session, mock_lock, mock_isdir, mock_rootfs, *_mocks
 ):
-    """Processes exit after SIGTERM — no SIGKILL needed."""
+    """Processes exit after SIGTERM, no SIGKILL needed."""
     args = MagicMock()
     args.container_name = "alpine"
 

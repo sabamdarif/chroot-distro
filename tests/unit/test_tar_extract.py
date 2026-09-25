@@ -28,7 +28,7 @@ def _rootfs_fd(rootfs_dir):
 
 
 def _tar_with(tar_path, members):
-    """Write *members* — (TarInfo, bytes|None) pairs — into a plain tar."""
+    """Write *members*, which are (TarInfo, bytes|None) pairs, into a plain tar."""
     with tarfile.open(tar_path, "w") as tar:
         for member, payload in members:
             if payload is None:
@@ -158,7 +158,7 @@ def test_parent_repointed_after_the_resolve_is_refused(tmp_path):
     """The write follows the descriptor the parent was walked to, not its name.
 
     The resolve says `etc` and the directory is swapped for a symlink out of
-    the tree before the member is written — exactly what a process sharing the
+    the tree before the member is written, exactly what a process sharing the
     prefix can do on Termux. Re-walking the answer with O_NOFOLLOW refuses it,
     where os.makedirs()/open(dest) followed the link and wrote outside.
     """

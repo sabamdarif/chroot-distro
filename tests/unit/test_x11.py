@@ -188,7 +188,7 @@ def test_provision_guest_xauthority_no_xauth(tmp_path):
     rootfs = tmp_path / "rootfs"
     rootfs.mkdir()
     host_xauth = tmp_path / "host.xauth"
-    # Write an empty file — no entries to extract.
+    # Write an empty file, no entries to extract.
     host_xauth.write_bytes(b"")
 
     with patch("os.path.isfile", return_value=True):

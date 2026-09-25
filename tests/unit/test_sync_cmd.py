@@ -282,8 +282,8 @@ def test_a_symlink_named_as_the_source_is_followed(rootfs, tmp_path, capsys):
     target.write_text("payload")
     os.symlink(str(target), tmp_path / "link")
 
-    # Only the endpoints are followed — `sync /sdcard box:/x` is the ordinary way
-    # to ask for this on Termux — so a dangling one has nothing to transfer.
+    # Only the endpoints are followed. `sync /sdcard box:/x` is the ordinary way
+    # to ask for this on Termux, so a dangling one has nothing to transfer.
     assert sync(tmp_path / "link", "distro:/copy.txt") == 0
     assert (rootfs / "copy.txt").read_text() == "payload"
 

@@ -262,7 +262,7 @@ def test_split_operands_splits_with_shell_quoting():
 
 def test_split_operands_names_the_line_it_could_not_parse():
     # shlex answers an unbalanced quote with ValueError, which `build` does not
-    # catch — one mistyped line used to end it in a traceback.
+    # catch. One mistyped line used to end it in a traceback.
     instr = {"name": "COPY", "lineno": 7, "value": '"unterminated /app'}
     with pytest.raises(BuildError, match="Cannot parse COPY at line 7"):
         parsing.split_operands(instr["value"], instr)

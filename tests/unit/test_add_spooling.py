@@ -109,7 +109,7 @@ def test_member_mtime_survives_the_spool(tmp_path, spool):
 
 def test_an_absurd_member_mtime_does_not_raise(tmp_path, spool):
     # os.utime() raises OverflowError, not OSError, on a value the platform
-    # cannot store — and the value comes out of a guest-written header.
+    # cannot store, and the value comes out of a guest-written header.
     arc = tmp_path / "payload.tar"
     _make_tar(str(arc), [("a", "file", b"A", 2**63)])
     file_map = {}
@@ -233,7 +233,7 @@ def test_a_body_short_of_its_declared_length_is_refused(spool, monkeypatch):
 
 def test_a_body_cut_mid_chunk_is_a_build_error(spool, monkeypatch):
     # A chunked body has no declared length to check, and the read raises
-    # http.client.IncompleteRead — not an OSError, so it used to walk out of
+    # http.client.IncompleteRead, not an OSError, so it used to walk out of
     # here and out of `build` as a traceback.
     class _Cut(_Resp):
         def read(self, *_a):

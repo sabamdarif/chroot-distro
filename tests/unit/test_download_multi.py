@@ -152,7 +152,7 @@ class TestComputeSegments:
     """Tests for _compute_segments()."""
 
     def test_even_split(self):
-        total = 32 * 1024 * 1024  # 32 MiB — well above MIN_SEGMENT_BYTES
+        total = 32 * 1024 * 1024  # 32 MiB, well above MIN_SEGMENT_BYTES
         segs = _compute_segments(total, 4, "/tmp/test")
         assert len(segs) == 4
         # No gaps, no overlap

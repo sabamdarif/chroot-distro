@@ -92,7 +92,7 @@ def test_lock_info_ignores_a_planted_symlink(lock_tree, tmp_path):
 
 
 def test_pid_state_self_running():
-    # Our own process is running (R) or sleeping (S) — never stopped.
+    # Our own process is running (R) or sleeping (S), never stopped.
     assert _pid_state(os.getpid()) in ("R", "S")
 
 

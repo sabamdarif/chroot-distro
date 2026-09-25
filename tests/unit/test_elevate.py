@@ -192,7 +192,7 @@ def test_forwarded_env_assignments_only_present_vars():
         assignments = _forwarded_env_assignments()
     assert "CD_USE_NS=1" in assignments
     assert "CD_DOWNLOAD_WORKERS=8" in assignments
-    # CD_DOCKER_AUTH is a secret — must never ride in plain argv assignments.
+    # CD_DOCKER_AUTH is a secret and must never ride in plain argv assignments.
     assert all(not a.startswith("CD_DOCKER_AUTH=") for a in assignments)
     # Unrelated host vars are never forwarded.
     assert all(not a.startswith("UNRELATED=") for a in assignments)

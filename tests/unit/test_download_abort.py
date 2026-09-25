@@ -56,13 +56,13 @@ class TestLiveResponsesShutdown:
         srv.close()
         cli.close()
         # Must not raise on a closed BufferedReader; a closed socket is
-        # acceptable too — shutdown() on it is a harmless suppressed error.
+        # acceptable too, since shutdown() on it is a harmless suppressed error.
         sock = _response_socket(resp)
         assert sock is None or sock.fileno() == -1
 
     def test_close_all_unblocks_blocked_reader(self):
         """close_all() from one thread must return promptly and unblock a
-        reader thread stuck in resp.read() — the ^C^C^C deadlock repro."""
+        reader thread stuck in resp.read(), the ^C^C^C deadlock repro."""
         srv, cli = socket.socketpair()
         resp = _SocketBackedResp(cli)
         live = _LiveResponses(lock=threading.Lock(), responses=set())
