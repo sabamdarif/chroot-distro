@@ -54,13 +54,16 @@ finding the user genuinely needs to know, in a 1-2 line status, e.g.:
 
 ### Prose, everywhere
 
-Replies, comments, commit messages and docs all follow these two:
+Replies, comments, commit messages and docs all follow these three:
 
 - Never use an em dash (or `--` standing in for one) in a sentence. A comma, a
   colon, parentheses or two sentences always say it. Older code predates the rule;
   fix what you touch, don't sweep the tree.
 - Reference only what another contributor can reach as well: no path, host or link
   that exists on this machine only or is private to one account.
+- No AI tells: plain words (use, not utilize/leverage; is/has, not serves
+  as/boasts/features), name the mechanism or number not a feeling, active
+  voice, no "not just X but Y", rule-of-three, or metaphor nouns.
 
 ### Before you change anything
 
