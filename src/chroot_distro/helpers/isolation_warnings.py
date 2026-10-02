@@ -69,6 +69,7 @@ NAMESPACE_INFO: dict[int, NamespaceInfo] = {
         severity="high",
         impacts=(
             "Host processes visible inside container via /proc",
+            "/proc/<pid>/root reaches the host filesystem of any listed process",
             "Container processes can send signals to host processes",
         ),
     ),

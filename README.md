@@ -608,6 +608,7 @@ All of these are optional.
 
 - **No full init systems.** `systemd` and similar will not work inside containers. Individual long-running programs are fine.
 - **Isolation is partial.** `--isolated` covers mount, PID, UTS, and IPC namespaces (no network isolation). It is not a full container runtime like Docker or Podman.
+- **Default mode has no boundary.** Without `--isolated` or `CD_USE_NS` the guest runs as host root: `/proc` lists host processes, and `/proc/<pid>/root` reaches the host filesystem of any listed process. Use the namespace modes when the guest is not your own.
 - **Builds are not full BuildKit.** `RUN` steps execute under chroot, few BuildKit features are not supported so they are rejected with an error.
 - **`push` is single-architecture.** `build --platform` produces several platforms at once, but each is pushed on its own with `push -a`.
 - **Foreign architectures need the kernel's help.** Emulation goes through `binfmt_misc`, so a kernel built without `CONFIG_BINFMT_MISC` cannot run an image for another CPU. `chroot-distro info` reports it.
