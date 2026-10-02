@@ -33,7 +33,7 @@ import stat
 from collections.abc import Sequence
 
 from chroot_distro.exceptions import MountError, MountRefusedError
-from chroot_distro.syscalls._constants import MS_BIND, MS_REC
+from chroot_distro.syscalls._constants import MS_BIND, MS_RDONLY, MS_REC
 from chroot_distro.syscalls.mount import (
     _parse_and_split_mount_options,
     _parse_mount_options,
@@ -263,6 +263,80 @@ def mount_filesystem_fd(
     return True
 
 
+def mask_path(rootfs: str, parts: Sequence[str], *, is_dir: bool) -> bool:
+    """Cover the *parts* entry under *rootfs*. True when masked.
+
+    A file gets /dev/null bound over it, a directory a read-only tmpfs. The
+    source is verified before binding, as runc does, and bound by name: a
+    user namespace rejects an fd-path source. Best-effort: False means the
+    target is missing (a mode whose filesystem does not carry the entry) or
+    the mount was refused, and the caller skips it.
+    """
+    if is_dir:
+        try:
+            return mount_filesystem_fd(
+                "tmpfs", rootfs, parts, "tmpfs", flags=0, options="ro,nosuid,nodev,noexec", create=False
+            )
+        except (MountError, OSError):
+            return False
+    want = "file" if len(parts) else "dir"
+    try:
+        fd = resolve_mount_target(rootfs, parts, want=want, create=False)
+    except (MountError, MountRefusedError):
+        return False
+    if fd is None:
+        return False
+    try:
+        # runc's own form: verify the /dev/null inode, then bind by name.
+        null_fd = os.open("/dev/null", O_PATH | os.O_CLOEXEC)
+        try:
+            if not verify_dev_null(null_fd):
+                return False
+        finally:
+            os.close(null_fd)
+        native_mount("/dev/null", fd_path(fd), None, MS_BIND, None)
+        return True
+    except OSError:
+        return False
+    finally:
+        os.close(fd)
+
+
+def readonly_path(rootfs: str, parts: Sequence[str]) -> bool:
+    """Bind the *parts* entry under *rootfs* onto itself, read-only. True when done.
+
+    The entry may be a directory or a file (`/proc/sysrq-trigger`). The
+    self-bind by descriptor names the mount, and the remount re-resolves the
+    leaf first (a descriptor opened before the bind still names the pre-bind
+    mount). Best-effort like mask_path.
+    """
+    try:
+        fd = resolve_mount_target(rootfs, parts, want="any", create=False)
+    except (MountError, MountRefusedError):
+        return False
+    if fd is None:
+        return False
+    try:
+        native_mount(fd_path(fd), fd_path(fd), None, MS_BIND, None)
+    except OSError:
+        return False
+    finally:
+        os.close(fd)
+    try:
+        fd = resolve_mount_target(rootfs, parts, want="any", create=False)
+    except (MountError, MountRefusedError):
+        return False
+    if fd is None:
+        return False
+    try:
+        remount_bind(fd_path(fd), flags=MS_RDONLY)
+        return True
+    except OSError:
+        return False
+    finally:
+        os.close(fd)
+
+
 def verify_dev_null(fd: int) -> bool:
     """True when *fd* is the real char 1:3 device, not a planted stand-in."""
     try:
@@ -285,23 +359,6 @@ def verify_dev_node(fd: int, major: int, minor: int, *, char: bool = True) -> bo
     want = stat.S_IFCHR if char else stat.S_IFBLK
     return stat.S_IFMT(st.st_mode) == want and os.major(st.st_rdev) == major and os.minor(st.st_rdev) == minor
 
-
-def open_devnull_source() -> int | None:
-    """Open the host ``/dev/null`` and inode-verify it. Descriptor or None.
-
-    A mask binds this over sensitive files, so the source is checked the way
-    runc's verifyDevNull checks it: char 1:3, and nothing else.
-    """
-    try:
-        fd = os.open("/dev/null", O_PATH | os.O_CLOEXEC)
-    except OSError as exc:
-        log.debug("cannot open /dev/null for masking: %s", exc)
-        return None
-    if not verify_dev_null(fd):
-        log.debug("/dev/null is not the char 1:3 device; masking skipped")
-        os.close(fd)
-        return None
-    return fd
 
 
 def open_ptmx(rootfs: str) -> int | None:

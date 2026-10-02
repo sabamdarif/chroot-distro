@@ -163,3 +163,72 @@ def test_open_ptmx_rejects_a_symlinked_pts(tmp_path):
     (root / "dev").mkdir(parents=True)
     (root / "dev" / "pts").symlink_to(str(elsewhere))
     assert mt.open_ptmx(str(root)) is None
+
+
+# ── the mask and read-only helpers (item 4) ────────────────────────────────────
+
+def _fake_fd(tmp_path, name="stub"):
+    f = tmp_path / name
+    f.write_text("x")
+    return os.open(f, os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC)
+
+
+def test_mask_path_binds_devnull_over_a_file(tmp_path, monkeypatch):
+    root = tmp_path / "root"
+    (root / "proc").mkdir(parents=True)
+    (root / "proc" / "kcore").write_text("secret")
+    target = _fake_fd(tmp_path, "kcore")
+    mounts = []
+    monkeypatch.setattr(mt, "verify_dev_null", lambda fd: True)
+    monkeypatch.setattr(mt, "native_mount", lambda src, tgt, fs, flags, data: mounts.append((src, tgt, fs, flags)))
+    monkeypatch.setattr(mt, "resolve_mount_target", lambda rootfs, parts, **kw: target)
+
+    assert mt.mask_path(str(root), ["proc", "kcore"], is_dir=False) is True
+    assert mounts and mounts[0][0] == "/dev/null"
+
+
+
+def test_mask_path_mounts_ro_tmpfs_over_a_dir(tmp_path, monkeypatch):
+    root = tmp_path / "root"
+    (root / "proc" / "acpi").mkdir(parents=True)
+    mounts = []
+    monkeypatch.setattr(mt, "mount_filesystem_fd", lambda *a, **kw: mounts.append((a, kw)) or True)
+
+    assert mt.mask_path(str(root), ["proc", "acpi"], is_dir=True) is True
+    assert mounts and mounts[0][0][0] == "tmpfs"
+    assert mounts[0][1]["options"] == "ro,nosuid,nodev,noexec"
+
+
+def test_mask_path_missing_target_returns_false(tmp_path):
+    root = tmp_path / "root"
+    root.mkdir()
+    assert mt.mask_path(str(root), ["proc", "kcore"], is_dir=False) is False
+
+
+def test_readonly_path_self_binds_and_remounts_ro(tmp_path, monkeypatch):
+    root = tmp_path / "root"
+    (root / "proc").mkdir(parents=True)
+    stub = tmp_path / "stub"
+    stub.write_text("x")
+
+    def fresh_fd(rootfs, parts, **kw):
+        # each resolve opens its own descriptor; the helper closes each
+        return os.open(stub, os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC)
+
+    monkeypatch.setattr(mt, "resolve_mount_target", fresh_fd)
+    mounts = []
+    remounts = []
+    monkeypatch.setattr(mt, "native_mount", lambda src, tgt, fs, flags, data: mounts.append((src, tgt, flags)))
+    monkeypatch.setattr(mt, "remount_bind", lambda tgt, **kw: remounts.append(tgt))
+
+    assert mt.readonly_path(str(root), ["proc", "sys"]) is True
+    # one self-bind, then one read-only remount of the re-resolved leaf
+    assert len(mounts) == 1
+    assert mounts[0][0].startswith("/proc/self/fd/")
+    assert remounts and remounts[0].startswith("/proc/self/fd/")
+
+
+def test_readonly_path_missing_target_returns_false(tmp_path):
+    root = tmp_path / "root"
+    root.mkdir()
+    assert mt.readonly_path(str(root), ["proc", "sys"]) is False

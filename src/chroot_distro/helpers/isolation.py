@@ -26,7 +26,10 @@ straight away, or the devpts mounted into it next propagates back onto the host 
 Failure policy is per source. A bind listed in *best_effort_sources* warns and is
 skipped, anything else re-raises, and a missing mount namespace is not an error at
 all: both session wrappers yield None so the caller runs unisolated rather than not
-at all. The fresh tmpfs /dev under maximum isolation is the same shape, since some
+at all. The masked and read-only proc/sys path sets (docker-default's) are applied
+after the special mounts in every mode, wherever the guest path resolves.
+
+The fresh tmpfs /dev under maximum isolation is the same shape, since some
 Android kernels deny it under SELinux, and falling back to the container's own empty
 /dev directory is still not a host bind.
 
@@ -137,6 +140,7 @@ def apply_bind_mounts(
     opts_map = bind_options or {}
     run_root = os.path.realpath(os.path.join(rootfs, "run"))
     dev_root = os.path.realpath(os.path.join(rootfs, "dev"))
+    sys_root = os.path.realpath(os.path.join(rootfs, "sys"))
     for src, dst in resolved_binds:
         dst_real = os.path.realpath(dst)
         try:
@@ -156,9 +160,9 @@ def apply_bind_mounts(
                 warn(f"Skipping optional bind {src} -> {dst}: {exc}")
                 continue
             raise
-        # Stop send-propagation from the /dev bind, or mounts made inside it
-        # next (/dev/pts, devpts) propagate copies back onto the host /dev.
-        if holder is None and dst_real == dev_root:
+        # Stop send-propagation: mounts made under /dev or /sys next
+        # (/dev/pts, the path masks) propagate copies back onto the host.
+        if holder is None and dst_real in (dev_root, sys_root):
             mount_manager.make_rslave(dst)
 
 
@@ -239,7 +243,13 @@ def apply_special_mounts(
         enable_binfmt=not minimal,
         enable_shm=not minimal,
     )
+    binfmt_sm = None
     for sm in specials:
+        # binfmt_misc mounts under /proc/sys; the read-only mask there must
+        # land first or it covers the binfmt mount.
+        if sm.fstype == "binfmt_misc":
+            binfmt_sm = sm
+            continue
         is_maxiso_dev = max_isolation and sm.fstype == "tmpfs" and sm.target == "/dev"
         if is_maxiso_dev:
             # Best-effort under max isolation: if the kernel denies the fresh
@@ -257,8 +267,67 @@ def apply_special_mounts(
         else:
             mount_manager.apply_special_mount(rootfs, sm, holder=holder)
 
+    _apply_masked_paths(rootfs, holder, masked=bindings.masked_paths(), readonly=bindings.READONLY_PATHS)
+
+    if binfmt_sm is not None:
+        mount_manager.apply_special_mount(rootfs, binfmt_sm, holder=holder)
+
     if max_isolation:
         _ensure_ptmx_symlink(rootfs, holder)
+
+
+def _apply_masked_paths(
+    rootfs: str,
+    holder: NamespaceHolder | None,
+    masked: list[str],
+    readonly: tuple[str, ...],
+) -> None:
+    """Apply the masked and read-only path sets, wherever they resolve.
+
+    docker-default's lists, every mode: a file is covered by a verified
+    /dev/null bind, a directory by a read-only tmpfs, and a read-only entry
+    by a self-bind remounted ro. A path the guest's filesystems do not carry
+    is skipped quietly (kernels and modes differ). With a holder the work
+    runs inside its namespaces, where those filesystems live.
+    """
+    from chroot_distro.helpers import mount_targets
+
+    def _path_parts(path: str) -> list[str]:
+        return [p for p in path.split("/") if p not in ("", ".")]
+
+    def _one_masked(path: str) -> bytes:
+        parts = _path_parts(path)
+        try:
+            is_dir = os.path.isdir(os.path.join(rootfs, *parts))
+        except OSError:
+            return b""
+        done = mount_targets.mask_path(rootfs, parts, is_dir=is_dir)
+        return b"1" if done else b""
+
+    def _one_readonly(path: str) -> bytes:
+        done = mount_targets.readonly_path(rootfs, _path_parts(path))
+        return b"1" if done else b""
+
+    for path in masked:
+        if holder is None:
+            _one_masked(path)
+            continue
+
+        def _mask(p: str = path) -> bytes:
+            return _one_masked(p)
+
+        if holder.call(_mask) is None:
+            log.debug("Could not apply mask %s in the holder's namespaces", path)
+    for path in readonly:
+        if holder is None:
+            _one_readonly(path)
+            continue
+
+        def _ro(p: str = path) -> bytes:
+            return _one_readonly(p)
+
+        if holder.call(_ro) is None:
+            log.debug("Could not make %s read-only in the holder's namespaces", path)
 
 
 def probe_isolation(*, warn_on_gaps: bool = True) -> NamespaceProbeResult:

@@ -5,7 +5,9 @@
 `get_bindings` returns (host source, resolved target inside the rootfs) pairs plus
 the guest paths whose propagation must become rslave, and `get_special_mounts`
 returns the filesystems mounted by type instead. `helpers/mount_manager.py` and
-`helpers/isolation.py` are what act on either list.
+`helpers/isolation.py` are what act on either list. The masked and read-only
+path tables live here too: docker-default's sets, applied where the guest path
+resolves, so a mode whose filesystem does not carry the entry skips it.
 
 Order in the bind list is significant: a parent (`/data`, `$PREFIX`) has to come
 before anything beneath it, because a parent mounted later shadows the children
@@ -247,6 +249,42 @@ def _max_isolation_dev_specials() -> list[SpecialMount]:
     ]
 
 
+# docker-default's masked set a file is covered
+# by a /dev/null bind, a directory by a read-only tmpfs.
+_MASKED_PATHS: tuple[str, ...] = (
+    "/proc/acpi",
+    "/proc/asound",
+    "/proc/interrupts",
+    "/proc/kcore",
+    "/proc/keys",
+    "/proc/latency_stats",
+    "/proc/sched_debug",
+    "/proc/scsi",
+    "/proc/timer_list",
+    "/proc/timer_stats",
+    "/sys/devices/virtual/powercap",
+    "/sys/firmware",
+)
+
+
+def masked_paths() -> list[str]:
+    """The masked set plus one thermal_throttle dir per configured CPU."""
+    paths = list(_MASKED_PATHS)
+    for n in range(os.sysconf("SC_NPROCESSORS_CONF") or 1):
+        paths.append(f"/sys/devices/system/cpu/cpu{n}/thermal_throttle")
+    return paths
+
+
+# docker-default's read-only set: a bind of the path onto itself, remounted ro.
+READONLY_PATHS: tuple[str, ...] = (
+    "/proc/bus",
+    "/proc/fs",
+    "/proc/irq",
+    "/proc/sys",
+    "/proc/sysrq-trigger",
+)
+
+
 # (relative path, major, minor, mode) nodes for the fresh --isolated /dev.
 MAX_ISOLATION_DEV_NODES: tuple[tuple[str, int, int, int], ...] = (
     ("null", 1, 3, 0o666),
@@ -331,11 +369,6 @@ def get_special_mounts(
     if enable_usb:
         specials.extend(_usb_specials())
 
-    if enable_binfmt:
-        sm = _binfmt_misc_special(fresh_proc=True, use_userns=use_userns)
-        if sm:
-            specials.append(sm)
-
     # /dev/shm: always needed under max isolation (fresh /dev has none);
     # otherwise only when the host lacks one (some Android kernels).
     if enable_shm and (max_isolation or not os.path.exists("/dev/shm")):
@@ -349,6 +382,11 @@ def get_special_mounts(
                 optional=True,
             )
         )
+
+    if enable_binfmt:
+        sm = _binfmt_misc_special(fresh_proc=True, use_userns=use_userns)
+        if sm:
+            specials.append(sm)
 
     return specials
 

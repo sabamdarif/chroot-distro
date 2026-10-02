@@ -160,6 +160,8 @@ chroot-distro login ubuntu -- uname -a
 
 If you want namespace isolation but still keep all the normal shared folders, set `CD_USE_NS=1` instead of using `--isolated`.
 
+Some proc and sys paths are covered or made read-only in every mode, following Docker's defaults: `/proc/kcore` and `/proc/keys` are masked (a `/dev/null` or an empty read-only tmpfs), and `/proc/sys`, `/proc/bus` and `/proc/sysrq-trigger` are read-only.
+
 Several sessions of one container share its options. A session that joins a container someone is already logged into gets that container's `--bind` mounts, `--shared-*` folders and `-e`/`--env` values, and whatever it asks for on top is added to the running container, so a second `login` no longer needs an `unmount` to bring a folder in. Two exceptions: a `--bind` whose destination the running container already fills from another source is ignored (with a warning), and `--isolated` shares nothing, so asking for it while a normal session is running is still an error. `CD_USE_NS` cannot be turned on for a container that is already running either, and a mismatch there is a warning.
 
 GPU acceleration works on regular Linux with no flag. The render nodes come in with `/dev`, so an AMD or Intel guest renders with its own Mesa packages, and a host NVIDIA driver's libraries, ICD descriptors and tools are bound in and switched on automatically.
