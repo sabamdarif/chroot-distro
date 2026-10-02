@@ -10,6 +10,10 @@ because a mount made from the host's view is not the mount the guest sees, and a
 target on a tmpfs that only exists inside the namespace cannot even be created from
 outside.
 
+Every mount target is resolved by descriptor (`helpers/mount_targets.py`) rather
+than a joined name: the rootfs is untrusted input, and mount(2) resolving a name
+through a symlink the image planted is the host-write hole the walk refuses.
+
 An existing mount at a target is normally trusted, since concurrent sessions share
 mounts, and the exceptions are what most of the code here is for. A mount left by a
 dead namespace is MNT_LOCKED, so umount2 refuses it with EINVAL and the only way past
@@ -52,12 +56,15 @@ import logging
 import os
 import re
 import stat
+import sys
 from typing import TYPE_CHECKING
 
-from chroot_distro.exceptions import MountError
+from chroot_distro.dirfd import _chmod_fd
+from chroot_distro.exceptions import MountError, MountRefusedError
+from chroot_distro.helpers import mount_targets
 from chroot_distro.message import warn
 from chroot_distro.syscalls._constants import MS_PRIVATE, MS_REC, MS_SLAVE
-from chroot_distro.syscalls.mount import bind_mount, mount_filesystem, set_propagation
+from chroot_distro.syscalls.mount import fd_path, set_propagation
 from chroot_distro.syscalls.umount import native_umount
 
 if TYPE_CHECKING:
@@ -156,14 +163,19 @@ def _filter_bind_options(options: str) -> str:
 def safe_mount(
     source: str,
     target: str,
+    *,
+    rootfs: str,
     holder: NamespaceHolder | None = None,
     recursive: bool = False,
     options: str = "",
     required_child: str = "",
 ) -> None:
-    """Safely mount source to target using bind mount.
+    """Safely bind-mount *source* onto *target* under *rootfs*.
 
-    Creates target directory or file if they do not exist.
+    The target is resolved by descriptor (mount_targets.bind_mount_fd): every
+    component is opened O_NOFOLLOW off the rootfs, and mount(2) is handed the
+    leaf's procfs fd name, so a symlink the image planted on the target path
+    is refused (MountRefusedError) rather than followed to a host location.
 
     When *required_child* is given (e.g. ``"ptmx"`` for the /dev bind), an
     already-mounted target is only trusted if that child entry exists;
@@ -172,9 +184,8 @@ def safe_mount(
     but lack what the guest needs and cannot be unmounted.
 
     When *options* is given (e.g. ``"ro"`` or ``"ro,nosuid"``), a second
-    ``mount -o remount,bind,<options>`` is issued after the initial bind:
-    the kernel ignores per-mount flags like ``ro`` on the first bind, so a
-    remount is required to actually apply them (matches util-linux).
+    remount pass applies them, re-resolving the leaf first: a descriptor
+    opened before the bind still names the pre-bind mount.
     """
     source_abs = os.path.realpath(source)
     if not os.path.exists(source_abs):
@@ -194,16 +205,8 @@ def safe_mount(
         except OSError as exc:
             log.debug("Failed to get size of mount source %s: %s", source_abs, exc)
 
-    # Track whether we create an empty stub target so we can remove it if the
-    # bind fails (otherwise the empty stub shadows a real rootfs file).
-    created_stub = False
-    if source_is_dir:
-        os.makedirs(target, exist_ok=True)
-    else:
-        os.makedirs(os.path.dirname(target), exist_ok=True)
-        if not os.path.exists(target):
-            open(target, "a").close()
-            created_stub = True
+    parts = mount_targets.guest_parts(rootfs, target)
+    want = "dir" if source_is_dir else "any"
 
     if is_mounted(target, holder=holder):
         # Normally an existing mount is trusted (concurrent sessions share
@@ -223,23 +226,27 @@ def safe_mount(
 
     kernel_options = _filter_bind_options(options)
 
+    def _do_mount() -> bytes:
+        try:
+            mount_targets.bind_mount_fd(
+                source_abs, rootfs, parts, want=want, recursive=recursive, options=kernel_options
+            )
+        except (OSError, MountError) as exc:
+            # The child's exception cannot cross holder.call; stderr still
+            # reaches the user, matching what the old do_bind_mount child did.
+            sys.stderr.write(f"safe_mount: {source} -> {target}: {exc}\n")
+            raise
+        return b""
+
     if holder is not None:
         # A mount only reaches the guest from inside the holder's mount
-        # namespace, so the holder makes it.
-        try:
-            holder.do_bind_mount(source_abs, target, recursive=recursive, options=kernel_options)
-        except (OSError, MountError) as e:
-            if created_stub:
-                with contextlib.suppress(OSError):
-                    os.remove(target)
-            raise MountError(f"Failed to mount {source} to {target}: {e}") from e
+        # namespace, so the walk and the mount both run there.
+        if holder.call(_do_mount) is None:
+            raise MountError(f"Failed to mount {source} to {target} inside the holder's namespaces")
     else:
         try:
-            bind_mount(source_abs, target, recursive=recursive, options=kernel_options)
-        except OSError as e:
-            if created_stub:
-                with contextlib.suppress(OSError):
-                    os.remove(target)
+            _do_mount()
+        except (OSError, MountError) as e:
             raise MountError(f"Failed to mount {source} to {target}: {e}") from e
 
 
@@ -258,6 +265,12 @@ def create_dev_nodes(
     and the ``std*`` symlinks are provided by the devpts overmount and the login
     pty wrapper, so they are not created here.
 
+    Every path is addressed through the descriptor walk in
+    :mod:`chroot_distro.helpers.mount_targets`, so a symlink the image planted
+    under ``dev`` cannot redirect a mknod or a bind onto the host. Each made
+    node is reopened and inode-verified (type and major:minor) before the
+    chmod, so a name swapped in between cannot pass off a lookalike.
+
     Two strategies:
 
     * **mknod** (default) creates real device nodes on the new tmpfs. This is
@@ -272,47 +285,68 @@ def create_dev_nodes(
 
     Failures are non-fatal and logged at debug level.
     """
-    dev_dir = os.path.join(rootfs, "dev")
-    for name, major, minor, mode in nodes:
-        host_path = os.path.join(dev_dir, name)
 
+    def _bind_node(name: str) -> None:
+        mount_targets.bind_mount_fd(os.path.join("/dev", name), rootfs, ["dev", name], want="any")
+
+    def _make_node(name: str, major: int, minor: int, mode: int) -> None:
+        dev_fd = mount_targets.resolve_mount_target(rootfs, ["dev"], want="dir", create=True)
+        if dev_fd is None:
+            # create=True makes this unreachable; the return type does not know.
+            raise MountError(f"cannot open {rootfs}/dev")
+        try:
+            try:
+                os.lstat(name, dir_fd=dev_fd)
+                return  # an entry is already there; never clobber it
+            except FileNotFoundError:
+                pass
+            os.mknod(name, mode | stat.S_IFCHR, os.makedev(major, minor), dir_fd=dev_fd)
+            node_fd = os.open(name, os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=dev_fd)
+            try:
+                if not mount_targets.verify_dev_node(node_fd, major, minor):
+                    # Not the node mknod just made: something took the name.
+                    raise MountError(f"/dev/{name} did not verify as char {major}:{minor}")
+                _chmod_fd(node_fd, mode)
+            finally:
+                os.close(node_fd)
+        finally:
+            os.close(dev_fd)
+
+    for name, major, minor, mode in nodes:
         if use_userns:
-            # Bind the host's real device node over a stub in the tmpfs /dev.
-            # The fresh tmpfs /dev lives inside the holder's mount namespace, so
-            # the stub target must be created there, not on the host view of
-            # the rootfs, or the bind has no mount target.
             source = os.path.join("/dev", name)
             if not os.path.exists(source):
                 log.debug("Skipping /dev/%s bind: host node %s missing", name, source)
                 continue
+
+            def _bind(n: str = name) -> bytes:
+                _bind_node(n)
+                return b""
+
             if holder is not None:
-
-                def _stub(path: str = host_path) -> None:
-                    os.close(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o644))
-
-                if holder.call(_stub) is None:
-                    log.debug("Could not create stub %s in the holder's namespaces", host_path)
-                    continue
+                # The stub target lives on a tmpfs only the holder's mount
+                # namespace holds, so the walk and the bind both run there.
+                if holder.call(_bind) is None:
+                    log.debug("Could not bind device node %s in the holder's namespaces", name)
+                continue
             try:
-                safe_mount(source, host_path, holder=holder)
-            except MountError as exc:
-                log.debug("Bind of device node %s -> %s failed: %s", source, host_path, exc)
+                _bind_node(name)
+            except (OSError, MountError) as exc:
+                log.debug("Bind of device node /dev/%s failed: %s", name, exc)
             continue
 
-        def _make_node(path: str = host_path, mode: int = mode, major: int = major, minor: int = minor) -> None:
-            if os.path.exists(path):
-                return
-            os.mknod(path, mode | stat.S_IFCHR, os.makedev(major, minor))
-            os.chmod(path, mode)
+        def _make(n: str = name, mj: int = major, mn: int = minor, md: int = mode) -> bytes:
+            _make_node(n, mj, mn, md)
+            return b""
 
         if holder is not None:
-            if holder.call(_make_node) is None:
-                log.debug("Could not create device node %s in the holder's namespaces", host_path)
+            if holder.call(_make) is None:
+                log.debug("Could not create device node %s in the holder's namespaces", name)
             continue
         try:
-            _make_node()
-        except OSError as exc:
-            log.debug("os.mknod %s failed: %s", host_path, exc)
+            _make_node(name, major, minor, mode)
+        except (OSError, MountError) as exc:
+            log.debug("Could not create device node /dev/%s: %s", name, exc)
 
 
 def make_rslave(target: str, holder: NamespaceHolder | None = None) -> bool:
@@ -619,69 +653,38 @@ def _mount_fs_and_options(target: str) -> tuple[str, str]:
 def apply_special_mount(rootfs: str, sm, holder: NamespaceHolder | None = None, force_optional: bool = False) -> bool:
     """Execute a single SpecialMount inside rootfs.
 
-    Returns True on success, False on failure (when optional). Raises
-    RuntimeError on failure when not optional. *force_optional* lets the
-    caller treat an otherwise-required mount as best-effort (used for the
-    max-isolation /dev tmpfs, which falls back to the on-disk /dev).
+    The target is resolved by descriptor (mount_targets.mount_filesystem_fd):
+    every component is opened O_NOFOLLOW off the rootfs and mount(2) is handed
+    the leaf's procfs fd name, so a symlink the image planted on the target
+    path is refused rather than followed to a host location. With a holder the
+    walk and the mount both run inside that holder's namespaces, which is also
+    what covers targets that only exist there (the fresh tmpfs /dev under
+    maximum isolation).
+
+    Returns True on success, False on failure (when optional, or when the
+    target is missing and *sm.mkdir* is False). Raises RuntimeError on failure
+    when not optional. *force_optional* lets the caller treat an
+    otherwise-required mount as best-effort (used for the max-isolation /dev
+    tmpfs, which falls back to the on-disk /dev).
     """
     optional = sm.optional or force_optional
     if sm.check and not _fs_supported(sm.check):
         log.debug(f"Skipping {sm.fstype} mount: '{sm.check}' not in /proc/filesystems")
         return False
 
-    target = os.path.join(rootfs, sm.target.lstrip("/"))
-
-    if sm.mkdir:
-        # When a holder is present the target may live on a tmpfs that only
-        # exists inside the holder's mount namespace (e.g. the fresh /dev
-        # under maximum isolation). Creating it from the parent process would
-        # write to the underlying directory the namespace cannot see, so the
-        # subsequent mount fails with "mount point does not exist". Create the
-        # directory inside the holder's mount namespace instead.
-        if holder is not None:
-
-            def _mkdir() -> None:
-                os.makedirs(target, exist_ok=True)
-
-            if holder.call(_mkdir) is None:
-                msg = f"Failed to create mount target directory {target} inside the holder's namespaces"
-                if optional:
-                    log.debug(msg)
-                    return False
-                raise RuntimeError(msg)
-        else:
-            try:
-                os.makedirs(target, exist_ok=True)
-            except OSError as e:
-                msg = f"Failed to create mount target directory {target}: {e}"
-                if optional:
-                    log.debug(msg)
-                    return False
-                raise RuntimeError(msg) from e
-    elif not os.path.exists(target):
-        # With a holder, existence must also be checked inside its namespace.
-        if holder is not None:
-
-            def _exists() -> bytes:
-                return b"1" if os.path.exists(target) else b""
-
-            if not holder.call(_exists):
-                log.debug(f"Mount target {target} does not exist in holder NS and mkdir=False, skipping")
-                return False
-        else:
-            log.debug(f"Mount target {target} does not exist and mkdir=False, skipping")
-            return False
+    parts = [p for p in sm.target.split("/") if p not in ("", ".")]
 
     # On single-instance kernels a devpts mount(2) reconfigures the one global
     # superblock, i.e. the host's /dev/pts, until reboot. Bind it instead.
     if sm.fstype == "devpts" and _devpts_single_instance():
+        target = os.path.join(rootfs, *parts)
         if is_mounted(target, holder=holder):
             return True
         if holder is None:
             try:
-                bind_mount("/dev/pts", target)
+                mount_targets.bind_mount_fd("/dev/pts", rootfs, parts, want="dir")
                 return True
-            except OSError as e:
+            except (OSError, MountError) as e:
                 msg = f"binding host /dev/pts on {target} failed: {e}"
                 if optional:
                     log.debug(msg)
@@ -692,26 +695,56 @@ def apply_special_mount(rootfs: str, sm, holder: NamespaceHolder | None = None, 
         warn("Single-instance devpts kernel: container gets no private /dev/pts.")
         return False
 
-    if is_mounted(target, holder=holder):
-        # Trust an existing mount only when it looks like the one we would
-        # create. Stale mounts from dead namespaces are MNT_LOCKED (umount2
-        # fails with EINVAL) and must be mounted over instead. For devpts,
-        # the host instance (and binds of it) carries ptmxmode=000, which
-        # breaks pty allocation in the login session; our newinstance devpts
-        # uses ptmxmode=0666, so its presence identifies the correct mount.
-        if holder is not None:
-            return True
-        fstype, opts = _mount_fs_and_options(target)
-        if sm.fstype == "devpts":
-            if "ptmxmode=666" in opts:
-                return True
-        elif fstype == sm.fstype:
-            return True
-        # Fall through: stack the correct mount on top of the stale one.
-        # Make the covered mount private first, or the new mount propagates
-        # a copy onto the host original when they share a peer group.
-        with contextlib.suppress(OSError):
-            set_propagation(target, MS_PRIVATE)
+    if holder is not None and is_mounted(os.path.join(rootfs, *parts), holder=holder):
+        # An existing mount in the holder's namespace is this program's own
+        # (the namespace is not one a dead session left behind), so it is
+        # trusted and never stacked on.
+        return True
+
+    # Walk the target once up front (holder=None only): a refusal here is
+    # the symlink guard, and the leaf path names the mount for the stale-mount
+    # checks below. With a holder the walk runs in do_mount_filesystem's
+    # child, so existence is decided where the mount lands.
+    leaf = ""
+    if holder is None:
+        try:
+            fd = mount_targets.resolve_mount_target(rootfs, parts, want="dir", create=False)
+        except MountRefusedError as e:
+            msg = f"mount target {sm.target} refused: {e}"
+            if optional:
+                log.debug(msg)
+                return False
+            raise RuntimeError(msg) from e
+        if fd is None:
+            if not sm.mkdir:
+                log.debug(f"Mount target {sm.target} does not exist and mkdir=False, skipping")
+                return False
+        else:
+            try:
+                leaf = mount_targets.leaf_path(fd) or ""
+                if leaf and is_mounted(leaf):
+                    # Trust an existing mount only when it looks like the one
+                    # we would create. Stale mounts from dead namespaces are
+                    # MNT_LOCKED (umount2 fails with EINVAL) and must be
+                    # mounted over instead. For devpts, the host instance (and
+                    # binds of it) carries ptmxmode=000, which breaks pty
+                    # allocation in the login session; our newinstance devpts
+                    # uses ptmxmode=0666, so its presence identifies the
+                    # correct mount.
+                    fstype, opts = _mount_fs_and_options(leaf)
+                    if sm.fstype == "devpts":
+                        if "ptmxmode=666" in opts:
+                            return True
+                    elif fstype == sm.fstype:
+                        return True
+                    # Fall through: stack the correct mount on top of the
+                    # stale one. Make the covered mount private first, or the
+                    # new mount propagates a copy onto the host original when
+                    # they share a peer group.
+                    with contextlib.suppress(OSError):
+                        set_propagation(fd_path(fd), MS_PRIVATE)
+            finally:
+                os.close(fd)
 
     # Option strings are tried simplest-last: Android kernels and SELinux
     # reject some tmpfs options (size= above all), so strip them one group at
@@ -732,32 +765,42 @@ def apply_special_mount(rootfs: str, sm, holder: NamespaceHolder | None = None, 
     for opts in option_attempts:
         if holder is not None:
             try:
-                holder.do_mount_filesystem(sm.source, target, sm.fstype, options=opts)
-                log.debug("Mounted %s at %s (options=%r) via holder", sm.fstype, sm.target, opts)
-                return True
+                if holder.do_mount_filesystem(sm.source, rootfs, parts, sm.fstype, options=opts, create=sm.mkdir):
+                    log.debug("Mounted %s at %s (options=%r) via holder", sm.fstype, sm.target, opts)
+                    return True
+                log.debug(f"Mount target {sm.target} does not exist in holder NS and mkdir=False, skipping")
+                return False
             except OSError as e:
                 last_err = str(e)
                 log.debug("mount(2) of %s opts=%r failed via holder: %s", sm.fstype, opts, last_err)
         else:
             try:
-                mount_filesystem(sm.source, target, sm.fstype, options=opts)
+                if not mount_targets.mount_filesystem_fd(sm.source, rootfs, parts, sm.fstype, options=opts, create=sm.mkdir):
+                    log.debug(f"Mount target {sm.target} does not exist and mkdir=False, skipping")
+                    return False
                 log.debug("Mounted %s at %s (options=%r)", sm.fstype, sm.target, opts)
                 return True
+            except MountRefusedError as e:
+                msg = f"mount target {sm.target} refused: {e}"
+                if optional:
+                    log.debug(msg)
+                    return False
+                raise RuntimeError(msg) from e
             except OSError as e:
                 # Kernel < 4.7 single-instance devpts: newinstance is a no-op
                 # and stacking the lone instance on its own bind EBUSYs; the
                 # devpts already at the target is that instance, reuse it.
-                if sm.fstype == "devpts" and e.errno == errno.EBUSY and _mount_fs_and_options(target)[0] == "devpts":
+                if sm.fstype == "devpts" and e.errno == errno.EBUSY and leaf and _mount_fs_and_options(leaf)[0] == "devpts":
                     log.debug(
                         "devpts is single-instance on this kernel; reusing the instance already mounted at %s",
-                        target,
+                        leaf,
                     )
                     return True
                 last_err = str(e)
                 log.debug("mount(2) of %s opts=%r failed (native): %s", sm.fstype, opts, last_err)
 
     detail = last_err or "(no error output)"
-    msg = f"mounting {sm.fstype} on {target} failed: {detail}"
+    msg = f"mounting {sm.fstype} on {rootfs}/{sm.target.lstrip('/')} failed: {detail}"
     if optional:
         log.debug(msg)
         return False

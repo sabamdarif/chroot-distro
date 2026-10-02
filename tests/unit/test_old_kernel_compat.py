@@ -13,7 +13,7 @@ import pytest
 from chroot_distro.commands.login import bindings
 from chroot_distro.commands.login.bindings import SpecialMount
 from chroot_distro.exceptions import MountError
-from chroot_distro.helpers import isolation, mount_manager
+from chroot_distro.helpers import isolation, mount_manager, mount_targets
 
 
 # ── apply_bind_mounts failure policy ───────────────────────────────────────────
@@ -73,13 +73,14 @@ def test_tmpfs_size_reject_falls_back(tmp_path, monkeypatch):
     (tmp_path / "dev" / "shm").mkdir(parents=True)
     attempts = []
 
-    def fake_mount_filesystem(source, target, fstype, options=""):
+    def fake_mount_filesystem_fd(source, rootfs, parts, fstype, *, options="", create=True):
         attempts.append(options)
         if "size=" in options:
             raise OSError(errno.EINVAL, "mount(2): Invalid argument (EINVAL)")
+        return True
 
     monkeypatch.setattr(mount_manager, "is_mounted", lambda target, holder=None: False)
-    monkeypatch.setattr(mount_manager, "mount_filesystem", fake_mount_filesystem)
+    monkeypatch.setattr(mount_targets, "mount_filesystem_fd", fake_mount_filesystem_fd)
 
     sm = SpecialMount(fstype="tmpfs", source="tmpfs", target="/dev/shm", options="size=256M,mode=1777", optional=True)
     assert mount_manager.apply_special_mount(str(tmp_path), sm) is True

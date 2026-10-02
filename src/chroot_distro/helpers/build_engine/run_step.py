@@ -500,7 +500,7 @@ def _run_plain(
                 warn(f"rootfs {guest_path} is not a plain directory; running this step without that bind.")
                 continue
             is_run = os.path.realpath(target) == os.path.realpath(os.path.join(rootfs, "run"))
-            mount_manager.safe_mount(src, target, recursive=is_run)
+            mount_manager.safe_mount(src, target, rootfs=rootfs, recursive=is_run)
 
         # RUN --mount targets go on top of the base binds (and are torn down
         # before them when the `with` block exits).

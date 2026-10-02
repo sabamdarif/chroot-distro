@@ -328,6 +328,7 @@ goes through it:
 | `helpers/session.py`           | the per-container session refcount                          |
 | `helpers/session_registry.py`  | one JSON file per live session                              |
 | `helpers/mount_manager.py`     | every mount, unmount, `/dev` node and propagation change    |
+| `helpers/mount_targets.py`     | the O_NOFOLLOW walk every mount target resolves through      |
 | `commands/login/__init__.py`   | resolve a session, mount for it, enter it                   |
 | `commands/login/bindings.py`   | name the mounts a session needs, mount nothing              |
 | `commands/login/chroot_cmd.py` | `ChrootConfig`, and the argv only `--get-chroot-cmd` prints |
@@ -465,7 +466,6 @@ the caller (`build_engine/constants.is_host_exec_var`, applied in
 | --------------------- | ------------------------------------------------- |
 | `message.py`          | every user-facing line, and the rules they follow |
 | `progress.py`         | bars, spinners, byte counters                     |
-| `helpers/__init__.py` | nothing: a marker module                          |
 
 ### Adding or changing a command
 

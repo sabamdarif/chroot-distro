@@ -17,9 +17,17 @@ A bind mount cannot apply options in one call. mount(2) ignores everything but
 MS_BIND and MS_REC on the initial bind, so `readonly` and any flag options are
 applied by an immediate MS_REMOUNT|MS_BIND pass, carrying MS_REC again when the
 bind was recursive, or a submount stays writable under a read-only parent.
+
+A mount target can also be a descriptor: `fd_path` names one through procfs, and
+mount(2) resolving that name lands the mount on the descriptor's inode, immune
+to symlinks in a path the guest controls. The descriptor must be opened in the
+same mount namespace the mount lands in, and re-opened after any mount on it,
+since an older descriptor still names the mount it was opened on.
 """
 
 from __future__ import annotations
+
+import os
 
 from chroot_distro.syscalls._constants import (
     MS_BIND,
@@ -56,8 +64,10 @@ __all__ = [
     "MS_SHARED",
     "MS_SLAVE",
     "bind_mount",
+    "fd_path",
     "mount_filesystem",
     "native_mount",
+    "remount_bind",
     "set_propagation",
 ]
 
@@ -88,6 +98,18 @@ _OPTION_FLAG_MAP: dict[str, int] = {
 def _encode(value: str | None) -> bytes | None:
     """Encode a string to UTF-8 bytes, passing ``None`` through unchanged."""
     return value.encode() if value is not None else None
+
+
+def fd_path(fd: int) -> str:
+    """The procfs name for *fd*, so mount(2) acts on the descriptor's inode.
+
+    The kernel resolves this name to the descriptor itself, so a symlink the
+    guest planted at the path the fd came from cannot redirect the mount. The
+    caller needs CAP_SYS_ADMIN and the fd must be open in the mount namespace
+    the mount targets: one opened before a mount landed there still names the
+    older mount, so re-open after any stacking.
+    """
+    return f"/proc/self/fd/{fd}"
 
 
 def _parse_mount_options(options: str) -> int:
@@ -285,3 +307,38 @@ def set_propagation(target: str, propagation: int) -> None:
         >>> set_propagation("/", MS_PRIVATE | MS_REC)
     """
     native_mount("none", target, None, propagation, None)
+
+
+def remount_bind(target: str, *, flags: int = MS_RDONLY, recursive: bool = False) -> None:
+    """Re-mount an existing bind with *flags* added, re-supplying locked ones.
+
+    Inside a user namespace (Tier A/B) the kernel rejects a read-only bind
+    remount unless the existing ``nosuid/nodev/noexec`` are re-supplied
+    (MNT_LOCKED flags survive into the namespace and must be carried across),
+    so on failure statvfs is consulted for the mount's own locked flags and
+    they are OR-ed in for one retry. *target* may be an fd path
+    (:func:`fd_path`): statvfs follows the procfs link to the mount itself.
+    The fd must have been opened after the mount it should remount.
+    """
+    bind_flags = MS_REMOUNT | MS_BIND | flags
+    if recursive:
+        bind_flags |= MS_REC
+    try:
+        native_mount("", target, None, bind_flags, None)
+        return
+    except OSError:
+        pass
+
+    locked = 0
+    try:
+        st = os.statvfs(target)
+        if st.f_flag & os.ST_NOSUID:
+            locked |= MS_NOSUID
+        if st.f_flag & os.ST_NODEV:
+            locked |= MS_NODEV
+        if st.f_flag & os.ST_NOEXEC:
+            locked |= MS_NOEXEC
+    except OSError:
+        locked = 0
+    if locked:
+        native_mount("", target, None, bind_flags | locked, None)

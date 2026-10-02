@@ -13,6 +13,7 @@ import pytest
 from chroot_distro.commands import kernel_config as kc
 from chroot_distro.commands.login.bindings import SpecialMount
 from chroot_distro.helpers import mount_manager as mm
+from chroot_distro.helpers import mount_targets
 
 
 def _devpts_special() -> SpecialMount:
@@ -47,7 +48,7 @@ def test_devpts_ebusy_reuses_existing_instance(rootfs, monkeypatch, multi_instan
     def fail_ebusy(*args, **kwargs):
         raise OSError(errno.EBUSY, "mount(2): Device or resource busy (EBUSY)")
 
-    monkeypatch.setattr(mm, "mount_filesystem", fail_ebusy)
+    monkeypatch.setattr(mount_targets, "mount_filesystem_fd", fail_ebusy)
 
     assert mm.apply_special_mount(rootfs, _devpts_special()) is True
 
@@ -61,7 +62,7 @@ def test_devpts_ebusy_without_devpts_at_target_still_raises(rootfs, monkeypatch,
     def fail_ebusy(*args, **kwargs):
         raise OSError(errno.EBUSY, "mount(2): Device or resource busy (EBUSY)")
 
-    monkeypatch.setattr(mm, "mount_filesystem", fail_ebusy)
+    monkeypatch.setattr(mount_targets, "mount_filesystem_fd", fail_ebusy)
 
     with pytest.raises(RuntimeError, match="mounting devpts"):
         mm.apply_special_mount(rootfs, _devpts_special())
@@ -91,8 +92,8 @@ def test_single_instance_never_mounts_devpts(rootfs, monkeypatch):
     def boom(*args, **kwargs):
         raise AssertionError("mount(2) must not be attempted on single-instance devpts")
 
-    monkeypatch.setattr(mm, "mount_filesystem", boom)
-    monkeypatch.setattr(mm, "bind_mount", boom)
+    monkeypatch.setattr(mount_targets, "mount_filesystem_fd", boom)
+    monkeypatch.setattr(mount_targets, "bind_mount_fd", boom)
 
     assert mm.apply_special_mount(rootfs, _devpts_special()) is True
 
@@ -101,10 +102,14 @@ def test_single_instance_binds_host_pts_when_unmounted(rootfs, monkeypatch):
     monkeypatch.setattr(mm, "_devpts_single_instance", lambda: True)
     monkeypatch.setattr(mm, "is_mounted", lambda target, holder=None: False)
     binds = []
-    monkeypatch.setattr(mm, "bind_mount", lambda src, dst, **kw: binds.append((src, dst)))
+
+    def record(src, rootfs_arg, parts, **kw):
+        binds.append((src, rootfs_arg, list(parts)))
+
+    monkeypatch.setattr(mount_targets, "bind_mount_fd", record)
 
     assert mm.apply_special_mount(rootfs, _devpts_special()) is True
-    assert binds == [("/dev/pts", f"{rootfs}/dev/pts")]
+    assert binds == [("/dev/pts", rootfs, ["dev", "pts"])]
 
 
 def test_stacking_makes_target_private_first(rootfs, monkeypatch, multi_instance):
@@ -114,7 +119,9 @@ def test_stacking_makes_target_private_first(rootfs, monkeypatch, multi_instance
     monkeypatch.setattr(mm, "_mount_fs_and_options", lambda target: ("devpts", "rw,mode=600,ptmxmode=000"))
     calls = []
     monkeypatch.setattr(mm, "set_propagation", lambda target, flags: calls.append((target, flags)))
-    monkeypatch.setattr(mm, "mount_filesystem", lambda *a, **kw: None)
+    monkeypatch.setattr(mount_targets, "mount_filesystem_fd", lambda *a, **kw: True)
 
     assert mm.apply_special_mount(rootfs, _devpts_special()) is True
-    assert calls == [(f"{rootfs}/dev/pts", mm.MS_PRIVATE)]
+    assert len(calls) == 1
+    assert calls[0][0].startswith("/proc/self/fd/")
+    assert calls[0][1] == mm.MS_PRIVATE

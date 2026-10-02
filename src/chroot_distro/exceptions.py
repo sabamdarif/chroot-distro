@@ -21,6 +21,15 @@ class MountError(ChrootDistroError):
     """Raised when mounting/unmounting mounts fails."""
 
 
+class MountRefusedError(MountError):
+    """Raised when a guest path cannot be resolved to a safe mount target.
+
+    A symlink or non-directory standing where a mount point must be means the
+    operation is refused rather than followed: the rootfs is untrusted input,
+    and following the link is the escape it is asking for.
+    """
+
+
 class LockConflictError(ChrootDistroError):
     """Raised when a file/container lock is already held by another process."""
 

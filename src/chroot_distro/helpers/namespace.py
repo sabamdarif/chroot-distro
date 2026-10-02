@@ -66,7 +66,7 @@ from chroot_distro.syscalls._constants import (
     cli_flags_to_bitmask,
 )
 from chroot_distro.syscalls._libc import libc_sethostname
-from chroot_distro.syscalls.mount import bind_mount, mount_filesystem, set_propagation
+from chroot_distro.syscalls.mount import set_propagation
 from chroot_distro.syscalls.nsenter import (
     call_in_namespaces,
     filter_accessible_namespaces,
@@ -332,8 +332,9 @@ def _userns_mount_probe_inner() -> bool:
         if not (live & CLONE_NEWUSER):
             return False
         holder = NamespaceHolder(pid=holder_pid, ns_flags=live, container_name="__userns_probe__")
-        holder.do_mount_filesystem("proc", tempfile.mkdtemp(), "proc")
-        holder.do_bind_mount(tempfile.mkdtemp(), tempfile.mkdtemp())
+        holder.do_mount_filesystem("proc", tempfile.mkdtemp(), [], "proc")
+        source = tempfile.mkdtemp()
+        holder.do_bind_mount(source, source, [])
         return True
     except (OSError, MountError):
         log.debug("userns smoke test: mount rejected inside user namespace", exc_info=True)
@@ -624,39 +625,40 @@ class NamespaceHolder:
     def do_bind_mount(
         self,
         source: str,
-        target: str,
+        rootfs: str,
+        parts: list[str],
         *,
         recursive: bool = False,
         options: str = "",
     ) -> None:
-        """Bind-mount source to target inside this holder's namespaces."""
-        flags = self._live_ns_flags()
-        readonly = "ro" in options.split(",") if options else False
-        clean_opts = ",".join(o for o in options.split(",") if o and o != "ro") if options else ""
+        """Bind-mount *source* onto the *parts* names under *rootfs* in the holder.
 
+        The target walk runs in the forked child, after setns(2): a name on a
+        tmpfs only the holder's namespace holds resolves nowhere else, and the
+        descriptor the mount is addressed to must be opened in the namespace
+        the mount lands in.
+        """
+        flags = self._live_ns_flags()
         child_pid = os.fork()
         if child_pid == 0:
             try:
                 from chroot_distro.syscalls.nsenter import enter_namespaces
 
                 enter_namespaces(self.pid, flags)
-                bind_mount(source, target, recursive=recursive, readonly=readonly, options=clean_opts)
-                os._exit(0)
-            except Exception as exc:
-                import sys
+                from chroot_distro.helpers import mount_targets
 
-                try:
-                    sys.stderr.write(f"do_bind_mount: {exc}\n")
-                    sys.stderr.flush()
-                except Exception as write_exc:
-                    log.warning("sys.stderr.write failed in child: %s", write_exc)
+                mount_targets.bind_mount_fd(
+                    source, rootfs, parts, want="dir", recursive=recursive, options=options
+                )
+                os._exit(0)
+            except BaseException:
                 os._exit(1)
 
         _, status = os.waitpid(child_pid, 0)
         if os.WIFEXITED(status) and os.WEXITSTATUS(status) != 0:
-            raise MountError(f"Bind mount {source} -> {target} failed in namespace")
+            raise MountError(f"Bind mount {source} -> {rootfs}/{'/'.join(parts)} failed in namespace")
         if os.WIFSIGNALED(status):
-            raise MountError(f"Bind mount {source} -> {target} killed by signal {os.WTERMSIG(status)}")
+            raise MountError(f"Bind mount {source} killed by signal {os.WTERMSIG(status)}")
 
     def do_umount(self, target: str, *, lazy: bool = False, force: bool = False) -> None:
         """Unmount target inside this holder's namespaces."""
@@ -685,12 +687,19 @@ class NamespaceHolder:
     def do_mount_filesystem(
         self,
         source: str,
-        target: str,
+        rootfs: str,
+        parts: list[str],
         fstype: str,
         *,
         options: str = "",
-    ) -> None:
-        """Mount a filesystem inside this holder's namespaces."""
+        create: bool = True,
+    ) -> bool:
+        """Mount *fstype* on the *parts* names under *rootfs* in the holder.
+
+        True when mounted, False when the target is missing and *create* is
+        false (the caller's signal to skip). The target walk runs in the
+        forked child, after setns(2), for the same reason as do_bind_mount.
+        """
         flags = self._live_ns_flags()
         child_pid = os.fork()
         if child_pid == 0:
@@ -699,30 +708,33 @@ class NamespaceHolder:
 
                 enter_namespaces(self.pid, flags)
                 if flags & CLONE_NEWPID:
-                    # Double-fork so that the process calling mount_filesystem()
-                    # is inside the new PID namespace (since setns(2) on a PID
-                    # namespace only places subsequent children in the namespace).
+                    # Double-fork so that the process calling mount(2) is
+                    # inside the new PID namespace (setns(2) on a PID
+                    # namespace only places subsequent children in it).
                     inner_pid = os.fork()
                     if inner_pid != 0:
-                        _, status = os.waitpid(inner_pid, 0)
-                        os._exit(os.WEXITSTATUS(status) if os.WIFEXITED(status) else 1)
-                mount_filesystem(source, target, fstype, options=options)
-                os._exit(0)
-            except Exception as exc:
-                import sys
+                        _, inner_status = os.waitpid(inner_pid, 0)
+                        os._exit(os.WEXITSTATUS(inner_status) if os.WIFEXITED(inner_status) else 1)
+                from chroot_distro.helpers import mount_targets
 
-                try:
-                    sys.stderr.write(f"do_mount_filesystem: {exc}\n")
-                    sys.stderr.flush()
-                except Exception as write_exc:
-                    log.warning("sys.stderr.write failed in child: %s", write_exc)
+                mounted = mount_targets.mount_filesystem_fd(
+                    source, rootfs, parts, fstype, options=options, create=create
+                )
+                os._exit(0 if mounted else 2)
+            except BaseException:
                 os._exit(1)
 
         _, status = os.waitpid(child_pid, 0)
-        if os.WIFEXITED(status) and os.WEXITSTATUS(status) != 0:
-            raise OSError(f"mount(2) of {fstype} ({source}) on {target} failed inside the namespace")
+        if os.WIFEXITED(status):
+            code = os.WEXITSTATUS(status)
+            if code == 2:
+                return False
+            if code != 0:
+                raise OSError(f"mount(2) of {fstype} ({source}) on {rootfs}/{'/'.join(parts)} failed inside the namespace")
+            return True
         if os.WIFSIGNALED(status):
             raise OSError(f"mount(2) of {fstype} killed by signal {os.WTERMSIG(status)}")
+        raise OSError(f"mount(2) of {fstype} failed inside the namespace")
 
     def do_set_propagation(self, target: str, propagation: int) -> None:
         """Set mount propagation inside this holder's namespaces."""

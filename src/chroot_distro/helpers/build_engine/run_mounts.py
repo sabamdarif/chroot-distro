@@ -186,12 +186,11 @@ def _host_target(rootfs: str, target_abs: str) -> str:
     """Resolve a guest target path to a host path clamped inside rootfs.
 
     The last component is resolved along with the rest of them. A mount point
-    is a name: safe_mount() creates it with a named makedirs and mount(2)
-    resolves it again, and both follow a symlink standing there, so
-    ``--mount=target=/var/tmp/x`` against an image shipping
-    ``var/tmp -> <host dir>`` put the source outside the rootfs. Following the
-    link re-anchored at the rootfs is what the guest's own view gives, so
-    ``/var/run/...`` still lands on ``/run/...``.
+    is a name, and safe_mount() re-walks it with O_NOFOLLOW off the rootfs and
+    addresses the mount to a descriptor, so a symlink standing there can no
+    longer redirect the bind. The resolution here still matters: it decides
+    *which* guest path the mount lands on, the way the guest's own view sees
+    it, so ``/var/run/...`` still lands on ``/run/...``.
     """
     parts = [p for p in target_abs.split("/") if p not in ("", ".")]
     if not parts or ".." in parts:
@@ -435,7 +434,7 @@ def run_mount_session(
 
             host_tgt = _host_target(rootfs, target_abs)
             _record_missing(rootfs, host_tgt, created)
-            mount_manager.safe_mount(src, host_tgt, holder=holder, options="ro" if ro else "")
+            mount_manager.safe_mount(src, host_tgt, rootfs=rootfs, holder=holder, options="ro" if ro else "")
             mounted.append(host_tgt)
 
         yield extra_env

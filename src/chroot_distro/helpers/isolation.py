@@ -143,6 +143,7 @@ def apply_bind_mounts(
             mount_manager.safe_mount(
                 src,
                 dst,
+                rootfs=rootfs,
                 holder=holder,
                 recursive=bind_is_recursive(src, dst_real, run_root, use_userns=use_userns),
                 options=opts_map.get(dst_real, ""),
@@ -177,15 +178,24 @@ def finalize_holder(holder: NamespaceHolder, container_key: str, *, hostname: st
 
 
 def _ensure_ptmx_symlink(rootfs: str, holder: NamespaceHolder | None) -> None:
-    """Ensure ``/dev/ptmx`` is a symlink to the private ``pts/ptmx`` multiplexer.
+    """Point ``/dev/ptmx`` at the private ``pts/ptmx`` multiplexer, verified.
 
-    Under maximum isolation ``/dev`` is a fresh tmpfs, so ``ptmx`` must point at
-    the ``newinstance`` devpts multiplexer. Runs inside the holder's namespaces
-    when given, else directly on the host view of the rootfs.
+    The devpts multiplexer is char 5:2; anything else standing at
+    ``dev/pts/ptmx`` (an image's stand-in) is refused the link rather than
+    pointed at. Under maximum isolation ``/dev`` is a fresh tmpfs, so ``ptmx``
+    must point at the ``newinstance`` devpts multiplexer. Runs inside the
+    holder's namespaces when given, else directly on the host view of the
+    rootfs.
     """
-    ptmx_path = os.path.join(rootfs, "dev/ptmx")
+    from chroot_distro.helpers import mount_targets
 
     def _relink() -> None:
+        ptmx_fd = mount_targets.open_ptmx(rootfs)
+        if ptmx_fd is None:
+            log.debug("ptmx at %s/dev/pts/ptmx did not verify; leaving /dev/ptmx alone", rootfs)
+            return
+        os.close(ptmx_fd)
+        ptmx_path = os.path.join(rootfs, "dev/ptmx")
         if os.path.islink(ptmx_path):
             return
         if os.path.exists(ptmx_path):
