@@ -284,3 +284,21 @@ def test_join_session_keyring_unknown_arch_skips(monkeypatch):
     with patch("chroot_distro.arch.get_device_cpu_arch", return_value="mips"):
         chroot._join_session_keyring()
     fake_libc.syscall.assert_not_called()
+
+
+# ── no_new_privs ────────────────────────────────────────────────────────────────
+def test_should_set_no_new_privs_env(monkeypatch):
+    monkeypatch.delenv("CD_NO_NEW_PRIVS", raising=False)
+    assert chroot.should_set_no_new_privs() is False
+    monkeypatch.setenv("CD_NO_NEW_PRIVS", "1")
+    assert chroot.should_set_no_new_privs() is True
+    monkeypatch.setenv("CD_NO_NEW_PRIVS", "0")
+    assert chroot.should_set_no_new_privs() is False
+
+
+def test_set_no_new_privs_calls_prctl():
+    calls = []
+    with patch.object(chroot, "libc_prctl", side_effect=lambda *a: calls.append(a) or 0):
+        chroot._set_no_new_privs()
+    assert calls[0][0] == 38  # PR_SET_NO_NEW_PRIVS
+    assert calls[0][1] == 1

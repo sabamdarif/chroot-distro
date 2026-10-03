@@ -184,9 +184,6 @@ CAP_MKNOD: int = 27
 CAP_CHOWN: int = 0
 """Allow chown(2) on files the guest does not otherwise own."""
 
-CAP_DAC_OVERRIDE: int = 1
-"""Override file read/write/execute permission checks."""
-
 CAP_FOWNER: int = 3
 """Override permission checks on files already owned."""
 
@@ -195,12 +192,6 @@ CAP_FSETID: int = 4
 
 CAP_KILL: int = 5
 """Send signals to processes the guest does not otherwise own."""
-
-CAP_SETGID: int = 6
-"""Allow setgid(2) and setgroups(2)."""
-
-CAP_SETUID: int = 7
-"""Allow setuid(2)."""
 
 CAP_SETPCAP: int = 8
 """Transfer capabilities between the permitted and inheritable sets."""
@@ -254,6 +245,26 @@ PR_CAP_AMBIENT_IS_SET: int = 1
 
 PR_CAP_AMBIENT_CLEAR_ALL: int = 4
 """Clear the whole ambient capability set."""
+
+PR_SET_SECCOMP: int = 22
+"""Install a seccomp filter (mode in the first argument)."""
+
+SECCOMP_MODE_FILTER: int = 2
+"""Filter mode for ``prctl(PR_SET_SECCOMP, ...)``."""
+
+# seccomp filter return actions, from <linux/seccomp.h>.
+SECCOMP_RET_ERRNO: int = 0x00050000
+"""Deny the syscall and return an errno to the caller."""
+
+SECCOMP_RET_ALLOW: int = 0x7FFF0000
+"""Allow the syscall through."""
+
+# Classic BPF opcodes used to build a seccomp program, from
+# <linux/bpf_common.h>: LD|W|ABS loads a u32 at the given offset, JMP|JEQ|K
+# compares it to a constant, RET|K returns a constant action.
+BPF_LD_W_ABS: int = 0x20
+BPF_JMP_JEQ_K: int = 0x15
+BPF_RET_K: int = 0x06
 
 def cli_flags_to_bitmask(flags: list[str]) -> int:
     """Convert a list of CLI-style namespace flags to a CLONE_* bitmask.

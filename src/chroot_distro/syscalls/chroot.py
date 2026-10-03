@@ -23,7 +23,9 @@ holder be forked the same way.
 A guest also leaves the host's session keyring behind: `_join_session_keyring`
 swaps it for a fresh one while the child is still privileged, so host secrets
 root's keyring holds never reach the guest. Best-effort by design, since a
-container that will not start is worse than one sharing a keyring.
+container that will not start is worse than one sharing a keyring. The seccomp
+denylist (`syscalls/seccomp.py`) installs last, before the identity change:
+it needs the privilege, and the keyring it denies must already be joined.
 
 `spawn_detached` clears close-on-exec on `keep_fds` deliberately: a caller passing
 a lock descriptor needs the flock to survive the exec, since that is what goes on
@@ -55,6 +57,7 @@ import typing
 from chroot_distro.syscalls._constants import PR_SET_NO_NEW_PRIVS
 from chroot_distro.syscalls._libc import libc_prctl, syscall_libc
 from chroot_distro.syscalls.capabilities import clear_ambient_caps, drop_bounding_caps
+from chroot_distro.syscalls.seccomp import install_guest_filter
 
 log = logging.getLogger(__name__)
 
@@ -216,6 +219,8 @@ def enter_chroot(
     if drop_caps:
         drop_bounding_caps()
         clear_ambient_caps()
+
+    install_guest_filter()
 
     if groups is not None:
         os.setgroups(groups)

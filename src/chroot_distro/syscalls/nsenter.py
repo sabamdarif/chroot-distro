@@ -330,6 +330,9 @@ def enter_and_run_with_pty(
 
             if should_set_no_new_privs():
                 _set_no_new_privs()
+            from chroot_distro.syscalls.seccomp import install_guest_filter
+
+            install_guest_filter()
 
             if setup is not None:
                 setup()
