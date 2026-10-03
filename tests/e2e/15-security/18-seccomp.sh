@@ -9,7 +9,7 @@ set -e
 # The field needs no syscall to read, so the probe works on any image.
 
 mode() {
-	sudo chroot-distro login debian-sec "$@" -- awk -F': *' '$1=="Seccomp" {print $2}' /proc/self/status
+	sudo chroot-distro login debian-sec "$@" -- awk '$1=="Seccomp:" {gsub(/[ 	]/, "", $2); print $2}' /proc/self/status
 }
 
 # Without the hatch: the filter must be installed (mode 2).
@@ -19,7 +19,7 @@ echo "Seccomp: $out"
 echo "PASS: denylist filter installed in the guest"
 
 # The escape hatch must reach across elevation and remove the filter.
-out=$(sudo env CD_NO_SECCOMP=1 chroot-distro login debian-sec -- awk -F': *' '$1=="Seccomp" {print $2}' /proc/self/status)
+out=$(sudo env CD_NO_SECCOMP=1 chroot-distro login debian-sec -- awk '$1=="Seccomp:" {gsub(/[ 	]/, "", $2); print $2}' /proc/self/status)
 echo "Seccomp (CD_NO_SECCOMP=1): $out"
 [ "$out" = "0" ] || { echo "FAIL: CD_NO_SECCOMP did not disable the filter (or was stripped by elevation)"; exit 1; }
 echo "PASS: CD_NO_SECCOMP forwarded and honoured"
