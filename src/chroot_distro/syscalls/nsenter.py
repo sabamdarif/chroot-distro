@@ -320,9 +320,15 @@ def enter_and_run_with_pty(
                     os._exit(os.WEXITSTATUS(status) if os.WIFEXITED(status) else 128 + os.WTERMSIG(status))
 
             # Drop dangerous capabilities when no user namespace is
-            # providing capability scoping.
+            # providing capability scoping. The no-new-privs prctl is
+            # environment-gated here because the setup callable's chroot runs
+            # after this and cannot rely on still being privileged.
             if drop_caps:
                 drop_bounding_caps()
+            from chroot_distro.syscalls.chroot import _set_no_new_privs, should_set_no_new_privs
+
+            if should_set_no_new_privs():
+                _set_no_new_privs()
 
             if setup is not None:
                 setup()

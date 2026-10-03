@@ -534,6 +534,7 @@ def _command_login_inner_once(container_name: str, args) -> None:
     # handled separately by should_use_namespaces().
     isolated = resolve_isolated(args)
     minimal = getattr(args, "minimal", False)
+    no_new_privs = getattr(args, "no_new_privs", False)
     # `--isolated` skips the extra host mounts AND uses namespaces; CD_USE_NS
     # keeps every mount, so this tracks only the real flag.
     skip_extra_mounts = isolated
@@ -1065,6 +1066,7 @@ def _command_login_inner_once(container_name: str, args) -> None:
                                     groups=chroot_config.groups,
                                     workdir=chroot_config.workdir,
                                     drop_caps=not has_userns,
+                                    no_new_privs=no_new_privs,
                                 ),
                             )
                         finally:
@@ -1301,6 +1303,7 @@ def _command_login_inner_once(container_name: str, args) -> None:
             child_env=child_env,
             holder=holder,
             session_handle=_sess_handle,
+            no_new_privs=no_new_privs,
         )
         return
 
@@ -1341,6 +1344,7 @@ def _command_login_inner_once(container_name: str, args) -> None:
                     workdir=chroot_config.workdir,
                     env=child_env,
                     drop_caps=not has_userns,
+                    no_new_privs=no_new_privs,
                 ).returncode
             else:
                 # The chroot is the child's own last step, after setns(2) and
@@ -1386,6 +1390,7 @@ def _run_detached(
     child_env: dict,
     holder,
     session_handle=None,
+    no_new_privs: bool = False,
 ) -> None:
     """Launch the resolved command in the background and return immediately.
 
@@ -1435,6 +1440,7 @@ def _run_detached(
             gid=chroot_config.gid,
             groups=chroot_config.groups,
             workdir=chroot_config.workdir,
+            no_new_privs=no_new_privs,
         )
 
     try:

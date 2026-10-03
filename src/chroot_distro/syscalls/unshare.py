@@ -188,6 +188,7 @@ class ForegroundExec:
     groups: list[int] | None = None
     workdir: str = "/"
     drop_caps: bool = False
+    no_new_privs: bool = False
 
 
 def create_holder_process(
@@ -527,6 +528,7 @@ def _exec_foreground(fg: ForegroundExec) -> None:
             groups=fg.groups,
             workdir=fg.workdir,
             drop_caps=fg.drop_caps,
+            no_new_privs=fg.no_new_privs,
         )
 
         _try_exec(fg.command, fg.env if fg.env is not None else dict(os.environ))

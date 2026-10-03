@@ -52,7 +52,8 @@ import subprocess
 import sys
 import typing
 
-from chroot_distro.syscalls._libc import syscall_libc
+from chroot_distro.syscalls._constants import PR_SET_NO_NEW_PRIVS
+from chroot_distro.syscalls._libc import libc_prctl, syscall_libc
 from chroot_distro.syscalls.capabilities import drop_bounding_caps
 
 log = logging.getLogger(__name__)
@@ -139,6 +140,24 @@ def _close_fds_above(keep: typing.Iterable[int]) -> None:
 __NR_KEYCTL_BY_ARCH = {"x86_64": 250, "i686": 288, "arm": 311, "aarch64": 219, "riscv64": 219}
 KEYCTL_JOIN_SESSION_KEYRING = 1
 
+_TRUTHY_ENV = frozenset({"1", "true", "yes", "on"})
+
+
+def should_set_no_new_privs() -> bool:
+    """Return True when ``CD_NO_NEW_PRIVS=1`` asks for the prctl."""
+    return os.environ.get("CD_NO_NEW_PRIVS", "").strip().lower() in _TRUTHY_ENV
+
+
+def _set_no_new_privs() -> None:
+    """Set PR_SET_NO_NEW_PRIVS so a guest setuid binary cannot elevate.
+
+    Off by default on purpose: it breaks sudo, su and setuid ping inside the
+    guest, and a distro-in-a-chroot that cannot run those is a support trap.
+    """
+    result = libc_prctl(PR_SET_NO_NEW_PRIVS, 1)
+    if result != 0:
+        log.debug("PR_SET_NO_NEW_PRIVS failed: %d", result)
+
 
 def _join_session_keyring() -> None:
     """Leave the host's session keyring by joining a fresh one.
@@ -176,6 +195,7 @@ def enter_chroot(
     groups: list[int] | None = None,
     workdir: str = "/",
     drop_caps: bool = False,
+    no_new_privs: bool = False,
 ) -> None:
     """Chroot into *rootfs* and take on the target identity, without exec'ing.
 
@@ -189,6 +209,9 @@ def enter_chroot(
     os.chdir(workdir)
 
     _join_session_keyring()
+
+    if no_new_privs or should_set_no_new_privs():
+        _set_no_new_privs()
 
     if drop_caps:
         drop_bounding_caps()
@@ -214,6 +237,7 @@ def chroot_and_run(
     text: bool = False,
     timeout: int | None = None,
     drop_caps: bool = False,
+    no_new_privs: bool = False,
 ) -> subprocess.CompletedProcess:
     """Fork, chroot, exec command, and capture output.
 
@@ -288,6 +312,7 @@ def chroot_and_run(
                 groups=groups,
                 workdir=workdir,
                 drop_caps=drop_caps,
+                no_new_privs=no_new_privs,
             )
 
             _try_exec(command, dict(os.environ))

@@ -51,6 +51,12 @@ _MINIMAL_OPT = (
     "and /run, /dev/pts, /dev/shm when present). Stripped guest environment. "
     "Mutually exclusive with --isolated.",
 )
+_NO_NEW_PRIVS_OPT = (
+    "--no-new-privs",
+    "Set PR_SET_NO_NEW_PRIVS, so a setuid binary inside the container cannot "
+    "gain privileges. Off by default, because it breaks sudo, su and setuid "
+    "ping in the guest. CD_NO_NEW_PRIVS=1 is the environment equivalent.",
+)
 
 HELP_PAGES: dict[str, dict[str, typing.Any]] = {
     "build": {
@@ -486,6 +492,7 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
             ),
             _ISOLATED_OPT,
             _MINIMAL_OPT,
+            _NO_NEW_PRIVS_OPT,
             (
                 "--shared-home",
                 "Bind host home directory into the container. Ignored under --isolated.",
@@ -718,6 +725,7 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
             ),
             _ISOLATED_OPT,
             _MINIMAL_OPT,
+            _NO_NEW_PRIVS_OPT,
             (
                 "--shared-home",
                 "Bind host home directory into the container. Ignored under --isolated.",

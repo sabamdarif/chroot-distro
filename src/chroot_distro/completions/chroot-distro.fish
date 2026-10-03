@@ -257,6 +257,8 @@ complete -c chroot-distro -f -n __chroot_distro_seen_login \
     -l shared-display     -d 'Share X11, Wayland, sound and D-Bus with the container'
 complete -c chroot-distro -f -n __chroot_distro_seen_login \
     -l shared-x11         -d 'Alias for --shared-display (backward compatibility)'
+complete -c chroot-distro -f -n __chroot_distro_seen_login \
+    -l no-new-privs       -d 'Set PR_SET_NO_NEW_PRIVS: setuid binaries cannot elevate'
 complete -c chroot-distro -n __chroot_distro_seen_login \
     -s b -l bind       -r -d 'Bind-mount PATH[:DEST] into the container (repeatable)'
 complete -c chroot-distro -n __chroot_distro_seen_login \
@@ -370,6 +372,8 @@ complete -c chroot-distro -f -n '__fish_seen_subcommand_from run' \
     -l shared-display     -d 'Share X11, Wayland, sound and D-Bus with the container'
 complete -c chroot-distro -f -n '__fish_seen_subcommand_from run' \
     -l shared-x11         -d 'Alias for --shared-display (backward compatibility)'
+complete -c chroot-distro -f -n '__fish_seen_subcommand_from run' \
+    -l no-new-privs       -d 'Set PR_SET_NO_NEW_PRIVS: setuid binaries cannot elevate'
 complete -c chroot-distro -n '__fish_seen_subcommand_from run' \
     -s b -l bind       -r -d 'Bind-mount PATH[:DEST] into the container (repeatable)'
 complete -c chroot-distro -n '__fish_seen_subcommand_from run' \

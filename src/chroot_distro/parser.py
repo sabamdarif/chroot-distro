@@ -163,6 +163,7 @@ def _add_login_or_run_common(p):
     )
     p.add_argument("-b", "--bind", action="append", metavar="PATH[:PATH[:OPTIONS]]")
     p.add_argument("-w", "--work-dir", dest="work_dir", metavar="PATH")
+    p.add_argument("--no-new-privs", dest="no_new_privs", action="store_true")
     p.add_argument("-e", "--env", action="append", metavar="VAR=VALUE")
 
 

@@ -147,7 +147,7 @@ _chroot_distro() {
 		-e | --env) return ;;
 		esac
 		if [[ "${cur}" == -* ]]; then
-			local opts="-u --user --isolated --minimal --shared-home --shared-tmp --shared-display --shared-x11
+			local opts="-u --user --isolated --minimal --no-new-privs --shared-home --shared-tmp --shared-display --shared-x11
                     -b --bind -w --work-dir -e --env --get-chroot-cmd -h --help"
 			_chroot_distro_compgen_words "${opts}" "${cur}"
 		else
@@ -256,7 +256,7 @@ _chroot_distro() {
 		--entrypoint) return ;;
 		esac
 		if [[ "${cur}" == -* ]]; then
-			local opts="-u --user --isolated --minimal --shared-home --shared-tmp --shared-display --shared-x11
+			local opts="-u --user --isolated --minimal --no-new-privs --shared-home --shared-tmp --shared-display --shared-x11
                     -b --bind -w --work-dir -e --env --entrypoint -d --detach --get-chroot-cmd -h --help"
 			_chroot_distro_compgen_words "${opts}" "${cur}"
 		else
