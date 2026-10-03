@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-only
 # Copyright (C) 2025-2026 Md Arif
-"""Single libc handle, the errno check every wrapper uses, and two backports.
+"""Single libc handle, the errno check every wrapper uses, two backports and
+the raw syscall(2) path.
 
 One `ctypes.CDLL` is built per process with `use_errno=True`, under a lock, so
 `ctypes.get_errno()` reads the thread-local errno of the call that just returned
@@ -9,7 +10,9 @@ convention (-1 plus errno) into an OSError that names the raw syscall,
 `mount(2)` rather than `mount`, so a failure can never be read as the output of a
 command-line tool this program does not run. `libc_prctl` is the deliberate
 exception: prctl(2) returns meaningful non-negative values, so it hands the raw
-result back unchecked and the caller interprets it.
+result back unchecked and the caller interprets it. `syscall_libc` types
+`libc.syscall` to return `c_long`, for the syscalls glibc has no wrapper for
+(open_tree, move_mount, keyctl).
 
 os.unshare and os.setns arrived in Python 3.12. Below that they are called through
 ctypes here, so nothing above this file needs a version check.
@@ -117,6 +120,13 @@ def libc_sethostname(name: str) -> None:
     name_bytes = name.encode()
     result = libc.sethostname(name_bytes, len(name_bytes))
     check_syscall(result, "sethostname")
+
+
+def syscall_libc() -> ctypes.CDLL:
+    """Return the shared libc handle with ``syscall`` typed to return long."""
+    libc = get_libc()
+    libc.syscall.restype = ctypes.c_long
+    return libc
 
 
 def libc_prctl(option: int, *args: int) -> int:

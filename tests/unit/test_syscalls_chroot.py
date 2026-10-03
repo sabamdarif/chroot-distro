@@ -1,8 +1,9 @@
+import ctypes
 import errno
 import os
 import struct
 import subprocess
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -243,3 +244,43 @@ def test_spawn_detached_sweep_keeps_keep_fds(tmp_path):
     assert open(out).read() == "1"
     os.close(leak)
     os.close(leak2)
+
+
+# ── _join_session_keyring ───────────────────────────────────────────────────────
+def test_join_session_keyring_calls_keyctl(monkeypatch):
+    fake_libc = MagicMock()
+    fake_libc.syscall.return_value = 42
+    monkeypatch.setattr(chroot, "syscall_libc", lambda: fake_libc)
+    monkeypatch.setattr(chroot, "__NR_KEYCTL_BY_ARCH", {"x86_64": 250})
+
+    with patch("chroot_distro.arch.get_device_cpu_arch", return_value="x86_64"):
+        chroot._join_session_keyring()
+    # one keyctl call: JOIN_SESSION_KEYRING with a _ses.<pid> name
+    args = fake_libc.syscall.call_args.args
+    assert args[0].value == 250
+    assert args[1].value == 1
+    assert args[2].value.startswith(b"_ses.")
+
+
+def test_join_session_keyring_tolerates_enosys(monkeypatch):
+    fake_libc = MagicMock()
+
+    def failing(*a):
+        ctypes.set_errno(errno.ENOSYS)
+        return -1
+
+    fake_libc.syscall.side_effect = failing
+    monkeypatch.setattr(chroot, "syscall_libc", lambda: fake_libc)
+    monkeypatch.setattr(chroot, "__NR_KEYCTL_BY_ARCH", {"x86_64": 250})
+
+    with patch("chroot_distro.arch.get_device_cpu_arch", return_value="x86_64"):
+        chroot._join_session_keyring()  # must not raise
+
+
+def test_join_session_keyring_unknown_arch_skips(monkeypatch):
+    fake_libc = MagicMock()
+    monkeypatch.setattr(chroot, "syscall_libc", lambda: fake_libc)
+    monkeypatch.setattr(chroot, "__NR_KEYCTL_BY_ARCH", {"x86_64": 250})
+    with patch("chroot_distro.arch.get_device_cpu_arch", return_value="mips"):
+        chroot._join_session_keyring()
+    fake_libc.syscall.assert_not_called()

@@ -32,7 +32,7 @@ import ctypes
 import logging
 import os
 
-from chroot_distro.syscalls._libc import get_libc
+from chroot_distro.syscalls._libc import syscall_libc
 
 log = logging.getLogger(__name__)
 
@@ -67,16 +67,9 @@ def _check(result: int, name: str) -> int:
     return result
 
 
-def _syscall_libc() -> ctypes.CDLL:
-    """Return the shared libc handle with ``syscall`` typed to return long."""
-    libc = get_libc()
-    libc.syscall.restype = ctypes.c_long
-    return libc
-
-
 def open_tree(dfd: int, path: str, flags: int) -> int:
     """``open_tree(2)``: return an fd referring to a (clone of a) mount tree."""
-    libc = _syscall_libc()
+    libc = syscall_libc()
     fd = libc.syscall(
         ctypes.c_long(__NR_open_tree),
         ctypes.c_int(dfd),
@@ -88,7 +81,7 @@ def open_tree(dfd: int, path: str, flags: int) -> int:
 
 def move_mount(from_dfd: int, from_path: str, to_dfd: int, to_path: str, flags: int) -> None:
     """``move_mount(2)``: attach a detached mount tree at a new location."""
-    libc = _syscall_libc()
+    libc = syscall_libc()
     result = libc.syscall(
         ctypes.c_long(__NR_move_mount),
         ctypes.c_int(from_dfd),
@@ -106,7 +99,7 @@ def mount_setattr(dfd: int, path: str, flags: int, attr: MountAttr) -> None:
     Note: ``MOUNT_ATTR_IDMAP`` cannot be combined with ``AT_RECURSIVE``: the
     kernel does not support setting an idmap recursively.
     """
-    libc = _syscall_libc()
+    libc = syscall_libc()
     result = libc.syscall(
         ctypes.c_long(__NR_mount_setattr),
         ctypes.c_int(dfd),

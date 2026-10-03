@@ -20,6 +20,11 @@ chroot and this file enters it in the process it already has, which is what keep
 the `chroot /proc/1/root` escape closed and what lets a build step or an isolation
 holder be forked the same way.
 
+A guest also leaves the host's session keyring behind: `_join_session_keyring`
+swaps it for a fresh one while the child is still privileged, so host secrets
+root's keyring holds never reach the guest. Best-effort by design, since a
+container that will not start is worse than one sharing a keyring.
+
 `spawn_detached` clears close-on-exec on `keep_fds` deliberately: a caller passing
 a lock descriptor needs the flock to survive the exec, since that is what goes on
 signalling that the session is alive. Everything else is closed before the exec:
@@ -36,6 +41,7 @@ explicitly sidesteps it.
 from __future__ import annotations
 
 import contextlib
+import ctypes
 import fcntl
 import functools
 import logging
@@ -46,6 +52,7 @@ import subprocess
 import sys
 import typing
 
+from chroot_distro.syscalls._libc import syscall_libc
 from chroot_distro.syscalls.capabilities import drop_bounding_caps
 
 log = logging.getLogger(__name__)
@@ -127,6 +134,40 @@ def _close_fds_above(keep: typing.Iterable[int]) -> None:
                 os.close(fd)
 
 
+# keyctl(2) per arch, from runc's vendored golang.org/x/sys zsysnum tables.
+# The operation codes (KEYCTL_*) are arch-independent.
+__NR_KEYCTL_BY_ARCH = {"x86_64": 250, "i686": 288, "arm": 311, "aarch64": 219, "riscv64": 219}
+KEYCTL_JOIN_SESSION_KEYRING = 1
+
+
+def _join_session_keyring() -> None:
+    """Leave the host's session keyring by joining a fresh one.
+
+    Runs in the guest child while it still has the privilege to: keyctl(2) is
+    unprivileged-safe, but the point is that the guest never sees the session
+    keyring root carries, which can hold host secrets. Best-effort, because a
+    keyring is a nicety and a kernel without keyctl support (old Android) must
+    not refuse the container a start.
+    """
+    from chroot_distro.arch import get_device_cpu_arch
+
+    nr = __NR_KEYCTL_BY_ARCH.get(get_device_cpu_arch())
+    if nr is None:
+        log.debug("no keyctl syscall number for arch, keeping inherited keyring")
+        return
+    libc = syscall_libc()
+    try:
+        result = libc.syscall(
+            ctypes.c_long(nr),
+            ctypes.c_int(KEYCTL_JOIN_SESSION_KEYRING),
+            ctypes.c_char_p(f"_ses.{os.getpid()}".encode()),
+        )
+        if result == -1:
+            raise OSError(ctypes.get_errno(), "keyctl(2)")
+    except OSError as exc:
+        log.debug("fresh session keyring unavailable, keeping inherited: %s", exc)
+
+
 def enter_chroot(
     rootfs: str,
     *,
@@ -142,10 +183,12 @@ def enter_chroot(
     that is about to exec or exit. The order is coreutils' own: chroot, chdir,
     then setgroups before setgid before setuid, because each of those can only
     be given up once. A capability drop belongs before them, while the process
-    still has the privilege to make it.
+    still has the privilege to make it, and so does the fresh session keyring.
     """
     os.chroot(rootfs)
     os.chdir(workdir)
+
+    _join_session_keyring()
 
     if drop_caps:
         drop_bounding_caps()

@@ -26,13 +26,13 @@ def test_check_raises_on_minus_one():
 
 # ── open_tree / move_mount / mount_setattr marshal args and check result ──────────
 def test_open_tree_returns_fd():
-    with patch.object(idmap, "_syscall_libc", return_value=_fake_libc(7)):
+    with patch.object(idmap, "syscall_libc", return_value=_fake_libc(7)):
         assert idmap.open_tree(-100, "/mnt", idmap.OPEN_TREE_CLONE) == 7
 
 
 def test_open_tree_raises_on_error():
     with (
-        patch.object(idmap, "_syscall_libc", return_value=_fake_libc(-1)),
+        patch.object(idmap, "syscall_libc", return_value=_fake_libc(-1)),
         patch("ctypes.get_errno", return_value=13),
         pytest.raises(OSError),
     ):
@@ -40,13 +40,13 @@ def test_open_tree_raises_on_error():
 
 
 def test_move_mount_ok():
-    with patch.object(idmap, "_syscall_libc", return_value=_fake_libc(0)):
+    with patch.object(idmap, "syscall_libc", return_value=_fake_libc(0)):
         idmap.move_mount(3, "", -100, "/dst", idmap.MOVE_MOUNT_F_EMPTY_PATH)  # no raise
 
 
 def test_move_mount_raises():
     with (
-        patch.object(idmap, "_syscall_libc", return_value=_fake_libc(-1)),
+        patch.object(idmap, "syscall_libc", return_value=_fake_libc(-1)),
         patch("ctypes.get_errno", return_value=1),
         pytest.raises(OSError),
     ):
@@ -55,7 +55,7 @@ def test_move_mount_raises():
 
 def test_mount_setattr_ok():
     attr = idmap.MountAttr(attr_set=idmap.MOUNT_ATTR_IDMAP, attr_clr=0, propagation=0, userns_fd=0)
-    with patch.object(idmap, "_syscall_libc", return_value=_fake_libc(0)):
+    with patch.object(idmap, "syscall_libc", return_value=_fake_libc(0)):
         idmap.mount_setattr(3, "", idmap.AT_EMPTY_PATH, attr)  # no raise
 
 
