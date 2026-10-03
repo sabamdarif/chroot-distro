@@ -305,10 +305,6 @@ def chroot_and_run(
             elif use_pty:
                 _setup_child_pty(master_fd, slave_fd)
 
-            if env is not None:
-                os.environ.clear()
-                os.environ.update(env)
-
             _close_fds_above(())
 
             # drop_caps drops the bounding set when no user namespace is
@@ -322,6 +318,13 @@ def chroot_and_run(
                 drop_caps=drop_caps,
                 no_new_privs=no_new_privs,
             )
+
+            # The guest environment replaces this process's only after the
+            # CD_* switches in enter_chroot have been read: the guest env
+            # deliberately carries none of them.
+            if env is not None:
+                os.environ.clear()
+                os.environ.update(env)
 
             _try_exec(command, dict(os.environ))
         except Exception as exc:
