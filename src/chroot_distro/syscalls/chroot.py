@@ -83,8 +83,10 @@ def _close_range_available() -> bool:
     libc = ctypes.CDLL(None, use_errno=True)
     libc.syscall.restype = ctypes.c_long
     ctypes.set_errno(0)
-    # An empty range is a no-op on a kernel that has the syscall.
-    result = libc.syscall(__NR_CLOSE_RANGE, 2, 2, 0)
+    # Probe with an empty range above the stdio descriptors: [2,2] would
+    # close fd 2 itself, and in a forked child that is the PTY the whole
+    # session talks through.
+    result = libc.syscall(__NR_CLOSE_RANGE, _FD_MAX, _FD_MAX, 0)
     return not (result == -1 and ctypes.get_errno() in (errno.ENOSYS, errno.EPERM))
 
 

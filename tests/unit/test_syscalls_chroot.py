@@ -302,3 +302,35 @@ def test_set_no_new_privs_calls_prctl():
         chroot._set_no_new_privs()
     assert calls[0][0] == 38  # PR_SET_NO_NEW_PRIVS
     assert calls[0][1] == 1
+
+
+def test_close_range_probe_closes_no_stdio():
+    # The availability probe once used the range [2, 2], which closed fd 2
+    # itself: in a forked child fd 2 is the PTY the whole session talks
+    # through, and the guest went mute. The probe must touch nothing.
+    import ctypes
+
+    r, w = os.pipe()
+    pid = os.fork()
+    if pid == 0:
+        os.close(r)
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.syscall.restype = ctypes.c_long
+        libc.syscall(436, 0xFFFFFFFF, 0xFFFFFFFF, 0)
+        try:
+            os.fstat(w)
+            alive = 1
+        except OSError:
+            alive = 0
+        # fd 2 must survive the probe too: write to it and check for EBADF.
+        try:
+            os.fstat(2)
+            fd2 = 1
+        except OSError:
+            fd2 = 0
+        os._exit((alive << 1) | fd2)
+    _, status = os.waitpid(pid, 0)
+    code = os.WEXITSTATUS(status)
+    assert code == 3  # pipe fd alive AND fd 2 alive
+    os.close(r)
+    os.close(w)
