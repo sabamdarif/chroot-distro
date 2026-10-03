@@ -38,4 +38,34 @@ else
 		exit 1
 	fi
 	echo "PASS: capability bounding set restricted (cap-drop fallback)"
+
+	# The allowlist: MKNOD and SYS_CHROOT dropped, SYS_ADMIN kept, and the
+	# ambient set empty.
+	mknod=$(sudo chroot-distro login debian-sec --isolated -- \
+		sh -c 'mknod /tmp/testnode c 1 3 2>/dev/null && echo MKNOD=OK || echo MKNOD=DENIED')
+	echo "$mknod"
+	if echo "$mknod" | grep -q "MKNOD=OK"; then
+		echo "FAIL: CAP_MKNOD survived the drop"
+		exit 1
+	fi
+	echo "PASS: mknod denied (CAP_MKNOD dropped)"
+
+	mount=$(sudo chroot-distro login debian-sec --isolated -- \
+		sh -c 'mkdir -p /tmp/capchk2; if mount -t tmpfs tmpfs /tmp/capchk2 2>/dev/null; then \
+      umount /tmp/capchk2 2>/dev/null; echo MOUNT=OK; else echo MOUNT=DENIED; fi')
+	echo "$mount"
+	if echo "$mount" | grep -q "MOUNT=DENIED"; then
+		echo "FAIL: guest mount failed, CAP_SYS_ADMIN was not kept"
+		exit 1
+	fi
+	echo "PASS: guest mount works (CAP_SYS_ADMIN kept)"
+
+	ambient=$(sudo chroot-distro login debian-sec --isolated -- \
+		sh -c 'grep CapAmb /proc/self/status | awk "{print \$2}"')
+	echo "CapAmb: $ambient"
+	if [ "$ambient" != "0000000000000000" ]; then
+		echo "FAIL: ambient capability set is not empty"
+		exit 1
+	fi
+	echo "PASS: ambient capability set empty"
 fi

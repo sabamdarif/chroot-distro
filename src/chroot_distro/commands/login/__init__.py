@@ -1428,6 +1428,12 @@ def _run_detached(
 
     ns_flags = holder._live_ns_flags() if holder is not None else 0
     holder_pid = holder.pid if holder is not None else -1
+    # A user namespace scopes capabilities, so the drop is only for the
+    # namespace-less case, same as the foreground and pty paths.
+    from chroot_distro.syscalls._constants import CLONE_NEWUSER
+
+    has_userns = bool(ns_flags & CLONE_NEWUSER)
+    drop_caps = not has_userns
 
     def _become_guest() -> None:
         if holder_pid > 0:
@@ -1440,6 +1446,7 @@ def _run_detached(
             gid=chroot_config.gid,
             groups=chroot_config.groups,
             workdir=chroot_config.workdir,
+            drop_caps=drop_caps,
             no_new_privs=no_new_privs,
         )
 

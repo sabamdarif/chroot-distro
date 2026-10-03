@@ -54,7 +54,7 @@ import typing
 
 from chroot_distro.syscalls._constants import PR_SET_NO_NEW_PRIVS
 from chroot_distro.syscalls._libc import libc_prctl, syscall_libc
-from chroot_distro.syscalls.capabilities import drop_bounding_caps
+from chroot_distro.syscalls.capabilities import clear_ambient_caps, drop_bounding_caps
 
 log = logging.getLogger(__name__)
 
@@ -215,6 +215,7 @@ def enter_chroot(
 
     if drop_caps:
         drop_bounding_caps()
+        clear_ambient_caps()
 
     if groups is not None:
         os.setgroups(groups)

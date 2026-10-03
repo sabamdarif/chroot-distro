@@ -46,7 +46,7 @@ from chroot_distro.syscalls._constants import (
     NS_FILE_MAP,
 )
 from chroot_distro.syscalls._libc import py_setns
-from chroot_distro.syscalls.capabilities import drop_bounding_caps
+from chroot_distro.syscalls.capabilities import clear_ambient_caps, drop_bounding_caps
 
 log = logging.getLogger(__name__)
 
@@ -325,6 +325,7 @@ def enter_and_run_with_pty(
             # after this and cannot rely on still being privileged.
             if drop_caps:
                 drop_bounding_caps()
+                clear_ambient_caps()
             from chroot_distro.syscalls.chroot import _set_no_new_privs, should_set_no_new_privs
 
             if should_set_no_new_privs():

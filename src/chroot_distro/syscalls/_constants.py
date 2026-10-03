@@ -181,6 +181,42 @@ CAP_SYS_ADMIN: int = 21
 CAP_MKNOD: int = 27
 """Allow mknod(2)."""
 
+CAP_CHOWN: int = 0
+"""Allow chown(2) on files the guest does not otherwise own."""
+
+CAP_DAC_OVERRIDE: int = 1
+"""Override file read/write/execute permission checks."""
+
+CAP_FOWNER: int = 3
+"""Override permission checks on files already owned."""
+
+CAP_FSETID: int = 4
+"""Set the setgid bit on files the guest does not own."""
+
+CAP_KILL: int = 5
+"""Send signals to processes the guest does not otherwise own."""
+
+CAP_SETGID: int = 6
+"""Allow setgid(2) and setgroups(2)."""
+
+CAP_SETUID: int = 7
+"""Allow setuid(2)."""
+
+CAP_SETPCAP: int = 8
+"""Transfer capabilities between the permitted and inheritable sets."""
+
+CAP_NET_BIND_SERVICE: int = 10
+"""Bind to ports below 1024."""
+
+CAP_NET_RAW: int = 13
+"""Raw sockets: ping, traceroute."""
+
+CAP_AUDIT_WRITE: int = 29
+"""Write to the kernel audit log."""
+
+CAP_SETFCAP: int = 31
+"""Set file capabilities."""
+
 CAP_SYS_MODULE: int = 16
 """Allow loading/unloading kernel modules."""
 
@@ -215,6 +251,9 @@ PR_CAP_AMBIENT: int = 47
 
 PR_CAP_AMBIENT_IS_SET: int = 1
 """Check if an ambient capability is set."""
+
+PR_CAP_AMBIENT_CLEAR_ALL: int = 4
+"""Clear the whole ambient capability set."""
 
 def cli_flags_to_bitmask(flags: list[str]) -> int:
     """Convert a list of CLI-style namespace flags to a CLONE_* bitmask.
