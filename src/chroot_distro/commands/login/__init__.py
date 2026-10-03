@@ -46,7 +46,7 @@ reported as ignored rather than quietly dropped.
 
 Entering has four forms: `chroot_and_run` when there is no holder, waiting on a
 foreground holder that execs the command itself (entering one would hang the
-session forever), `enter_and_run_with_pty` into a sleeping holder, and
+session forever), `enter_and_run_with_pty` into a parked holder, and
 `spawn_detached` for `--detach`.
 """
 

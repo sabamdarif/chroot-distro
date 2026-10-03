@@ -12,9 +12,12 @@ straight back to the host namespace.
 
 A holder exists because namespaces die with their last member. Given a *rootfs* it
 chroots itself, which closes the `chroot /proc/1/root` escape a namespace whose PID
-1 sits on the host root would leave open. It then sleeps forever, or, with a
-`ForegroundExec`, execs the session's own command so that command *is* PID 1 and
-the namespaces end when it does.
+1 sits on the host root would leave open. It then parks forever as a functioning
+PID 1: it reaps the orphans that reparent to it, and it exits on the SIGTERM the
+teardown paths send (a plain PID 1 ignores both, which is why a sleeping PID 1
+accumulates zombies and only ever dies by SIGKILL). With a `ForegroundExec` it
+instead execs the session's own command, so that command *is* PID 1 and the
+namespaces end when it does.
 
 Two synchronisation channels are not optional. A pipe carries the holder's host PID
 back out, since a PID inside a new namespace means nothing to the parent. And the
@@ -37,6 +40,7 @@ import contextlib
 import dataclasses
 import logging
 import os
+import signal
 import time
 import typing
 
@@ -202,9 +206,9 @@ def create_holder_process(
     """Create a long-lived process that holds namespaces open.
 
     The holder process calls ``unshare(2)`` with *flags*, optionally
-    ``chroot``\\ s into *rootfs* for maximum isolation, and then sleeps
-    forever.  Other processes can later join its namespaces via
-    ``/proc/<pid>/ns/*``.
+    ``chroot``\\ s into *rootfs* for maximum isolation, and then parks
+    forever, reaping whatever reparents to it.  Other processes can later
+    join its namespaces via ``/proc/<pid>/ns/*``.
 
     With *foreground* the holder execs that command instead of sleeping, once
     the parent writes the go byte; see :class:`ForegroundExec`.
@@ -423,7 +427,7 @@ def create_holder_process(
                     os.write(pid_w, str(grandchild_pid).encode())
             os.close(pid_w)
 
-            # A sleeping holder only ever gets here by being killed; a
+            # A sleeping holder only ever leaves by SIGTERM or SIGKILL; a
             # foreground one exits with the session's own status, and this
             # process is what the parent waits on.
             status = 0
@@ -443,6 +447,35 @@ def create_holder_process(
 
     # Should never be reached.
     os._exit(1)
+
+
+def _reap_children(*_args: object) -> None:
+    """SIGCHLD handler: drain every dead child, if any exist.
+
+    In a PID namespace the holder is PID 1, so any container process that
+    double-forks or outlives its parent is reparented here. A sleeping PID 1
+    that never wait(2)s would keep them as zombies forever.
+    """
+    while True:
+        try:
+            pid, _ = os.waitpid(-1, os.WNOHANG)
+        except ChildProcessError:
+            return
+        if pid == 0:
+            return
+
+
+def _install_holder_signals() -> None:
+    """Make the sleeping holder a functioning PID 1: reap, and exit on SIGTERM.
+
+    Only for the sleeping shape: a foreground holder execs the session's
+    command, whose own wait semantics and signal handling must stay intact.
+    Installed in the holder itself (the grandchild), never in the launcher,
+    whose blocking ``waitpid(grandchild_pid, 0)`` a ``waitpid(-1, WNOHANG)``
+    here would starve.
+    """
+    signal.signal(signal.SIGCHLD, _reap_children)
+    signal.signal(signal.SIGTERM, lambda *_: os._exit(0))
 
 
 def _run_holder(notify_fd: int, rootfs: str | None, foreground: ForegroundExec | None = None) -> None:
@@ -479,9 +512,10 @@ def _run_holder(notify_fd: int, rootfs: str | None, foreground: ForegroundExec |
     if foreground is not None:
         _exec_foreground(foreground)
 
-    # Sleeping forever is the point: the namespaces live as long as this
-    # process does.
-    log.debug("holder process %d entering sleep loop", os.getpid())
+    # Parking is the point: the namespaces live as long as this process does.
+    # PEP 475 restarts the sleep across every SIGCHLD the reaper wakes for.
+    _install_holder_signals()
+    log.debug("holder process %d parking with zombie reaping", os.getpid())
     try:
         while True:
             time.sleep(2147483647)

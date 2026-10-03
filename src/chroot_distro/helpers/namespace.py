@@ -589,7 +589,7 @@ class NamespaceHolder:
     launcher_pid: int = -1
     master_fd: int = -1
     # True only for a holder that execs the session's command itself (a
-    # ForegroundExec). A plain sleeping holder also has a live launcher_pid,
+    # ForegroundExec). A plain parked holder also has a live launcher_pid,
     # so that alone cannot tell the two apart.
     is_foreground: bool = False
 
@@ -785,7 +785,7 @@ def _create_holder(
     *rootfs* makes the holder chroot itself before it starts holding (maximum
     isolation, so ``/proc/<pid>/root`` cannot reach the host); *foreground*
     makes it exec the session's own command once the caller says the mounts are
-    ready, instead of sleeping. They are alternatives: a foreground holder does
+    ready, instead of parking. They are alternatives: a foreground holder does
     its own chroot after that go-ahead.
 
     *id_map* is the ``(uid_map, gid_map)`` to write when *flags* include

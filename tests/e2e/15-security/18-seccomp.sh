@@ -13,7 +13,7 @@ mode() {
 }
 
 # Without the hatch: the filter must be installed (mode 2).
-out=$(mode)
+out=$(mode --)
 echo "Seccomp: $out"
 [ "$out" = "2" ] || { echo "FAIL: no seccomp filter in the guest (mode $out)"; exit 1; }
 echo "PASS: denylist filter installed in the guest"

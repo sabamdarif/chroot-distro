@@ -1,8 +1,12 @@
 import os
+import signal
+import time
 from unittest.mock import patch
 
+import pytest
+
 from chroot_distro.syscalls import unshare
-from chroot_distro.syscalls._constants import CLONE_NEWNS, CLONE_NEWPID
+from chroot_distro.syscalls._constants import CLONE_NEWNS
 
 
 # ── probe_namespace_support: aggregates supported bits from child exit codes ──────
@@ -88,3 +92,50 @@ def test_write_id_mappings_privileged_skips_setgroups(monkeypatch):
     # Root parent leaves setgroups at allow (never written).
     assert "/proc/999/setgroups" not in writes
     assert writes["/proc/999/uid_map"] == "0 0 1\n"
+
+
+# ── the sleeping holder as PID 1: reap and exit on SIGTERM ────────────────────────
+def test_reap_children_drains_zombie():
+    # A child that exits and is never waited for stays as a zombie until the
+    # SIGCHLD handler drains it.
+    pid = os.fork()
+    if pid == 0:
+        os._exit(0)
+    # Wait for the child to die without reaping it.
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        try:
+            with open(f"/proc/{pid}/stat") as fh:
+                state = fh.read().split()[2]
+            if state == "Z":
+                break
+        except OSError:
+            break
+        time.sleep(0.01)
+    unshare._reap_children()
+    # A reaped pid leaves /proc entirely.
+    with pytest.raises(FileNotFoundError):
+        os.stat(f"/proc/{pid}/stat")
+
+
+def test_reap_children_without_children_returns():
+    unshare._reap_children()  # ChildProcessError path: must not raise
+
+
+def test_holder_installs_reaping_and_exits_on_sigterm():
+    # The parked holder must die on SIGTERM (a bare PID 1 ignores it).
+    pid = os.fork()
+    if pid == 0:
+        unshare._install_holder_signals()
+        try:
+            while True:
+                time.sleep(2147483647)
+        except BaseException:
+            pass
+        os._exit(0)
+
+    time.sleep(0.2)
+    os.kill(pid, signal.SIGTERM)
+    _, status = os.waitpid(pid, 0)
+    assert os.WIFEXITED(status)
+    assert os.WEXITSTATUS(status) == 0
