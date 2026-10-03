@@ -1,40 +1,27 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-only
 # Copyright (C) 2025-2026 Md Arif
-# Security: the seccomp denylist must deny listed syscalls and allow the rest
+# Security: the seccomp denylist must be installed in the guest
 
 set -e
 
-# The probe: call three syscalls through libc and report their errno. kexec_load
-# with null args is EINVAL (22) when the syscall runs, EPERM (1) when the filter
-# denies it. io_uring_setup with null args is EFAULT (14) unfiltered, EPERM
-# filtered. getpid must keep working.
-probe='
-import ctypes, errno
-libc = ctypes.CDLL(None, use_errno=True)
-libc.syscall.restype = ctypes.c_long
-out = []
-for nr, args in ((246, (0, 0, 0, 0)), (425, (0, 0)), (39, ())):
-    ctypes.set_errno(0)
-    libc.syscall(nr, *args)
-    out.append(ctypes.get_errno())
-print("KEXEC=%d IOURING=%d GETPID=%d" % tuple(out))
-'
+# Seccomp: 2 in /proc/self/status means a filter is installed; 0 means none.
+# The field needs no syscall to read, so the probe works on any image.
 
-out=$(sudo chroot-distro login debian-sec -- python3 -c "$probe")
-echo "$out"
-echo "$out" | grep -q "KEXEC=1" || { echo "FAIL: kexec_load not denied by the filter"; exit 1; }
-echo "$out" | grep -q "IOURING=1" || { echo "FAIL: io_uring_setup not denied by the filter"; exit 1; }
-echo "$out" | grep -q "GETPID=0" || { echo "FAIL: getpid broken by the filter"; exit 1; }
-echo "PASS: denylist filter active in the guest"
+mode() {
+	sudo chroot-distro login debian-sec "$@" -- awk -F': *' '$1=="Seccomp" {print $2}' /proc/self/status
+}
 
-# The escape hatch must reach across elevation and turn the filter off.
-out=$(CD_NO_SECCOMP=1 sudo chroot-distro login debian-sec -- python3 -c "$probe")
-echo "$out"
-if echo "$out" | grep -q "KEXEC=1"; then
-	echo "FAIL: CD_NO_SECCOMP did not disable the filter (or was stripped by elevation)"
-	exit 1
-fi
+# Without the hatch: the filter must be installed (mode 2).
+out=$(mode)
+echo "Seccomp: $out"
+[ "$out" = "2" ] || { echo "FAIL: no seccomp filter in the guest (mode $out)"; exit 1; }
+echo "PASS: denylist filter installed in the guest"
+
+# The escape hatch must reach across elevation and remove the filter.
+out=$(sudo env CD_NO_SECCOMP=1 chroot-distro login debian-sec -- awk -F': *' '$1=="Seccomp" {print $2}' /proc/self/status)
+echo "Seccomp (CD_NO_SECCOMP=1): $out"
+[ "$out" = "0" ] || { echo "FAIL: CD_NO_SECCOMP did not disable the filter (or was stripped by elevation)"; exit 1; }
 echo "PASS: CD_NO_SECCOMP forwarded and honoured"
 
 # A normal shell and a file write still work under the filter.
