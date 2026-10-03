@@ -286,6 +286,7 @@ def enter_and_run_with_pty(
     Returns the child's exit code (0-255).
     """
     from chroot_distro.syscalls.chroot import (
+        _close_fds_above,
         _copy_terminal_size,
         _pty_relay,
         _setup_child_pty,
@@ -307,6 +308,8 @@ def enter_and_run_with_pty(
         try:
             if use_pty:
                 _setup_child_pty(master_fd, slave_fd)
+
+            _close_fds_above(())
 
             enter_namespaces(target_pid, namespaces)
 

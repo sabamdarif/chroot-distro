@@ -95,6 +95,7 @@ from chroot_distro.helpers.layer_diff import (
 from chroot_distro.helpers.tar_extract import _safe_resolve
 from chroot_distro.message import log_info, warn
 from chroot_distro.syscalls.chroot import (
+    _close_fds_above,
     _try_exec,
     _wait_for_child,
     _wait_for_child_with_signals,
@@ -466,6 +467,7 @@ def _fork_step(
                 groups=config.groups,
                 workdir=config.workdir,
             )
+            _close_fds_above(())
             _try_exec(config.command, env)
         except BaseException:
             os._exit(127)

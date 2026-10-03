@@ -22,7 +22,10 @@ holder be forked the same way.
 
 `spawn_detached` clears close-on-exec on `keep_fds` deliberately: a caller passing
 a lock descriptor needs the flock to survive the exec, since that is what goes on
-signalling that the session is alive.
+signalling that the session is alive. Everything else is closed before the exec:
+a descriptor the child does not need is a way out of the rootfs (a holder's
+go-pipe or PTY master still names a host file), so each forked child runs
+`_close_fds_above` between its own setup and the exec.
 
 `_try_exec` retries through the binary's own PT_INTERP when a direct execve fails
 with ENOENT or EACCES on a binary that plainly exists. That is an Android/Termux
@@ -34,6 +37,7 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import functools
 import logging
 import os
 import select
@@ -51,6 +55,76 @@ _TIOCSCTTY = 0x540E
 # Terminal window-size ioctls.
 _TIOCGWINSZ = 0x5413
 _TIOCSWINSZ = 0x5414
+
+# close_range(2) is in the architecture-synchronised range (>= 424), so one
+# number serves every arch, like idmap's.
+__NR_CLOSE_RANGE = 436
+# close_range takes unsigned ints; the whole table is 3..UINT_MAX.
+_FD_MAX = 0xFFFFFFFF
+
+
+@functools.lru_cache(maxsize=1)
+def _close_range_available() -> bool:
+    """Whether close_range(2) works here (Linux 5.9+, not old Android)."""
+    import ctypes
+    import errno
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.syscall.restype = ctypes.c_long
+    ctypes.set_errno(0)
+    # An empty range is a no-op on a kernel that has the syscall.
+    result = libc.syscall(__NR_CLOSE_RANGE, 2, 2, 0)
+    return not (result == -1 and ctypes.get_errno() in (errno.ENOSYS, errno.EPERM))
+
+
+def _close_fds_above(keep: typing.Iterable[int]) -> None:
+    """Close every descriptor above 2 except those in *keep*.
+
+    Runs in a forked child, before the guest setup: a descriptor the exec does
+    not need still names a host file (the holder's go-pipe, a PTY master), and
+    holding it across the exec is the breakout shape CVE-2024-21626 fixed in
+    runc. close_range(2) does it in two calls; below 5.9 the fallbacks are a
+    /proc/self/fd walk, and an fstat scan capped at 1024 for a kernel with no
+    visible /proc, where the fd table beyond that is host policy, not this
+    program's.
+    """
+    import ctypes
+
+    kept = {fd for fd in keep if fd > 2}
+    if _close_range_available():
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.syscall.restype = ctypes.c_long
+        bounds = [(3, _FD_MAX)]
+        if kept:
+            lo, hi = min(kept), max(kept)
+            bounds = [(3, lo - 1), (hi + 1, _FD_MAX)]
+        for first, last in bounds:
+            if first <= last:
+                with contextlib.suppress(OSError):
+                    libc.syscall(__NR_CLOSE_RANGE, first, last, 0)
+        return
+
+    try:
+        names = os.listdir("/proc/self/fd")
+    except OSError:
+        for fd in range(3, 1024):
+            if fd in kept:
+                continue
+            try:
+                os.fstat(fd)
+            except OSError:
+                continue
+            with contextlib.suppress(OSError):
+                os.close(fd)
+        return
+
+    for name in names:
+        if not name.isdigit():
+            continue
+        fd = int(name)
+        if fd > 2 and fd not in kept:
+            with contextlib.suppress(OSError):
+                os.close(fd)
 
 
 def enter_chroot(
@@ -160,6 +234,8 @@ def chroot_and_run(
                 os.environ.clear()
                 os.environ.update(env)
 
+            _close_fds_above(())
+
             # drop_caps drops the bounding set when no user namespace is
             # providing capability scoping.
             enter_chroot(
@@ -245,6 +321,7 @@ def spawn_detached(
             os.dup2(stdin_fd, 0)
             os.dup2(stdout_fd, 1)
             os.dup2(stderr_fd, 2)
+            _close_fds_above(keep_fds)
             for fd in keep_fds:
                 os.set_inheritable(fd, True)
             if setup is not None:

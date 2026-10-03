@@ -207,6 +207,9 @@ PR_CAPBSET_DROP: int = 24
 
 # prctl(2) constants, from <linux/prctl.h>
 
+PR_SET_NO_NEW_PRIVS: int = 38
+"""Stop setuid binaries from granting privileges on exec (runc's no_new_privileges)."""
+
 PR_CAP_AMBIENT: int = 47
 """Ambient capability operations."""
 

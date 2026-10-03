@@ -495,7 +495,12 @@ def _exec_foreground(fg: ForegroundExec) -> None:
     Already inside the namespaces; what is left is the terminal, the root, the
     identity, and the exec.
     """
-    from chroot_distro.syscalls.chroot import _setup_child_pty, _try_exec, enter_chroot
+    from chroot_distro.syscalls.chroot import (
+        _close_fds_above,
+        _setup_child_pty,
+        _try_exec,
+        enter_chroot,
+    )
 
     try:
         go = os.read(fg.go_fd, 1)
@@ -512,6 +517,8 @@ def _exec_foreground(fg: ForegroundExec) -> None:
     try:
         if fg.stdio_fd >= 0:
             _setup_child_pty(fg.stdio_master_fd, fg.stdio_fd)
+
+        _close_fds_above(())
 
         enter_chroot(
             fg.rootfs,

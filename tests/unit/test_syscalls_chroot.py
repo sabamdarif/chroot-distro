@@ -137,3 +137,109 @@ def test_wait_for_child_decodes_normal_exit():
     if pid == 0:
         os._exit(3)
     assert chroot._wait_for_child(pid) == 3
+
+
+# ── _close_fds_above: the pre-exec descriptor sweep ─────────────────────────────
+def test_close_fds_above_closes_unkept_keeps_kept():
+    # Child inherits an extra fd; the sweep must close it and keep the one
+    # named in *keep*. Reported through the kept pipe so no probe fd pollutes
+    # the layout.
+    r, w = os.pipe()
+    extra = os.open(os.devnull, os.O_RDONLY)
+    pid = os.fork()
+    if pid == 0:
+        os.close(r)
+        chroot._close_fds_above((w,))
+        try:
+            os.fstat(extra)
+            alive = 1
+        except OSError:
+            alive = 0
+        try:
+            os.fstat(w)
+            kept = 1
+        except OSError:
+            kept = 0
+        os._exit(alive * 2 + kept)
+    _, status = os.waitpid(pid, 0)
+    assert os.WEXITSTATUS(status) == 1  # extra closed, keep survived
+    os.close(r)
+    os.close(w)
+    os.close(extra)
+
+
+def test_close_fds_above_no_keep_closes_everything():
+    r, w = os.pipe()
+    extra = os.open(os.devnull, os.O_RDONLY)
+    pid = os.fork()
+    if pid == 0:
+        chroot._close_fds_above(())
+        try:
+            os.fstat(extra)
+            alive = 1
+        except OSError:
+            alive = 0
+        os._exit(alive)
+    _, status = os.waitpid(pid, 0)
+    assert os.WEXITSTATUS(status) == 0
+    os.close(r)
+    os.close(w)
+    os.close(extra)
+
+
+def test_close_fds_above_proc_fallback_closes_unkept(monkeypatch):
+    # Force the /proc/self/fd walk (the pre-5.9 path) and check it still closes.
+    monkeypatch.setattr(chroot, "_close_range_available", lambda: False)
+    r, w = os.pipe()
+    extra = os.open(os.devnull, os.O_RDONLY)
+    pid = os.fork()
+    if pid == 0:
+        chroot._close_fds_above((w,))
+        try:
+            os.fstat(extra)
+            alive = 1
+        except OSError:
+            alive = 0
+        os._exit(alive)
+    _, status = os.waitpid(pid, 0)
+    assert os.WEXITSTATUS(status) == 0
+    os.close(r)
+    os.close(w)
+    os.close(extra)
+
+
+def test_spawn_detached_sweep_keeps_keep_fds(tmp_path):
+    # spawn_detached closes everything above 2 except keep_fds, then the guest
+    # setup runs. The setup callable reports through a file: the report pipe
+    # would itself be swept, being above 2 and not kept.
+    out = str(tmp_path / "survivors")
+    leak = os.open(os.devnull, os.O_RDONLY)
+    leak2 = os.open(os.devnull, os.O_RDONLY)
+
+    def setup() -> None:
+        alive = 0
+        for fd in (leak, leak2):
+            try:
+                os.fstat(fd)
+                alive += 1
+            except OSError:
+                pass
+        with open(out, "w") as fh:
+            fh.write(str(alive))
+
+    devnull = os.open(os.devnull, os.O_RDONLY)
+    pid = chroot.spawn_detached(
+        ["/bin/true"],
+        env={},
+        stdin_fd=devnull,
+        stdout_fd=devnull,
+        stderr_fd=devnull,
+        keep_fds=(leak,),
+        setup=setup,
+    )
+    os.close(devnull)
+    os.waitpid(pid, 0)
+    # leak survives (kept), leak2 is closed by the sweep.
+    assert open(out).read() == "1"
+    os.close(leak)
+    os.close(leak2)
