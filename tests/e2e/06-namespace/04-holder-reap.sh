@@ -72,3 +72,8 @@ echo "PASS: holder exits on SIGTERM"
 # The state must still self-heal: a later command clears what is left.
 sudo chroot-distro unmount debian
 echo "PASS: unmount after holder exit cleans state"
+
+# The killed holder left a stale isolation mode behind; the plain login is
+# what trips over it.
+sudo chroot-distro login debian -- true
+echo "PASS: plain login works after the killed holder is unmounted"

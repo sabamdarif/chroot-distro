@@ -94,8 +94,11 @@ def command_unmount(args) -> None:
 
         if holder is not None:
             namespace.release_holder(container_name)
-            namespace.clear_isolation_mode(container_name)
             holder = None
+
+        # A holder killed from outside leaves its mode file behind, so this
+        # cannot sit inside the holder gate above.
+        namespace.clear_isolation_mode(container_name)
 
         # Termux: mounts made by an earlier `su --mount-master` live in the
         # global namespace and reach this process as slave copies that cannot

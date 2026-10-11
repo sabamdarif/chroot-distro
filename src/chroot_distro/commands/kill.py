@@ -201,7 +201,10 @@ def command_kill(args) -> None:
         session.clear_mount_options(container_name)
         if holder is not None:
             namespace.release_holder(container_name)
-            namespace.clear_isolation_mode(container_name)
+
+        # A holder killed from outside leaves its mode file behind, so this
+        # cannot sit inside the holder gate above.
+        namespace.clear_isolation_mode(container_name)
 
         # The SIGKILL survivors are re-read from /proc rather than trusted: one
         # that was in uninterruptible sleep then may well be gone by now.
