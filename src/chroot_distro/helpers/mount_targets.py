@@ -63,6 +63,23 @@ def guest_parts(rootfs: str, target: str) -> list[str]:
     return parts
 
 
+def open_rootfs_fd(rootfs: str) -> int:
+    """Open *rootfs* itself as a descriptor, or -1 when it cannot be opened.
+
+    A child setns'd into a subordinate user namespace opens this before it
+    re-asserts the mapped id, while its kernel uid is still 0, and hands the
+    descriptor to :func:`resolve_mount_target` as *rootfs_fd*: the mapped
+    subordinate id cannot always traverse the path to the rootfs (a 0700 or
+    0750 $HOME prefix), and the descriptor must be opened in the namespace
+    the mount lands in, so the manager cannot open it ahead of the setns.
+    """
+    try:
+        return os.open(rootfs, O_PATH | os.O_DIRECTORY | os.O_CLOEXEC)
+    except OSError as exc:
+        log.debug("cannot open rootfs %s: %s", rootfs, exc)
+        return -1
+
+
 def resolve_mount_target(
     rootfs: str,
     parts: Sequence[str],
@@ -70,8 +87,14 @@ def resolve_mount_target(
     want: str = "any",
     create: bool = True,
     created: list[list[str]] | None = None,
+    rootfs_fd: int = -1,
 ) -> int | None:
     """Open the mount target *parts* names under *rootfs*. Descriptor or None.
+
+    *rootfs_fd* is a caller-opened descriptor for *rootfs* itself; without it
+    the rootfs is opened by path, which a setns-entered child under a
+    subordinate user map cannot always traverse (a 0700 or 0750 $HOME prefix,
+    for one). The caller owns the descriptor; it is not closed here.
 
     Every component is opened O_NOFOLLOW off the descriptor of the one above,
     so a symlink anywhere on the path raises :class:`MountRefusedError`, and so
@@ -90,8 +113,15 @@ def resolve_mount_target(
     clean = [p for p in parts if p not in ("", ".")]
     if ".." in clean:
         raise MountRefusedError(f"invalid mount target /{'/'.join(parts)}")
+    # dup the caller's descriptor: the walk below closes its fd each step,
+    # so the caller's must survive this call. A pre-opened descriptor is a
+    # walk *base* only: with no components the caller's descriptor itself
+    # would be the mount target, and a descriptor opened in another mount
+    # namespace cannot be mounted onto, so the path form is kept there.
     try:
-        fd = os.open(rootfs, O_PATH | os.O_DIRECTORY | os.O_CLOEXEC)
+        fd = os.dup(rootfs_fd) if rootfs_fd >= 0 and clean else os.open(
+            rootfs, O_PATH | os.O_DIRECTORY | os.O_CLOEXEC
+        )
     except OSError as exc:
         raise MountError(f"cannot open rootfs {rootfs}: {exc}") from exc
     try:
@@ -196,6 +226,7 @@ def bind_mount_fd(
     recursive: bool = False,
     options: str = "",
     create: bool = True,
+    rootfs_fd: int = -1,
 ) -> None:
     """Bind *source* onto the target *parts* names under *rootfs*, by descriptor.
 
@@ -204,11 +235,12 @@ def bind_mount_fd(
     them. The leaf is re-resolved for that pass because a descriptor opened
     before the bind still names the mount it was opened on. A file stub this
     call created is removed again when the bind fails, so an empty
-    placeholder cannot shadow a real rootfs entry.
+    placeholder cannot shadow a real rootfs entry. *rootfs_fd* is the
+    caller's descriptor for *rootfs* (see :func:`resolve_mount_target`).
     """
     clean = [p for p in parts if p not in ("", ".")]
     created: list[list[str]] = []
-    fd = resolve_mount_target(rootfs, clean, want=want, create=create, created=created)
+    fd = resolve_mount_target(rootfs, clean, want=want, create=create, created=created, rootfs_fd=rootfs_fd)
     if fd is None:
         raise MountError(f"mount target /{'/'.join(clean)} does not exist")
     bind_flags = MS_BIND | (MS_REC if recursive else 0)
@@ -226,7 +258,7 @@ def bind_mount_fd(
     if not extra_flags:
         return
     # Re-resolve: the descriptor above now names the pre-bind mount.
-    fd = resolve_mount_target(rootfs, clean, want=want, create=False)
+    fd = resolve_mount_target(rootfs, clean, want=want, create=False, rootfs_fd=rootfs_fd)
     if fd is None:
         raise MountError(f"mount target /{'/'.join(clean)} does not exist")
     try:
@@ -244,15 +276,18 @@ def mount_filesystem_fd(
     flags: int = 0,
     options: str = "",
     create: bool = True,
+    rootfs_fd: int = -1,
 ) -> bool:
     """Mount *fstype* on the target *parts* names under *rootfs*, by descriptor.
 
     True when mounted. False means the target does not exist and *create* is
     false. The option string is split the way :func:`mount_filesystem` splits
     it, so generic VFS options become flags and the rest is data.
+    *rootfs_fd* is the caller's descriptor for *rootfs* (see
+    :func:`resolve_mount_target`).
     """
     clean = [p for p in parts if p not in ("", ".")]
-    fd = resolve_mount_target(rootfs, clean, want="dir", create=create)
+    fd = resolve_mount_target(rootfs, clean, want="dir", create=create, rootfs_fd=rootfs_fd)
     if fd is None:
         return False
     try:
@@ -263,7 +298,7 @@ def mount_filesystem_fd(
     return True
 
 
-def mask_path(rootfs: str, parts: Sequence[str], *, is_dir: bool) -> bool:
+def mask_path(rootfs: str, parts: Sequence[str], *, is_dir: bool, rootfs_fd: int = -1) -> bool:
     """Cover the *parts* entry under *rootfs*. True when masked.
 
     A file gets /dev/null bound over it, a directory a read-only tmpfs. The
@@ -275,13 +310,14 @@ def mask_path(rootfs: str, parts: Sequence[str], *, is_dir: bool) -> bool:
     if is_dir:
         try:
             return mount_filesystem_fd(
-                "tmpfs", rootfs, parts, "tmpfs", flags=0, options="ro,nosuid,nodev,noexec", create=False
+                "tmpfs", rootfs, parts, "tmpfs", flags=0, options="ro,nosuid,nodev,noexec", create=False,
+                rootfs_fd=rootfs_fd,
             )
         except (MountError, OSError):
             return False
     want = "file" if len(parts) else "dir"
     try:
-        fd = resolve_mount_target(rootfs, parts, want=want, create=False)
+        fd = resolve_mount_target(rootfs, parts, want=want, create=False, rootfs_fd=rootfs_fd)
     except (MountError, MountRefusedError):
         return False
     if fd is None:
@@ -302,7 +338,7 @@ def mask_path(rootfs: str, parts: Sequence[str], *, is_dir: bool) -> bool:
         os.close(fd)
 
 
-def readonly_path(rootfs: str, parts: Sequence[str]) -> bool:
+def readonly_path(rootfs: str, parts: Sequence[str], rootfs_fd: int = -1) -> bool:
     """Bind the *parts* entry under *rootfs* onto itself, read-only. True when done.
 
     The entry may be a directory or a file (`/proc/sysrq-trigger`). The
@@ -311,7 +347,7 @@ def readonly_path(rootfs: str, parts: Sequence[str]) -> bool:
     mount). Best-effort like mask_path.
     """
     try:
-        fd = resolve_mount_target(rootfs, parts, want="any", create=False)
+        fd = resolve_mount_target(rootfs, parts, want="any", create=False, rootfs_fd=rootfs_fd)
     except (MountError, MountRefusedError):
         return False
     if fd is None:
@@ -323,7 +359,7 @@ def readonly_path(rootfs: str, parts: Sequence[str]) -> bool:
     finally:
         os.close(fd)
     try:
-        fd = resolve_mount_target(rootfs, parts, want="any", create=False)
+        fd = resolve_mount_target(rootfs, parts, want="any", create=False, rootfs_fd=rootfs_fd)
     except (MountError, MountRefusedError):
         return False
     if fd is None:
@@ -361,7 +397,7 @@ def verify_dev_node(fd: int, major: int, minor: int, *, char: bool = True) -> bo
 
 
 
-def open_ptmx(rootfs: str) -> int | None:
+def open_ptmx(rootfs: str, rootfs_fd: int = -1) -> int | None:
     """Open ``dev/pts/ptmx`` under *rootfs* and verify it. Descriptor or None.
 
     The node inside a devpts instance is char 5:2 and not a symlink, so
@@ -369,7 +405,7 @@ def open_ptmx(rootfs: str) -> int | None:
     the ``/dev/ptmx`` symlink. The caller owns the returned descriptor.
     """
     try:
-        dev_fd = resolve_mount_target(rootfs, ["dev"], want="dir", create=False)
+        dev_fd = resolve_mount_target(rootfs, ["dev"], want="dir", create=False, rootfs_fd=rootfs_fd)
     except MountError:
         return None
     if dev_fd is None:

@@ -8,6 +8,14 @@ by host uid 0 stays usable inside a container whose user namespace maps containe
 uid 0 to an unprivileged subordinate uid: without it, every install would have to
 `chown -R` the whole tree to match, twice, once each way.
 
+Direction, measured on the wire: with the guest's own userns as the mount idmap,
+on-disk uid N reads as uid N inside (the mount idmap cancels the userns
+translation), and a file the guest creates lands on disk as the same uid it
+appears to be inside, so container root mints host-uid-0 files. One mount idmap
+cannot give both a readable root-owned rootfs and unprivileged on-disk writes:
+mapping the subid range identity would leave on-disk uid 0 unmapped (nobody,
+EOVERFLOW on writes).
+
 open_tree(2), move_mount(2) and mount_setattr(2) have no glibc wrappers, so they go
 straight through syscall(2). Their numbers are in the architecture-synchronised
 range (>= 424), identical on x86_64, aarch64, arm and x86, which is why one set of

@@ -27,11 +27,11 @@ def test_mounts_under_rootfs_filters_and_sorts(monkeypatch):
         "malformed-line",
     ]
     result = mm._mounts_under_rootfs_from_lines(lines, "/root/rootfs")
-    # Only mounts at or under rootfs, deepest first.
+    # Only mounts strictly under rootfs, deepest first; the mountpoint itself
+    # is the Tier B idmapped rootfs stack and is never swept.
     assert result == [
         "/root/rootfs/dev/shm",
         "/root/rootfs/dev",
-        "/root/rootfs",
     ]
 
 

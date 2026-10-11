@@ -1022,6 +1022,7 @@ def _command_login_inner_once(container_name: str, args) -> None:
             container_name,
             use_namespaces=use_namespaces,
             host_mounts_exist=host_mounts_exist,
+            max_isolation=max_isolation and use_namespaces,
         )
     except NamespaceError as exc:
         crit_error(str(exc))
@@ -1356,6 +1357,7 @@ def _command_login_inner_once(container_name: str, args) -> None:
                         gid=chroot_config.gid,
                         groups=chroot_config.groups,
                         workdir=chroot_config.workdir,
+                        regain_ids=True,
                     )
 
                 exit_code = enter_and_run_with_pty(
@@ -1439,7 +1441,9 @@ def _run_detached(
         if holder_pid > 0:
             from chroot_distro.syscalls.nsenter import enter_namespaces
 
-            enter_namespaces(holder_pid, ns_flags)
+            # The regain is enter_chroot's: the mapped id cannot necessarily
+            # traverse the rootfs path, and setresuid(2) needs CAP_SETUID.
+            enter_namespaces(holder_pid, ns_flags, regain_ids=False)
         enter_chroot(
             chroot_config.rootfs,
             uid=chroot_config.uid,
@@ -1448,6 +1452,7 @@ def _run_detached(
             workdir=chroot_config.workdir,
             drop_caps=drop_caps,
             no_new_privs=no_new_privs,
+            regain_ids=holder_pid > 0,
         )
 
     try:

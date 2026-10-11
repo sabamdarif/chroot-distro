@@ -13,7 +13,10 @@ The order of the identity change is coreutils' own and is not negotiable:
 chroot, chdir, then setgroups before setgid before setuid. Each of those can only
 be given up once, so a uid dropped early leaves the groups behind for good. A
 capability drop goes before all of them, while the process still has the privilege
-to perform it.
+to perform it. A caller that joined a mapped user namespace with setns(2)
+re-asserts its ids between the chdir and the keyring (`regain_ids`): earlier and
+the subordinate id cannot traverse the rootfs path, later and the dropped
+bounding set has taken the CAP_SETUID the regain needs.
 
 Nothing here is handed a command line to a helper binary: a caller describes a
 chroot and this file enters it in the process it already has, which is what keeps
@@ -201,6 +204,7 @@ def enter_chroot(
     workdir: str = "/",
     drop_caps: bool = False,
     no_new_privs: bool = False,
+    regain_ids: bool = False,
 ) -> None:
     """Chroot into *rootfs* and take on the target identity, without exec'ing.
 
@@ -209,9 +213,21 @@ def enter_chroot(
     then setgroups before setgid before setuid, because each of those can only
     be given up once. A capability drop belongs before them, while the process
     still has the privilege to make it, and so does the fresh session keyring.
+
+    *regain_ids* is for a process that entered a mapped user namespace with
+    setns(2): the re-assert happens after the chroot, because the mapped
+    (subordinate) id cannot necessarily traverse the rootfs path (a 0700 or
+    0750 $HOME prefix), and before the capability drop, because setresuid(2)
+    back into the map's range needs CAP_SETUID. A process that created its own
+    user namespace is already mapped and leaves this off.
     """
     os.chroot(rootfs)
     os.chdir(workdir)
+
+    if regain_ids:
+        from chroot_distro.syscalls.nsenter import _regain_mapped_root
+
+        _regain_mapped_root()
 
     _join_session_keyring()
 

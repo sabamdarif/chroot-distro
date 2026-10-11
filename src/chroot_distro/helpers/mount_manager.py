@@ -57,6 +57,7 @@ import os
 import re
 import stat
 import sys
+from functools import partial
 from typing import TYPE_CHECKING
 
 from chroot_distro.dirfd import _chmod_fd
@@ -95,7 +96,11 @@ def _mounts_under_rootfs_from_lines(lines: list[str], rootfs: str) -> list[str]:
             mount_point_abs = os.path.realpath(mount_point)
         except OSError:
             continue
-        if mount_point_abs == rootfs_abs or mount_point_abs.startswith(rootfs_abs + os.sep):
+        if mount_point_abs == rootfs_abs:
+            # A mount at the rootfs itself is the Tier B idmapped stack the
+            # whole container runs on, not a stale bind to sweep away.
+            continue
+        if mount_point_abs.startswith(rootfs_abs + os.sep):
             active_mounts.append(mount_point_abs)
     active_mounts.sort(key=lambda p: len(p.split(os.sep)), reverse=True)
     return active_mounts
@@ -226,10 +231,11 @@ def safe_mount(
 
     kernel_options = _filter_bind_options(options)
 
-    def _do_mount() -> bytes:
+    def _do_mount(rootfs_fd: int = -1) -> bytes:
         try:
             mount_targets.bind_mount_fd(
-                source_abs, rootfs, parts, want=want, recursive=recursive, options=kernel_options
+                source_abs, rootfs, parts, want=want, recursive=recursive, options=kernel_options,
+                rootfs_fd=rootfs_fd,
             )
         except (OSError, MountError) as exc:
             # The child's exception cannot cross holder.call; stderr still
@@ -240,8 +246,10 @@ def safe_mount(
 
     if holder is not None:
         # A mount only reaches the guest from inside the holder's mount
-        # namespace, so the walk and the mount both run there.
-        if holder.call(_do_mount) is None:
+        # namespace, so the walk and the mount both run there. The rootfs is
+        # opened before the mapped id is re-asserted, so a subordinate map
+        # whose view cannot traverse the path still gets its walk base.
+        if holder.call(_do_mount, prepare=partial(mount_targets.open_rootfs_fd, rootfs)) is None:
             raise MountError(f"Failed to mount {source} to {target} inside the holder's namespaces")
     else:
         try:
@@ -286,8 +294,10 @@ def create_dev_nodes(
     Failures are non-fatal and logged at debug level.
     """
 
-    def _bind_node(name: str) -> None:
-        mount_targets.bind_mount_fd(os.path.join("/dev", name), rootfs, ["dev", name], want="any")
+    def _bind_node(name: str, rootfs_fd: int = -1) -> None:
+        mount_targets.bind_mount_fd(
+            os.path.join("/dev", name), rootfs, ["dev", name], want="any", rootfs_fd=rootfs_fd
+        )
 
     def _make_node(name: str, major: int, minor: int, mode: int) -> None:
         dev_fd = mount_targets.resolve_mount_target(rootfs, ["dev"], want="dir", create=True)
@@ -319,14 +329,16 @@ def create_dev_nodes(
                 log.debug("Skipping /dev/%s bind: host node %s missing", name, source)
                 continue
 
-            def _bind(n: str = name) -> bytes:
-                _bind_node(n)
+            def _bind(n: str = name, rootfs_fd: int = -1) -> bytes:
+                _bind_node(n, rootfs_fd)
                 return b""
 
             if holder is not None:
                 # The stub target lives on a tmpfs only the holder's mount
-                # namespace holds, so the walk and the bind both run there.
-                if holder.call(_bind) is None:
+                # namespace holds, so the walk and the bind both run there;
+                # the rootfs walk base is opened before the mapped id is
+                # re-asserted, as in safe_mount.
+                if holder.call(_bind, prepare=partial(mount_targets.open_rootfs_fd, rootfs)) is None:
                     log.debug("Could not bind device node %s in the holder's namespaces", name)
                 continue
             try:

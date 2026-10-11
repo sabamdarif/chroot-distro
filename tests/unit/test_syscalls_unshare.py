@@ -139,3 +139,76 @@ def test_holder_installs_reaping_and_exits_on_sigterm():
     _, status = os.waitpid(pid, 0)
     assert os.WIFEXITED(status)
     assert os.WEXITSTATUS(status) == 0
+
+
+# ── Tier B: the idmap handshake between parent and holder ────────────────────────
+def test_stack_idmapped_rootfs_mounts_on_confirmation(monkeypatch):
+    calls = {}
+    monkeypatch.setattr(unshare.os, "read", lambda fd, n: b"I")
+    monkeypatch.setattr(unshare.os, "close", lambda fd: calls.setdefault("closed", []).append(fd))
+    import chroot_distro.syscalls.idmap as idmap
+
+    monkeypatch.setattr(idmap, "move_mount", lambda *a, **k: calls.setdefault("move", a))
+    monkeypatch.setattr(unshare.log, "error", lambda *a, **k: calls.setdefault("logged", a))
+    unshare._stack_idmapped_rootfs(7, 8, "/tmp/rootfs")
+    assert calls["move"] == (8, "", -100, "/tmp/rootfs", idmap.MOVE_MOUNT_F_EMPTY_PATH)
+    assert 7 in calls["closed"] and 8 in calls["closed"]
+    assert "logged" not in calls
+
+
+def test_stack_idmapped_rootfs_eof_exits(monkeypatch):
+    # os._exit(1) would take the test runner with it, so it raises here instead.
+    monkeypatch.setattr(unshare.os, "read", lambda fd, n: b"")
+    monkeypatch.setattr(unshare.os, "close", lambda fd: None)
+    monkeypatch.setattr(unshare.os, "_exit", lambda code: (_ for _ in ()).throw(SystemExit(code)))
+    import chroot_distro.syscalls.idmap as idmap
+
+    monkeypatch.setattr(idmap, "move_mount", lambda *a, **k: pytest.fail("must not mount"))
+    with pytest.raises(SystemExit):
+        unshare._stack_idmapped_rootfs(7, 8, "/tmp/rootfs")
+
+
+def test_stack_idmapped_rootfs_mount_failure_exits(monkeypatch):
+    monkeypatch.setattr(unshare.os, "read", lambda fd, n: b"I")
+    monkeypatch.setattr(unshare.os, "close", lambda fd: None)
+    monkeypatch.setattr(unshare.os, "_exit", lambda code: (_ for _ in ()).throw(SystemExit(code)))
+    import chroot_distro.syscalls.idmap as idmap
+
+    def boom(*a, **k):
+        raise OSError(22, "invalid")
+
+    monkeypatch.setattr(idmap, "move_mount", boom)
+    monkeypatch.setattr(unshare.log, "exception", lambda *a, **k: None)
+    monkeypatch.setattr(unshare.log, "error", lambda *a, **k: None)
+    with pytest.raises(SystemExit):
+        unshare._stack_idmapped_rootfs(7, 8, "/tmp/rootfs")
+
+
+def test_apply_idmap_to_clone_sets_idmap(monkeypatch):
+    import chroot_distro.syscalls.idmap as idmap
+
+    seen = {}
+    monkeypatch.setattr(unshare.os, "open", lambda p, f: 33)
+    monkeypatch.setattr(unshare.os, "close", lambda fd: seen.setdefault("close", []).append(fd))
+    monkeypatch.setattr(
+        idmap, "mount_setattr", lambda fd, path, flags, attr: seen.update(fd=fd, path=path, flags=flags, attr=attr)
+    )
+    unshare._apply_idmap_to_clone(11, 4242)
+    assert seen["fd"] == 11 and seen["path"] == "" and seen["flags"] == idmap.AT_EMPTY_PATH
+    assert seen["attr"].attr_set == idmap.MOUNT_ATTR_IDMAP
+    assert seen["attr"].userns_fd == 33
+    assert 33 in seen["close"]
+
+
+def test_apply_idmap_to_clone_propagates_oserror(monkeypatch):
+    import chroot_distro.syscalls.idmap as idmap
+
+    monkeypatch.setattr(unshare.os, "open", lambda p, f: 33)
+    monkeypatch.setattr(unshare.os, "close", lambda fd: None)
+
+    def boom(fd, path, flags, attr):
+        raise OSError(1, "permitted")
+
+    monkeypatch.setattr(idmap, "mount_setattr", boom)
+    with pytest.raises(OSError):
+        unshare._apply_idmap_to_clone(11, 4242)

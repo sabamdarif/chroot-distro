@@ -154,6 +154,15 @@ def _write_id_mappings(child_pid: int, id_map: tuple[str, str] | None = None) ->
         fh.write(gid_map)
 
 
+class HolderIdmapError(RuntimeError):
+    """The idmap handshake failed: the rootfs clone could not be idmapped.
+
+    Raised in the parent while creating a Tier B holder, so the caller can
+    fall back to the Tier A identity map rather than leave a subordinate
+    userns staring at an unmapped (nobody-owned) rootfs.
+    """
+
+
 class HolderPids(typing.NamedTuple):
     """The two PIDs a holder is made of.
 
@@ -202,6 +211,7 @@ def create_holder_process(
     ready_fd: int = -1,
     id_map: tuple[str, str] | None = None,
     foreground: ForegroundExec | None = None,
+    idmap_tree_fd: int = -1,
 ) -> HolderPids:
     """Create a long-lived process that holds namespaces open.
 
@@ -213,12 +223,24 @@ def create_holder_process(
     With *foreground* the holder execs that command instead of sleeping, once
     the parent writes the go byte; see :class:`ForegroundExec`.
 
+    With *idmap_tree_fd* (Tier B) the rootfs is served through an idmapped
+    mount: the parent sets ``MOUNT_ATTR_IDMAP`` on the detached clone after
+    the user namespace is mapped, and the holder ``move_mount``\\ s it stacked
+    over *rootfs* before chrooting. The split is a kernel constraint:
+    ``mount_setattr`` needs CAP_SYS_ADMIN in the userns that owns the
+    filesystem (the initial one), while ``move_mount`` must run in the
+    destination mount namespace. Requires *id_map* (a mapped userns) and a
+    *rootfs*; both are the caller's job.
+
     Synchronisation
     ~~~~~~~~~~~~~~~
     The holder (or launcher) signals readiness and communicates the holder's
     host PID to the parent using an internal pipe.
 
     * If *ready_fd* ≥ 0 the byte ``b'K'`` is also written there.
+    * With *idmap_tree_fd*, an ``b'I'`` byte (idmap applied) is written to a
+      third pipe after the maps: the holder stacks the clone only then, so it
+      never chroots into an unmapped tree.
 
     PID namespace handling
     ~~~~~~~~~~~~~~~~~~~~~~
@@ -235,6 +257,9 @@ def create_holder_process(
         ready_fd: File descriptor to write the ready byte to.  When set
             to ``-1`` (the default) an internal pipe is created.
         foreground: When given, what the holder execs instead of sleeping.
+        idmap_tree_fd: Detached ``open_tree(CLONE)`` fd of *rootfs*. The
+            parent idmaps it and the holder stacks it over *rootfs* before
+            the chroot; the holder closes it either way.
 
     Returns:
         The holder's host PID and this process's own child's PID; see
@@ -244,6 +269,8 @@ def create_holder_process(
         OSError: If ``unshare(2)`` or ``fork(2)`` fails, or if the
             holder process exits before signalling readiness.
         RuntimeError: If the holder fails to start.
+        HolderIdmapError: If *idmap_tree_fd* was given but the idmap could
+            not be applied; the clone fd is left for the caller to close.
     """
     # Pipe to send the actual holder's host PID back to the parent.
     pid_r, pid_w = os.pipe()
@@ -256,12 +283,19 @@ def create_holder_process(
     if has_userns:
         map_r, map_w = os.pipe()
 
+    # Tier B: a third pipe for the idmap handshake ('I' = idmap applied).
+    idmap_r = idmap_w = -1
+    if idmap_tree_fd >= 0:
+        idmap_r, idmap_w = os.pipe()
+
     launcher_pid = os.fork()
     if launcher_pid > 0:
         # ---- Original (parent) process ----
         os.close(pid_w)
         if map_r >= 0:
             os.close(map_r)  # Parent only writes map_w.
+        if idmap_r >= 0:
+            os.close(idmap_r)  # Parent only writes idmap_w.
 
         if has_userns:
             # The child unshares CLONE_NEWUSER and reports its PID, which
@@ -275,6 +309,8 @@ def create_holder_process(
                 os.close(pid_r)
                 if map_w >= 0:
                     os.close(map_w)
+                if idmap_w >= 0:
+                    os.close(idmap_w)
                 _reap_child(launcher_pid)
                 raise RuntimeError("namespace holder process failed to start (no readiness signal received)")
 
@@ -287,6 +323,8 @@ def create_holder_process(
                     os.close(pid_r)
                     if map_w >= 0:
                         os.close(map_w)
+                    if idmap_w >= 0:
+                        os.close(idmap_w)
                     _reap_child(launcher_pid)
                     raise RuntimeError(f"Invalid MAP request from child: {decoded!r}") from exc
 
@@ -300,6 +338,22 @@ def create_holder_process(
                         os.write(map_w, b"M")
                     os.close(map_w)
                     map_w = -1
+
+                if idmap_w >= 0:
+                    # The idmap needs a mapped user namespace, so it goes
+                    # after the 'M'. EOF (not b'I') tells the holder to give
+                    # up rather than chroot into an unmapped tree.
+                    try:
+                        _apply_idmap_to_clone(idmap_tree_fd, child_pid)
+                        with contextlib.suppress(OSError):
+                            os.write(idmap_w, b"I")
+                    except OSError as exc:
+                        raise HolderIdmapError(
+                            f"mount_setattr(MOUNT_ATTR_IDMAP) on the rootfs clone failed: {exc}"
+                        ) from exc
+                    finally:
+                        os.close(idmap_w)
+                        idmap_w = -1
 
                 try:
                     data2 = os.read(pid_r, 32)
@@ -322,6 +376,11 @@ def create_holder_process(
                 if map_w >= 0:
                     os.close(map_w)
                     map_w = -1
+                if idmap_w >= 0:
+                    # No user namespace, so the Tier B map is off the table;
+                    # EOF makes the holder proceed without the idmapped rootfs.
+                    os.close(idmap_w)
+                    idmap_w = -1
                 try:
                     holder_pid = int(decoded)
                 except ValueError as exc:
@@ -355,6 +414,8 @@ def create_holder_process(
     os.close(pid_r)
     if map_w >= 0:
         os.close(map_w)  # Child only reads map_r.
+    if idmap_w >= 0:
+        os.close(idmap_w)  # Child only reads idmap_r.
 
     try:
         py_unshare(flags)
@@ -369,6 +430,13 @@ def create_holder_process(
             if map_r >= 0:
                 os.close(map_r)
                 map_r = -1
+            if idmap_r >= 0:
+                os.close(idmap_r)
+                idmap_r = -1
+            if idmap_tree_fd >= 0:
+                with contextlib.suppress(OSError):
+                    os.close(idmap_tree_fd)
+                idmap_tree_fd = -1
             try:
                 py_unshare(flags)
             except OSError:
@@ -415,6 +483,13 @@ def create_holder_process(
                         with contextlib.suppress(OSError):
                             os.close(fd)
             os.close(sync_w)
+            if idmap_r >= 0:
+                os.close(idmap_r)
+                idmap_r = -1
+            if idmap_tree_fd >= 0:
+                with contextlib.suppress(OSError):
+                    os.close(idmap_tree_fd)
+                idmap_tree_fd = -1
             try:
                 ready_signal = os.read(sync_r, 1)
             except OSError:
@@ -440,10 +515,10 @@ def create_holder_process(
         # Grandchild - this is the actual holder (PID 1).
         os.close(sync_r)
         os.close(pid_w)
-        _run_holder(sync_w, rootfs, foreground)
+        _run_holder(sync_w, rootfs, foreground, idmap_r=idmap_r, idmap_tree_fd=idmap_tree_fd)
     else:
         # No PID namespace: the launcher itself is the holder.
-        _run_holder(pid_w, rootfs, foreground)
+        _run_holder(pid_w, rootfs, foreground, idmap_r=idmap_r, idmap_tree_fd=idmap_tree_fd)
 
     # Should never be reached.
     os._exit(1)
@@ -478,7 +553,65 @@ def _install_holder_signals() -> None:
     signal.signal(signal.SIGTERM, lambda *_: os._exit(0))
 
 
-def _run_holder(notify_fd: int, rootfs: str | None, foreground: ForegroundExec | None = None) -> None:
+def _apply_idmap_to_clone(idmap_tree_fd: int, userns_pid: int) -> None:
+    """Set ``MOUNT_ATTR_IDMAP`` on the detached rootfs clone, in the parent.
+
+    *userns_pid* is the process whose user namespace the idmap is taken from
+    (the launcher, whose namespace the holder shares). Runs at the caller's
+    privilege: the kernel requires CAP_SYS_ADMIN in the userns that owns the
+    filesystem, which only the pre-fork parent holds.
+    """
+    from chroot_distro.syscalls import idmap
+
+    userns_fd = os.open(f"/proc/{userns_pid}/ns/user", os.O_RDONLY)
+    try:
+        attr = idmap.MountAttr(attr_set=idmap.MOUNT_ATTR_IDMAP, attr_clr=0, propagation=0, userns_fd=userns_fd)
+        idmap.mount_setattr(idmap_tree_fd, "", idmap.AT_EMPTY_PATH, attr)
+    finally:
+        with contextlib.suppress(OSError):
+            os.close(userns_fd)
+
+
+def _stack_idmapped_rootfs(idmap_r: int, idmap_tree_fd: int, rootfs: str) -> None:
+    """Wait for the 'I' byte and stack the idmapped clone over *rootfs*.
+
+    Runs in the holder, after the propagation is private and before the
+    chroot: ``move_mount`` must land in the destination mount namespace, and
+    every later mount (specials, binds) must land on top of the idmapped
+    layer. EOF instead of ``b'I'`` means the parent could not idmap the
+    clone; a Tier B map without an idmapped rootfs would show the rootfs as
+    nobody-owned, so the holder refuses to continue.
+    """
+    from chroot_distro.syscalls import idmap
+
+    try:
+        byte = os.read(idmap_r, 1)
+    except OSError:
+        byte = b""
+    finally:
+        with contextlib.suppress(OSError):
+            os.close(idmap_r)
+    try:
+        if byte == b"I":
+            idmap.move_mount(idmap_tree_fd, "", -100, rootfs, idmap.MOVE_MOUNT_F_EMPTY_PATH)
+            return
+        log.error("holder: no idmap confirmation for %s; refusing to chroot", rootfs)
+    except OSError:
+        log.exception("holder: stacking the idmapped rootfs at %s failed", rootfs)
+    finally:
+        with contextlib.suppress(OSError):
+            os.close(idmap_tree_fd)
+    os._exit(1)
+
+
+def _run_holder(
+    notify_fd: int,
+    rootfs: str | None,
+    foreground: ForegroundExec | None = None,
+    *,
+    idmap_r: int = -1,
+    idmap_tree_fd: int = -1,
+) -> None:
     """Execute the holder loop: set propagation, chroot, signal, then wait.
 
     This function never returns - it sleeps forever, execs *foreground*'s
@@ -489,11 +622,16 @@ def _run_holder(notify_fd: int, rootfs: str | None, foreground: ForegroundExec |
         rootfs: Optional root filesystem to ``chroot`` into.
         foreground: What to exec once the parent gives the go-ahead, instead
             of sleeping.
+        idmap_r: Read end of the idmap handshake; stacked with
+            *idmap_tree_fd* before the chroot when set.
+        idmap_tree_fd: Detached clone of *rootfs* to stack idmapped.
     """
     with contextlib.suppress(OSError):
         libc_mount(None, b"/", None, MS_REC | MS_PRIVATE, None)
 
     if rootfs is not None:
+        if idmap_r >= 0 and idmap_tree_fd >= 0:
+            _stack_idmapped_rootfs(idmap_r, idmap_tree_fd, rootfs)
         try:
             os.chroot(rootfs)
             os.chdir("/")

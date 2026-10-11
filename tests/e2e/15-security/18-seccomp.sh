@@ -9,11 +9,11 @@ set -e
 # The field needs no syscall to read, so the probe works on any image.
 
 mode() {
-	sudo chroot-distro login debian-sec "$@" -- awk '$1=="Seccomp:" {gsub(/[ 	]/, "", $2); print $2}' /proc/self/status
+	sudo chroot-distro login debian-sec -- awk '$1=="Seccomp:" {gsub(/[ 	]/, "", $2); print $2}' /proc/self/status
 }
 
 # Without the hatch: the filter must be installed (mode 2).
-out=$(mode --)
+out=$(mode)
 echo "Seccomp: $out"
 [ "$out" = "2" ] || { echo "FAIL: no seccomp filter in the guest (mode $out)"; exit 1; }
 echo "PASS: denylist filter installed in the guest"

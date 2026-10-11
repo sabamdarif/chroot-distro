@@ -354,15 +354,16 @@ def _isolation_tier_status() -> tuple[str, str] | None:
     if result.missing_mandatory:
         return "unavailable (no mount namespace on this kernel)", "warn"
     descriptions = {
-        "B": "B: full user-namespace remap (container uids remapped, capabilities scoped)",
+        "B": "B: subordinate uid remap with idmapped rootfs (guest runs as unprivileged "
+        "host uids; files it writes land on disk as the uid it sees)",
         "A": "A: user namespace active (capabilities scoped; uids not remapped)",
         "C": "C: capability-drop only (no user namespace; container root == host root)",
     }
     levels = {"B": "ok", "A": "ok", "C": "warn"}
     tier = result.isolation_tier
     value = descriptions.get(tier, tier)
-    if tier == "A" and result.idmapped_mounts:
-        value += "; idmapped mounts available (uid-remap not yet enabled)"
+    if tier != "B" and result.idmapped_mounts:
+        value += "; idmapped mounts available but not applied (no chrooted holder)"
     elif tier != "C" and not result.idmapped_mounts:
         value += "; idmapped mounts unavailable"
     if not result.userns_mounts_ok:

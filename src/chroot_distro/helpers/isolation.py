@@ -193,21 +193,33 @@ def _ensure_ptmx_symlink(rootfs: str, holder: NamespaceHolder | None) -> None:
     """
     from chroot_distro.helpers import mount_targets
 
-    def _relink() -> None:
-        ptmx_fd = mount_targets.open_ptmx(rootfs)
+    def _open_rootfs() -> int:
+        return mount_targets.open_rootfs_fd(rootfs)
+
+    def _relink(rootfs_fd: int = -1) -> None:
+        ptmx_fd = mount_targets.open_ptmx(rootfs, rootfs_fd=rootfs_fd)
         if ptmx_fd is None:
             log.debug("ptmx at %s/dev/pts/ptmx did not verify; leaving /dev/ptmx alone", rootfs)
             return
         os.close(ptmx_fd)
-        ptmx_path = os.path.join(rootfs, "dev/ptmx")
-        if os.path.islink(ptmx_path):
+        try:
+            dev_fd = mount_targets.resolve_mount_target(rootfs, ["dev"], want="dir", create=False, rootfs_fd=rootfs_fd)
+        except (mount_targets.MountError, mount_targets.MountRefusedError):
+            dev_fd = None
+        if dev_fd is None:
             return
-        if os.path.exists(ptmx_path):
-            os.remove(ptmx_path)
-        os.symlink("pts/ptmx", ptmx_path)
+        try:
+            ptmx_path = os.path.join(rootfs, "dev/ptmx")
+            if os.path.islink(ptmx_path):
+                return
+            if os.path.exists(ptmx_path):
+                os.remove(ptmx_path)
+            os.symlink("pts/ptmx", "ptmx", dir_fd=dev_fd)
+        finally:
+            os.close(dev_fd)
 
     if holder is not None:
-        if holder.call(_relink) is None:
+        if holder.call(_relink, prepare=_open_rootfs) is None:
             log.debug("Failed to create ptmx symlink in the holder's namespaces")
         return
     try:
@@ -295,17 +307,20 @@ def _apply_masked_paths(
     def _path_parts(path: str) -> list[str]:
         return [p for p in path.split("/") if p not in ("", ".")]
 
-    def _one_masked(path: str) -> bytes:
+    def _open_rootfs() -> int:
+        return mount_targets.open_rootfs_fd(rootfs)
+
+    def _one_masked(path: str, rootfs_fd: int = -1) -> bytes:
         parts = _path_parts(path)
         try:
             is_dir = os.path.isdir(os.path.join(rootfs, *parts))
         except OSError:
             return b""
-        done = mount_targets.mask_path(rootfs, parts, is_dir=is_dir)
+        done = mount_targets.mask_path(rootfs, parts, is_dir=is_dir, rootfs_fd=rootfs_fd)
         return b"1" if done else b""
 
-    def _one_readonly(path: str) -> bytes:
-        done = mount_targets.readonly_path(rootfs, _path_parts(path))
+    def _one_readonly(path: str, rootfs_fd: int = -1) -> bytes:
+        done = mount_targets.readonly_path(rootfs, _path_parts(path), rootfs_fd=rootfs_fd)
         return b"1" if done else b""
 
     for path in masked:
@@ -313,20 +328,20 @@ def _apply_masked_paths(
             _one_masked(path)
             continue
 
-        def _mask(p: str = path) -> bytes:
-            return _one_masked(p)
+        def _mask(p: str = path, rootfs_fd: int = -1) -> bytes:
+            return _one_masked(p, rootfs_fd)
 
-        if holder.call(_mask) is None:
+        if holder.call(_mask, prepare=_open_rootfs) is None:
             log.debug("Could not apply mask %s in the holder's namespaces", path)
     for path in readonly:
         if holder is None:
             _one_readonly(path)
             continue
 
-        def _ro(p: str = path) -> bytes:
-            return _one_readonly(p)
+        def _ro(p: str = path, rootfs_fd: int = -1) -> bytes:
+            return _one_readonly(p, rootfs_fd)
 
-        if holder.call(_ro) is None:
+        if holder.call(_ro, prepare=_open_rootfs) is None:
             log.debug("Could not make %s read-only in the holder's namespaces", path)
 
 

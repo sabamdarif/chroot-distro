@@ -105,7 +105,7 @@ def check_ns_accessible(pid: int, nstype: int) -> bool:
     return True
 
 
-def enter_namespaces(target_pid: int, namespaces: int) -> None:
+def enter_namespaces(target_pid: int, namespaces: int, *, regain_ids: bool = True) -> None:
     """Enter one or more namespaces of *target_pid*.
 
     For each bit set in *namespaces*, the corresponding
@@ -129,6 +129,11 @@ def enter_namespaces(target_pid: int, namespaces: int) -> None:
         target_pid: PID of the process whose namespaces to enter.
         namespaces: Bitmask of ``CLONE_NEW*`` flags indicating which
             namespaces to join.
+        regain_ids: Re-assert the caller's ids in the entered user namespace
+            (see :func:`_regain_mapped_root`). A caller that needs to open
+            paths by their host location first (mount work under a
+            subordinate map, whose entered view cannot traverse a 0700
+            ``$HOME``) passes False and calls it itself once done.
 
     Raises:
         OSError: If a namespace cannot be entered in pass 2.
@@ -171,16 +176,48 @@ def enter_namespaces(target_pid: int, namespaces: int) -> None:
                 NS_FILE_MAP[nstype],
                 target_pid,
             )
+
+        if CLONE_NEWUSER in entered and regain_ids:
+            _regain_mapped_root()
     finally:
         for fd in fds.values():
             with contextlib.suppress(OSError):
                 os.close(fd)
 
 
+def _regain_mapped_root() -> None:
+    """Re-assert the caller's uid inside a just-entered user namespace.
+
+    setns(2) into a user namespace leaves a root caller as the overflow uid
+    (nobody) until it re-asserts an id the namespace maps: a Tier B map maps
+    container uid 0, and the manager entering it needs that id to keep
+    working on the (idmapped) rootfs it mounts into. Idempotent and harmless
+    under Tier A, where the caller is already uid 0.
+    """
+    # getuid() reads through the new namespace's map, so an unmapped caller
+    # shows as the overflow uid even though its kernel uid is unchanged.
+    # setresuid(0) is idempotent for a caller already at that id, and both
+    # ids must be re-asserted: file creation stamps fsgid, so an unmapped
+    # gid fails it with EOVERFLOW even when the uid is fine.
+    for target in (0, os.getuid()):
+        try:
+            os.setresuid(target, target, target)
+            break
+        except OSError:
+            continue
+    for target in (0, os.getgid()):
+        try:
+            os.setresgid(target, target, target)
+            break
+        except OSError:
+            continue
+
+
 def call_in_namespaces(
     target_pid: int,
     namespaces: int,
-    fn: typing.Callable[[], bytes | None],
+    fn: typing.Callable[..., bytes | None],
+    prepare: typing.Callable[[], int] | None = None,
 ) -> bytes | None:
     """Run *fn* inside *target_pid*'s namespaces and return what it produced.
 
@@ -192,22 +229,36 @@ def call_in_namespaces(
 
     *fn* runs in a forked copy of this process. Nothing it does to memory
     reaches the parent, so anything it has to say belongs in its return value.
+
+    *prepare*, when given, runs between entering the namespaces and
+    re-asserting the caller's mapped ids, and its return value is passed to
+    *fn* as the ``rootfs_fd`` keyword: mount-shaped work opens the rootfs by
+    path while the kernel uid is still 0 (it can traverse what the mapped
+    subordinate id cannot), then mounts with the regained id's capabilities.
     """
     read_fd, write_fd = os.pipe()
     child_pid = os.fork()
 
     if child_pid == 0:
         # --- Child ---
+        rootfs_fd = -1
         try:
             os.close(read_fd)
-            enter_namespaces(target_pid, namespaces)
-            data = fn()
+            enter_namespaces(target_pid, namespaces, regain_ids=prepare is None)
+            if prepare is not None:
+                rootfs_fd = prepare()
+                _regain_mapped_root()
+            data = fn(rootfs_fd=rootfs_fd) if prepare is not None else fn()
             if data:
                 os.write(write_fd, data)
             os.close(write_fd)
             os._exit(0)
         except BaseException:
             os._exit(1)
+        finally:
+            if rootfs_fd >= 0:
+                with contextlib.suppress(OSError):
+                    os.close(rootfs_fd)
 
     # --- Parent ---
     # Read to EOF before reaping: fn's output can exceed the pipe buffer, and
@@ -311,7 +362,11 @@ def enter_and_run_with_pty(
 
             _close_fds_above(())
 
-            enter_namespaces(target_pid, namespaces)
+            # Regaining the mapped id is the setup's job (enter_chroot does it
+            # after the chroot): doing it here would re-assert a subordinate
+            # id before the setup's chroot, whose path it may not be able to
+            # traverse.
+            enter_namespaces(target_pid, namespaces, regain_ids=False)
 
             if fork_for_pid and (namespaces & CLONE_NEWPID):
                 inner_pid = os.fork()

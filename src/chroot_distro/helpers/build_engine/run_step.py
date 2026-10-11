@@ -34,7 +34,8 @@ this process because it makes itself a child subreaper first.
 plain host-namespace bind set; a step with stdin and a kernel without
 mount-namespace support both fall back to the plain path. Either way the
 chroot happens in the child, as the last thing before the exec so the namespaces
-are already joined, and onto the stage's pinned descriptor where there is one.
+are already joined; the stage's pinned descriptor serves the plain path only,
+since under a holder the tree to enter is the holder's.
 `_require_emulator` gates all of it: `build`'s preflight only sees the Dockerfile's
 own RUN lines, so a foreign-arch step with no binfmt_misc handler is refused here
 instead, which is also what leaves a cached foreign step working (nothing execs for
@@ -455,7 +456,9 @@ def _fork_step(
             if holder is not None:
                 from chroot_distro.syscalls.nsenter import enter_namespaces
 
-                enter_namespaces(holder.pid, holder._live_ns_flags())
+                # The regain is enter_chroot's: the mapped id cannot
+                # necessarily traverse the rootfs path.
+                enter_namespaces(holder.pid, holder._live_ns_flags(), regain_ids=False)
             newroot = config.rootfs
             if rootfs_fd is not None:
                 os.fchdir(rootfs_fd)
@@ -466,6 +469,7 @@ def _fork_step(
                 gid=config.gid,
                 groups=config.groups,
                 workdir=config.workdir,
+                regain_ids=holder is not None,
             )
             _close_fds_above(())
             _try_exec(config.command, env)

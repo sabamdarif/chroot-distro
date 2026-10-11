@@ -102,22 +102,21 @@ def test_probe_and_report_namespaces_tiered(mock_probe, mock_userns_ok, mock_idm
     assert result.userns_mounts_ok is False
     assert result.isolation_tier == ns.ISOLATION_TIER_CAPDROP
 
-    # Full flags + userns mounts ok + idmapped mounts available. Idmapped
-    # support is detected (reported by `info`), but until the rootfs-idmap
-    # integration is wired in (_TIER_B_ROOTFS_IDMAP_READY), the *active* tier
-    # stays A so we never apply a subordinate map without idmapping the rootfs.
+    # Full flags + userns mounts ok + idmapped mounts available: the gate is
+    # on, so the same host resolves to Tier B (a max-isolation holder will
+    # idmap its rootfs; the tier reported here is the map the holder uses).
     mock_userns_ok.return_value = True
     mock_idmap.return_value = True
     result = ns.probe_and_report_namespaces()
     assert result.has_userns is True
     assert result.idmapped_mounts is True
-    assert result.isolation_tier == ns.ISOLATION_TIER_USERNS
+    assert result.isolation_tier == ns.ISOLATION_TIER_REMAP
+    assert result.id_map() == ("0 100000 65536\n", "0 100000 65536\n")
 
-    # When the integration gate is on, the same host resolves to Tier B.
-    with patch.object(ns, "_TIER_B_ROOTFS_IDMAP_READY", True):
+    # Gate off (a build with the idmap handshake disabled) keeps Tier A.
+    with patch.object(ns, "_TIER_B_ROOTFS_IDMAP_READY", False):
         result = ns.probe_and_report_namespaces()
-        assert result.isolation_tier == ns.ISOLATION_TIER_REMAP
-        assert result.id_map() == ("0 100000 65536\n", "0 100000 65536\n")
+        assert result.isolation_tier == ns.ISOLATION_TIER_USERNS
 
 
 # ---------------------------------------------------------------------------
@@ -223,4 +222,129 @@ def test_create_holder_success(mock_alive, mock_remove, mock_filter, mock_create
     assert holder.pid == 555
     assert holder.launcher_pid == 554
     assert holder.ns_flags == CLONE_NEWNS | CLONE_NEWPID
-    mock_create.assert_called_once_with(CLONE_NEWNS | CLONE_NEWPID, rootfs="/tmp/rootfs", id_map=None, foreground=None)
+    mock_create.assert_called_once_with(
+        CLONE_NEWNS | CLONE_NEWPID, rootfs="/tmp/rootfs", id_map=None, foreground=None, idmap_tree_fd=-1
+    )
+
+
+# ── Tier B: _create_holder picks the idmapped path only with a rootfs ─────────────
+@patch("chroot_distro.helpers.namespace.create_holder_process")
+@patch("chroot_distro.helpers.namespace.filter_accessible_namespaces")
+@patch("chroot_distro.helpers.namespace._remove_holder_state")
+@patch("chroot_distro.helpers.namespace._pid_alive", return_value=True)
+@patch("chroot_distro.helpers.namespace.RUNTIME_DIR", "/tmp")
+def test_create_holder_tier_b_uses_clone_and_subordinate_map(
+    mock_alive, mock_remove, mock_filter, mock_create
+):
+    from unittest.mock import MagicMock
+
+    import chroot_distro.syscalls._constants as _c
+
+    mock_create.return_value = HolderPids(holder=556, launcher=555)
+    mock_filter.return_value = CLONE_NEWNS | CLONE_NEWPID | _c.CLONE_NEWUSER
+
+    with (
+        patch("builtins.open", mock_open()),
+        patch("chroot_distro.helpers.namespace._get_process_start_time", return_value=12345.67),
+        patch("chroot_distro.helpers.namespace._idmapped_mounts_supported", return_value=True),
+        patch("chroot_distro.helpers.namespace._open_rootfs_clone", return_value=42) as mock_clone,
+    ):
+        holder = ns._create_holder(
+            "alpine",
+            CLONE_NEWNS | CLONE_NEWPID | _c.CLONE_NEWUSER,
+            rootfs="/tmp/rootfs",
+        )
+    mock_clone.assert_called_once_with("/tmp/rootfs")
+    kwargs = mock_create.call_args.kwargs
+    assert kwargs["idmap_tree_fd"] == 42
+    assert kwargs["id_map"] == ("0 100000 65536\n", "0 100000 65536\n")
+    assert holder.pid == 556
+
+
+@patch("chroot_distro.helpers.namespace.create_holder_process")
+@patch("chroot_distro.helpers.namespace.filter_accessible_namespaces")
+@patch("chroot_distro.helpers.namespace._remove_holder_state")
+@patch("chroot_distro.helpers.namespace._pid_alive", return_value=True)
+@patch("chroot_distro.helpers.namespace.RUNTIME_DIR", "/tmp")
+def test_create_holder_tier_b_needs_rootfs(mock_alive, mock_remove, mock_filter, mock_create):
+    import chroot_distro.syscalls._constants as _c
+
+    mock_create.return_value = HolderPids(holder=557, launcher=556)
+    mock_filter.return_value = CLONE_NEWNS | CLONE_NEWPID | _c.CLONE_NEWUSER
+    with (
+        patch("builtins.open", mock_open()),
+        patch("chroot_distro.helpers.namespace._get_process_start_time", return_value=12345.67),
+        patch("chroot_distro.helpers.namespace._idmapped_mounts_supported", return_value=True),
+        patch("chroot_distro.helpers.namespace._open_rootfs_clone") as mock_clone,
+    ):
+        ns._create_holder("alpine", CLONE_NEWNS | CLONE_NEWPID | _c.CLONE_NEWUSER)
+    mock_clone.assert_not_called()
+    kwargs = mock_create.call_args.kwargs
+    assert kwargs["idmap_tree_fd"] == -1
+    # No rootfs means Tier A even with idmapped mounts available.
+    assert kwargs["id_map"] == ("0 0 65536\n", "0 0 65536\n")
+
+
+@patch("chroot_distro.helpers.namespace.create_holder_process")
+@patch("chroot_distro.helpers.namespace.filter_accessible_namespaces")
+@patch("chroot_distro.helpers.namespace._remove_holder_state")
+@patch("chroot_distro.helpers.namespace._pid_alive", return_value=True)
+@patch("chroot_distro.helpers.namespace.RUNTIME_DIR", "/tmp")
+def test_create_holder_idmap_failure_falls_back_to_tier_a(
+    mock_alive, mock_remove, mock_filter, mock_create
+):
+    import chroot_distro.syscalls._constants as _c
+    from chroot_distro.syscalls.unshare import HolderIdmapError
+
+    mock_create.return_value = HolderPids(holder=558, launcher=557)
+    mock_filter.return_value = CLONE_NEWNS | CLONE_NEWPID | _c.CLONE_NEWUSER
+    mock_create.side_effect = [
+        HolderIdmapError("setattr failed"),
+        HolderPids(holder=558, launcher=557),
+    ]
+    closed = []
+    with (
+        patch("builtins.open", mock_open()),
+        patch("chroot_distro.helpers.namespace._get_process_start_time", return_value=12345.67),
+        patch("chroot_distro.helpers.namespace._idmapped_mounts_supported", return_value=True),
+        patch("chroot_distro.helpers.namespace._open_rootfs_clone", return_value=42),
+        patch("chroot_distro.helpers.namespace.os.close", side_effect=closed.append),
+    ):
+        ns._create_holder(
+            "alpine",
+            CLONE_NEWNS | CLONE_NEWPID | _c.CLONE_NEWUSER,
+            rootfs="/tmp/rootfs",
+        )
+    # The failed attempt's clone fd is closed before the Tier A retry.
+    assert 42 in closed
+    assert mock_create.call_count == 2
+    retry_kwargs = mock_create.call_args.kwargs
+    assert retry_kwargs["idmap_tree_fd"] == -1
+    assert retry_kwargs["id_map"] == ("0 0 65536\n", "0 0 65536\n")
+
+
+def test_holder_uid_map_base_reads_map():
+    with patch("builtins.open", mock_open(read_data="0 100000 65536\n")):
+        assert ns.holder_uid_map_base(4242) == 100000
+    with patch("builtins.open", mock_open(read_data="0 0 65536\n")):
+        assert ns.holder_uid_map_base(4242) == 0
+    with patch("builtins.open", side_effect=OSError("no such pid")):
+        assert ns.holder_uid_map_base(4242) is None
+
+
+def test_check_isolation_conflicts_blocks_tier_b_adoption():
+    holder = MagicMock()
+    holder.pid = 4242
+    with (
+        patch("chroot_distro.helpers.namespace.get_live_holder", return_value=holder),
+        patch("chroot_distro.helpers.namespace.read_isolation_mode", return_value=ns.ISOLATION_MODE_NAMESPACE),
+        patch("chroot_distro.helpers.namespace.holder_uid_map_base", return_value=100000),
+    ):
+        with pytest.raises(ns.NamespaceError, match="Tier B"):
+            ns.check_isolation_conflicts(
+                "alpine", use_namespaces=True, host_mounts_exist=False, max_isolation=False
+            )
+        # A max-isolation session adopts the same holder fine.
+        ns.check_isolation_conflicts(
+            "alpine", use_namespaces=True, host_mounts_exist=False, max_isolation=True
+        )

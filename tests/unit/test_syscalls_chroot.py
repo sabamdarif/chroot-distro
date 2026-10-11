@@ -334,3 +334,26 @@ def test_close_range_probe_closes_no_stdio():
     assert code == 3  # pipe fd alive AND fd 2 alive
     os.close(r)
     os.close(w)
+
+
+# ── enter_chroot: the mapped-id regain lands after the chroot ───────────────────
+def test_enter_chroot_regain_ids_after_chroot(monkeypatch):
+    # A setns-entered Tier B child re-asserts its mapped id inside
+    # enter_chroot: before the chroot the subordinate id cannot traverse the
+    # rootfs path, and the regain needs the CAP_SETUID the cap drop takes.
+    from chroot_distro.syscalls import nsenter
+
+    order = []
+    monkeypatch.setattr(os, "chroot", lambda p: order.append("chroot"))
+    monkeypatch.setattr(os, "chdir", lambda p: order.append("chdir"))
+    monkeypatch.setattr(nsenter, "_regain_mapped_root", lambda: order.append("regain"))
+    monkeypatch.setattr(chroot, "_join_session_keyring", lambda: None)
+    monkeypatch.setattr(chroot, "install_guest_filter", lambda: None)
+    monkeypatch.setattr(chroot, "should_set_no_new_privs", lambda: False)
+
+    chroot.enter_chroot("/rootfs", regain_ids=True)
+    assert order == ["chroot", "chdir", "regain"]
+
+    order.clear()
+    chroot.enter_chroot("/rootfs")
+    assert order == ["chroot", "chdir"]

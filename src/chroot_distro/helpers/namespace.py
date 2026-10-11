@@ -19,11 +19,13 @@ so the user can be told why.
 
 Three tiers come out of that: A is the identity-mapped user namespace, B adds a
 subordinate uid range with an idmapped rootfs, C is no user namespace and a
-capability-bounding-set drop instead. `_TIER_B_ROOTFS_IDMAP_READY` gates B off
-deliberately: the idmap syscalls and probe are in place, but the rootfs cannot yet
-be mounted idmapped inside the holder's chroot, and selecting the subordinate
-range without that would make a host-uid-0 rootfs appear as nobody inside the
-namespace, EOVERFLOW on every path.
+capability-bounding-set drop instead. Tier B is what an idmapped mount makes
+honest: the guest runs as subordinate host uids, the rootfs appears unchanged
+inside because the mount idmap is the guest's own userns, and a file the guest
+writes lands on disk as the same uid it sees (the idmap cancels the userns
+translation), so it is a containment upgrade, not a filesystem-integrity one.
+B applies to the chrooted sleeping holder only; A is kept where host binds
+must stay usable.
 
 Holder state lives in `data/<name>/`. The pid file carries the process start time
 next to the PID, because a PID is reused and a recycled one would otherwise be
@@ -113,14 +115,18 @@ ISOLATION_TIER_USERNS = "A"
 ISOLATION_TIER_CAPDROP = "C"
 
 # Whether the idmapped-rootfs integration (Tier B) is wired into the holder's
-# chroot flow. The idmap syscalls, direction and support probe are all in place
-# and validated, but mounting the rootfs idmapped inside the holder requires a
-# chroot-ordering handshake that is not yet implemented. Until then we detect
-# and *report* idmapped-mount availability but keep the applied map at the
-# identity Tier A: selecting the subordinate Tier B range without idmapping the
-# rootfs would make the (host-uid-0) rootfs appear as nobody inside the userns
-# and break the container (EOVERFLOW on every path).
-_TIER_B_ROOTFS_IDMAP_READY = False
+# chroot flow: the parent idmaps the detached rootfs clone (mount_setattr with
+# the holder's userns) and the holder stacks it over the rootfs before
+# chrooting, via the 'I' handshake in create_holder_process. What Tier B buys:
+# the guest's processes run as unprivileged subordinate host uids with
+# userns-scoped caps, and the rootfs needs no chown because the mount's idmap
+# (the guest's own userns) makes on-disk ownership appear unchanged inside.
+# What it does not buy: the idmap cancels the userns translation, so a file
+# the guest creates lands on disk as the same uid it appears to be inside
+# (container root mints host-uid-0 files). Scope: only the chrooted sleeping
+# holder (max isolation); foreground and CD_USE_NS holders keep Tier A, since
+# host binds would appear nobody-owned under a subordinate map.
+_TIER_B_ROOTFS_IDMAP_READY = True
 
 # Number of contiguous uids/gids mapped into the container's user namespace.
 # 65536 covers every uid a normal distro rootfs uses (root..nobody).
@@ -606,14 +612,15 @@ class NamespaceHolder:
             live |= CLONE_NEWNS
         return live
 
-    def call(self, fn: Callable[[], bytes | None]) -> bytes | None:
+    def call(self, fn: Callable[..., bytes | None], prepare: Callable[[], int] | None = None) -> bytes | None:
         """Run *fn* inside this holder's namespaces, ``None`` if it failed.
 
         The way to do filesystem work in the holder's view: a stdlib call,
         moved into the right namespace. ``b""`` is a success that had nothing
-        to say.
+        to say. *prepare* is :func:`call_in_namespaces`' pre-regain hook for
+        mount-shaped work.
         """
-        return call_in_namespaces(self.pid, self._live_ns_flags(), fn)
+        return call_in_namespaces(self.pid, self._live_ns_flags(), fn, prepare=prepare)
 
     def get_proc_mounts(self) -> str:
         """Read /proc/mounts from inside this holder's namespaces."""
@@ -636,20 +643,32 @@ class NamespaceHolder:
         The target walk runs in the forked child, after setns(2): a name on a
         tmpfs only the holder's namespace holds resolves nowhere else, and the
         descriptor the mount is addressed to must be opened in the namespace
-        the mount lands in.
+        the mount lands in. The child enters without re-asserting its mapped
+        ids and opens the rootfs by path first: while its kernel uid is still
+        0 the DAC check walks a 0700 ``$HOME`` prefix that the mapped
+        (subordinate) id cannot, and every descriptor it then opens is a
+        walk base the mount can land on.
         """
         flags = self._live_ns_flags()
         child_pid = os.fork()
         if child_pid == 0:
             try:
-                from chroot_distro.syscalls.nsenter import enter_namespaces
+                from chroot_distro.syscalls.nsenter import _regain_mapped_root, enter_namespaces
 
-                enter_namespaces(self.pid, flags)
+                enter_namespaces(self.pid, flags, regain_ids=False)
                 from chroot_distro.helpers import mount_targets
 
-                mount_targets.bind_mount_fd(
-                    source, rootfs, parts, want="dir", recursive=recursive, options=options
-                )
+                rootfs_fd = mount_targets.open_rootfs_fd(rootfs)
+                try:
+                    _regain_mapped_root()
+                    mount_targets.bind_mount_fd(
+                        source, rootfs, parts, want="dir", recursive=recursive, options=options,
+                        rootfs_fd=rootfs_fd,
+                    )
+                finally:
+                    if rootfs_fd >= 0:
+                        with contextlib.suppress(OSError):
+                            os.close(rootfs_fd)
                 os._exit(0)
             except BaseException:
                 os._exit(1)
@@ -698,29 +717,39 @@ class NamespaceHolder:
 
         True when mounted, False when the target is missing and *create* is
         false (the caller's signal to skip). The target walk runs in the
-        forked child, after setns(2), for the same reason as do_bind_mount.
+        forked child, after setns(2), for the same reason as do_bind_mount,
+        and the rootfs is opened by path before the id regain for the same
+        reason too.
         """
         flags = self._live_ns_flags()
         child_pid = os.fork()
         if child_pid == 0:
             try:
-                from chroot_distro.syscalls.nsenter import enter_namespaces
+                from chroot_distro.syscalls.nsenter import _regain_mapped_root, enter_namespaces
 
-                enter_namespaces(self.pid, flags)
-                if flags & CLONE_NEWPID:
-                    # Double-fork so that the process calling mount(2) is
-                    # inside the new PID namespace (setns(2) on a PID
-                    # namespace only places subsequent children in it).
-                    inner_pid = os.fork()
-                    if inner_pid != 0:
-                        _, inner_status = os.waitpid(inner_pid, 0)
-                        os._exit(os.WEXITSTATUS(inner_status) if os.WIFEXITED(inner_status) else 1)
+                enter_namespaces(self.pid, flags, regain_ids=False)
                 from chroot_distro.helpers import mount_targets
 
-                mounted = mount_targets.mount_filesystem_fd(
-                    source, rootfs, parts, fstype, options=options, create=create
-                )
-                os._exit(0 if mounted else 2)
+                rootfs_fd = mount_targets.open_rootfs_fd(rootfs)
+                try:
+                    _regain_mapped_root()
+                    if flags & CLONE_NEWPID:
+                        # Double-fork so that the process calling mount(2) is
+                        # inside the new PID namespace (setns(2) on a PID
+                        # namespace only places subsequent children in it).
+                        inner_pid = os.fork()
+                        if inner_pid != 0:
+                            _, inner_status = os.waitpid(inner_pid, 0)
+                            os._exit(os.WEXITSTATUS(inner_status) if os.WIFEXITED(inner_status) else 1)
+                    mounted = mount_targets.mount_filesystem_fd(
+                        source, rootfs, parts, fstype, options=options, create=create,
+                        rootfs_fd=rootfs_fd,
+                    )
+                    os._exit(0 if mounted else 2)
+                finally:
+                    if rootfs_fd >= 0:
+                        with contextlib.suppress(OSError):
+                            os.close(rootfs_fd)
             except BaseException:
                 os._exit(1)
 
@@ -796,18 +825,54 @@ def _create_holder(
 
     self_chroot_holder = bool(rootfs) or foreground is not None
 
+    idmap_tree_fd = -1
     if id_map is None and (flags & CLONE_NEWUSER):
-        use_remap = _TIER_B_ROOTFS_IDMAP_READY and _idmapped_mounts_supported()
+        use_remap = (
+            _TIER_B_ROOTFS_IDMAP_READY
+            and _idmapped_mounts_supported()
+            and rootfs is not None
+        )
         tier = ISOLATION_TIER_REMAP if use_remap else ISOLATION_TIER_USERNS
         id_map = resolve_userns_map(tier)
+        if use_remap and rootfs is not None:
+            idmap_tree_fd = _open_rootfs_clone(rootfs)
+            if idmap_tree_fd < 0:
+                # No clone, no idmapped rootfs; the subordinate map without
+                # it would show the rootfs as nobody-owned.
+                id_map = resolve_userns_map(ISOLATION_TIER_USERNS)
+
+    from chroot_distro.syscalls.unshare import HolderIdmapError
 
     try:
-        holder_pid, launcher_pid = create_holder_process(
-            flags,
-            rootfs=rootfs,
-            id_map=id_map,
-            foreground=foreground,
+        holder_pid, launcher_pid = _spawn_holder(
+            container_name, flags, rootfs=rootfs, id_map=id_map,
+            foreground=foreground, idmap_tree_fd=idmap_tree_fd,
         )
+    except HolderIdmapError as exc:
+        # The clone is still ours to close; the holder never stacked it.
+        if idmap_tree_fd >= 0:
+            with contextlib.suppress(OSError):
+                os.close(idmap_tree_fd)
+            idmap_tree_fd = -1
+        log.warning(
+            "idmapped rootfs unavailable (%s); falling back to the identity "
+            "user namespace map (Tier A).",
+            exc,
+        )
+        try:
+            holder_pid, launcher_pid = _spawn_holder(
+                container_name, flags, rootfs=rootfs,
+                id_map=resolve_userns_map(ISOLATION_TIER_USERNS),
+                foreground=foreground, idmap_tree_fd=-1,
+            )
+        except (OSError, RuntimeError) as exc2:
+            raise NamespaceError(
+                "Failed to create the isolation namespace holder. "
+                f"Error: {exc2}. "
+                "Isolation requires root with CAP_SYS_ADMIN and kernel "
+                "support for the mount/PID/UTS/IPC namespaces; some Android "
+                "kernels restrict this."
+            ) from exc2
     except (OSError, RuntimeError) as exc:
         raise NamespaceError(
             "Failed to create the isolation namespace holder. "
@@ -854,6 +919,50 @@ def _create_holder(
         master_fd=foreground.stdio_master_fd if foreground is not None else -1,
         is_foreground=foreground is not None,
     )
+
+
+def _open_rootfs_clone(rootfs: str) -> int:
+    """Return a detached ``open_tree(CLONE)`` fd of *rootfs*, or -1.
+
+    Non-recursive: the login rootfs has no submounts at holder-creation time,
+    and ``MOUNT_ATTR_IDMAP`` cannot be combined with ``AT_RECURSIVE``.
+    """
+    from chroot_distro.syscalls import idmap
+
+    try:
+        return idmap.open_tree(-100, rootfs, idmap.OPEN_TREE_CLONE | idmap.OPEN_TREE_CLOEXEC)
+    except OSError as exc:
+        log.debug("open_tree of %s failed; Tier B unavailable here: %s", rootfs, exc)
+        return -1
+
+
+def _spawn_holder(
+    container_name: str,
+    flags: int,
+    *,
+    rootfs: str | None,
+    id_map: tuple[str, str] | None,
+    foreground: ForegroundExec | None,
+    idmap_tree_fd: int,
+) -> tuple[int, int]:
+    """Call create_holder_process, closing the clone fd on ordinary failure.
+
+    HolderIdmapError escapes untouched: the fd is left for _create_holder's
+    fallback to close, since it may still hold a usable (un-idmapped) clone.
+    """
+    try:
+        return create_holder_process(
+            flags,
+            rootfs=rootfs,
+            id_map=id_map,
+            foreground=foreground,
+            idmap_tree_fd=idmap_tree_fd,
+        )
+    except (OSError, RuntimeError):
+        if idmap_tree_fd >= 0:
+            with contextlib.suppress(OSError):
+                os.close(idmap_tree_fd)
+        raise
 
 
 def acquire_holder(
@@ -925,17 +1034,41 @@ def set_namespace_hostname(holder: NamespaceHolder, hostname: str) -> bool:
     return False
 
 
+def holder_uid_map_base(pid: int) -> int | None:
+    """First host uid of the holder's user namespace map, None when unmapped.
+
+    A base of 0 with a bounded range is Tier A (identity); a nonzero base is
+    Tier B (subordinate remap).
+    """
+    try:
+        with open(f"/proc/{pid}/uid_map") as fh:
+            fields = fh.read().split()
+        return int(fields[1]) if len(fields) >= 3 else None
+    except (OSError, ValueError):
+        return None
+
+
 def check_isolation_conflicts(
     container_name: str,
     *,
     use_namespaces: bool,
     host_mounts_exist: bool,
+    max_isolation: bool = False,
 ) -> None:
     """Raise NamespaceError when isolated and non-isolated modes would mix."""
     mode = read_isolation_mode(container_name)
     live_holder = get_live_holder(container_name)
 
     if use_namespaces:
+        if live_holder is not None and not max_isolation:
+            base = holder_uid_map_base(live_holder.pid)
+            if base is not None and base != 0:
+                raise NamespaceError(
+                    f"Container '{container_name}' has a live Tier B "
+                    "(idmapped) holder, which only --isolated sessions can "
+                    f"enter. Run '{PROGRAM_NAME} unmount {container_name}' "
+                    "first."
+                )
         if mode == ISOLATION_MODE_HOST and host_mounts_exist:
             raise NamespaceError(
                 f"Container '{container_name}' has active mounts in the host mount namespace. "

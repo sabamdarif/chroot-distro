@@ -52,7 +52,7 @@ def test_filter_bind_options_drops_selinux_flags():
 
 def test_safe_mount_no_options_is_single_bind():
     holder = MagicMock()
-    holder.call.side_effect = lambda fn: fn()
+    holder.call.side_effect = lambda fn, prepare=None: fn()
     with (
         patch("os.path.isdir", return_value=True),
         patch("os.path.exists", return_value=True),
@@ -61,12 +61,12 @@ def test_safe_mount_no_options_is_single_bind():
         patch("chroot_distro.helpers.mount_targets.bind_mount_fd") as do_bind,
     ):
         mm.safe_mount("/host/src", "/tmp/rootfs/mnt", rootfs="/tmp/rootfs", holder=holder)
-    do_bind.assert_called_once_with("/host/src", "/tmp/rootfs", ["mnt"], want="dir", recursive=False, options="")
+    do_bind.assert_called_once_with("/host/src", "/tmp/rootfs", ["mnt"], want="dir", recursive=False, options="", rootfs_fd=-1)
 
 
 def test_safe_mount_ro_issues_remount():
     holder = MagicMock()
-    holder.call.side_effect = lambda fn: fn()
+    holder.call.side_effect = lambda fn, prepare=None: fn()
     with (
         patch("os.path.isdir", return_value=True),
         patch("os.path.exists", return_value=True),
@@ -75,12 +75,12 @@ def test_safe_mount_ro_issues_remount():
         patch("chroot_distro.helpers.mount_targets.bind_mount_fd") as do_bind,
     ):
         mm.safe_mount("/host/src", "/tmp/rootfs/mnt", rootfs="/tmp/rootfs", holder=holder, options="ro")
-    do_bind.assert_called_once_with("/host/src", "/tmp/rootfs", ["mnt"], want="dir", recursive=False, options="ro")
+    do_bind.assert_called_once_with("/host/src", "/tmp/rootfs", ["mnt"], want="dir", recursive=False, options="ro", rootfs_fd=-1)
 
 
 def test_safe_mount_only_selinux_option_skips_remount():
     holder = MagicMock()
-    holder.call.side_effect = lambda fn: fn()
+    holder.call.side_effect = lambda fn, prepare=None: fn()
     with (
         patch("os.path.isdir", return_value=True),
         patch("os.path.exists", return_value=True),
@@ -89,12 +89,12 @@ def test_safe_mount_only_selinux_option_skips_remount():
         patch("chroot_distro.helpers.mount_targets.bind_mount_fd") as do_bind,
     ):
         mm.safe_mount("/host/src", "/tmp/rootfs/mnt", rootfs="/tmp/rootfs", holder=holder, options="z")
-    do_bind.assert_called_once_with("/host/src", "/tmp/rootfs", ["mnt"], want="dir", recursive=False, options="")
+    do_bind.assert_called_once_with("/host/src", "/tmp/rootfs", ["mnt"], want="dir", recursive=False, options="", rootfs_fd=-1)
 
 
 def test_safe_mount_recursive_ro_uses_rbind_remount():
     holder = MagicMock()
-    holder.call.side_effect = lambda fn: fn()
+    holder.call.side_effect = lambda fn, prepare=None: fn()
     with (
         patch("os.path.isdir", return_value=True),
         patch("os.path.exists", return_value=True),
@@ -103,4 +103,4 @@ def test_safe_mount_recursive_ro_uses_rbind_remount():
         patch("chroot_distro.helpers.mount_targets.bind_mount_fd") as do_bind,
     ):
         mm.safe_mount("/host/src", "/tmp/rootfs/mnt", rootfs="/tmp/rootfs", holder=holder, recursive=True, options="ro")
-    do_bind.assert_called_once_with("/host/src", "/tmp/rootfs", ["mnt"], want="dir", recursive=True, options="ro")
+    do_bind.assert_called_once_with("/host/src", "/tmp/rootfs", ["mnt"], want="dir", recursive=True, options="ro", rootfs_fd=-1)

@@ -22,7 +22,7 @@ def test_get_active_mounts_via_holder():
 def test_safe_mount_via_holder():
     # With a holder the walk and the mount run inside that namespace.
     holder = MagicMock()
-    holder.call.side_effect = lambda fn: fn()
+    holder.call.side_effect = lambda fn, prepare=None: fn()
 
     with (
         patch("os.path.isdir", return_value=True),
@@ -33,7 +33,7 @@ def test_safe_mount_via_holder():
     ):
         mm.safe_mount("/host/src", "/tmp/rootfs/mnt", rootfs="/tmp/rootfs", holder=holder)
 
-    do_bind.assert_called_once_with("/host/src", "/tmp/rootfs", ["mnt"], want="dir", recursive=False, options="")
+    do_bind.assert_called_once_with("/host/src", "/tmp/rootfs", ["mnt"], want="dir", recursive=False, options="", rootfs_fd=-1)
 
 
 def test_create_dev_nodes_via_holder(tmp_path):
@@ -41,7 +41,7 @@ def test_create_dev_nodes_via_holder(tmp_path):
     # addressed through the descriptor walk. mknod itself needs privileges,
     # so it is faked to create the plain file the walk then re-opens.
     holder = MagicMock()
-    holder.call.side_effect = lambda fn: fn()
+    holder.call.side_effect = lambda fn, prepare=None: fn()
     (tmp_path / "dev").mkdir()
 
     def fake_mknod(name, mode, dev, *, dir_fd=None):
@@ -64,7 +64,7 @@ def test_create_dev_nodes_under_userns_binds_instead_of_mknod(tmp_path):
     # Inside a user namespace mknod is forbidden, so the host device node is
     # bind-mounted onto a stub created inside the holder.
     holder = MagicMock()
-    holder.call.side_effect = lambda fn: fn()
+    holder.call.side_effect = lambda fn, prepare=None: fn()
     (tmp_path / "dev").mkdir()
     with (
         patch("os.path.exists", return_value=True),
@@ -75,5 +75,5 @@ def test_create_dev_nodes_under_userns_binds_instead_of_mknod(tmp_path):
 
     # The stub is made and the host node bound over it, both inside the holder.
     holder.call.assert_called_once()
-    mock_bind.assert_called_once_with("/dev/null", str(tmp_path), ["dev", "null"], want="any")
+    mock_bind.assert_called_once_with("/dev/null", str(tmp_path), ["dev", "null"], want="any", rootfs_fd=-1)
     mock_mknod.assert_not_called()
