@@ -35,6 +35,14 @@ update falls back to last-writer-wins, which costs one entry.
 `entries_for()` and `merge_entries()` are the two halves `build_cache_io` moves a
 portable copy of this index through, and `entry_is_usable` is public because that
 module reads the same records this one does.
+
+`last_used` is what bounds the cache. `record()` stamps it and `touch()` re-stamps
+the entries a build actually used, once at the end of the build rather than on
+every `lookup()`, since the stamp is a locked write. `prune()` evicts
+least-recently-used entries past a size cap: a build prunes itself against
+`CD_BUILD_CACHE_MAX`, and `clear-cache --build-cache --keep` prunes to a size on
+demand. The entry eviction only drops the index record; the layer blob it pinned
+is collected by the orphan sweep that runs after.
 """
 
 import contextlib
@@ -330,8 +338,72 @@ def record(
             "size": size,
             "image_config_patch": image_config_patch or {},
             "created": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "last_used": time.time(),
         }
         _save_index(data)
+
+
+def touch(recipes: typing.Iterable[str]) -> None:
+    """Stamp `last_used` on the entries *recipes* name, once, under one lock.
+
+    A build calls this at the end with the recipes it actually used, rather
+    than on every `lookup()`: the index is read and written under a lock, so a
+    write per step would contend with itself for the whole build. One write at
+    the end is what `prune()` reads its eviction order from. A recipe with no
+    entry is ignored, since a step that was not served from cache has nothing
+    to keep warm.
+    """
+    recipes = list(recipes)
+    if not recipes:
+        return
+    with _index_lock():
+        data = _load_index()
+        entries = data.get("entries", {})
+        now = time.time()
+        changed = False
+        for recipe in recipes:
+            entry = entries.get(recipe)
+            if isinstance(entry, dict):
+                entry["last_used"] = now
+                changed = True
+        if changed:
+            _save_index(data)
+
+
+def prune(keep_bytes: int) -> tuple[int, int]:
+    """Evict least-recently-used entries until the cache is under *keep_bytes*.
+
+    Returns (entries_dropped, bytes_reclaimed). The total is the sum of each
+    entry's recorded `size`, which is the layer it pins; an entry with no
+    `last_used` (recorded before the stamp existed, or imported) sorts oldest,
+    so it is the first to go. Eviction removes the index entries only; the layer
+    blobs they pinned are collected by `clear-cache --build-cache`'s orphan
+    sweep, which runs next. `keep_bytes <= 0` is no cap and prunes nothing.
+    """
+    if keep_bytes <= 0:
+        return 0, 0
+    with _index_lock():
+        data = _load_index()
+        entries = data.get("entries", {})
+        total = sum(e.get("size", 0) for e in entries.values() if isinstance(e, dict))
+        if total <= keep_bytes:
+            return 0, 0
+        # Oldest last_used first; a missing or null stamp counts as never used.
+        order = sorted(
+            (r for r, e in entries.items() if isinstance(e, dict)),
+            key=lambda r: entries[r].get("last_used") or 0.0,
+        )
+        dropped = 0
+        reclaimed = 0
+        for recipe in order:
+            if total <= keep_bytes:
+                break
+            entry = entries.pop(recipe)
+            total -= entry.get("size", 0)
+            dropped += 1
+            reclaimed += entry.get("size", 0)
+        _save_index(data)
+    return dropped, reclaimed
 
 
 def merge_entries(entries: dict[str, dict[str, typing.Any]]) -> int:

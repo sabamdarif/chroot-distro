@@ -153,6 +153,25 @@ def download_rate_limit() -> int:
         return 0
 
 
+def build_cache_max() -> int:
+    """Return the build-cache size cap in bytes from ``CD_BUILD_CACHE_MAX``.
+
+    Accepts the same suffixes as ``CD_DOWNLOAD_RATE_LIMIT``. Returns ``0`` (no
+    cap) when unset or on parse error; a build prunes against this once it
+    finishes, never against a cap of zero.
+    """
+    raw = os.environ.get("CD_BUILD_CACHE_MAX", "").strip().upper()
+    if not raw:
+        return 0
+    multipliers = {"K": 1024, "M": 1024 * 1024, "G": 1024 * 1024 * 1024}
+    try:
+        if raw[-1] in multipliers:
+            return max(0, int(raw[:-1]) * multipliers[raw[-1]])
+        return max(0, int(raw))
+    except (ValueError, IndexError):
+        return 0
+
+
 if IS_TERMUX:
     DEFAULT_PATH_ENV = (
         "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"

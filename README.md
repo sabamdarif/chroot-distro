@@ -535,20 +535,26 @@ Aliases: clear, cl
 
 Delete all cached downloads (image layers, manifests, build cache) and show how much space was freed. After this, installing an image needs the network again, and `diff` stops working for existing containers.
 
-| Option            | Description                                                         |
-| ----------------- | ------------------------------------------------------------------- |
-| `--build-cache`   | Drop the build cache index and the layer blobs only it was pinning. |
-| `-v`, `--verbose` | Show each deleted file.                                             |
-| `-q`, `--quiet`   | Only show errors.                                                   |
+| Option            | Description                                                                                     |
+| ----------------- | ----------------------------------------------------------------------------------------------- |
+| `--build-cache`   | Drop the build cache index and the layer blobs only it was pinning.                             |
+| `--keep SIZE`     | With `--build-cache`, evict least-recently-used entries past `SIZE` instead of dropping it all. |
+| `-v`, `--verbose` | Show each deleted file.                                                                         |
+| `-q`, `--quiet`   | Only show errors.                                                                               |
 
-Every `RUN` a build executes is recorded against the layer it produced, so a later build with the same parent, instruction and inputs reuses it. Nothing ever evicts those entries, and every edit to a Dockerfile strands the ones before it, so the build cache is the part that only grows.
+Every `RUN` a build executes is recorded against the layer it produced, so a later build with the same parent, instruction and inputs reuses it. Without a cap nothing evicts those entries, and every edit to a Dockerfile strands the ones before it, so the build cache is the part that only grows.
 
 ```sh
 # Reclaim the build cache, keep the downloaded images
 chroot-distro clear-cache --build-cache
+
+# Or trim it to 500 MiB, dropping the least-recently-used steps first
+chroot-distro clear-cache --build-cache --keep 500M
 ```
 
-This removes the index and then deletes the layers nothing else points at. The layers of images you still have are kept, so what goes is the build's own bookkeeping, the intermediates no image held on to, and any leftover blob from a killed download. The next `build` re-runs every step. It refuses to run while another `chroot-distro` command holds a lock, since a build in progress has recorded steps whose layers this would unpin. To skip cache lookups for a single build without deleting anything, use `build --no-cache` instead, which still records what it builds.
+Without `--keep` this removes the index and then deletes the layers nothing else points at. The layers of images you still have are kept, so what goes is the build's own bookkeeping, the intermediates no image held on to, and any leftover blob from a killed download. The next `build` re-runs every step. With `--keep`, only the least-recently-used entries past `SIZE` are evicted and the rest stay warm for the next build. It refuses to run while another `chroot-distro` command holds a lock, since a build in progress has recorded steps whose layers this would unpin. To skip cache lookups for a single build without deleting anything, use `build --no-cache` instead, which still records what it builds.
+
+Set `CD_BUILD_CACHE_MAX` (for example `CD_BUILD_CACHE_MAX=1G`) and every `build` prunes itself against that cap once it finishes, so the cache stays bounded without a manual `clear-cache`.
 
 A folder written by `build --cache-to` is yours, not part of this cache, so nothing here touches it. Delete that folder yourself when you want it gone.
 
@@ -604,6 +610,7 @@ All of these are optional.
 | `CD_DOWNLOAD_WORKERS`             | How many layers to download at once (default 4, max 10).                                                                                                                                            |
 | `CD_DOWNLOAD_RATE_LIMIT`          | Download speed limit, like `5M` for 5 MiB/s. Default is unlimited.                                                                                                                                  |
 | `CD_DOWNLOAD_MAX_RETRIES`         | Retries per failed download (default 3, max 20).                                                                                                                                                    |
+| `CD_BUILD_CACHE_MAX`              | Build-cache size cap, like `1G`. A `build` prunes least-recently-used steps past it once it finishes. Default is no cap.                                                                            |
 | `CD_USER`                         | Default user for `login`/`run` when `--user` is not given.                                                                                                                                          |
 | `CD_WORKDIR`                      | Default working directory for `login`/`run` when `--work-dir` is not given.                                                                                                                         |
 | `CD_ENV`                          | Extra guest environment variables, one `VAR=VALUE` per line. `--env` wins on conflict.                                                                                                              |

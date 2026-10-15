@@ -327,6 +327,12 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
                 "and the layer blobs only it was holding on to. The "
                 "downloaded base images stay where they are.",
             ),
+            (
+                "--keep SIZE",
+                "With --build-cache, prune least-recently-used entries until "
+                "the pinned layers fit under SIZE (a number, optionally with "
+                "a K, M or G suffix) instead of dropping the whole index.",
+            ),
             ("-v, --verbose", "Log each removed file."),
             ("-q, --quiet", "Suppress non-error output. Mutually exclusive with --verbose."),
         ],
@@ -352,9 +358,12 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
                     "re-runs every step. It refuses to run while another "
                     f"{PROGRAM_NAME} command holds a lock, since a build in "
                     "progress has recorded steps whose layers this would "
-                    "unpin. To skip cache lookups for one build without "
-                    f"discarding anything, use '{PROGRAM_NAME} build "
-                    "--no-cache' instead."
+                    "unpin. --keep SIZE instead evicts only the "
+                    "least-recently-used entries past SIZE, leaving the rest "
+                    "for the next build. A build also prunes itself against "
+                    "CD_BUILD_CACHE_MAX when that is set. To skip cache "
+                    "lookups for one build without discarding anything, use "
+                    f"'{PROGRAM_NAME} build --no-cache' instead."
                 ),
             },
         ],

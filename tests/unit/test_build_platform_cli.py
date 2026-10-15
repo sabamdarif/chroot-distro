@@ -29,6 +29,7 @@ def _result(platform):
         manifest={"config": {"digest": "sha256:" + "0" * 64}},
         image_config={"architecture": platform.architecture, "os": platform.os},
         layers=[{"size": 4096, "digest": "sha256:" + "1" * 64, "diff_id": "sha256:" + "2" * 64}],
+        step_recipes=frozenset(),
     )
 
 

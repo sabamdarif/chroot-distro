@@ -84,8 +84,9 @@ from chroot_distro.commands.install import command_install
 from chroot_distro.constants import (
     PROGRAM_NAME,
     RUNTIME_DIR,
+    build_cache_max,
 )
-from chroot_distro.helpers import namespace
+from chroot_distro.helpers import build_cache, namespace
 from chroot_distro.helpers.binfmt import ensure_handler
 from chroot_distro.helpers.build_cache_io import export_cache, import_cache
 from chroot_distro.helpers.build_engine import (
@@ -365,6 +366,16 @@ def command_build(args: typing.Any) -> None:
 
             if exports:
                 _run_exports(exports, results, tmp_root, tmp_root_fd, quiet)
+
+            # One stamp for the whole build, then prune against the size cap.
+            # Both are the build cache's own bookkeeping and run once, after the
+            # steps, rather than per lookup.
+            build_cache.touch(recipe for result in results for recipe in result.step_recipes)
+            cap = build_cache_max()
+            if cap > 0:
+                dropped, reclaimed = build_cache.prune(cap)
+                if dropped and not quiet:
+                    log_info(f"Pruned {dropped} cached step(s) ({fmt_size(reclaimed)}) to stay under the build cache cap.")
 
             if not quiet:
                 log_info("Build complete.")

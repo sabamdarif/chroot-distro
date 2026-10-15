@@ -20,11 +20,24 @@ import stat
 import sys
 
 from chroot_distro.constants import BASE_CACHE_DIR, LAYER_CACHE_DIR, PROGRAM_NAME
-from chroot_distro.helpers.build_cache import discard_index, index_path
+from chroot_distro.helpers.build_cache import discard_index, index_path, prune
 from chroot_distro.helpers.docker import layer_cache_path, referenced_blob_digests
 from chroot_distro.locking import busy_locks
 from chroot_distro.message import crit_error, log_error, log_info, quote_path, warn
 from chroot_distro.progress import fmt_size
+
+
+def _parse_size(raw: str) -> int:
+    """Parse a byte size with an optional K/M/G suffix, or refuse it."""
+    text = raw.strip().upper()
+    multipliers = {"K": 1024, "M": 1024 * 1024, "G": 1024 * 1024 * 1024}
+    try:
+        if text[-1] in multipliers:
+            return max(0, int(text[:-1]) * multipliers[text[-1]])
+        return max(0, int(text))
+    except (ValueError, IndexError):
+        crit_error(f"invalid --keep size '{raw}' (use a number, optionally with a K, M or G suffix).")
+        sys.exit(1)
 
 
 def _ensure_readable(path: str) -> None:
@@ -91,23 +104,25 @@ def command_clear_cache(args) -> None:
 
 
 def _sweep_build_cache(args) -> None:
-    """Drop the build index, then the layer blobs nothing else references.
+    """Drop or prune the build index, then the layer blobs nothing references.
 
-    The keep set is computed before anything is deleted, so a reference source
-    that cannot be read leaves the cache exactly as it was. The index then goes
-    first and a failure to remove it stops the command before a blob it still
-    pins is touched: unpinned-then-kept is untidy, pinned-then-deleted is the
-    direction that matters.
+    Without `--keep` the whole index goes; with it, `prune()` evicts
+    least-recently-used entries until the pinned layers fit under the size. The
+    keep set is computed before anything is deleted, so a reference source that
+    cannot be read leaves the cache exactly as it was. The index then goes first
+    and a failure to remove it stops the command before a blob it still pins is
+    touched: unpinned-then-kept is untidy, pinned-then-deleted is the direction
+    that matters.
 
-    The index is never read, only unlinked, which is what makes the flag work on
-    one too corrupt to parse, among the reasons to reach for it. What survives
-    is what a cached image lists, including every layer of an image a build
-    produced, so what actually goes is the build's own bookkeeping, the
-    intermediates no image kept (multi-stage stages, the output of steps rebuilt
-    since), and the ordinary orphans a killed download or a local OCI install
-    left behind.
+    Without `--keep` the index is never read, only unlinked, which is what makes
+    that form work on one too corrupt to parse. What survives is what a cached
+    image lists, including every layer of an image a build produced, so what
+    actually goes is the build's own bookkeeping, the intermediates no image
+    kept (multi-stage stages, the output of steps rebuilt since), and the
+    ordinary orphans a killed download or a local OCI install left behind.
     """
     verbose = getattr(args, "verbose", False)
+    keep_arg = getattr(args, "keep", None)
 
     busy = busy_locks()
     if busy:
@@ -119,12 +134,19 @@ def _sweep_build_cache(args) -> None:
         sys.exit(1)
 
     keep = _referenced_blob_names()
-    index_removed, reclaimed = _drop_build_index(verbose)
+    if keep_arg is not None:
+        dropped, pruned_bytes = prune(_parse_size(keep_arg))
+        if dropped:
+            log_info(f"Pruned {dropped} cached step(s) ({fmt_size(pruned_bytes)}).")
+        index_removed = False
+        reclaimed = 0
+    else:
+        index_removed, reclaimed = _drop_build_index(verbose)
     orphans, total = _collect_orphans(keep)
 
     if orphans:
         log_info(f"Removing {len(orphans)} unreferenced layer(s) ({fmt_size(total)})...")
-    elif not index_removed:
+    elif not index_removed and not keep_arg:
         log_info("The build cache is already empty.")
         return
 
