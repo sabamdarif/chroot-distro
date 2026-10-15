@@ -418,6 +418,7 @@ Build an image from a Dockerfile, like `docker build` but without Docker. `PATH`
 | `--platform LIST`                 | Build one image per platform, comma-separated (`linux/amd64,linux/arm64`). Can be given more than once.                                                    |
 | `--target STAGE`                  | Stop at a named stage of a multi-stage build.                                                                                                              |
 | `-o`, `--output FILE`             | Also save the image as an OCI tarball (`.oci.tar`, `.oci.tar.gz`, `.oci.tar.xz`). Can be given more than once.                                             |
+| `--export type=...,dest=...`      | Export the rootfs itself: `type=local,dest=DIR` as a directory, `type=tar,dest=FILE` as a plain tarball. One platform, your own CPU. More than once.      |
 | `--install-as NAME`               | Install the built image as a container right after the build.                                                                                              |
 | `--secret id=NAME[,src=PATH]`     | Give a secret to `RUN --mount=type=secret` steps. Without `src=`, the value comes from the environment variable `NAME`. Secrets never end up in the image. |
 | `--ssh ID[=SOCK]`                 | Give an SSH agent socket to `RUN --mount=type=ssh` steps. Default socket is `$SSH_AUTH_SOCK`.                                                              |
@@ -477,6 +478,17 @@ Where those images end up:
 chroot-distro build -t myapp:1.0 --install-as myapp .
 chroot-distro build -t myapp:1.0 --platform linux/amd64,linux/arm64 -o myapp.oci.tar .
 ```
+
+#### Exporting the rootfs
+
+`--output` writes the image: the manifest, config and layers a registry or `docker load` reads. To get the filesystem alone, use `--export`, which writes the rootfs for your own CPU's platform:
+
+```sh
+chroot-distro build -t myapp:1.0 --export type=tar,dest=rootfs.tar.gz .
+chroot-distro build -t myapp:1.0 --export type=local,dest=./rootfs .
+```
+
+`type=tar` writes a plain tarball (compression picked from the extension), `type=local` a plain directory. Both hold the rootfs the image describes and nothing else: no manifest, no layer blobs. Ownership stays numeric, so an image built for a non-root user extracts correctly. Neither destination may already exist.
 
 #### Cache import and export
 

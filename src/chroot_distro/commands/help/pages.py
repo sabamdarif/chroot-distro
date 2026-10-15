@@ -119,6 +119,12 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
                 "Compression is inferred from the extension "
                 "(.oci.tar, .oci.tar.gz, .oci.tar.xz). Repeatable.",
             ),
+            (
+                "--export [type=local,dest=DIR | type=tar,dest=FILE]",
+                "Export the rootfs itself, not the image: a directory "
+                "(type=local) or a plain tarball (type=tar, compression from "
+                "the extension). One platform, this host's own. Repeatable.",
+            ),
             ("--install-as [NAME]", "Install the built image as a container named NAME after the build completes."),
             (
                 "--secret [id=NAME[,src=PATH]]",

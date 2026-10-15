@@ -34,7 +34,8 @@ which is what `install <tag>` and `push -a` each resolve one of. An `--output`
 archive is the only place a whole matrix stands as one document, an OCI image
 index over every platform. `--install-as` installs one container, so among several
 platforms it takes the host's own and refuses a matrix holding nothing this host
-runs.
+runs. An `--export` is the rootfs alone (a directory or a plain tarball), one
+platform chosen the way `--install-as` chooses, and not an image document.
 
 One exclusive `BuildLock` per (tag, platform) is held for the whole build, taken
 in lock-path order so two concurrent builds with overlapping but differently
@@ -99,6 +100,7 @@ from chroot_distro.helpers.dockerfile import (
     DockerfileSyntaxError,
     parse_dockerfile,
 )
+from chroot_distro.helpers.export_rootfs import export_local_dir, write_rootfs_tar
 from chroot_distro.helpers.isolation import use_isolation_env_enabled
 from chroot_distro.helpers.oci_writer import (
     store_in_cache,
@@ -122,6 +124,7 @@ def command_build(args: typing.Any) -> None:
     target_stage = getattr(args, "target_stage", None) or None
     emulator = getattr(args, "emulator", None) or ""
     outputs = list(getattr(args, "outputs", []) or [])
+    exports = _parse_export_specs(getattr(args, "exports", None) or [])
     install_as = getattr(args, "install_as", None)
     cache_from = _parse_cache_specs(getattr(args, "cache_from", None) or [], "--cache-from", "src")
     cache_to = _parse_cache_specs(getattr(args, "cache_to", None) or [], "--cache-to", "dest")
@@ -267,6 +270,15 @@ def command_build(args: typing.Any) -> None:
             crit_error(f"--cache-to dest '{dest}' exists and is not a directory.")
             sys.exit(1)
 
+    for kind, dest in exports:
+        if os.path.exists(dest):
+            what = "directory" if os.path.isdir(dest) else "file"
+            crit_error(f"--export dest '{dest}' already exists as a {what}. Please specify a different name.")
+            sys.exit(1)
+        if kind == "tar" and os.path.isdir(dest):
+            crit_error(f"--export type=tar dest '{dest}' is a directory.")
+            sys.exit(1)
+
     # Acquire one exclusive BuildLock per (tag, platform) for the duration of the
     # build: the manifest cache entry a build publishes is per pair, so that is
     # what two of them can collide on. Sorted by lock path so two concurrent
@@ -350,6 +362,9 @@ def command_build(args: typing.Any) -> None:
                     sys.exit(1)
 
             _export_cache_dirs(cache_to, results, quiet)
+
+            if exports:
+                _run_exports(exports, results, tmp_root, tmp_root_fd, quiet)
 
             if not quiet:
                 log_info("Build complete.")
@@ -474,6 +489,35 @@ def _parse_cache_specs(raw: list[str], option: str, key: str) -> list[str]:
     return out
 
 
+def _parse_export_specs(raw: list[str]) -> list[tuple[str, str]]:
+    """Parse `type=...,dest=...` items into (kind, resolved dest) pairs, in order.
+
+    `type=local` writes the rootfs as a directory, `type=tar` as a plain
+    tarball; both are spelled out rather than assumed, for the reason
+    `_parse_cache_specs` gives. Repeats and duplicates behave like
+    `--output`'s: every distinct destination once, in the order first named.
+    """
+    out: list[tuple[str, str]] = []
+    for item in raw:
+        fields: dict[str, str] = {}
+        for part in item.split(","):
+            name, _, value = part.partition("=")
+            fields[name.strip()] = value
+        kind = fields.pop("type", "")
+        dest = fields.pop("dest", "")
+        if kind not in ("local", "tar"):
+            crit_error(f"--export type '{kind}' is not supported; the rootfs is exported as 'type=local' or 'type=tar'.")
+            sys.exit(1)
+        if not dest or fields:
+            crit_error(f"invalid --export '{item}' (expected type={kind},dest={'DIR' if kind == 'local' else 'FILE'}).")
+            sys.exit(1)
+        resolved = os.path.abspath(os.path.expanduser(dest))
+        entry = (kind, resolved)
+        if entry not in out:
+            out.append(entry)
+    return out
+
+
 def _import_cache_dirs(dirs: list[str], quiet: bool) -> None:
     """Merge every `--cache-from` directory into this machine's build cache.
 
@@ -515,6 +559,36 @@ def _export_cache_dirs(dirs: list[str], results: list[PlatformResult], quiet: bo
             sys.exit(1)
         if not quiet:
             log_info(f"Exported {steps} cached step(s) ({fmt_size(size)}) to '{path}'.")
+
+
+def _run_exports(
+    exports: list[tuple[str, str]],
+    results: list[PlatformResult],
+    scratch_path: str,
+    scratch_fd: int,
+    quiet: bool,
+) -> None:
+    """Write every `--export` destination from the built results.
+
+    One platform each: an export is a single rootfs, so the host's platform is
+    used, chosen the way `_install_platform` chooses the container
+    `--install-as` installs. Failure ends the command the way an `--output`
+    that cannot be written does; the image is already published, so what is
+    lost is the exported copy.
+    """
+    platform = _install_platform([result.platform for result in results])
+    result = next(r for r in results if r.platform == platform)
+    for kind, dest in exports:
+        try:
+            if not quiet:
+                log_info(f"Exporting the rootfs ({platform}) to '{dest}'...")
+            if kind == "tar":
+                write_rootfs_tar(dest, result.layers, scratch_path, scratch_fd, result.platform.format())
+            else:
+                export_local_dir(dest, result.layers, scratch_path, scratch_fd, result.platform.format())
+        except (OSError, RuntimeError) as exc:
+            log_error(f"Cannot export to '{dest}': {exc}")
+            sys.exit(1)
 
 
 def _install_platform(platforms: list[Platform]) -> Platform:

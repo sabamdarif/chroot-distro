@@ -409,6 +409,9 @@ complete -c chroot-distro -f -n '__fish_seen_subcommand_from build' \
 complete -c chroot-distro -n '__fish_seen_subcommand_from build' \
     -s o -l output     -r -d 'Write OCI tarball to FILE (repeatable)'
 complete -c chroot-distro -f -n '__fish_seen_subcommand_from build' \
+    -l export          -r -d 'Export the rootfs as a directory or tarball (repeatable)' \
+    -a 'type=local,dest= type=tar,dest='
+complete -c chroot-distro -f -n '__fish_seen_subcommand_from build' \
     -l install-as      -r -d 'Install image as a local container after build' \
     -a '(__chroot_distro_containers)'
 complete -c chroot-distro -f -n '__fish_seen_subcommand_from build' \

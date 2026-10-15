@@ -404,6 +404,13 @@ def _build(sub):
         metavar="ID[=SOCK]",
     )
     p.add_argument(
+        "--export",
+        dest="exports",
+        action="append",
+        default=[],
+        metavar="type=local,dest=DIR | type=tar,dest=FILE",
+    )
+    p.add_argument(
         "--cache-from",
         dest="cache_from",
         action="append",

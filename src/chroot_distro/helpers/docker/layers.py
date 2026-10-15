@@ -42,6 +42,7 @@ import os
 import shutil
 import signal
 import threading
+import typing
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -368,3 +369,20 @@ def apply_layer(layer_path: str, rootfs_fd: int) -> None:
     tree and the last byte written resolves its name a second time.
     """
     extract_tar_to_rootfs(layer_path, rootfs_fd, handle_whiteouts=True)
+
+
+def materialize_rootfs(layers: list[dict[str, typing.Any]], rootfs_fd: int) -> None:
+    """Rebuild one image's rootfs under *rootfs_fd* by applying its cached layers.
+
+    The layers are read back out of the content-addressed cache the build wrote
+    them into, so the tree is exactly the one the image describes, and a blob
+    missing from the cache raises rather than yielding a truncated rootfs.
+    """
+    for layer in layers:
+        digest = layer["digest"]
+        layer_path = layer_cache_path(digest)
+        if not os.path.isfile(layer_path):
+            raise RuntimeError(
+                f"Layer blob {digest} is missing from the cache; cannot rebuild the rootfs."
+            )
+        apply_layer(layer_path, rootfs_fd)

@@ -309,6 +309,10 @@ _chroot_distro() {
 			_chroot_distro_compgen_words "auto plain tty rawjson" "${cur}"
 			return
 			;;
+		--export)
+			_chroot_distro_compgen_words "type=local,dest= type=tar,dest=" "${cur}"
+			return
+			;;
 		--cache-from)
 			_chroot_distro_compgen_words "type=local,src=" "${cur}"
 			return
@@ -320,7 +324,7 @@ _chroot_distro() {
 		esac
 		if [[ "${cur}" == -* ]]; then
 			_chroot_distro_compgen_words "-f --file -t --tag --build-arg -a --architecture
-                    --platform --target -o --output --install-as --secret --ssh
+                    --platform --target -o --output --export --install-as --secret --ssh
                     --cache-from --cache-to --no-cache --progress -v --verbose
                     -q --quiet -h --help" "${cur}"
 		else
