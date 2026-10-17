@@ -45,7 +45,7 @@ import os
 from collections.abc import Iterator
 from typing import TYPE_CHECKING
 
-from chroot_distro.constants import IS_TERMUX
+from chroot_distro.constants import IS_TERMUX, TERMUX_PREFIX
 from chroot_distro.helpers import mount_manager, namespace
 from chroot_distro.helpers.namespace import NamespaceError, NamespaceHolder
 from chroot_distro.helpers.rootfs import write_resolv_conf
@@ -97,11 +97,13 @@ def safe_hostname(name: str) -> str:
     return name
 
 
-# Host pseudo-filesystems that must be bound recursively when a user namespace
-# is active: a non-recursive bind of /sys or /dev is rejected by the kernel
-# inside a userns (their locked submounts cannot be split off), whereas a
-# recursive bind of the whole subtree is permitted.
-_USERNS_RECURSIVE_BINDS = frozenset({"/sys", "/dev"})
+# Host paths that must be bound recursively when a user namespace is active: a
+# non-recursive bind of /sys, /dev or /data is rejected by the kernel inside a
+# userns (their submounts cannot be split off there), whereas a recursive bind
+# of the whole subtree is permitted. /data (and TERMUX_PREFIX, which sits under
+# it) carries dozens of submounts on Android, so it hits the same EINVAL as the
+# pseudo-filesystems.
+_USERNS_RECURSIVE_BINDS = frozenset({"/sys", "/dev", "/data", TERMUX_PREFIX})
 
 
 def bind_is_recursive(src: str, dst_real: str, run_root: str, *, use_userns: bool = False) -> bool:
