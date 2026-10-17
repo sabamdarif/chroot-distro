@@ -88,6 +88,8 @@ def run(monkeypatch, tmp_path):
     monkeypatch.setattr(build_cmd, "store_in_cache", lambda *_a: None)
     monkeypatch.setattr(build_cmd, "import_cache", _import)
     monkeypatch.setattr(build_cmd, "export_cache", _export)
+    monkeypatch.setattr(build_cmd, "pull_cache", lambda ref, insecure=False: (1, 0))
+    monkeypatch.setattr(build_cmd, "push_cache", lambda ref, recipes, insecure=False: (1, 0))
 
     def _run(**kwargs):
         kwargs.setdefault("path", str(ctx))
@@ -133,13 +135,24 @@ def test_a_relative_directory_is_resolved_once(run, monkeypatch, tmp_path):
     assert run(cache_to=["type=local,dest=./out"]).exported == [str(tmp_path / "out")]
 
 
+def test_a_registry_reference_pulls_and_pushes(run, monkeypatch):
+    pulled, pushed = [], []
+    monkeypatch.setattr(build_cmd, "pull_cache", lambda ref, insecure=False: pulled.append(ref) or (1, 0))
+    monkeypatch.setattr(build_cmd, "push_cache", lambda ref, recipes, insecure=False: pushed.append((ref, set(recipes))) or (1, 0))
+    run(
+        cache_from=["type=registry,ref=ghcr.io/me/cache:latest"],
+        cache_to=["type=registry,ref=ghcr.io/me/cache:latest"],
+    )
+    assert pulled == ["ghcr.io/me/cache:latest"]
+    assert pushed == [("ghcr.io/me/cache:latest", set(run.recipes))]
+
+
 # ── what they refuse, and when ────────────────────────────────────────────────
 
 
 @pytest.mark.parametrize(
     "spec",
     [
-        "type=registry,ref=docker.io/me/cache",
         "type=gha",
         "/plain/path",
         "src=/dir",
@@ -147,6 +160,9 @@ def test_a_relative_directory_is_resolved_once(run, monkeypatch, tmp_path):
         "type=local,src=",
         "type=local,src=/dir,mode=max",
         "type=local,dest=/dir",
+        "type=registry",
+        "type=registry,ref=",
+        "type=registry,src=/dir",
     ],
 )
 def test_a_spec_this_program_cannot_honour_is_refused_before_the_locks(run, capsys, spec):

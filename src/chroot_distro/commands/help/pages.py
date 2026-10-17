@@ -140,19 +140,26 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
             ),
             ("--no-cache", "Disable build-step caching. Each instruction is executed fresh."),
             (
-                "--cache-from [type=local,src=DIR]",
-                "Import the cached steps a --cache-to wrote into DIR before "
-                "building. A directory that is not there yet imports nothing "
-                "and is not an error; one that is there and is not a cache "
-                "directory ends the build. Every layer is verified against its "
-                "own digest and diff_id on the way in. Skipped under "
-                "--no-cache. Repeatable.",
+                "--allow-insecure",
+                "Allow plain-HTTP registries for --cache-from/--cache-to "
+                "type=registry. TLS is enforced by default; this is for a "
+                "local registry you trust.",
             ),
             (
-                "--cache-to [type=local,dest=DIR]",
-                "Export the steps this build dispatched into DIR, so another "
+                "--cache-from [type=local,src=DIR | type=registry,ref=REF]",
+                "Import cached steps before building, from a directory "
+                "(type=local) or a registry artifact (type=registry). A "
+                "directory that is not there yet imports nothing and is not an "
+                "error; one that is there and is not a cache directory ends the "
+                "build. Every layer is verified against its own digest and "
+                "diff_id on the way in. Skipped under --no-cache. Repeatable.",
+            ),
+            (
+                "--cache-to [type=local,dest=DIR | type=registry,ref=REF]",
+                "Export the steps this build dispatched, to a directory "
+                "(type=local) or a registry artifact (type=registry), so another "
                 "machine can serve them with --cache-from. Only this build's "
-                "steps, added to whatever DIR already holds. Repeatable.",
+                "steps, added to whatever the target already holds. Repeatable.",
             ),
             (
                 "--progress [auto|plain|tty|rawjson]",
@@ -216,8 +223,9 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
                     "an error. A multi-platform image index is written to an "
                     "--output archive only; 'push' uploads one platform at a "
                     "time, chosen with its own --architecture. Cache import and "
-                    "export cover 'type=local' and no other; provenance, SBOM "
-                    "and named or remote contexts are not implemented."
+                    "export cover 'type=local' and 'type=registry' and no other; "
+                    "provenance, SBOM and named or remote contexts are not "
+                    "implemented."
                 ),
             },
         ],

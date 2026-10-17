@@ -416,16 +416,22 @@ def _build(sub):
         dest="cache_from",
         action="append",
         default=[],
-        metavar="type=local,src=DIR",
+        metavar="type=local,src=DIR | type=registry,ref=REF",
     )
     p.add_argument(
         "--cache-to",
         dest="cache_to",
         action="append",
         default=[],
-        metavar="type=local,dest=DIR",
+        metavar="type=local,dest=DIR | type=registry,ref=REF",
     )
     p.add_argument("--no-cache", dest="no_cache", action="store_true")
+    p.add_argument(
+        "--allow-insecure",
+        dest="insecure",
+        action="store_true",
+        help="Allow plain-HTTP registries for --cache-from/--cache-to type=registry.",
+    )
     p.add_argument(
         "--progress",
         dest="progress",

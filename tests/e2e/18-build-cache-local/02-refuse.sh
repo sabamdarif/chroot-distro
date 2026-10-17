@@ -11,13 +11,13 @@
 set -e
 
 if sudo chroot-distro build /tmp/cache-build -t test-build-cache:latest \
-	--cache-from type=registry,ref=docker.io/example/cache 2>/tmp/cache-registry.err; then
-	echo "FAIL: a registry cache was accepted"
+	--cache-from type=gha 2>/tmp/cache-registry.err; then
+	echo "FAIL: an unsupported cache type was accepted"
 	exit 1
 fi
 cat /tmp/cache-registry.err
 grep -q "type=local" /tmp/cache-registry.err
-echo "PASS: only type=local is accepted"
+echo "PASS: an unsupported cache type is refused"
 
 mkdir -p /tmp/not-a-cache
 echo "not an index" >/tmp/not-a-cache/build-cache.json

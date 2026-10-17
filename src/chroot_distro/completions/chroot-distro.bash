@@ -314,11 +314,11 @@ _chroot_distro() {
 			return
 			;;
 		--cache-from)
-			_chroot_distro_compgen_words "type=local,src=" "${cur}"
+			_chroot_distro_compgen_words "type=local,src= type=registry,ref=" "${cur}"
 			return
 			;;
 		--cache-to)
-			_chroot_distro_compgen_words "type=local,dest=" "${cur}"
+			_chroot_distro_compgen_words "type=local,dest= type=registry,ref=" "${cur}"
 			return
 			;;
 		esac
