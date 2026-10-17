@@ -15,13 +15,15 @@ into a directory off engine.tmp_root and referenced by (that directory's
 descriptor, name), which is where it was headed anyway, and tmp_root is removed
 when the build ends.
 
-Three source kinds, decided per operand: a URL (ADD only), the build context, and
+Three source kinds, decided per operand: a URL (ADD only), a context tree (the
+main build context, or a named local one when `--from` names one), and
 another rootfs (`--from`: an earlier stage, or an image pulled into a throwaway
-tree). None of the three is a tree this build wrote, so `_SourceTree` is the only
-way one is located. It resolves a spec to components with each hop clamped inside
-the tree, then hands back descriptors walked down O_NOFOLLOW rather than the path
-it resolved. The last component is left unresolved deliberately, because COPY
-copies a symlink as a symlink instead of reading through it.
+tree, which is also what a named image context resolves to). None of the three
+is a tree this build wrote, so `_SourceTree` is the only way one is located. It
+resolves a spec to components with each hop clamped inside the tree, then hands
+back descriptors walked down O_NOFOLLOW rather than the path it resolved. The
+last component is left unresolved deliberately, because COPY copies a symlink
+as a symlink instead of reading through it.
 
 A fourth kind reaches no tree at all: a `<<TAG` operand is an inline here-doc
 whose body is the file's content and whose tag is its name.
@@ -34,7 +36,9 @@ buys.
 Flags are an allow-list. `--link` is refused as BuildKit-only and `--checksum`
 and `--keep-git-dir` as unimplemented, never ignored, since each one changes what
 the instruction is meant to produce. An ADD naming a git repository is refused
-the same way, for the same reason.
+the same way, for the same reason; parsing.looks_like_git and
+parsing.refuse_git_message own the check and the wording, since
+`--build-context` shares both.
 """
 
 import contextlib
@@ -67,7 +71,9 @@ from chroot_distro.helpers.build_engine.errors import BuildError
 from chroot_distro.helpers.build_engine.parsing import (
     TAR_HEADER_BYTES,
     is_tar_header,
+    looks_like_git,
     looks_like_url,
+    refuse_git_message,
     split_operands,
 )
 from chroot_distro.helpers.build_engine.users import resolve_chown
@@ -349,6 +355,8 @@ def _do_copy_or_add(
     instr: dict[str, typing.Any],
     allow_url: bool,
     auto_extract: bool,
+    tree: _SourceTree | None = None,
+    ignore: typing.Iterable[str] | None = None,
 ) -> None:
     stage = engine.current
     flags = instr.get("flags") or {}
@@ -385,33 +393,47 @@ def _do_copy_or_add(
     from_stage = flags.get("from")
     from_rootfs = None
     from_rootfs_fd = None
+    # A caller (a FROM over a local context) hands the source tree in; a
+    # `--from` naming a local context resolves to one here.
+    source_tree = tree
+    source_ignore = ignore
     # The throwaway rootfs is ours to close; another stage's descriptor is not.
     owned_fd = None
     if from_stage:
         ref_stage = engine.stages.get(from_stage)
-        if ref_stage is None:
-            from_rootfs, owned_fd = _pull_throwaway_image(engine, from_stage)
-            from_rootfs_fd = owned_fd
-        else:
+        if ref_stage is not None:
             from_rootfs = ref_stage.rootfs_dir
             from_rootfs_fd = ref_stage.rootfs_fd
+        elif from_stage.lower() in engine.build_contexts:
+            context_value = engine.build_contexts[from_stage.lower()]
+            if os.path.isdir(context_value):
+                # A named local context is read the way the main build context
+                # is: its own .dockerignore, and the same clamped walk.
+                source_tree = _SourceTree(context_value)
+                source_ignore = engine.context_ignore_patterns(context_value)
+            else:
+                from_rootfs, owned_fd = _pull_throwaway_image(engine, context_value)
+                from_rootfs_fd = owned_fd
+        else:
+            from_rootfs, owned_fd = _pull_throwaway_image(engine, from_stage)
+            from_rootfs_fd = owned_fd
 
     resolved = []
     for src in sources:
         tag = _heredoc_tag(src)
         if tag is not None and tag in heredocs:
             resolved.append(("heredoc", tag))
-        elif allow_url and _looks_like_git(src):
-            # Docker clones one. Refused by name rather than left to the URL
-            # download (which would fetch a `.git` URL as a file) or to the
-            # context walk (which would report the ref missing).
-            raise BuildError(f"ADD from a git repository ('{src}') is not supported (line {instr['lineno']}).")
+        elif allow_url and looks_like_git(src):
+            # Refused by name rather than left to the URL download (which
+            # would fetch a `.git` URL as a file) or to the context walk
+            # (which would report the ref missing); parsing.py owns the why.
+            raise BuildError(f"ADD: {refuse_git_message(src)} (line {instr['lineno']}).")
         elif from_rootfs is not None:
             resolved.append(("rootfs", src))
         elif allow_url and looks_like_url(src):
             resolved.append(("url", src))
         else:
-            resolved.append(("ctx", src))
+            resolved.append(("ctx", src))  # the source tree, or the main context
 
     is_dir_dest = dest.endswith("/") or len(sources) > 1
     if not dest.startswith("/"):
@@ -443,6 +465,8 @@ def _do_copy_or_add(
                     auto_extract,
                     parents=parents,
                     spool=spool,
+                    tree=source_tree,
+                    ignore=source_ignore,
                 )
             elif kind == "rootfs":
                 assert from_rootfs is not None
@@ -483,18 +507,8 @@ def _do_copy_or_add(
                 os.close(owned_fd)
 
 
-# What Docker reads as a git repository for ADD to clone rather than as a file:
-# a scheme it clones over, an http(s) URL whose path ends in `.git`, or an
-# scp-like `user@host:path`.
-_GIT_SCHEME_RE = re.compile(r"^(?:git|ssh)://", re.IGNORECASE)
-_GIT_SCP_RE = re.compile(r"^[A-Za-z0-9._-]+@[A-Za-z0-9.-]+:")
-
-
-def _looks_like_git(src: str) -> bool:
-    """True when *src* names a git repository rather than a file or a tree."""
-    if _GIT_SCHEME_RE.match(src) or _GIT_SCP_RE.match(src):
-        return True
-    return looks_like_url(src) and urllib.parse.urlparse(src).path.endswith(".git")
+# The git-repository check itself lives in parsing (looks_like_git), next to
+# looks_like_url, since --build-context shares it.
 
 
 # A source operand that is a here-doc opener. The quotes a tag may carry are
@@ -611,6 +625,8 @@ def _copy_from_context(
     auto_extract: bool,
     parents: bool = False,
     spool: _Spool | None = None,
+    tree: _SourceTree | None = None,
+    ignore: typing.Iterable[str] | None = None,
 ) -> None:
     """COPY/ADD from the build context, confined to it.
 
@@ -620,8 +636,14 @@ def _copy_from_context(
     `escape -> /` becomes plain `secret` and is reported missing if the context
     holds no such file. That is what the daemon makes of a context symlink too:
     it only ever sees the unpacked context, never the host tree the link named.
+
+    *tree* and *ignore* come in only when the source is a named local build
+    context (`--from=name` or a `FROM name` standing on one); without them the
+    main build context and its .dockerignore answer.
     """
-    tree = _SourceTree(engine.build_dir)
+    if tree is None:
+        tree = _SourceTree(engine.build_dir)
+    ignore_patterns: typing.Iterable[str] = engine.ignore_patterns if ignore is None else ignore
     spec, anchor = _split_parents_pivot(src.lstrip("/")) if parents else (src, "")
     raw = _spec_parts(spec)
     if raw is None:
@@ -635,8 +657,8 @@ def _copy_from_context(
         # context counts for nothing: with no match left the source is not in the
         # context, which is what the user is told rather than the instruction
         # quietly copying nothing.
-        matches = sorted(simple_glob(engine.build_dir, _rel_name(raw)))
-        matches = [m for m in matches if not is_ignored(m, list(engine.ignore_patterns))]
+        matches = sorted(simple_glob(tree.root, _rel_name(raw)))
+        matches = [m for m in matches if not is_ignored(m, list(ignore_patterns))]
         found = []
         for m in matches:
             m_raw = _spec_parts(m)
@@ -659,11 +681,11 @@ def _copy_from_context(
                 mode_override=mode_override,
                 auto_extract=auto_extract,
                 src_rel=_rel_name(m_parts),
-                ignore_patterns=engine.ignore_patterns,
+                ignore_patterns=ignore_patterns,
                 spool=spool,
             )
         return
-    if is_ignored(_rel_name(parts), list(engine.ignore_patterns)):
+    if is_ignored(_rel_name(parts), list(ignore_patterns)):
         return
     if parents:
         # Preserved relative to the spelling rather than to where the walk
@@ -684,7 +706,7 @@ def _copy_from_context(
         mode_override=mode_override,
         auto_extract=auto_extract,
         src_rel=_rel_name(parts),
-        ignore_patterns=engine.ignore_patterns,
+        ignore_patterns=ignore_patterns,
         spool=spool,
     )
 

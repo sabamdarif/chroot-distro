@@ -95,6 +95,16 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
                 "Set a build-time ARG. Only ARGs declared in the Dockerfile are honoured. Repeatable.",
             ),
             (
+                "--build-context [name=VALUE]",
+                "Define a named build context the Dockerfile refers to by "
+                "name, from FROM or COPY --from=name. VALUE is a local "
+                "directory (read like the main build context, with its own "
+                ".dockerignore; FROM name stands the stage up from scratch "
+                "with the tree copied in) or an image reference (pulled). "
+                "Repeatable. A git source is not supported: clone the "
+                "repository and pass the checkout instead.",
+            ),
+            (
                 "-a, --architecture [ARCH]",
                 "Target CPU architecture (default: host architecture). "
                 f"Accepts {PROGRAM_NAME} names (aarch64, arm, i686, "
@@ -177,6 +187,7 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
             f"{PROGRAM_NAME} build -f Dockerfile.arm --architecture aarch64 .",
             f"{PROGRAM_NAME} build -t myapp:1.0 --platform linux/amd64,linux/arm64 -o myapp.oci.tar .",
             f"{PROGRAM_NAME} build -t myapp --cache-to type=local,dest=.buildcache .",
+            f"{PROGRAM_NAME} build -t myapp --build-context assets=../assets .",
         ],
         "footer": [
             {
@@ -224,7 +235,7 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
                     "--output archive only; 'push' uploads one platform at a "
                     "time, chosen with its own --architecture. Cache import and "
                     "export cover 'type=local' and 'type=registry' and no other; "
-                    "provenance, SBOM and named or remote contexts are not "
+                    "provenance, SBOM and remote or git build contexts are not "
                     "implemented."
                 ),
             },

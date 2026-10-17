@@ -321,9 +321,12 @@ _chroot_distro() {
 			_chroot_distro_compgen_words "type=local,dest= type=registry,ref=" "${cur}"
 			return
 			;;
+		--build-context)
+			return
+			;;
 		esac
 		if [[ "${cur}" == -* ]]; then
-			_chroot_distro_compgen_words "-f --file -t --tag --build-arg -a --architecture
+			_chroot_distro_compgen_words "-f --file -t --tag --build-arg --build-context -a --architecture
                     --platform --target -o --output --export --install-as --secret --ssh
                     --cache-from --cache-to --no-cache --progress -v --verbose
                     -q --quiet -h --help" "${cur}"

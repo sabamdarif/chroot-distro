@@ -68,6 +68,10 @@ class BuildRequest:
     ssh_sockets: dict[str, str] = dataclasses.field(default_factory=dict)
     progress: str = "auto"
     multi_platform: bool = False
+    # The `--build-context name=...` table, keys lowercased. A request is
+    # shared by every platform's solve, and the table is read-only, so the
+    # one dict serves all of them.
+    build_contexts: dict[str, str] = dataclasses.field(default_factory=dict)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -154,6 +158,7 @@ def solve_platform(request: BuildRequest) -> PlatformResult:
             tmp_root_fd=tmp_root_fd,
             target_platform=request.target_platform,
             build_platform=request.build_platform,
+            build_contexts=request.build_contexts,
         )
         stage = engine.run(request.instructions)
         manifest, image_config = build_manifest_and_config(

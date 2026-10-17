@@ -401,6 +401,8 @@ complete -c chroot-distro -f -n '__fish_seen_subcommand_from build' \
 complete -c chroot-distro -f -n '__fish_seen_subcommand_from build' \
     -l build-arg       -r -d 'Set a build-time ARG (repeatable)'
 complete -c chroot-distro -f -n '__fish_seen_subcommand_from build' \
+    -l build-context   -r -d 'Define a named build context (repeatable)'
+complete -c chroot-distro -f -n '__fish_seen_subcommand_from build' \
     -s a -l architecture -r -d 'Target CPU architecture' \
     -a 'aarch64\tAArch64 arm\tARM(32-bit) i686\tx86(32-bit) riscv64\tRISC-V x86_64\tx86_64'
 complete -c chroot-distro -f -n '__fish_seen_subcommand_from build' \

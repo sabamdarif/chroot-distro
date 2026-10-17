@@ -91,6 +91,7 @@ from chroot_distro.helpers import build_cache, namespace
 from chroot_distro.helpers.binfmt import ensure_handler
 from chroot_distro.helpers.build_cache_io import export_cache, import_cache
 from chroot_distro.helpers.build_cache_registry import pull_cache, push_cache
+from chroot_distro.helpers.build_contexts import parse_build_contexts, resolve_context_dir
 from chroot_distro.helpers.build_engine import (
     BuildError,
     BuildRequest,
@@ -123,6 +124,7 @@ def command_build(args: typing.Any) -> None:
     dockerfile_path = getattr(args, "dockerfile", None)
     tags = list(getattr(args, "tags", []) or [])
     build_args = _parse_build_args(getattr(args, "build_args", None) or [])
+    build_contexts = _parse_build_context_opts(getattr(args, "build_contexts", None) or [])
     override_arch = getattr(args, "override_arch", None) or ""
     target_stage = getattr(args, "target_stage", None) or None
     emulator = getattr(args, "emulator", None) or ""
@@ -325,6 +327,7 @@ def command_build(args: typing.Any) -> None:
                 secrets=secrets,
                 ssh_sockets=ssh_sockets,
                 progress=getattr(args, "progress", "auto") or "auto",
+                build_contexts=build_contexts,
             )
 
             try:
@@ -789,6 +792,22 @@ def _parse_ssh_opts(raw: list[str]) -> dict[str, str]:
             sys.exit(1)
         out[sid] = os.path.abspath(os.path.expanduser(sock))
     return out
+
+
+def _parse_build_context_opts(raw: list[str]) -> dict[str, str]:
+    """The `--build-context` table, validated and with directories resolved.
+
+    A git or URL value is refused here, before the locks and any pull, and a
+    local directory is resolved to an absolute path so the engine and COPY
+    read the same tree wherever the process later stands. A value naming no
+    directory stays as given: it is an image reference, and pull reports it.
+    """
+    try:
+        parsed = parse_build_contexts(raw)
+    except BuildError as exc:
+        crit_error(str(exc))
+        sys.exit(1)
+    return {name: resolve_context_dir(value) for name, value in parsed.items()}
 
 
 def _parse_build_args(raw: list[str]) -> dict[str, str]:

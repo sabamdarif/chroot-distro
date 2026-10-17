@@ -327,6 +327,7 @@ _chroot_distro() {
 				'(-f --file)'{-f,--file}'[path to Dockerfile (- reads from stdin)]:file:_files' \
 				'*'{-t,--tag}'[image reference to assign (repeatable)]:ref' \
 				'*--build-arg[set a build-time ARG (repeatable)]:K=V' \
+			'*--build-context[define a named build context (repeatable)]:name=VALUE' \
 				'(-a --architecture)'{-a,--architecture}'[target CPU architecture]:arch:(aarch64 arm i686 riscv64 x86_64)' \
 				'*--platform[build one image per platform (comma-separated, repeatable)]:platforms:(linux/amd64 linux/arm64 linux/arm/v7 linux/386 linux/riscv64)' \
 				'--target[stop after this named build stage]:stage' \

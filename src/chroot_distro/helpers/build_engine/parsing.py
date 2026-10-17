@@ -145,6 +145,42 @@ def looks_like_url(s: str) -> bool:
     return s.startswith(("http://", "https://"))
 
 
+# What Docker reads as a git repository to clone rather than as a file or a
+# tree: a scheme it clones over, an http(s) URL whose path ends in `.git`, or
+# an scp-like `user@host:path`. A `git+` prefix is buildx's spelling of the
+# same thing and is refused on the strength of the prefix alone.
+_GIT_SCHEME_RE = re.compile(r"^(?:git|ssh)://", re.IGNORECASE)
+_GIT_SCP_RE = re.compile(r"^[A-Za-z0-9._-]+@[A-Za-z0-9.-]+:")
+
+
+def looks_like_git(s: str) -> bool:
+    """True when *s* names a git repository rather than a file or a tree."""
+    if s.startswith("git+"):
+        return True
+    if _GIT_SCHEME_RE.match(s) or _GIT_SCP_RE.match(s):
+        return True
+    return looks_like_url(s) and s.split("?", 1)[0].split("#", 1)[0].rstrip("/").endswith(".git")
+
+
+def refuse_git_message(source: str) -> str:
+    """The refusal a git source gets, naming the alternative.
+
+    One message for both places a git source can appear (an ADD operand, a
+    --build-context value), since the answer is the same: there is no git
+    protocol client in the stdlib, and the host's archive URL or a checkout
+    passed as a local context serves the same tree.
+    """
+    archive = ""
+    if source.startswith(("git+http://", "git+https://", "http://", "https://")):
+        plain = source.removeprefix("git+")
+        base = plain.split("?", 1)[0].split("#", 1)[0].removesuffix(".git")
+        archive = f" The host's archive URL ({base}/archive/refs/heads/main.tar.gz and the like) serves the same tree."
+    return (
+        f"a git source ('{source}') is not supported, as there is no git client here.{archive} "
+        "Clone the repository and pass the checkout as a build context instead."
+    )
+
+
 # How much of a file the signature check below needs: the ustar magic sits at
 # offset 257 and runs to 265.
 TAR_HEADER_BYTES = 265

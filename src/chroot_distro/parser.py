@@ -358,6 +358,13 @@ def _build(sub):
         metavar="K=V",
     )
     p.add_argument(
+        "--build-context",
+        dest="build_contexts",
+        action="append",
+        default=[],
+        metavar="name=VALUE",
+    )
+    p.add_argument(
         "-a",
         "--architecture",
         dest="override_arch",

@@ -414,6 +414,7 @@ Build an image from a Dockerfile, like `docker build` but without Docker. `PATH`
 | `-f`, `--file PATH`               | Use a Dockerfile at a different location. Pass `-` to read it from stdin.                                                                                  |
 | `-t`, `--tag REF`                 | Name the image (like `myapp:1.0`). Can be given more than once.                                                                                            |
 | `--build-arg K=V`                 | Set a build-time `ARG`. Can be given more than once.                                                                                                       |
+| `--build-context name=VALUE`      | Give a name to another source the Dockerfile can use. `VALUE` is a local folder or an image reference. See [Named build contexts](#named-build-contexts). Can be given more than once. |
 | `-a`, `--architecture ARCH`       | Build for a different CPU type. Default is your device's CPU. The one-platform spelling of `--platform`.                                                   |
 | `--platform LIST`                 | Build one image per platform, comma-separated (`linux/amd64,linux/arm64`). Can be given more than once.                                                    |
 | `--target STAGE`                  | Stop at a named stage of a multi-stage build.                                                                                                              |
@@ -454,13 +455,31 @@ These fail with a clear error rather than being ignored, because each one would 
 | `RUN --security`                                       | Comes after the isolation work.                                                      |
 | `COPY --link`                                          | A BuildKit-only way of rebasing layers.                                              |
 | `COPY --checksum`, `ADD --keep-git-dir`                | Not implemented.                                                                     |
-| `ADD` from a git repository                            | Not implemented. Clone it yourself and `COPY` the result.                            |
+| `ADD` or `--build-context` from a git repository       | Not implemented. The error names the alternative: the host's archive URL for `ADD`, or a checkout passed as a local folder for a context. |
 | `--cache-from`/`--cache-to` other than `local`/`registry` | Those two are what move a cache, see [Cache import and export](#cache-import-and-export). |
-| Provenance, SBOM, named and remote contexts            | Not implemented.                                                                     |
+| Provenance, SBOM, and remote build contexts            | Not implemented.                                                                     |
 
 A `# syntax=` line naming anything but `docker/dockerfile` asks for a frontend program that this cannot fetch or run. The build warns and reads the file as an ordinary Dockerfile.
 
 A `.dockerignore` file in the context excludes files from `COPY` and `ADD`, with Docker's own rules: `*` and `?` stop at a `/`, `**` spans any number of folders, `!` puts a file back, the last matching line decides, and naming a folder covers everything inside it.
+
+#### Named build contexts
+
+`--build-context name=VALUE` lets the Dockerfile pull from somewhere other than the folder you passed to `build`, the way `docker buildx` does:
+
+```sh
+chroot-distro build -t myapp --build-context assets=../shared-assets .
+```
+
+A Dockerfile then refers to the name from `FROM` or from `COPY --from=`:
+
+```dockerfile
+FROM alpine
+COPY --from=assets logo.png /usr/share/myapp/
+FROM assets AS bundled   # a local folder: scratch plus the tree copied in
+```
+
+The value is a local folder or an image reference. A folder is read like the main build context, with its own `.dockerignore`, and a stage `FROM` one starts empty and copies the folder in. An image reference is pulled, so `COPY --from=baseimg` and `FROM baseimg` use it as a base. A stage declared with `AS` in the same Dockerfile still wins over a named context of the same name, as it does in Docker. Git URLs (`git+https://...` and friends) are refused with a message naming the alternative, because there is no git client here: clone the repository yourself and pass the checkout as a local folder.
 
 #### Platforms and output
 

@@ -26,6 +26,7 @@ import pytest
 
 from chroot_distro import dirfd
 from chroot_distro.helpers.build_engine import copy_step
+from chroot_distro.helpers.build_engine.parsing import looks_like_git
 from chroot_distro.helpers.build_engine.errors import BuildError
 
 
@@ -295,10 +296,10 @@ def _add(src):
 def test_a_git_source_is_refused_by_name(src):
     # Docker clones one; downloading a `.git` URL as a file or reporting the ref
     # missing from the build context would both build something else.
-    with pytest.raises(BuildError, match="git repository"):
+    with pytest.raises(BuildError, match="git source"):
         _add(src)
 
 
 @pytest.mark.parametrize("src", ["https://example.com/file.tar.gz", "sub/dir", "user@host"])
 def test_an_ordinary_source_is_not_taken_for_git(src):
-    assert copy_step._looks_like_git(src) is False
+    assert looks_like_git(src) is False

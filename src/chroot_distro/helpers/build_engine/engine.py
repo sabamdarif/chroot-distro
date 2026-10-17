@@ -26,7 +26,7 @@ where the reasoning lives: a pulled config is a document this program did not
 write, every field of it is read back by a handler, so it is held to the type OCI
 says it is at the single point it is adopted.
 
-`firing_onbuild` is true only while a base image's triggers run, which is what
+``firing_onbuild` is true only while a base image's triggers run, which is what
 lets `do_env` tell a stranger's ENV line from the Dockerfile author's. An ONBUILD
 in this Dockerfile records a trigger for whoever builds FROM the result and fires
 nothing here. A trigger fires once and is then dropped from the stage's config,
@@ -380,8 +380,13 @@ class BuildEngine:
         tmp_root_fd: int | None = None,
         target_platform: Platform | None = None,
         build_platform: Platform | None = None,
+        build_contexts: dict[str, str] | None = None,
     ):
         self.build_dir = os.path.abspath(build_dir)
+        # `--build-context name=...`, keys lowercased: FROM and COPY --from
+        # consult it before reading a name as a stage or an image, and a
+        # stage name keeps priority over it, which is Docker's order too.
+        self.build_contexts = dict(build_contexts or {})
         self.tmp_root = tmp_root
         # Descriptor on this run's own scratch root. Every stage tree is made
         # off it, so the stage descriptors name inodes below the directory the
@@ -422,6 +427,9 @@ class BuildEngine:
         # `--cache-to` exports is the index entries these name.
         self.step_recipes: set[str] = set()
         self.ignore_patterns = load_dockerignore(self.build_dir)
+        # One .dockerignore per named local context, loaded when a COPY first
+        # reads from it; the pattern lists are small and most builds name none.
+        self._context_ignore: dict[str, list[str]] = {}
         # LD_* names the Dockerfile set and the host-side chroot exec was
         # refused (run_step._refuse_host_exec). Kept per build so a name is
         # named once rather than once per RUN step.
@@ -661,7 +669,11 @@ class BuildEngine:
             elif base_ref in self.stages:
                 self._inherit_from_stage(stage, self.stages[base_ref])
             else:
-                self._pull_base_image(stage, base_ref)
+                context_value = self.build_contexts.get(base_ref.lower())
+                if context_value is not None and os.path.isdir(context_value):
+                    self._from_local_context(stage, base_ref, context_value)
+                else:
+                    self._pull_base_image(stage, context_value if context_value is not None else base_ref)
         except BaseException:
             stage.close()
             raise
@@ -768,6 +780,54 @@ class BuildEngine:
                 os.close(stage_fd)
             raise BuildError(f"cannot create the scratch tree for stage {idx}: {exc}") from exc
         return stage_fd, rootfs_fd
+
+    def _from_local_context(self, stage: Stage, name: str, context_dir: str) -> None:
+        """Stand *stage* up FROM a local-directory build context.
+
+        Docker's reading of the same line: FROM scratch plus a COPY of the
+        context tree into the new stage's root. The copy goes through the
+        COPY handler with a synthetic instruction, so the layer it packs and
+        the history entry it records are the ones any other COPY writes; the
+        context's own .dockerignore applies to it. `context_dir` is a host
+        path the command line named, not a guest-resolved one, so it is read
+        by name the way the main build context is.
+        """
+        from chroot_distro.helpers.build_engine import copy_step
+
+        stage.image_config = {"config": {}}
+        # A synthetic COPY of the context tree, run against the context's own
+        # source tree and .dockerignore: going through do_copy with a --from
+        # would re-resolve the name, which a stage of the same name could win.
+        instr: dict[str, typing.Any] = {
+            "name": "COPY",
+            "value": [".", "/"],
+            "exec_form": True,
+            "flags": {},
+            "lineno": 0,
+            "raw": f"COPY . / # --build-context {name}={context_dir}",
+        }
+        self.current = stage
+
+        def _copy_tree(eng: typing.Any, i: dict[str, typing.Any]) -> None:
+            copy_step._do_copy_or_add(
+                eng,
+                i,
+                allow_url=False,
+                auto_extract=False,
+                tree=copy_step._SourceTree(context_dir),
+                ignore=self.context_ignore_patterns(context_dir),
+            )
+
+        # Through the history wrapper, not the bare handler: the copy packs a
+        # layer, and the count of non-empty history entries has to equal the
+        # diff_ids count in the image this build publishes.
+        self._run_with_history(_copy_tree, instr)
+
+    def context_ignore_patterns(self, context_dir: str) -> list[str]:
+        """The .dockerignore of one named local context, loaded once."""
+        if context_dir not in self._context_ignore:
+            self._context_ignore[context_dir] = load_dockerignore(context_dir)
+        return self._context_ignore[context_dir]
 
     def _inherit_from_stage(self, new_stage: Stage, parent: Stage) -> None:
         """Apply parent's layers to new_stage.rootfs_dir; copy config.
