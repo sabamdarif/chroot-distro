@@ -731,6 +731,11 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
                     "Only one container is restored per archive. An "
                     "archive holding more than one container, or no "
                     "container rootfs at all, is rejected."
+                    "\n\n"
+                    "Restore reuses the container name baked into the "
+                    "archive and refuses to overwrite one that is already "
+                    "installed; remove it first, or install the archive "
+                    "under a new name with install --name."
                 ),
             },
         ],

@@ -330,6 +330,20 @@ def command_restore(args) -> None:
                         clear_bar()
                         log_error(f"Cannot restore: container '{container_name}' is busy{hint}.")
                         sys.exit(1)
+                    # Refuse to overwrite an installed container, the way
+                    # install does: restore clears the rootfs it finds, so a
+                    # name that is already taken must be removed (or the
+                    # backup installed under a new one with install --name)
+                    # before its data is silently destroyed.
+                    if os.path.isdir(container_rootfs(container_name)):
+                        clear_bar()
+                        log_error(
+                            f"Cannot restore: container '{container_name}' is already installed. "
+                            f"Remove it first ('{PROGRAM_NAME} remove {container_name}'), or bring "
+                            f"the backup in under a new name with "
+                            f"'{PROGRAM_NAME} install <archive> --name NEWNAME'."
+                        )
+                        sys.exit(1)
                     log_info(f"Destination: {restore_name}")
                 elif container_name != restore_name:
                     clear_bar()

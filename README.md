@@ -331,7 +331,7 @@ chroot-distro backup ubuntu | gpg -c > ubuntu.tar.gpg
 chroot-distro restore [OPTIONS] [BACKUP_FILE]
 ```
 
-Bring back a container from a backup archive. Without a file, it reads from stdin. Compression is detected automatically.
+Bring back a container from a backup archive. Without a file, it reads from stdin. Compression is detected automatically. It reuses the container name baked into the archive and refuses to overwrite a container that is already installed; remove that one first, or install the archive under a new name with `install --name`.
 
 | Option            | Description               |
 | ----------------- | ------------------------- |
