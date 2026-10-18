@@ -176,7 +176,7 @@ def test_namespace_session_yields_none_without_mount_ns(tmp_path):
 
 def test_namespace_session_holder_not_chrooted_and_default_binds(tmp_path):
     holder = MagicMock()
-    binds = [("/dev", str(tmp_path / "dev"))]
+    binds = [("/data", str(tmp_path / "data"))]
     with (
         patch.object(isolation, "probe_isolation", return_value=_probe()),
         patch.object(isolation.namespace, "acquire_holder", return_value=holder) as acquire,
@@ -199,7 +199,6 @@ def test_namespace_session_holder_not_chrooted_and_default_binds(tmp_path):
         assert gb_kwargs["max_isolation"] is False
         assert gb_kwargs["use_namespaces"] is True
         sp_kwargs = special.call_args.kwargs
-        assert sp_kwargs["isolated"] is False
         assert sp_kwargs["max_isolation"] is False
         safe_mount.assert_called_once()
         teardown.assert_called_once_with("key", str(tmp_path), holder)

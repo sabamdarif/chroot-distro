@@ -38,8 +38,8 @@ _ISOLATED_OPT = (
     "rootfs and the procfs is mounted with hidepid=2, so there is no host path "
     "to escape through (e.g. 'chroot /proc/1/root' no longer reaches the "
     "host). Needs the mount namespace; where the kernel lacks it the login "
-    "degrades to chroot-only isolation with a warning, which keeps the core "
-    "/dev, /sys and /dev/pts binds and loses that protection. Sharing flags "
+    "degrades to chroot-only isolation with a warning and loses that "
+    "protection. Sharing flags "
     "(--shared-home, --shared-tmp, --shared-display, --bind) are ignored and a "
     "warning is printed, since they would expose a host path. "
     "Use CD_USE_NS=1 instead if you want namespace isolation but keep the "
@@ -47,8 +47,9 @@ _ISOLATED_OPT = (
 )
 _MINIMAL_OPT = (
     "--minimal",
-    "Bare minimum chroot: bind only core pseudo-filesystems (/dev, /proc, /sys, "
-    "and /run, /dev/pts, /dev/shm when present). Stripped guest environment. "
+    "Bare minimum chroot: only the fresh pseudo-filesystems (a tmpfs /dev, "
+    "procfs, read-only sysfs, /dev/pts and /dev/shm) and nothing bound from "
+    "the host. Stripped guest environment. "
     "Mutually exclusive with --isolated.",
 )
 _NO_NEW_PRIVS_OPT = (

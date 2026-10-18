@@ -114,6 +114,26 @@ _DRI_DEVICE_PATTERNS = (
 )
 
 
+def find_mesa_device_nodes() -> list[tuple[str, str]]:
+    """Return ``(host_path, guest_path)`` pairs for non-NVIDIA GPU nodes.
+
+    ``/dev/dri/*`` render nodes for Mesa (AMD/Intel) and ``/dev/dxg`` on
+    WSL2. These used to arrive with the host /dev bind; with the fresh tmpfs
+    /dev they are bound individually.
+    """
+    binds: list[tuple[str, str]] = []
+
+    if os.path.exists("/dev/dxg"):
+        binds.append(("/dev/dxg", "/dev/dxg"))
+
+    for pattern in _DRI_DEVICE_PATTERNS:
+        for dev in sorted(glob.glob(pattern)):
+            if os.path.exists(dev):
+                binds.append((dev, dev))
+
+    return binds
+
+
 def find_nvidia_device_nodes() -> list[tuple[str, str]]:
     """Return ``(host_path, guest_path)`` pairs for GPU device nodes.
 
@@ -128,13 +148,7 @@ def find_nvidia_device_nodes() -> list[tuple[str, str]]:
         if os.path.exists(dev):
             binds.append((dev, dev))
 
-    if os.path.exists("/dev/dxg"):
-        binds.append(("/dev/dxg", "/dev/dxg"))
-
-    for pattern in _DRI_DEVICE_PATTERNS:
-        for dev in sorted(glob.glob(pattern)):
-            if os.path.exists(dev):
-                binds.append((dev, dev))
+    binds.extend(find_mesa_device_nodes())
 
     return binds
 

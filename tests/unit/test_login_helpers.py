@@ -626,7 +626,8 @@ def test_special_mounts_isolated_includes_proc():
         assert len(proc_mounts) == 1
         assert proc_mounts[0].target == "/proc"
         assert proc_mounts[0].optional is False
-        assert specials[0].fstype == "proc"
+        # Fresh-first order: the /dev tmpfs leads the list.
+        assert specials[0].fstype == "tmpfs" and specials[0].target == "/dev"
 
 
 def test_special_mounts_termux_all():
@@ -689,9 +690,11 @@ def test_get_bindings_minimal_linux():
         )
         srcs = {src for src, _ in binds}
         assert "/tmp" not in srcs
-        assert "/dev" in srcs
+        # /dev and /sys are fresh special mounts, never binds.
+        assert "/dev" not in srcs
         assert "/proc" not in srcs
-        assert "/sys" in srcs
+        assert "/sys" not in srcs
+        assert binds == []
 
 
 def test_get_bindings_shared_tmp_termux():
@@ -804,9 +807,26 @@ def test_custom_bind_blocks_dev():
         )
         dev_binds = [(src, dst) for src, dst in binds if src == "/my/dev"]
         assert len(dev_binds) == 0
-        # System /dev bind should still be present
-        sys_dev = [(src, dst) for src, dst in binds if src == "/dev" and dst == "/fake/rootfs/dev"]
-        assert len(sys_dev) == 1
+        # No system /dev bind exists either: /dev is a fresh tmpfs.
+        sys_dev = [(src, dst) for src, dst in binds if src == "/dev"]
+        assert len(sys_dev) == 0
+
+
+def test_custom_bind_allows_a_single_device_node():
+    """--bind /dev/ttyUSB0 is the --device equivalent: nodes under /dev are allowed."""
+    from chroot_distro.commands.login.bindings import get_bindings
+
+    with (
+        patch("os.path.exists", return_value=True),
+        patch("chroot_distro.commands.login.bindings.IS_TERMUX", False),
+    ):
+        binds, _ = get_bindings(
+            rootfs="/fake/rootfs",
+            minimal=False,
+            isolated=False,
+            custom_binds=["/dev/ttyUSB0:/dev/ttyUSB0"],
+        )
+        assert ("/dev/ttyUSB0", "/fake/rootfs/dev/ttyUSB0") in binds
 
 
 def test_custom_bind_blocks_proc():
@@ -992,9 +1012,9 @@ def test_get_bindings_max_isolation_binds_nothing():
         assert rslave == []
 
 
-def test_get_bindings_default_does_not_bind_host_proc():
-    """Default (no-flag) mode must no longer bind-mount the host /proc; a fresh
-    procfs is mounted by get_special_mounts() instead."""
+def test_get_bindings_default_does_not_bind_host_pseudo_filesystems():
+    """Default (no-flag) mode binds no host pseudo-filesystems: fresh procfs,
+    tmpfs /dev and sysfs are mounted by get_special_mounts() instead."""
     from chroot_distro.commands.login.bindings import get_bindings
 
     with (
@@ -1009,9 +1029,8 @@ def test_get_bindings_default_does_not_bind_host_proc():
         )
     sources = {src for src, _dst in binds}
     assert "/proc" not in sources
-    # /dev and /sys are still bound in the default mode.
-    assert "/dev" in sources
-    assert "/sys" in sources
+    assert "/dev" not in sources
+    assert "/sys" not in sources
 
 
 def test_special_mounts_default_mode_mounts_fresh_procfs():
@@ -1157,15 +1176,39 @@ def test_special_mounts_max_isolation_dev_tmpfs_nosuid():
     assert "nosuid" in dev.options.split(",")
 
 
-def test_max_isolation_dev_nodes_table():
+def test_default_dev_nodes_table():
     """The minimal device-node table must include the core character devices."""
-    from chroot_distro.commands.login.bindings import MAX_ISOLATION_DEV_NODES
+    from chroot_distro.commands.login.bindings import DEFAULT_DEV_NODES
 
-    names = {name for name, _maj, _min, _mode in MAX_ISOLATION_DEV_NODES}
+    names = {name for name, _maj, _min, _mode in DEFAULT_DEV_NODES}
     assert {"null", "zero", "tty", "random", "urandom", "full"} <= names
     # null is major 1, minor 3 by Linux convention.
-    null = [n for n in MAX_ISOLATION_DEV_NODES if n[0] == "null"][0]
+    null = [n for n in DEFAULT_DEV_NODES if n[0] == "null"][0]
     assert null[1] == 1 and null[2] == 3
+
+
+def test_special_mounts_default_mode_fresh_dev_and_sysfs():
+    """Default mode gets the runc/moby set: fresh tmpfs /dev first, fresh
+    read-only sysfs, and /dev/shm even when the host has one."""
+    from chroot_distro.commands.login.bindings import get_special_mounts
+
+    with (
+        patch("os.path.exists", return_value=True),
+        patch("chroot_distro.commands.login.bindings.IS_TERMUX", False),
+        patch("chroot_distro.commands.login.bindings._fs_supported", return_value=True),
+    ):
+        specials = get_special_mounts("/fake/rootfs")
+
+    dev = specials[0]
+    assert dev.fstype == "tmpfs" and dev.target == "/dev"
+    assert "nosuid" in dev.options.split(",")
+
+    sysfs = [s for s in specials if s.fstype == "sysfs"][0]
+    for flag in ("ro", "nosuid", "nodev", "noexec"):
+        assert flag in sysfs.options.split(",")
+
+    shm = [s for s in specials if s.target == "/dev/shm"]
+    assert len(shm) == 1
 
 
 def test_resolve_rootfs_path_loop(tmp_path):

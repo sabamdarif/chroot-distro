@@ -13,6 +13,12 @@ Order in the bind list is significant: a parent (`/data`, `$PREFIX`) has to come
 before anything beneath it, because a parent mounted later shadows the children
 already there, which leaves them unreachable and breaks the unmount sweep.
 
+`/dev` and `/sys` are never bound: every mode mounts a fresh tmpfs `/dev` with
+the minimal device nodes and a fresh read-only sysfs (runc/moby's default
+shape). When the kernel or SELinux refuses a fresh mount, the caller falls back
+to the host bind on its own and warns; that fallback is failure handling, not a
+mode, so there is no option for it.
+
 Three host paths are never bound, each for its own reason. `/proc`, because a
 fresh procfs is mounted instead. `/run`, because `--shared-display` binds the
 individual sockets it needs. `/dev/ptmx`, because binding the host's leaked devpts
@@ -162,9 +168,12 @@ def _fs_supported(fstype: str) -> bool:
 
 
 def _usb_specials() -> list[SpecialMount]:
-    """On Android, mount usbfs at /dev/bus/usb if kernel + hardware support it.
+    """Mount usbfs at /dev/bus/usb if kernel + hardware support it.
 
-    On regular Linux /dev/bus/usb comes in via the /dev bind, so nothing to do.
+    Skipped when the host already carries /dev/bus/usb: it arrived with the
+    host /dev on kernels that register one, and a fresh usbfs over it is
+    pointless. Android kernels without one get a fresh mount so guest tools
+    can enumerate USB devices.
     """
     if os.path.isdir("/dev/bus/usb"):
         return []
@@ -232,23 +241,6 @@ def _binfmt_misc_special(*, fresh_proc: bool = True, use_userns: bool = False) -
     )
 
 
-def _max_isolation_dev_specials() -> list[SpecialMount]:
-    """Fresh tmpfs /dev for --isolated (host /dev is never bound there).
-
-    The minimal device nodes, devpts and /dev/shm are added separately.
-    """
-    return [
-        SpecialMount(
-            fstype="tmpfs",
-            source="tmpfs",
-            target="/dev",
-            options="mode=0755,size=64M,nosuid",
-            mkdir=True,
-            optional=False,
-        )
-    ]
-
-
 # docker-default's masked set a file is covered
 # by a /dev/null bind, a directory by a read-only tmpfs.
 _MASKED_PATHS: tuple[str, ...] = (
@@ -285,8 +277,8 @@ READONLY_PATHS: tuple[str, ...] = (
 )
 
 
-# (relative path, major, minor, mode) nodes for the fresh --isolated /dev.
-MAX_ISOLATION_DEV_NODES: tuple[tuple[str, int, int, int], ...] = (
+# (relative path, major, minor, mode) nodes for the fresh tmpfs /dev.
+DEFAULT_DEV_NODES: tuple[tuple[str, int, int, int], ...] = (
     ("null", 1, 3, 0o666),
     ("zero", 1, 5, 0o666),
     ("full", 1, 7, 0o666),
@@ -304,18 +296,44 @@ def get_special_mounts(
     use_userns: bool = False,
     enable_usb: bool = True,
     enable_binfmt: bool = True,
-    enable_shm: bool = True,
 ) -> list[SpecialMount]:
     """Return the special filesystem mounts to apply after bind mounts.
 
-    No tmpfs is overmounted on /tmp or /run here: it would hide the display
-    socket binds applied earlier. Under --isolated a fresh tmpfs /dev and a
-    read-only sysfs replace the host binds.
+    Every mode gets the runc/moby default set: a fresh tmpfs /dev (populated
+    with DEFAULT_DEV_NODES by the caller), a fresh read-only sysfs, a fresh
+    procfs, a newinstance devpts and a fresh /dev/shm. The host /dev and /sys
+    are bound only by the caller's failure fallback, never from this list. No
+    tmpfs is overmounted on /tmp or /run here: it would hide the display
+    socket binds applied earlier.
     """
     specials: list[SpecialMount] = []
 
-    if max_isolation:
-        specials.extend(_max_isolation_dev_specials())
+    specials.append(
+        SpecialMount(
+            fstype="tmpfs",
+            source="tmpfs",
+            target="/dev",
+            options="mode=0755,size=64M,nosuid",
+            mkdir=True,
+            optional=False,
+        )
+    )
+
+    # Fresh read-only sysfs. Skipped under a user namespace: the kernel EPERMs
+    # a fresh sysfs without an owned netns, so the caller binds the host /sys
+    # recursively instead.
+    if not use_userns:
+        specials.append(
+            SpecialMount(
+                fstype="sysfs",
+                source="sysfs",
+                target="/sys",
+                options="ro,nosuid,nodev,noexec",
+                mkdir=True,
+                check="sysfs",
+                optional=True,
+            )
+        )
 
     # Fresh procfs in every mode (the host /proc is never bind-mounted).
     # nosuid,nodev,noexec are plain VFS flags applied in every mode; hidepid=2
@@ -334,26 +352,10 @@ def get_special_mounts(
         )
     )
 
-    # Max isolation: fresh read-only sysfs. Skipped under a user namespace:
-    # the kernel EPERMs a fresh sysfs without an owned netns, so /sys comes
-    # in as a recursive bind from get_bindings() instead.
-    if max_isolation and not use_userns:
-        specials.append(
-            SpecialMount(
-                fstype="sysfs",
-                source="sysfs",
-                target="/sys",
-                options="ro,nosuid,nodev,noexec",
-                mkdir=True,
-                check="sysfs",
-                optional=True,
-            )
-        )
-
     # Fresh `newinstance` devpts: on Android the on-disk /dev/pts nodes carry
     # the wrong device major, so glibc's ttyname() fails on the inherited pty
     # ("Inappropriate ioctl for device"). A fresh instance hands out ptys
-    # with matching nodes; /dev/ptmx is pointed at it via bind_ptmx_to_pts().
+    # with matching nodes; /dev/ptmx is pointed at it by the caller.
     specials.append(
         SpecialMount(
             fstype="devpts",
@@ -369,19 +371,16 @@ def get_special_mounts(
     if enable_usb:
         specials.extend(_usb_specials())
 
-    # /dev/shm: always needed under max isolation (fresh /dev has none);
-    # otherwise only when the host lacks one (some Android kernels).
-    if enable_shm and (max_isolation or not os.path.exists("/dev/shm")):
-        specials.append(
-            SpecialMount(
-                fstype="tmpfs",
-                source="tmpfs",
-                target="/dev/shm",
-                options="size=256M,mode=1777,nosuid,nodev,noexec",
-                mkdir=True,
-                optional=True,
-            )
+    specials.append(
+        SpecialMount(
+            fstype="tmpfs",
+            source="tmpfs",
+            target="/dev/shm",
+            options="size=256M,mode=1777,nosuid,nodev,noexec",
+            mkdir=True,
+            optional=True,
         )
+    )
 
     if enable_binfmt:
         sm = _binfmt_misc_special(fresh_proc=True, use_userns=use_userns)
@@ -535,12 +534,17 @@ def get_bindings(
     login_user: str = "root",
     dist_type: str = "normal",
     nvidia_integration: bool = False,
+    mesa_integration: bool = False,
 ) -> tuple[list[tuple[str, str]], list[str]]:
     """Assemble all (source, target_in_rootfs) bind mounts based on configurations.
 
     Returns:
         (resolved_binds, rslave_targets), where *rslave_targets* lists the
         absolute guest paths whose propagation is set to rslave after binding.
+
+    /dev and /sys are never in the list: every mode mounts fresh
+    pseudo-filesystems from get_special_mounts(), and the caller's failure
+    fallback binds the host trees itself.
     """
     binds = []
     rslave_targets: list[str] = []
@@ -563,25 +567,8 @@ def get_bindings(
             return ([("/sys", sys_dst)], [sys_dst])
         return ([], [])
 
-    # /proc is never bound: get_special_mounts() always mounts a fresh
-    # procfs. The host /run is never bound either; with --shared-display
-    # specific sockets are bound individually below.
-    binds.append(("/dev", "/dev"))
-    binds.append(("/sys", "/sys"))
-
-    # Bind host /dev/pts but never /dev/ptmx (binding host ptmx leaked devpts
-    # state and exhausted the host pty pool); the newinstance devpts in
-    # get_special_mounts() provides the chroot's pty nodes.
-    if os.path.exists("/dev/pts"):
-        binds.append(("/dev/pts", "/dev/pts"))
-    if os.path.exists("/dev/shm"):
-        binds.append(("/dev/shm", "/dev/shm"))
-
     if minimal:
-        return (
-            [(src, os.path.join(rootfs, dst.lstrip("/"))) for src, dst in binds],
-            [],
-        )
+        return ([], [])
 
     if IS_TERMUX and not isolated:
         # Parents (/data, TERMUX_PREFIX) MUST be bound before child paths:
@@ -594,8 +581,9 @@ def get_bindings(
                 binds.append((TERMUX_PREFIX, TERMUX_PREFIX))
 
         # /dev/binder is a symlink into /dev/binderfs, a separate mount the
-        # /dev bind above does not descend into. termux-api binaries need it
-        # for clipboard and notifications.
+        # fresh tmpfs /dev does not contain. termux-api binaries need it for
+        # clipboard and notifications. The caller defers every bind under
+        # /dev until the tmpfs is up (isolation.split_dev_binds).
         if os.path.isdir("/dev/binderfs"):
             binds.append(("/dev/binderfs", "/dev/binderfs"))
 
@@ -635,8 +623,8 @@ def get_bindings(
             if os.path.exists(host_tmp):
                 binds.append((host_tmp, "/tmp"))
     else:
-        # /tmp defaults to a fresh tmpfs (get_special_mounts); bind the host
-        # /tmp only when the user explicitly opts in with --shared-tmp.
+        # /tmp stays the image's own directory by default; bind the host /tmp
+        # only when the user explicitly opts in with --shared-tmp.
         if shared_tmp and os.path.exists("/tmp"):
             binds.append(("/tmp", "/tmp"))
 
@@ -669,6 +657,12 @@ def get_bindings(
                 binds.append((path, path))
                 bound_srcs.add(path)
 
+    if mesa_integration and not nvidia_integration:
+        # /dev/dri render nodes (and /dev/dxg on WSL) used to arrive with the
+        # host /dev bind; the fresh tmpfs /dev does not have them.
+        for src, dst in nvidia_helper.find_mesa_device_nodes():
+            binds.append((src, dst))
+
     if nvidia_integration:
         nvidia_binds, _nvidia_env = nvidia_helper.get_nvidia_integration(rootfs)
         # Deduplicated by destination, never by source: one host library is the
@@ -683,7 +677,10 @@ def get_bindings(
                 bound_dsts.add(norm_dst)
 
     # A custom bind overrides a system bind on destination conflict, matching
-    # Docker/Podman --volume semantics.
+    # Docker/Podman --volume semantics. Individual device nodes under /dev are
+    # allowed (Docker's --device): the fresh tmpfs /dev carries only the six
+    # default nodes, so a host node the guest needs (a serial adapter, a GPU
+    # node) has to come in through a bind.
     _critical_guest_paths = frozenset({"/dev", "/proc", "/sys"})
 
     if custom_binds:
@@ -699,8 +696,11 @@ def get_bindings(
 
             norm_dst = "/" + dst.strip("/")
 
-            # Never override critical pseudo-filesystem mounts.
-            if norm_dst in _critical_guest_paths or any(norm_dst.startswith(cp + "/") for cp in _critical_guest_paths):
+            # Never override critical pseudo-filesystem mounts; single device
+            # nodes under /dev are the documented exception.
+            if norm_dst in _critical_guest_paths or any(
+                norm_dst.startswith(cp + "/") for cp in _critical_guest_paths if cp != "/dev"
+            ):
                 log.warning(
                     "Custom bind destination '%s' conflicts with a critical system mount, ignoring. Cannot override %s.",
                     dst,

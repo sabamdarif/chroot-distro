@@ -44,11 +44,18 @@ def get_libc() -> ctypes.CDLL:
         if _libc_handle is not None:
             return _libc_handle  # type: ignore[unreachable]
         name = ctypes.util.find_library("c")
-        if name is None:
-            # Fallback: on many Linux systems the soname is predictable.
-            name = "libc.so.6"
-        _libc_handle = ctypes.CDLL(name, use_errno=True)
-        return _libc_handle
+        candidates = [name] if name is not None else []
+        # find_library needs ldconfig or a compiler, both absent under
+        # Android's su; bionic's soname is libc.so, glibc's libc.so.6.
+        candidates += ["libc.so.6", "libc.so"]
+        last_exc: OSError | None = None
+        for candidate in candidates:
+            try:
+                _libc_handle = ctypes.CDLL(candidate, use_errno=True)
+                return _libc_handle
+            except OSError as exc:
+                last_exc = exc
+        raise last_exc if last_exc is not None else OSError("no libc candidate")
 
 
 def check_syscall(result: int, func_name: str) -> None:

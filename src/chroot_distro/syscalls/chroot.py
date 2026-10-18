@@ -59,7 +59,7 @@ import time
 import typing
 
 from chroot_distro.syscalls._constants import PR_SET_NO_NEW_PRIVS
-from chroot_distro.syscalls._libc import libc_prctl, syscall_libc
+from chroot_distro.syscalls._libc import get_libc, libc_prctl, syscall_libc
 from chroot_distro.syscalls.capabilities import clear_ambient_caps, drop_bounding_caps
 from chroot_distro.syscalls.seccomp import install_guest_filter
 
@@ -228,6 +228,9 @@ def enter_chroot(
     back into the map's range needs CAP_SETUID. A process that created its own
     user namespace is already mapped and leaves this off.
     """
+    # Inside the chroot dlopen cannot reach the host's libc (bionic lives
+    # outside the guest root), so the handle must exist before chroot(2).
+    get_libc()
     os.chroot(rootfs)
     os.chdir(workdir)
 

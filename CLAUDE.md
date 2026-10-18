@@ -343,11 +343,15 @@ goes through it:
 
 ### Isolation and namespaces
 
-Three levels, and the difference between them is the mount set, not the
-namespaces: default keeps host mounts and no namespaces; `CD_USE_NS` turns the
-namespaces on and keeps the default mount set; `--isolated` or `CD_USE_ISOLATION`
-binds nothing from the host and chroots the holder. `build` has no flag for it, so
-there the env vars are the whole interface.
+Three levels, and the difference between them is namespaces and host binds, not
+the pseudo-filesystems: every mode mounts a fresh tmpfs `/dev` with the minimal
+device nodes, a fresh read-only sysfs, a fresh procfs, a newinstance devpts and
+a fresh `/dev/shm` (runc/moby's default shape), falling back to the host bind
+when the kernel or SELinux refuses one. The default mode shares host paths and
+mounts in the host's namespace; `CD_USE_NS` turns the namespaces on and keeps
+the same mount set; `--isolated` or `CD_USE_ISOLATION` binds nothing from the
+host and chroots the holder. `build` has no flag for it, so there the env vars
+are the whole interface.
 
 | File                            | Owns                                                                |
 | ------------------------------- | ------------------------------------------------------------------- |

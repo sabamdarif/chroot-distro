@@ -533,3 +533,19 @@ def test_enter_chroot_regain_ids_after_chroot(monkeypatch):
     order.clear()
     chroot.enter_chroot("/rootfs")
     assert order == ["chroot", "chdir"]
+
+
+def test_enter_chroot_preloads_libc_before_chrooting(monkeypatch):
+    """libc must be loaded before chroot(2): inside the chroot dlopen cannot
+    reach the host's libc (bionic lives outside the guest root on Android)."""
+    order = []
+    monkeypatch.setattr(chroot, "get_libc", lambda: order.append("libc") or MagicMock())
+    monkeypatch.setattr(chroot.os, "chroot", lambda path: order.append("chroot"))
+    monkeypatch.setattr(chroot.os, "chdir", lambda path: None)
+    monkeypatch.setattr(chroot, "_join_session_keyring", lambda: None)
+    monkeypatch.setattr(chroot, "should_set_no_new_privs", lambda: False)
+    monkeypatch.setattr(chroot, "install_guest_filter", lambda: None)
+
+    chroot.enter_chroot("/fake/rootfs")
+
+    assert order == ["libc", "chroot"]

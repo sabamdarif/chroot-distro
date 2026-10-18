@@ -268,10 +268,10 @@ def create_dev_nodes(
     """Populate the fresh tmpfs ``/dev`` with the minimal device nodes.
 
     *nodes* is an iterable of ``(name, major, minor, mode)`` tuples. Used for
-    the fresh tmpfs ``/dev`` mounted under maximum isolation, where the host
-    ``/dev`` is intentionally not bind-mounted. ``/dev/ptmx``, ``/dev/console``
-    and the ``std*`` symlinks are provided by the devpts overmount and the login
-    pty wrapper, so they are not created here.
+    the fresh tmpfs ``/dev`` every mode mounts, where the host ``/dev`` is
+    intentionally not bind-mounted. ``/dev/ptmx``, ``/dev/console`` and the
+    ``std*`` symlinks are provided by the devpts overmount and the login pty
+    wrapper, so they are not created here.
 
     Every path is addressed through the descriptor walk in
     :mod:`chroot_distro.helpers.mount_targets`, so a symlink the image planted

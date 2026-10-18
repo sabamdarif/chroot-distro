@@ -707,13 +707,16 @@ def _command_login_inner_once(container_name: str, args) -> None:
     login_cmd = getattr(args, "login_cmd", []) or []
     run_inner = getattr(args, "_run_inner", None)
 
-    # NVIDIA auto-detect (host Linux only; --isolated would defeat it by
-    # binding host devices/libraries). AMD and Intel need nothing here: their
-    # render nodes arrive with the /dev bind and the guest's own Mesa ships the
-    # ICD descriptors that name its own drivers.
+    # GPU device nodes (host Linux only; --isolated would defeat them by
+    # binding host devices/libraries). NVIDIA gets its full integration
+    # (devices, libraries, configs); AMD and Intel only need their /dev/dri
+    # render nodes bound: the guest's own Mesa ships the ICD descriptors that
+    # name its drivers.
     has_nvidia = False
+    want_mesa = False
     if not IS_TERMUX and not minimal and not max_isolation:
         has_nvidia = detect_nvidia_gpu()
+        want_mesa = not has_nvidia
 
     if dist_type == "termux":
         if not login_wd:
@@ -1041,6 +1044,7 @@ def _command_login_inner_once(container_name: str, args) -> None:
         login_user=login_user,
         dist_type=dist_type,
         nvidia_integration=has_nvidia,
+        mesa_integration=want_mesa,
     )
 
     if login_wd:
@@ -1202,11 +1206,14 @@ def _command_login_inner_once(container_name: str, args) -> None:
             with contextlib.suppress(Exception):
                 mount_manager.unmount_all(rootfs, holder=holder)
             # best_effort_bind_sources() entries warn+skip on failure;
-            # anything else aborts.
+            # anything else aborts. Binds under /dev (GPU nodes, binderfs)
+            # wait for apply_special_mounts: the fresh tmpfs /dev it mounts
+            # would shadow them.
+            non_dev_binds, dev_binds = isolation.split_dev_binds(resolved_binds, rootfs)
             try:
                 isolation.apply_bind_mounts(
                     rootfs,
-                    resolved_binds,
+                    non_dev_binds,
                     holder=holder,
                     use_userns=has_userns,
                     bind_options=resolved_bind_options,
@@ -1237,11 +1244,19 @@ def _command_login_inner_once(container_name: str, args) -> None:
                 isolation.apply_special_mounts(
                     rootfs,
                     holder,
-                    isolated=use_namespaces,
                     max_isolation=max_isolation and use_namespaces,
                     minimal=minimal,
                     use_userns=has_userns,
                 )
+                if dev_binds:
+                    isolation.apply_bind_mounts(
+                        rootfs,
+                        dev_binds,
+                        holder=holder,
+                        use_userns=has_userns,
+                        bind_options=resolved_bind_options,
+                        best_effort_sources=bindings.best_effort_bind_sources(),
+                    )
             except Exception as e:
                 _abandon_holder_fds()
                 mount_manager.unmount_all(rootfs, holder=holder)

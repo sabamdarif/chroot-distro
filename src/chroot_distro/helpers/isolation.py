@@ -8,13 +8,20 @@ three times over. `login` composes the pieces inline because it also has a PTY, 
 richer bind set and session bookkeeping; `build` takes `max_isolation_session` or
 `namespace_session` whole.
 
-Three levels, and the difference between them is the mount set, not the namespaces:
-the default keeps host mounts and no namespaces at all; `CD_USE_NS` turns the
-namespaces on and keeps the default mount set (`namespace_session`, holder not
-chrooted); `--isolated` or `CD_USE_ISOLATION` binds nothing from the host and
-chroots the holder (`max_isolation_session`). `CD_USE_ISOLATION` wins when both env
-vars are set, and `resolve_isolated` is the only place the flag and the env var are
-combined. `build` has no CLI flag, so for it the env vars are the whole interface.
+Three levels, and the difference between them is namespaces and host binds, not
+the pseudo-filesystems: every mode mounts a fresh tmpfs /dev with the minimal
+device nodes, a fresh read-only sysfs, a fresh procfs, a newinstance devpts and
+a fresh /dev/shm (runc/moby's default shape). Fresh first, bind as the
+fallback: a kernel or SELinux refusal of the tmpfs or the sysfs falls back to
+binding the host tree, with a warning. The default mode shares host paths
+(/data, home, storage) and mounts in the host's namespace; `CD_USE_NS` turns
+the namespaces on and keeps the same mount set (`namespace_session`, holder
+not chrooted); `--isolated` or `CD_USE_ISOLATION` binds nothing from the host
+and chroots the holder (`max_isolation_session`), where a refused tmpfs /dev
+falls back to the container's own /dev populated with nodes, still not a host
+bind. `CD_USE_ISOLATION` wins when both env vars are set, and
+`resolve_isolated` is the only place the flag and the env var are combined.
+`build` has no CLI flag, so for it the env vars are the whole interface.
 
 What a bind needs is decided by `bind_is_recursive`, and each clause is a kernel or
 platform fact, not a preference: /run holds nested socket submounts, /apex is a
@@ -230,64 +237,202 @@ def _ensure_ptmx_symlink(rootfs: str, holder: NamespaceHolder | None) -> None:
         log.debug("Failed to create ptmx symlink: %s", exc)
 
 
+def split_dev_binds(
+    resolved_binds: list[tuple[str, str]], rootfs: str
+) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
+    """Split binds into (the rest, those targeting under the guest's /dev).
+
+    The fresh tmpfs /dev is a special mount, applied after the bind pass: a
+    bind handed to the bind pass whose target sits under rootfs/dev is
+    shadowed by the tmpfs, so the caller applies those after
+    apply_special_mounts instead.
+    """
+    dev_root = os.path.realpath(os.path.join(rootfs, "dev"))
+    dev_binds: list[tuple[str, str]] = []
+    rest: list[tuple[str, str]] = []
+    for src, dst in resolved_binds:
+        dst_real = os.path.realpath(dst)
+        if dst_real == dev_root or dst_real.startswith(dev_root + os.sep):
+            dev_binds.append((src, dst))
+        else:
+            rest.append((src, dst))
+    return rest, dev_binds
+
+
+def _guest_dir(rootfs: str, guest_path: str) -> str:
+    """Resolve a guest path against the rootfs; fall back to a plain join."""
+    from chroot_distro.commands.login.passwd import resolve_rootfs_path
+
+    try:
+        return resolve_rootfs_path(rootfs, guest_path)
+    except OSError:
+        return os.path.join(rootfs, guest_path.lstrip("/"))
+
+
+def _bind_host_sys(rootfs: str, holder: NamespaceHolder | None) -> None:
+    """Bind the host /sys where a fresh sysfs is refused or fails.
+
+    The only /sys mount a user namespace permits, and the fallback everywhere
+    else. The bind is recursive (a plain bind of /sys is rejected for its
+    locked submounts) and rslave, then remounted read-only best-effort.
+    """
+    from chroot_distro.helpers import mount_targets
+
+    sys_dst = _guest_dir(rootfs, "/sys")
+    mount_manager.safe_mount("/sys", sys_dst, rootfs=rootfs, holder=holder, recursive=True)
+    mount_manager.make_rslave(sys_dst, holder=holder)
+
+    def _open_rootfs() -> int:
+        return mount_targets.open_rootfs_fd(rootfs)
+
+    def _ro(rootfs_fd: int = -1) -> bytes:
+        return b"1" if mount_targets.readonly_path(rootfs, ["sys"], rootfs_fd=rootfs_fd) else b""
+
+    if holder is not None:
+        ro_done = holder.call(_ro, prepare=_open_rootfs) == b"1"
+    else:
+        ro_done = mount_targets.readonly_path(rootfs, ["sys"])
+    if not ro_done:
+        warn("Could not make the bound /sys read-only; it stays read-write.")
+
+
+def _ensure_dev_symlinks(rootfs: str, holder: NamespaceHolder | None) -> None:
+    """Link fd, stdin, stdout and stderr in the fresh /dev to /proc/self/fd.
+
+    The host /dev bind used to carry these; the fresh tmpfs does not, and
+    runc's setupDevSymlinks is the model. Absolute targets on purpose: they
+    resolve after the chroot. An existing entry (shipped by the image) wins.
+    """
+    from chroot_distro.helpers import mount_targets
+
+    links = (
+        ("/proc/self/fd", "fd"),
+        ("/proc/self/fd/0", "stdin"),
+        ("/proc/self/fd/1", "stdout"),
+        ("/proc/self/fd/2", "stderr"),
+    )
+
+    def _open_rootfs() -> int:
+        return mount_targets.open_rootfs_fd(rootfs)
+
+    def _link(rootfs_fd: int = -1) -> None:
+        try:
+            dev_fd = mount_targets.resolve_mount_target(rootfs, ["dev"], want="dir", create=False, rootfs_fd=rootfs_fd)
+        except (mount_targets.MountError, mount_targets.MountRefusedError):
+            dev_fd = None
+        if dev_fd is None:
+            return
+        try:
+            for target, name in links:
+                try:
+                    os.lstat(name, dir_fd=dev_fd)
+                    continue  # an entry is already there; never clobber it
+                except FileNotFoundError:
+                    pass
+                os.symlink(target, name, dir_fd=dev_fd)
+        finally:
+            os.close(dev_fd)
+
+    if holder is not None:
+        if holder.call(_link, prepare=_open_rootfs) is None:
+            log.debug("Failed to create /dev symlinks in the holder's namespaces")
+        return
+    try:
+        _link()
+    except OSError as exc:
+        log.debug("Failed to create /dev symlinks: %s", exc)
+
+
 def apply_special_mounts(
     rootfs: str,
     holder: NamespaceHolder | None,
     *,
-    isolated: bool,
     max_isolation: bool,
     minimal: bool,
     use_userns: bool = False,
 ) -> None:
-    """Apply the special filesystem mounts (/proc, /sys, /dev, …) into *rootfs*.
+    """Apply the special filesystem mounts (/dev, /sys, /proc, …) into *rootfs*.
 
-    Under maximum isolation, ``/dev`` becomes a fresh private tmpfs populated
-    with the minimal device nodes (the host ``/dev`` is never bound), and
-    ``/dev/ptmx`` is pointed at the private devpts multiplexer. Runs inside the
-    holder's mount namespace when *holder* is given.
+    Fresh first, bind as the fallback: a kernel or SELinux refusal of the
+    tmpfs /dev, the sysfs or the devpts falls back to binding the host tree
+    with a warning, except under maximum isolation, where a refused tmpfs
+    leaves the container's own /dev populated with the nodes, still not a
+    host bind. Runs inside the holder's mount namespace when *holder* is
+    given.
     """
     from chroot_distro.commands.login import bindings
 
     specials = bindings.get_special_mounts(
         rootfs,
-        isolated=isolated,
         max_isolation=max_isolation,
         use_userns=use_userns,
         enable_usb=not minimal,
         enable_binfmt=not minimal,
-        enable_shm=not minimal,
     )
+
+    # A user namespace cannot mount a fresh sysfs (no owned netns), so the
+    # list carries none: bind the host tree. Under maximum isolation the
+    # caller's get_bindings already returned that bind; this is non-max only.
+    if use_userns and not max_isolation:
+        _bind_host_sys(rootfs, holder)
+
     binfmt_sm = None
+    fresh_dev = False
     for sm in specials:
         # binfmt_misc mounts under /proc/sys; the read-only mask there must
         # land first or it covers the binfmt mount.
         if sm.fstype == "binfmt_misc":
             binfmt_sm = sm
             continue
-        is_maxiso_dev = max_isolation and sm.fstype == "tmpfs" and sm.target == "/dev"
-        if is_maxiso_dev:
-            # Best-effort under max isolation: if the kernel denies the fresh
-            # tmpfs (SELinux on some Android kernels), fall back to the
-            # container's own empty /dev dir, which is still not a host bind.
-            mounted = mount_manager.apply_special_mount(rootfs, sm, holder=holder, force_optional=True)
-            if not mounted:
-                warn(
-                    "Could not mount a fresh tmpfs /dev; using the "
-                    "container's own /dev directory (still isolated, no host bind)."
+        if sm.fstype == "tmpfs" and sm.target == "/dev":
+            fresh_dev = mount_manager.apply_special_mount(rootfs, sm, holder=holder, force_optional=True)
+            if not fresh_dev and not max_isolation:
+                warn("Could not mount a fresh tmpfs /dev; falling back to a host /dev bind.")
+                mount_manager.safe_mount(
+                    "/dev",
+                    _guest_dir(rootfs, "/dev"),
+                    rootfs=rootfs,
+                    holder=holder,
+                    recursive=use_userns,
+                    # A stale MNT_LOCKED mount can shadow /dev without ptmx;
+                    # detect and mount over.
+                    required_child="ptmx",
                 )
-            mount_manager.create_dev_nodes(
-                rootfs, bindings.MAX_ISOLATION_DEV_NODES, holder=holder, use_userns=use_userns
-            )
-        else:
-            mount_manager.apply_special_mount(rootfs, sm, holder=holder)
+            if not fresh_dev and max_isolation:
+                # SELinux on some Android kernels denies the tmpfs; the
+                # container's own /dev with the nodes is still not a host
+                # bind.
+                warn("Could not mount a fresh tmpfs /dev; using the container's own /dev directory.")
+            if fresh_dev or max_isolation:
+                mount_manager.create_dev_nodes(
+                    rootfs, bindings.DEFAULT_DEV_NODES, holder=holder, use_userns=use_userns
+                )
+            continue
+        if sm.fstype == "sysfs" and sm.target == "/sys":
+            if not mount_manager.apply_special_mount(rootfs, sm, holder=holder):
+                warn("Could not mount a fresh sysfs; falling back to a host /sys bind.")
+                _bind_host_sys(rootfs, holder)
+            continue
+        if sm.fstype == "devpts":
+            try:
+                mount_manager.apply_special_mount(rootfs, sm, holder=holder)
+            except (OSError, RuntimeError):
+                # Single-instance devpts (< 4.7) over a fresh tmpfs /dev has
+                # no instance to reuse; the host's /dev/pts bind supplies
+                # ptys. PTYs are required, so a failed bind still raises.
+                warn("Could not mount a fresh devpts; falling back to the host /dev/pts bind.")
+                mount_manager.safe_mount("/dev/pts", _guest_dir(rootfs, "/dev/pts"), rootfs=rootfs, holder=holder)
+            continue
+        mount_manager.apply_special_mount(rootfs, sm, holder=holder)
+
+    if fresh_dev or max_isolation:
+        _ensure_ptmx_symlink(rootfs, holder)
+        _ensure_dev_symlinks(rootfs, holder)
 
     _apply_masked_paths(rootfs, holder, masked=bindings.masked_paths(), readonly=bindings.READONLY_PATHS)
 
     if binfmt_sm is not None:
         mount_manager.apply_special_mount(rootfs, binfmt_sm, holder=holder)
-
-    if max_isolation:
-        _ensure_ptmx_symlink(rootfs, holder)
 
 
 def _apply_masked_paths(
@@ -423,7 +568,7 @@ def max_isolation_session(
         for rslave_path in rslave_targets:
             mount_manager.make_rslave(rslave_path, holder=holder)
 
-        apply_special_mounts(rootfs, holder, isolated=True, max_isolation=True, minimal=minimal, use_userns=use_userns)
+        apply_special_mounts(rootfs, holder, max_isolation=True, minimal=minimal, use_userns=use_userns)
 
         yield holder
     except NamespaceError as exc:
@@ -497,9 +642,7 @@ def namespace_session(
         for rslave_path in rslave_targets:
             mount_manager.make_rslave(rslave_path, holder=holder)
 
-        apply_special_mounts(
-            rootfs, holder, isolated=False, max_isolation=False, minimal=minimal, use_userns=use_userns
-        )
+        apply_special_mounts(rootfs, holder, max_isolation=False, minimal=minimal, use_userns=use_userns)
 
         yield holder
     except NamespaceError as exc:
