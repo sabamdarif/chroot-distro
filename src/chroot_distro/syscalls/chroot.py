@@ -55,6 +55,7 @@ import select
 import signal
 import subprocess
 import sys
+import time
 import typing
 
 from chroot_distro.syscalls._constants import PR_SET_NO_NEW_PRIVS
@@ -75,6 +76,12 @@ _TIOCSWINSZ = 0x5414
 __NR_CLOSE_RANGE = 436
 # close_range takes unsigned ints; the whole table is 3..UINT_MAX.
 _FD_MAX = 0xFFFFFFFF
+
+# How long a child gets to react to a relayed signal before the caller's
+# escalation (the session sweep) runs; matches kill.py's SIGTERM grace.
+_ESCALATE_GRACE_SECS = 1.0
+# Idle poll interval for the pty relay and the child waits.
+_COPY_POLL_SECS = 0.2
 
 
 @functools.lru_cache(maxsize=1)
@@ -262,6 +269,7 @@ def chroot_and_run(
     timeout: int | None = None,
     drop_caps: bool = False,
     no_new_privs: bool = False,
+    escalate: typing.Callable[[], None] | None = None,
 ) -> subprocess.CompletedProcess:
     """Fork, chroot, exec command, and capture output.
 
@@ -281,12 +289,17 @@ def chroot_and_run(
     workdir:
         Working directory inside the chroot.
     capture_output:
-        If True, capture stdout and stderr via pipes.
+        If True, capture stdout/stderr via pipes.
     text:
         If True, decode stdout/stderr as UTF-8.
     timeout:
         Maximum seconds to wait for the child.  ``None`` means wait
         indefinitely.
+    escalate:
+        Zero-argument callback run once when the child outlives a relayed
+        signal by :data:`_ESCALATE_GRACE_SECS`, for a caller that can force
+        the session down (the login's rootfs sweep).  ``None`` keeps the
+        plain wait.
 
     Returns
     -------
@@ -362,12 +375,12 @@ def chroot_and_run(
         stderr_data = _read_all(stderr_r)
         os.close(stdout_r)
         os.close(stderr_r)
-        returncode = _wait_for_child_with_signals(child_pid, timeout=timeout)
+        returncode = _wait_for_child_with_signals(child_pid, timeout=timeout, escalate=escalate)
     elif use_pty:
         os.close(slave_fd)
-        returncode = _pty_relay(master_fd, child_pid, timeout=timeout)
+        returncode = _pty_relay(master_fd, child_pid, timeout=timeout, escalate=escalate)
     else:
-        returncode = _wait_for_child_with_signals(child_pid, timeout=timeout)
+        returncode = _wait_for_child_with_signals(child_pid, timeout=timeout, escalate=escalate)
 
     if text:
         stdout_out: str | bytes = stdout_data.decode("utf-8", errors="replace")
@@ -456,12 +469,62 @@ def _setup_child_pty(master_fd: int, slave_fd: int) -> None:
         os.close(slave_fd)
 
 
-def _pty_relay(master_fd: int, child_pid: int, *, timeout: int | None = None) -> int:
+class _StuckSignalEscalation:
+    """Force a wait to end when the child outlives a relayed signal.
+
+    killpg gives the child and its group their chance to die, but an
+    interactive shell ignores SIGTERM and a GUI it launched may sit in a
+    session of its own, out of the group, so the relayed signal alone cannot
+    end the wait. Once the first signal's grace expires, *callback* (the
+    caller's rootfs sweep) runs once, the child dies, and the wait returns.
+    """
+
+    def __init__(self, signals: list[float], callback: typing.Callable[[], None]) -> None:
+        self.signals = signals
+        self.callback = callback
+        self.done = False
+
+    def check(self) -> None:
+        if self.done or not self.signals:
+            return
+        if time.monotonic() - self.signals[0] < _ESCALATE_GRACE_SECS:
+            return
+        self.done = True
+        self.callback()
+
+
+def _signal_child(child_pid: int, signum: int) -> None:
+    """Signal a child's process group, or the child alone when it leads none.
+
+    A pty child is a session leader, so its pid is its group id and the group
+    signal reaches a foreground GUI session along with it. A child that never
+    called setsid shares this process's group, and a pid can only lead the
+    group named after it, so for that child killpg is an ESRCH and the signal
+    would be dropped instead of relayed.
+    """
+    try:
+        os.killpg(child_pid, signum)
+    except ProcessLookupError:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(child_pid, signum)
+
+
+def _pty_relay(
+    master_fd: int,
+    child_pid: int,
+    *,
+    timeout: int | None = None,
+    escalate: typing.Callable[[], None] | None = None,
+) -> int:
     """Relay data between the original terminal and the PTY master.
 
     Sets stdin to raw mode so control characters (Ctrl-C, Ctrl-Z, etc.)
     are forwarded verbatim through the PTY to the child. Handles
     SIGWINCH to keep the child's terminal size in sync.
+
+    *escalate* is the caller's force-exit: when a relayed signal leaves the
+    child alive past the grace period, it runs once so the wait can end
+    (see :class:`_StuckSignalEscalation`).
 
     Returns the child's exit code.
     """
@@ -479,14 +542,37 @@ def _pty_relay(master_fd: int, child_pid: int, *, timeout: int | None = None) ->
         prev_winch = signal.signal(signal.SIGWINCH, _on_winsize)
 
     prev_handlers: dict[signal.Signals, signal._HANDLER] = {}
+    signal_times: list[float] = []
+    escalation = (
+        _StuckSignalEscalation(signal_times, escalate) if escalate is not None else None
+    )
 
     def _relay_sig(signum: int, _frame: object) -> None:
+        # Signal the child's whole process group, not just the child: a GUI
+        # session (dbus-launch startxfce4) leaves xfce4-session as the child's
+        # foreground child in the same group, and signalling the child alone
+        # leaves the session running while the child waits on it, hanging the
+        # exit. The child is a session leader, so its pid is its group id.
+        signal_times.append(time.monotonic())
         with contextlib.suppress(ProcessLookupError):
-            os.kill(child_pid, signum)
+            os.killpg(child_pid, signum)
 
-    for sig in (signal.SIGTERM, signal.SIGHUP):
+    def _on_tstp(_signum: int, _frame: object) -> None:
+        # Suspend the child and stop ourselves, so Ctrl-Z works even in raw
+        # mode (where the terminal never generates SIGTSTP for us). The
+        # foreground process group of the child's pty gets the stop; we then
+        # stop too, and the real shell's SIGCONT resumes us.
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(child_pid, signal.SIGTSTP)
+        signal.signal(signal.SIGTSTP, signal.SIG_DFL)
+        os.kill(os.getpid(), signal.SIGTSTP)
+
+    for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
         with contextlib.suppress(OSError, ValueError):
             prev_handlers[sig] = signal.signal(sig, _relay_sig)
+    # SIGTSTP is handled, not relayed, so the suspend actually reaches us.
+    with contextlib.suppress(OSError, ValueError):
+        prev_handlers[signal.SIGTSTP] = signal.signal(signal.SIGTSTP, _on_tstp)
 
     old_attrs: list[int | list[bytes | int]] | None = None
     try:
@@ -496,7 +582,7 @@ def _pty_relay(master_fd: int, child_pid: int, *, timeout: int | None = None) ->
         pass
 
     try:
-        _pty_copy_loop(master_fd)
+        _pty_copy_loop(master_fd, child_pid, escalation=escalation)
     finally:
         if old_attrs is not None:
             with contextlib.suppress(termios.error, OSError):
@@ -509,20 +595,59 @@ def _pty_relay(master_fd: int, child_pid: int, *, timeout: int | None = None) ->
             with contextlib.suppress(OSError, ValueError):
                 signal.signal(s, h)
 
+    # The copy loop may already have reaped the child when it detected the
+    # exit; a ChildProcessError here means exactly that, not a missing child.
     try:
-        _, status = os.waitpid(child_pid, 0)
-        return _decode_status(status)
+        return _wait_for_child(child_pid, escalation=escalation)
     except ChildProcessError:
         return 0
 
 
-def _pty_copy_loop(master_fd: int) -> None:
-    """Bidirectional copy between stdin/stdout and a PTY master fd."""
+def _pty_copy_loop(
+    master_fd: int,
+    child_pid: int,
+    *,
+    escalation: _StuckSignalEscalation | None = None,
+) -> None:
+    """Bidirectional copy between stdin/stdout and a PTY master fd.
+
+    Exits when the master reaches EOF *or* when the child has exited and its
+    pty has gone quiet. The child check matters because a GUI session
+    (``dbus-launch startxfce4``) leaves the window-manager and panel processes
+    holding the pty slave open after the login shell has exited: without it the
+    relay would wait for an EOF that never comes, and the session could not be
+    exited at all.
+
+    The select never blocks indefinitely: an idle pty is polled every
+    ``_COPY_POLL_SECS``, both so the child's death is noticed while its
+    orphans hold the slave open and so *escalation* (a relayed signal the
+    child outlived) gets its turn while the child is still alive.
+    """
     fds = [0, master_fd]
+    child_dead = False
     while fds:
         try:
-            rfds, _, _ = select.select(fds, [], [])
+            rfds, _, _ = select.select(fds, [], [], _COPY_POLL_SECS)
         except (OSError, ValueError, InterruptedError):
+            break
+        if not child_dead:
+            try:
+                wpid, _ = os.waitpid(child_pid, os.WNOHANG)
+                if wpid == child_pid:
+                    child_dead = True
+                    # A dead child reads nothing more; keep relaying only the
+                    # pty output that is still draining.
+                    if 0 in fds:
+                        fds.remove(0)
+            except ChildProcessError:
+                child_dead = True
+                if 0 in fds:
+                    fds.remove(0)
+            if escalation is not None:
+                escalation.check()
+        elif not rfds:
+            # Child is dead and the pty produced nothing this window: the
+            # writers left are orphans, not the session. Stop relaying.
             break
         if 0 in rfds:
             try:
@@ -549,28 +674,44 @@ def _pty_copy_loop(master_fd: int) -> None:
                 break
 
 
-def _wait_for_child_with_signals(pid: int, *, timeout: int | None = None) -> int:
+def _wait_for_child_with_signals(
+    pid: int,
+    *,
+    timeout: int | None = None,
+    escalate: typing.Callable[[], None] | None = None,
+) -> int:
     """Wait for *pid* while forwarding terminal signals to the child.
 
     Installs handlers for SIGINT, SIGTERM and SIGHUP that relay each
-    signal to the child process.  On ``KeyboardInterrupt`` (or any
-    exception that unwinds the wait), the child is sent SIGTERM and
-    then SIGKILL after a brief grace period so it never gets orphaned.
+    signal to the child's process group. When *escalate* is given and the
+    child outlives the first relayed signal by ``_ESCALATE_GRACE_SECS``, the
+    callback runs once: it is the caller's way of forcing the session down
+    where the relayed signal did not (an interactive shell ignores SIGTERM,
+    a GUI may sit in a session of its own), so the wait always ends.
+    On ``KeyboardInterrupt`` (or any exception that unwinds the wait), the
+    child is sent SIGTERM and then SIGKILL after a brief grace period so it
+    never gets orphaned.
     """
-    received_signal: list[int] = []
+    signal_times: list[float] = []
 
     def _relay(signum: int, _frame: object) -> None:
-        received_signal.append(signum)
+        signal_times.append(time.monotonic())
+        # Signal the process group so a foreground GUI session the child
+        # launched (xfce4-session et al.) is interrupted along with the child;
+        # signalling only the child leaves it waiting on that session forever.
         with contextlib.suppress(ProcessLookupError):
-            os.kill(pid, signum)
+            os.killpg(pid, signum)
 
     prev_handlers: dict[signal.Signals, signal._HANDLER] = {}
     for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
         with contextlib.suppress(OSError, ValueError):
             prev_handlers[sig] = signal.signal(sig, _relay)
 
+    escalation = (
+        _StuckSignalEscalation(signal_times, escalate) if escalate is not None else None
+    )
     try:
-        returncode = _wait_for_child(pid, timeout=timeout)
+        returncode = _wait_for_child(pid, timeout=timeout, escalation=escalation)
     except BaseException:
         # The parent is being torn down, so the child must not survive it.
         _kill_child(pid)
@@ -580,16 +721,11 @@ def _wait_for_child_with_signals(pid: int, *, timeout: int | None = None) -> int
             with contextlib.suppress(OSError, ValueError):
                 signal.signal(sig, handler)
 
-    if received_signal and returncode >= 128:
-        return returncode
-
     return returncode
 
 
 def _kill_child(pid: int) -> None:
     """Best-effort SIGTERM → wait → SIGKILL for *pid*."""
-    import time
-
     with contextlib.suppress(ProcessLookupError):
         os.kill(pid, signal.SIGTERM)
     deadline = time.monotonic() + 1.0
@@ -607,27 +743,33 @@ def _kill_child(pid: int) -> None:
         os.waitpid(pid, 0)
 
 
-def _wait_for_child(pid: int, *, timeout: int | None = None) -> int:
+def _wait_for_child(
+    pid: int,
+    *,
+    timeout: int | None = None,
+    escalation: _StuckSignalEscalation | None = None,
+) -> int:
     """Wait for *pid* to exit, returning its exit code.
 
-    If the child was killed by a signal, returns ``128 + signum``.
+    Polls with WNOHANG instead of one blocking waitpid: Python retries a
+    blocking wait straight through a signal handler (PEP 475), which would
+    leave the escalation no chance to act between the signal and the
+    child's death. If the child was killed by a signal, returns
+    ``128 + signum``.
     """
-    if timeout is not None:
-        import time
-
-        deadline = time.monotonic() + timeout
-        while True:
-            wpid, status = os.waitpid(pid, os.WNOHANG)
-            if wpid != 0:
-                return _decode_status(status)
-            if time.monotonic() >= deadline:
-                os.kill(pid, signal.SIGKILL)
-                _, status = os.waitpid(pid, 0)
-                return _decode_status(status)
-            time.sleep(0.01)
-
-    _, status = os.waitpid(pid, 0)
-    return _decode_status(status)
+    deadline = None if timeout is None else time.monotonic() + timeout
+    while True:
+        wpid, status = os.waitpid(pid, os.WNOHANG)
+        if wpid != 0:
+            return _decode_status(status)
+        if escalation is not None:
+            escalation.check()
+        now = time.monotonic()
+        if deadline is not None and now >= deadline:
+            os.kill(pid, signal.SIGKILL)
+            _, status = os.waitpid(pid, 0)
+            return _decode_status(status)
+        time.sleep(0.01 if deadline is not None else 0.05)
 
 
 def _decode_status(status: int) -> int:

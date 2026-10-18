@@ -316,6 +316,7 @@ def enter_and_run_with_pty(
     fork_for_pid: bool = True,
     drop_caps: bool = False,
     setup: typing.Callable[[], None] | None = None,
+    escalate: typing.Callable[[], None] | None = None,
 ) -> int:
     """Enter namespaces via native ``setns(2)`` and exec *command* with a PTY.
 
@@ -323,6 +324,9 @@ def enter_and_run_with_pty(
     it is going to drop, immediately before the exec. It is how a caller puts
     the child somewhere this module knows nothing about (a chroot, an identity)
     without handing over an argv for a binary that would do it.
+
+    *escalate* is the caller's force-exit for a stuck wait, passed to the
+    relay and the signal-aware wait unchanged.
 
     When stdin is a terminal, allocates a fresh PTY pair so the child has
     its own controlling terminal (enabling job control, ``ttyname()``,
@@ -399,5 +403,5 @@ def enter_and_run_with_pty(
     # --- Parent ---
     if use_pty:
         os.close(slave_fd)
-        return _pty_relay(master_fd, child_pid)
-    return _wait_for_child_with_signals(child_pid)
+        return _pty_relay(master_fd, child_pid, escalate=escalate)
+    return _wait_for_child_with_signals(child_pid, escalate=escalate)

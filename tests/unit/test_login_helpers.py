@@ -1,5 +1,6 @@
 import json
 import os
+import signal
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -1605,3 +1606,88 @@ def test_read_manifest_arch_ignores_a_field_of_another_type(tmp_path):
     assert read_manifest_arch(str(tmp_path)) == ""
     (tmp_path / "manifest.json").write_text(json.dumps(["not", "an", "object"]))
     assert read_manifest_arch(str(tmp_path)) == ""
+
+
+# ── session process sweep (kill-on-exit) ────────────────────────────────
+class _FakeTime:
+    """Stand-in for login's ``time as _time``: sleeps advance the clock."""
+
+    def __init__(self):
+        self.now = 0.0
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += seconds
+
+
+def test_reap_session_processes_sigterms_and_spares_exiting_pids(monkeypatch):
+    import chroot_distro.commands.login as login_mod
+
+    killed = []
+    seq = {"n": 0}
+
+    def fake_pids(name):
+        seq["n"] += 1
+        return [111, 222] if seq["n"] == 1 else []
+
+    monkeypatch.setattr(login_mod.session, "get_active_chroot_pids", fake_pids)
+    monkeypatch.setattr(os, "kill", lambda pid, sig: killed.append((pid, sig)))
+    monkeypatch.setattr(login_mod, "_time", _FakeTime())
+
+    login_mod._reap_session_processes("debian")
+
+    assert killed == [(111, signal.SIGTERM), (222, signal.SIGTERM)]
+
+
+def test_reap_session_processes_sigkills_survivors(monkeypatch):
+    import chroot_distro.commands.login as login_mod
+
+    killed = []
+    monkeypatch.setattr(login_mod.session, "get_active_chroot_pids", lambda name: [333])
+    monkeypatch.setattr(os, "kill", lambda pid, sig: killed.append((pid, sig)))
+    monkeypatch.setattr(login_mod, "_time", _FakeTime())
+
+    login_mod._reap_session_processes("debian")
+
+    assert killed == [(333, signal.SIGTERM), (333, signal.SIGKILL)]
+
+
+def test_reap_session_processes_excludes_pid_and_skips_when_empty(monkeypatch):
+    import chroot_distro.commands.login as login_mod
+
+    killed = []
+    seq = {"n": 0}
+
+    def fake_pids(name):
+        seq["n"] += 1
+        return [111, 222] if seq["n"] == 1 else []
+
+    monkeypatch.setattr(login_mod.session, "get_active_chroot_pids", fake_pids)
+    monkeypatch.setattr(os, "kill", lambda pid, sig: killed.append((pid, sig)))
+    monkeypatch.setattr(login_mod, "_time", _FakeTime())
+
+    # The holder pid stays out of the sweep: it must survive the unmount.
+    login_mod._reap_session_processes("debian", exclude_pid=111)
+    assert killed == [(222, signal.SIGTERM)]
+
+    killed.clear()
+    login_mod._reap_session_processes("debian")
+    assert killed == []
+
+
+def test_sweep_if_last_session_guards_on_session_count(monkeypatch):
+    import chroot_distro.commands.login as login_mod
+
+    swept = []
+    monkeypatch.setattr(login_mod, "_reap_session_processes", lambda name, **kw: swept.append((name, kw)))
+
+    # A second session's processes are not ours to kill.
+    monkeypatch.setattr(login_mod.session, "count", lambda name: 2)
+    login_mod._sweep_if_last_session("debian")
+    assert swept == []
+
+    monkeypatch.setattr(login_mod.session, "count", lambda name: 1)
+    login_mod._sweep_if_last_session("debian", exclude_pid=9)
+    assert swept == [("debian", {"exclude_pid": 9})]

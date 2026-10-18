@@ -16,9 +16,11 @@ so nothing here decides what a mount is.
 The session counter is the coordination mechanism. The first session writes
 resolv.conf, acquires the holder and applies every mount; a later one joins what
 is already there. Every exit path decrements under `session.lock`, and reaching
-zero unmounts, releases the holder and clears the isolation mode. `--detach` is
-the exception and leaves the count standing: the container stays mounted until
-`kill` or `unmount`.
+zero sweeps the container's leftover processes (a GUI session outlives its
+shell), unmounts, releases the holder and clears the isolation mode; processes
+the sweep cannot stop leave everything mounted for `kill` rather than unmounting
+over them. `--detach` is the other exception and leaves the count standing: the
+container stays mounted until `kill` or `unmount`.
 
 Joining is a union, not a fresh setup. `session.live_mount_options` says what the
 container is running with, and this file adopts it (the `--shared-*` flags, the
@@ -54,7 +56,9 @@ import contextlib
 import logging
 import os
 import shlex
+import signal as _signal
 import sys
+import time as _time
 
 import chroot_distro.helpers.mount_manager as mount_manager
 import chroot_distro.helpers.namespace as namespace
@@ -141,6 +145,95 @@ log = logging.getLogger(__name__)
 
 # Shared with the isolated build path; private alias for local callers.
 _safe_hostname = safe_hostname
+
+
+# Grace periods of the exit sweep, matching kill.py's escalation.
+_REAP_TERM_GRACE_SECS = 1.0
+_REAP_KILL_WAIT_SECS = 2.0
+
+
+def _reap_session_processes(container_name: str, *, exclude_pid: int | None = None) -> list[int]:
+    """Stop any container processes still alive after the session ended.
+
+    proot-distro's --kill-on-exit behaviour: a GUI session (dbus-launch
+    startxfce4) leaves xfce4-session and the panel running after the login
+    shell, and a shell blocked on such a child never reads ``exit``, so the
+    foreground wait would hang forever. Once the foreground command is over
+    and this was the last session, SIGTERM what is left in the rootfs, give
+    it a grace period to exit cleanly, then SIGKILL the survivors and wait
+    for them to die, so the unmount that follows meets no busy mount.
+
+    Returns the PIDs that are still alive after all of that; the caller must
+    not unmount over them (a lazy MNT_DETACH under live processes is what
+    breaks host services the binds point at).
+
+    *exclude_pid* keeps one process out of the sweep: the maximum-isolation
+    holder chroots into the rootfs and must stay alive for the
+    holder-mediated unmount that follows.
+    """
+
+    def _sweep_pids() -> list[int]:
+        return [pid for pid in session.get_active_chroot_pids(container_name) if pid != exclude_pid]
+
+    pids = _sweep_pids()
+    if not pids:
+        return []
+    for pid in pids:
+        with contextlib.suppress(OSError):
+            os.kill(pid, _signal.SIGTERM)
+    deadline = _time.monotonic() + _REAP_TERM_GRACE_SECS
+    while _time.monotonic() < deadline and _sweep_pids():
+        _time.sleep(0.05)
+    survivors = _sweep_pids()
+    if not survivors:
+        return []
+    for pid in survivors:
+        with contextlib.suppress(OSError):
+            os.kill(pid, _signal.SIGKILL)
+    deadline = _time.monotonic() + _REAP_KILL_WAIT_SECS
+    while _time.monotonic() < deadline and _sweep_pids():
+        _time.sleep(0.05)
+    return _sweep_pids()
+
+
+def _sweep_if_last_session(container_name: str, exclude_pid: int | None = None) -> None:
+    """Sweep the rootfs, but only when no other session's processes would die."""
+    if session.count(container_name) <= 1:
+        _reap_session_processes(container_name, exclude_pid=exclude_pid)
+
+
+def _exit_teardown(container_name: str, rootfs: str, holder, sess_handle) -> None:
+    """An exit path's whole teardown: decrement, sweep, unmount, release.
+
+    Processes that survive even the sweep gate everything after them:
+    unmounting over live processes falls back to a lazy MNT_DETACH, which
+    leaves each bind attached under the running guest and breaks the host
+    services it points at. The container is instead left mounted, as
+    `--detach` leaves it, for `kill`, which owns the force ladder.
+    """
+    if sess_handle is not None:
+        sess_handle.close()
+    with session.lock(container_name) as lock_fh:
+        sess_count = session.decrement(container_name, lock_fh=lock_fh)
+        if sess_count != 0:
+            return
+        survivors = _reap_session_processes(
+            container_name,
+            exclude_pid=holder.pid if holder is not None else None,
+        )
+        if survivors:
+            warn(
+                f"Processes {survivors} are still running in container "
+                f"'{container_name}' and could not be stopped; leaving it "
+                f"mounted. Run '{PROGRAM_NAME} kill {container_name}' to "
+                "tear it down."
+            )
+            return
+        mount_manager.unmount_all(rootfs, holder=holder)
+        session.clear_mount_options(container_name)
+        if holder is not None:
+            namespace.release_holder(container_name)
+        namespace.clear_isolation_mode(container_name)
 
 
 def command_login(args) -> None:
@@ -1310,6 +1403,11 @@ def _command_login_inner_once(container_name: str, args) -> None:
 
     exit_code = 0
 
+    def _signal_sweep() -> None:
+        # A relayed signal left the child alive: sweep, but only when no
+        # other session's processes would die with it.
+        _sweep_if_last_session(container_name, holder.pid if holder is not None else None)
+
     # Only a foreground holder execs the command itself and exits through its
     # launcher. A sleeping holder (isolated login, CD_USE_NS) also has a live
     # launcher_pid but never execs it, so it must be entered below to run the
@@ -1319,20 +1417,11 @@ def _command_login_inner_once(container_name: str, args) -> None:
             from chroot_distro.syscalls.chroot import _pty_relay, _wait_for_child_with_signals
 
             if holder.master_fd >= 0:
-                exit_code = _pty_relay(holder.master_fd, holder.launcher_pid)
+                exit_code = _pty_relay(holder.master_fd, holder.launcher_pid, escalate=_signal_sweep)
             else:
-                exit_code = _wait_for_child_with_signals(holder.launcher_pid)
+                exit_code = _wait_for_child_with_signals(holder.launcher_pid, escalate=_signal_sweep)
         finally:
-            if _sess_handle is not None:
-                _sess_handle.close()
-            with session.lock(container_name) as lock_fh:
-                sess_count = session.decrement(container_name, lock_fh=lock_fh)
-                if sess_count == 0:
-                    mount_manager.unmount_all(rootfs, holder=holder)
-                    session.clear_mount_options(container_name)
-                    if holder is not None:
-                        namespace.release_holder(container_name)
-                        namespace.clear_isolation_mode(container_name)
+            _exit_teardown(container_name, rootfs, holder, _sess_handle)
     else:
         try:
             if holder is None:
@@ -1346,6 +1435,7 @@ def _command_login_inner_once(container_name: str, args) -> None:
                     env=child_env,
                     drop_caps=not has_userns,
                     no_new_privs=no_new_privs,
+                    escalate=_signal_sweep,
                 ).returncode
             else:
                 # The chroot is the child's own last step, after setns(2) and
@@ -1367,18 +1457,10 @@ def _command_login_inner_once(container_name: str, args) -> None:
                     env=child_env,
                     drop_caps=not has_userns,
                     setup=_enter,
+                    escalate=_signal_sweep,
                 )
         finally:
-            if _sess_handle is not None:
-                _sess_handle.close()
-            with session.lock(container_name) as lock_fh:
-                sess_count = session.decrement(container_name, lock_fh=lock_fh)
-                if sess_count == 0:
-                    mount_manager.unmount_all(rootfs, holder=holder)
-                    session.clear_mount_options(container_name)
-                    if holder is not None:
-                        namespace.release_holder(container_name)
-                        namespace.clear_isolation_mode(container_name)
+            _exit_teardown(container_name, rootfs, holder, _sess_handle)
 
     if exit_code:
         # Map signal death (negative code) to the shell's 128+signal.

@@ -1,8 +1,11 @@
 import ctypes
 import errno
 import os
+import signal
 import struct
 import subprocess
+import threading
+import time
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -138,6 +141,179 @@ def test_wait_for_child_decodes_normal_exit():
     if pid == 0:
         os._exit(3)
     assert chroot._wait_for_child(pid) == 3
+
+
+# ── _wait_for_child: exit-code decoding and the timeout hard kill ───────────────
+def test_wait_for_child_decodes_normal_exit():
+    pid = os.fork()
+    if pid == 0:
+        os._exit(3)
+    assert chroot._wait_for_child(pid) == 3
+
+
+def test_wait_for_child_timeout_kills_child():
+    pid = os.fork()
+    if pid == 0:
+        time.sleep(30)
+        os._exit(0)
+    assert chroot._wait_for_child(pid, timeout=1) == 128 + signal.SIGKILL
+
+
+# ── stuck-signal escalation (the GUI-session exit hang) ─────────────────
+def test_escalation_fires_once_after_grace(monkeypatch):
+    monkeypatch.setattr(chroot, "_ESCALATE_GRACE_SECS", 0.0)
+    fired = []
+    esc = chroot._StuckSignalEscalation([time.monotonic()], lambda: fired.append(1))
+    esc.check()
+    assert fired == [1]
+    esc.check()
+    assert fired == [1]  # one-shot
+
+
+def test_escalation_holds_until_grace_expires():
+    fired = []
+    esc = chroot._StuckSignalEscalation([time.monotonic() + 60.0], lambda: fired.append(1))
+    esc.check()
+    assert fired == []
+
+
+def test_escalation_ignores_wait_without_signal():
+    fired = []
+    esc = chroot._StuckSignalEscalation([], lambda: fired.append(1))
+    esc.check()
+    assert fired == []
+
+
+def test_wait_for_child_escalation_ends_stuck_wait(monkeypatch):
+    # The child ignores the relayed signal; the escalation forces the end.
+    monkeypatch.setattr(chroot, "_ESCALATE_GRACE_SECS", 0.0)
+    alive = {"value": True}
+    swept = []
+
+    def fake_waitpid(pid, options):
+        return (0, 0) if alive["value"] else (pid, 0)
+
+    monkeypatch.setattr(os, "waitpid", fake_waitpid)
+
+    def escalate():
+        swept.append(1)
+        alive["value"] = False
+
+    esc = chroot._StuckSignalEscalation([time.monotonic()], escalate)
+    assert chroot._wait_for_child(4242, escalation=esc) == 0
+    assert swept == [1]
+
+
+def test_wait_for_child_with_signals_escalates_stuck_child(monkeypatch):
+    # Full wiring: a real SIGTERM reaches the relay handler, is killpg'd to
+    # the child's group, and when the child survives it the sweep runs and
+    # the wait returns instead of hanging.
+    monkeypatch.setattr(chroot, "_ESCALATE_GRACE_SECS", 0.0)
+    alive = {"value": True}
+    swept = []
+    signalled = []
+
+    def fake_waitpid(pid, options):
+        return (0, 0) if alive["value"] else (pid, 0)
+
+    def fake_killpg(pid, sig):
+        signalled.append((pid, sig))
+
+    monkeypatch.setattr(os, "waitpid", fake_waitpid)
+    monkeypatch.setattr(os, "killpg", fake_killpg)
+
+    def escalate():
+        swept.append(1)
+        alive["value"] = False
+
+    def fire_signal():
+        time.sleep(0.05)
+        os.kill(os.getpid(), signal.SIGTERM)
+
+    threading.Thread(target=fire_signal).start()
+    rc = chroot._wait_for_child_with_signals(4242, escalate=escalate)
+    assert swept == [1]
+    assert signalled == [(4242, signal.SIGTERM)]
+    assert rc == 0
+
+
+def test_wait_for_child_with_signals_no_escalation_when_child_exits(monkeypatch):
+    monkeypatch.setattr(chroot, "_ESCALATE_GRACE_SECS", 0.0)
+    swept = []
+    monkeypatch.setattr(os, "waitpid", lambda pid, options: (pid, 0))
+    monkeypatch.setattr(os, "killpg", lambda pid, sig: None)
+    rc = chroot._wait_for_child_with_signals(4242, escalate=lambda: swept.append(1))
+    assert swept == []
+    assert rc == 0
+
+
+def test_pty_copy_loop_exits_once_child_dead_and_pty_quiet(monkeypatch):
+    # A GUI session's orphans hold the pty slave open after the shell died:
+    # the relay must stop on child death plus a quiet pty, not wait for an
+    # EOF that never comes.
+    monkeypatch.setattr(chroot.select, "select", lambda fds, *a, **k: ([], [], []))
+    monkeypatch.setattr(os, "waitpid", lambda pid, options: (pid, 0))
+    r, w = os.pipe()
+    try:
+        chroot._pty_copy_loop(r, 4242)
+    finally:
+        os.close(r)
+        os.close(w)
+
+
+def test_pty_copy_loop_escalation_ends_hang_of_alive_child(monkeypatch):
+    monkeypatch.setattr(chroot, "_ESCALATE_GRACE_SECS", 0.0)
+    monkeypatch.setattr(chroot.select, "select", lambda fds, *a, **k: ([], [], []))
+    alive = {"value": True}
+    swept = []
+
+    def fake_waitpid(pid, options):
+        return (0, 0) if alive["value"] else (pid, 0)
+
+    monkeypatch.setattr(os, "waitpid", fake_waitpid)
+
+    def escalate():
+        swept.append(1)
+        alive["value"] = False
+
+    esc = chroot._StuckSignalEscalation([time.monotonic()], escalate)
+    r, w = os.pipe()
+    try:
+        chroot._pty_copy_loop(r, 4242, escalation=esc)
+    finally:
+        os.close(r)
+        os.close(w)
+    assert swept == [1]
+
+
+def test_pty_copy_loop_relays_master_output_while_child_alive(monkeypatch):
+    # The relay restructure must keep copying pty output for a live child.
+    master, slave = os.openpty()
+    os.write(slave, b"hello")
+    written = []
+
+    def fake_write(fd, data):
+        written.append((fd, data))
+        return len(data)
+
+    def fake_waitpid(pid, options):
+        return (pid, 0) if written else (0, 0)
+
+    polls = {"n": 0}
+
+    def fake_select(fds, *a, **k):
+        polls["n"] += 1
+        return ([master], [], []) if polls["n"] == 1 else ([], [], [])
+
+    monkeypatch.setattr(os, "write", fake_write)
+    monkeypatch.setattr(os, "waitpid", fake_waitpid)
+    monkeypatch.setattr(chroot.select, "select", fake_select)
+    try:
+        chroot._pty_copy_loop(master, 4242)
+    finally:
+        os.close(master)
+        os.close(slave)
+    assert written == [(1, b"hello")]
 
 
 # ── _close_fds_above: the pre-exec descriptor sweep ─────────────────────────────
