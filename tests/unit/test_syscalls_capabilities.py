@@ -42,12 +42,12 @@ def test_caps_to_drop_fails_safe_on_future_caps(monkeypatch):
     assert 41 in dropped and 42 in dropped
 
 
-def test_caps_to_drop_keeps_sys_admin_drops_mknod_and_chroot(monkeypatch):
+def test_caps_to_drop_keeps_sys_admin_and_chroot_drops_mknod(monkeypatch):
     monkeypatch.setattr(caps, "cap_last_cap", lambda: 40)
     dropped = set(caps.caps_to_drop())
     assert CAP_SYS_ADMIN not in dropped
+    assert CAP_SYS_CHROOT not in dropped
     assert CAP_MKNOD in dropped
-    assert CAP_SYS_CHROOT in dropped
     assert CAP_SYS_MODULE in dropped
 
 

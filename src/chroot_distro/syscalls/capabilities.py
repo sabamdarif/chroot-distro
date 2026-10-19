@@ -9,9 +9,12 @@ from /proc rather than assumed) that `CAPS_TO_KEEP` does not name is dropped,
 so a capability a future kernel gains is confined by default. `CAP_SYS_ADMIN`
 is deliberately kept, because a distro-in-a-chroot is a lightweight machine:
 mount, FUSE mounts (AppImages, sshfs) and a full guest init all want it, and
-Tier C, where this runs, is common on Termux. The price of that is the device
-hole `CAP_MKNOD`'s drop exists to close, and the re-chroot escape
-`CAP_SYS_CHROOT`'s drop closes: neither comes back without an escape hatch.
+Tier C, where this runs, is common on Termux. `CAP_SYS_CHROOT` is kept for the
+same class of reason: a guest browser's setuid sandbox helper (Chromium,
+Electron) chroots into its own empty directory before dropping privileges, and
+without the capability the helper dies and the browser refuses to start. The
+price of `CAP_SYS_ADMIN` is still the device hole `CAP_MKNOD`'s drop exists to
+close.
 
 PR_CAPBSET_DROP is irreversible for the process and everything it forks, so the
 drop belongs immediately before the exec and after any privileged setup the caller
@@ -41,6 +44,7 @@ from chroot_distro.syscalls._constants import (
     CAP_SETPCAP,
     CAP_SETUID,
     CAP_SYS_ADMIN,
+    CAP_SYS_CHROOT,
     PR_CAP_AMBIENT,
     PR_CAP_AMBIENT_CLEAR_ALL,
     PR_CAPBSET_DROP,
@@ -50,8 +54,7 @@ from chroot_distro.syscalls._libc import libc_prctl
 log = logging.getLogger(__name__)
 
 # Capabilities the guest KEEPS when no user namespace scopes them: moby's
-# default set, minus SYS_CHROOT (a chroot-only tool must not hand the guest
-# the cap that escapes a chroot), plus SYS_ADMIN (mount and FUSE in guest).
+# default set, plus SYS_ADMIN (mount and FUSE in guest).
 CAPS_TO_KEEP: tuple[int, ...] = (
     CAP_CHOWN,  # chown on its own files
     CAP_DAC_OVERRIDE,  # file access inside the rootfs
@@ -64,6 +67,7 @@ CAPS_TO_KEEP: tuple[int, ...] = (
     CAP_NET_BIND_SERVICE,  # bind < 1024: sshd, httpd
     CAP_NET_RAW,  # ping, traceroute
     CAP_AUDIT_WRITE,  # login(1) and friends write audit records
+    CAP_SYS_CHROOT,  # Chromium and Electron sandbox helpers chroot(2)
     CAP_SETFCAP,  # setcap on guest binaries
     CAP_SYS_ADMIN,  # mount, FUSE, a full guest init
 )
@@ -89,7 +93,6 @@ _CAP_NAMES: dict[int, str] = {
     13: "CAP_NET_RAW",
     16: "CAP_SYS_MODULE",
     17: "CAP_SYS_RAWIO",
-    18: "CAP_SYS_CHROOT",
     19: "CAP_SYS_PTRACE",
     21: "CAP_SYS_ADMIN",
     22: "CAP_SYS_BOOT",
