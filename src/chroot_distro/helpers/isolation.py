@@ -57,6 +57,8 @@ from chroot_distro.helpers import mount_manager, namespace
 from chroot_distro.helpers.namespace import NamespaceError, NamespaceHolder
 from chroot_distro.helpers.rootfs import write_resolv_conf
 from chroot_distro.message import warn
+from chroot_distro.syscalls._constants import MS_RDONLY
+from chroot_distro.syscalls.mount import remount_bind
 
 if TYPE_CHECKING:
     from chroot_distro.helpers.namespace import NamespaceProbeResult
@@ -274,24 +276,23 @@ def _bind_host_sys(rootfs: str, holder: NamespaceHolder | None) -> None:
 
     The only /sys mount a user namespace permits, and the fallback everywhere
     else. The bind is recursive (a plain bind of /sys is rejected for its
-    locked submounts) and rslave, then remounted read-only best-effort.
+    locked submounts) and rslave, then remounted read-only in place: the
+    self-bind dance mount_targets.readonly_path does cannot mount over the
+    MNT_LOCKED submounts under a user namespace, so the read-only flag goes on
+    the bind itself, the shape runc uses.
     """
-    from chroot_distro.helpers import mount_targets
-
     sys_dst = _guest_dir(rootfs, "/sys")
     mount_manager.safe_mount("/sys", sys_dst, rootfs=rootfs, holder=holder, recursive=True)
     mount_manager.make_rslave(sys_dst, holder=holder)
 
-    def _open_rootfs() -> int:
-        return mount_targets.open_rootfs_fd(rootfs)
+    def _ro() -> bytes:
+        try:
+            remount_bind(sys_dst, flags=MS_RDONLY, recursive=True)
+        except OSError:
+            return b""
+        return b"1"
 
-    def _ro(rootfs_fd: int = -1) -> bytes:
-        return b"1" if mount_targets.readonly_path(rootfs, ["sys"], rootfs_fd=rootfs_fd) else b""
-
-    if holder is not None:
-        ro_done = holder.call(_ro, prepare=_open_rootfs) == b"1"
-    else:
-        ro_done = mount_targets.readonly_path(rootfs, ["sys"])
+    ro_done = holder.call(_ro) == b"1" if holder is not None else _ro() == b"1"
     if not ro_done:
         warn("Could not make the bound /sys read-only; it stays read-write.")
 

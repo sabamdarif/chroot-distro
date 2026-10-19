@@ -172,9 +172,7 @@ def test_failed_sysfs_alone_binds_host_sys(monkeypatch, tmp_path):
         lambda src, dst, **kw: mounts.append(src),
     )
     monkeypatch.setattr(isolation.mount_manager, "make_rslave", lambda *a, **kw: True)
-    monkeypatch.setattr(
-        "chroot_distro.helpers.mount_targets.readonly_path", lambda *a, **kw: True
-    )
+    monkeypatch.setattr(isolation, "remount_bind", lambda *a, **kw: None)
 
     isolation.apply_special_mounts(str(tmp_path), None, max_isolation=False, minimal=True)
 
