@@ -13,8 +13,9 @@ echo "=== Removing the host account 08-chown/07-host-side.sh created ==="
 sudo userdel hostonly 2>/dev/null || true
 # /tmp is sticky, and chown-host.txt now belongs to uid 4321,
 # so the runner's own account can no longer unlink it.
-sudo rm -rf /tmp/chown-src.txt /tmp/chown-host.txt /tmp/chown-tree
-rm -rf /tmp/scratch-build /tmp/scratch-login.out /tmp/scratch-login.err
+sudo rm -rf /tmp/chown-src.txt /tmp/chown-host.txt /tmp/chown-tree \
+	/tmp/scratch-login.out /tmp/scratch-login.err
+rm -rf /tmp/scratch-build
 
 echo "=== Killing all sessions ==="
 sudo chroot-distro kill httpd 2>/dev/null || true

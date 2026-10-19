@@ -139,7 +139,9 @@ def pull_cache(ref: str, insecure: bool = False) -> tuple[int, int]:
     manifest = _get_manifest(repo, tag, token, base, insecure=insecure)
     layers = manifest.get("layers", [])
     if len(layers) != 1:
-        raise RuntimeError(f"'{ref}' is not a build cache this program wrote (expected one layer, found {len(layers)}).")
+        raise RuntimeError(
+            f"'{ref}' is not a build cache this program wrote (expected one layer, found {len(layers)})."
+        )
     digest = layers[0]["digest"]
 
     log_info("Downloading the build cache blob...")

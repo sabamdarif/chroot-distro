@@ -546,9 +546,7 @@ def _pty_relay(
 
     prev_handlers: dict[signal.Signals, signal._HANDLER] = {}
     signal_times: list[float] = []
-    escalation = (
-        _StuckSignalEscalation(signal_times, escalate) if escalate is not None else None
-    )
+    escalation = _StuckSignalEscalation(signal_times, escalate) if escalate is not None else None
 
     def _relay_sig(signum: int, _frame: object) -> None:
         # Signal the child's whole process group, not just the child: a GUI
@@ -710,9 +708,7 @@ def _wait_for_child_with_signals(
         with contextlib.suppress(OSError, ValueError):
             prev_handlers[sig] = signal.signal(sig, _relay)
 
-    escalation = (
-        _StuckSignalEscalation(signal_times, escalate) if escalate is not None else None
-    )
+    escalation = _StuckSignalEscalation(signal_times, escalate) if escalate is not None else None
     try:
         returncode = _wait_for_child(pid, timeout=timeout, escalation=escalation)
     except BaseException:

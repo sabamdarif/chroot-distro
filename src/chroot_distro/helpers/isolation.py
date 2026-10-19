@@ -405,9 +405,7 @@ def apply_special_mounts(
                 # bind.
                 warn("Could not mount a fresh tmpfs /dev; using the container's own /dev directory.")
             if fresh_dev or max_isolation:
-                mount_manager.create_dev_nodes(
-                    rootfs, bindings.DEFAULT_DEV_NODES, holder=holder, use_userns=use_userns
-                )
+                mount_manager.create_dev_nodes(rootfs, bindings.DEFAULT_DEV_NODES, holder=holder, use_userns=use_userns)
             continue
         if sm.fstype == "sysfs" and sm.target == "/sys":
             if not mount_manager.apply_special_mount(rootfs, sm, holder=holder):

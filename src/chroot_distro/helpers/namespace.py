@@ -662,7 +662,12 @@ class NamespaceHolder:
                 try:
                     _regain_mapped_root()
                     mount_targets.bind_mount_fd(
-                        source, rootfs, parts, want="dir", recursive=recursive, options=options,
+                        source,
+                        rootfs,
+                        parts,
+                        want="dir",
+                        recursive=recursive,
+                        options=options,
                         rootfs_fd=rootfs_fd,
                     )
                 finally:
@@ -742,7 +747,12 @@ class NamespaceHolder:
                             _, inner_status = os.waitpid(inner_pid, 0)
                             os._exit(os.WEXITSTATUS(inner_status) if os.WIFEXITED(inner_status) else 1)
                     mounted = mount_targets.mount_filesystem_fd(
-                        source, rootfs, parts, fstype, options=options, create=create,
+                        source,
+                        rootfs,
+                        parts,
+                        fstype,
+                        options=options,
+                        create=create,
                         rootfs_fd=rootfs_fd,
                     )
                     os._exit(0 if mounted else 2)
@@ -759,7 +769,9 @@ class NamespaceHolder:
             if code == 2:
                 return False
             if code != 0:
-                raise OSError(f"mount(2) of {fstype} ({source}) on {rootfs}/{'/'.join(parts)} failed inside the namespace")
+                raise OSError(
+                    f"mount(2) of {fstype} ({source}) on {rootfs}/{'/'.join(parts)} failed inside the namespace"
+                )
             return True
         if os.WIFSIGNALED(status):
             raise OSError(f"mount(2) of {fstype} killed by signal {os.WTERMSIG(status)}")
@@ -827,11 +839,7 @@ def _create_holder(
 
     idmap_tree_fd = -1
     if id_map is None and (flags & CLONE_NEWUSER):
-        use_remap = (
-            _TIER_B_ROOTFS_IDMAP_READY
-            and _idmapped_mounts_supported()
-            and rootfs is not None
-        )
+        use_remap = _TIER_B_ROOTFS_IDMAP_READY and _idmapped_mounts_supported() and rootfs is not None
         tier = ISOLATION_TIER_REMAP if use_remap else ISOLATION_TIER_USERNS
         id_map = resolve_userns_map(tier)
         if use_remap and rootfs is not None:
@@ -845,8 +853,12 @@ def _create_holder(
 
     try:
         holder_pid, launcher_pid = _spawn_holder(
-            container_name, flags, rootfs=rootfs, id_map=id_map,
-            foreground=foreground, idmap_tree_fd=idmap_tree_fd,
+            container_name,
+            flags,
+            rootfs=rootfs,
+            id_map=id_map,
+            foreground=foreground,
+            idmap_tree_fd=idmap_tree_fd,
         )
     except HolderIdmapError as exc:
         # The clone is still ours to close; the holder never stacked it.
@@ -855,15 +867,17 @@ def _create_holder(
                 os.close(idmap_tree_fd)
             idmap_tree_fd = -1
         log.warning(
-            "idmapped rootfs unavailable (%s); falling back to the identity "
-            "user namespace map (Tier A).",
+            "idmapped rootfs unavailable (%s); falling back to the identity user namespace map (Tier A).",
             exc,
         )
         try:
             holder_pid, launcher_pid = _spawn_holder(
-                container_name, flags, rootfs=rootfs,
+                container_name,
+                flags,
+                rootfs=rootfs,
                 id_map=resolve_userns_map(ISOLATION_TIER_USERNS),
-                foreground=foreground, idmap_tree_fd=-1,
+                foreground=foreground,
+                idmap_tree_fd=-1,
             )
         except (OSError, RuntimeError) as exc2:
             raise NamespaceError(

@@ -74,9 +74,7 @@ def _materialize(layers: list[dict[str, typing.Any]], rootfs_fd: int) -> None:
         digest = layer["digest"]
         layer_path = layer_cache_path(digest)
         if not os.path.isfile(layer_path):
-            raise RuntimeError(
-                f"Layer blob {digest} is missing from the cache; cannot rebuild the rootfs."
-            )
+            raise RuntimeError(f"Layer blob {digest} is missing from the cache; cannot rebuild the rootfs.")
         apply_layer(layer_path, rootfs_fd)
 
 

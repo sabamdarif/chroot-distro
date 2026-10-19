@@ -26,8 +26,8 @@ import pytest
 
 from chroot_distro import dirfd
 from chroot_distro.helpers.build_engine import copy_step
-from chroot_distro.helpers.build_engine.parsing import looks_like_git
 from chroot_distro.helpers.build_engine.errors import BuildError
+from chroot_distro.helpers.build_engine.parsing import looks_like_git
 
 
 @pytest.fixture

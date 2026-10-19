@@ -182,7 +182,7 @@ _chroot_distro() {
 				'--shared-tmp[share /tmp with the host]'
 				'--shared-display[share X11, Wayland, sound and D-Bus with the container]'
 				'--shared-x11[alias for --shared-display (backward compatibility)]'
-			'--no-new-privs[set PR_SET_NO_NEW_PRIVS: setuid binaries cannot elevate]'
+				'--no-new-privs[set PR_SET_NO_NEW_PRIVS: setuid binaries cannot elevate]'
 				'*'{-b,--bind}'[bind-mount PATH\[:DEST\] into the container]:path:_files'
 				'(-w --work-dir)'{-w,--work-dir}'[initial working directory]:path:_directories'
 				'*'{-e,--env}'[set environment variable]:VAR=VALUE'
@@ -227,7 +227,7 @@ _chroot_distro() {
 			_arguments \
 				'(-h --help)'{-h,--help}'[show help]' \
 				'--build-cache[drop the build cache index and the layers only it pinned]' \
-			'--keep[prune least-recently-used entries past SIZE]:size' \
+				'--keep[prune least-recently-used entries past SIZE]:size' \
 				'(-v --verbose -q --quiet)'{-v,--verbose}'[list removed files]' \
 				'(-v --verbose -q --quiet)'{-q,--quiet}'[suppress non-error output]'
 			;;
@@ -268,7 +268,7 @@ _chroot_distro() {
 				'--shared-tmp[share /tmp with the host]'
 				'--shared-display[share X11, Wayland, sound and D-Bus with the container]'
 				'--shared-x11[alias for --shared-display (backward compatibility)]'
-			'--no-new-privs[set PR_SET_NO_NEW_PRIVS: setuid binaries cannot elevate]'
+				'--no-new-privs[set PR_SET_NO_NEW_PRIVS: setuid binaries cannot elevate]'
 				'*'{-b,--bind}'[bind-mount PATH\[:DEST\] into the container]:path:_files'
 				'(-w --work-dir)'{-w,--work-dir}'[initial working directory]:path:_directories'
 				'*'{-e,--env}'[set environment variable]:VAR=VALUE'
@@ -327,12 +327,12 @@ _chroot_distro() {
 				'(-f --file)'{-f,--file}'[path to Dockerfile (- reads from stdin)]:file:_files' \
 				'*'{-t,--tag}'[image reference to assign (repeatable)]:ref' \
 				'*--build-arg[set a build-time ARG (repeatable)]:K=V' \
-			'*--build-context[define a named build context (repeatable)]:name=VALUE' \
+				'*--build-context[define a named build context (repeatable)]:name=VALUE' \
 				'(-a --architecture)'{-a,--architecture}'[target CPU architecture]:arch:(aarch64 arm i686 riscv64 x86_64)' \
 				'*--platform[build one image per platform (comma-separated, repeatable)]:platforms:(linux/amd64 linux/arm64 linux/arm/v7 linux/386 linux/riscv64)' \
 				'--target[stop after this named build stage]:stage' \
 				'*'{-o,--output}'[write OCI tarball to FILE (repeatable)]:file:_files' \
-			'*--export[export the rootfs as a directory or tarball (repeatable)]:spec:(type=local,dest= type=tar,dest=)' \
+				'*--export[export the rootfs as a directory or tarball (repeatable)]:spec:(type=local,dest= type=tar,dest=)' \
 				'--install-as[install image as a local container after build]:name:_chroot_distro_containers' \
 				'*--secret[expose a secret to RUN --mount=type=secret (repeatable)]:spec' \
 				'*--ssh[expose an SSH agent socket to RUN --mount=type=ssh (repeatable)]::spec' \

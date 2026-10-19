@@ -230,6 +230,7 @@ _SOCKET_TIMEOUT = 30  # seconds, so a stalled read() cannot pin a thread forever
 # retries up to _max_retries times internally.
 _MAX_RECONNECTIONS = 10
 
+
 def _ua_headers() -> dict[str, str]:
     return {"User-Agent": f"{PROGRAM_NAME}/{PROGRAM_VERSION}"}
 

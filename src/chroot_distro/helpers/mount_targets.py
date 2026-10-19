@@ -119,9 +119,7 @@ def resolve_mount_target(
     # would be the mount target, and a descriptor opened in another mount
     # namespace cannot be mounted onto, so the path form is kept there.
     try:
-        fd = os.dup(rootfs_fd) if rootfs_fd >= 0 and clean else os.open(
-            rootfs, O_PATH | os.O_DIRECTORY | os.O_CLOEXEC
-        )
+        fd = os.dup(rootfs_fd) if rootfs_fd >= 0 and clean else os.open(rootfs, O_PATH | os.O_DIRECTORY | os.O_CLOEXEC)
     except OSError as exc:
         raise MountError(f"cannot open rootfs {rootfs}: {exc}") from exc
     try:
@@ -310,7 +308,13 @@ def mask_path(rootfs: str, parts: Sequence[str], *, is_dir: bool, rootfs_fd: int
     if is_dir:
         try:
             return mount_filesystem_fd(
-                "tmpfs", rootfs, parts, "tmpfs", flags=0, options="ro,nosuid,nodev,noexec", create=False,
+                "tmpfs",
+                rootfs,
+                parts,
+                "tmpfs",
+                flags=0,
+                options="ro,nosuid,nodev,noexec",
+                create=False,
                 rootfs_fd=rootfs_fd,
             )
         except (MountError, OSError):
@@ -394,7 +398,6 @@ def verify_dev_node(fd: int, major: int, minor: int, *, char: bool = True) -> bo
         return False
     want = stat.S_IFCHR if char else stat.S_IFBLK
     return stat.S_IFMT(st.st_mode) == want and os.major(st.st_rdev) == major and os.minor(st.st_rdev) == minor
-
 
 
 def open_ptmx(rootfs: str, rootfs_fd: int = -1) -> int | None:

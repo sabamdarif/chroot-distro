@@ -6,10 +6,10 @@
 
 set -eo pipefail
 
-if sudo chroot-distro build /tmp/export-build \
+if sudo sh -c 'chroot-distro build /tmp/export-build \
 	-t test-build-export:latest \
 	--export type=tar,dest=/tmp/export.tar \
-	--progress plain >/tmp/export-refuse.log 2>&1; then
+	--progress plain >/tmp/export-refuse.log 2>&1'; then
 	echo "FAIL: an existing --export dest was not refused"
 	exit 1
 fi

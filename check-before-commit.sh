@@ -78,7 +78,7 @@ check_no_em_dash() {
 # `sudo cmd > /tmp/log` is the shape the e2e suite wants: the log is read back
 # unprivileged, and `| sudo tee` would hand it to root instead.
 check_shellcheck() {
-	if ! command -v shellcheck > /dev/null; then
+	if ! command -v shellcheck >/dev/null; then
 		echo "shellcheck not installed, install your platform's package for it"
 		return 1
 	fi
@@ -87,7 +87,7 @@ check_shellcheck() {
 	while IFS= read -r script; do
 		files+=("$script")
 	done < <(find tests/e2e -name "*.sh" | sort)
-	shellcheck --shell=bash --exclude=SC2024 "${files[@]}"
+	shellcheck --shell=bash "${files[@]}"
 }
 
 # Git never clones hooks, so .githooks/commit-msg is inert until this points at it.

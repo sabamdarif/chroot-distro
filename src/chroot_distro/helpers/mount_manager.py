@@ -234,7 +234,12 @@ def safe_mount(
     def _do_mount(rootfs_fd: int = -1) -> bytes:
         try:
             mount_targets.bind_mount_fd(
-                source_abs, rootfs, parts, want=want, recursive=recursive, options=kernel_options,
+                source_abs,
+                rootfs,
+                parts,
+                want=want,
+                recursive=recursive,
+                options=kernel_options,
                 rootfs_fd=rootfs_fd,
             )
         except (OSError, MountError) as exc:
@@ -295,9 +300,7 @@ def create_dev_nodes(
     """
 
     def _bind_node(name: str, rootfs_fd: int = -1) -> None:
-        mount_targets.bind_mount_fd(
-            os.path.join("/dev", name), rootfs, ["dev", name], want="any", rootfs_fd=rootfs_fd
-        )
+        mount_targets.bind_mount_fd(os.path.join("/dev", name), rootfs, ["dev", name], want="any", rootfs_fd=rootfs_fd)
 
     def _make_node(name: str, major: int, minor: int, mode: int) -> None:
         dev_fd = mount_targets.resolve_mount_target(rootfs, ["dev"], want="dir", create=True)
@@ -787,7 +790,9 @@ def apply_special_mount(rootfs: str, sm, holder: NamespaceHolder | None = None, 
                 log.debug("mount(2) of %s opts=%r failed via holder: %s", sm.fstype, opts, last_err)
         else:
             try:
-                if not mount_targets.mount_filesystem_fd(sm.source, rootfs, parts, sm.fstype, options=opts, create=sm.mkdir):
+                if not mount_targets.mount_filesystem_fd(
+                    sm.source, rootfs, parts, sm.fstype, options=opts, create=sm.mkdir
+                ):
                     log.debug(f"Mount target {sm.target} does not exist and mkdir=False, skipping")
                     return False
                 log.debug("Mounted %s at %s (options=%r)", sm.fstype, sm.target, opts)
@@ -802,7 +807,12 @@ def apply_special_mount(rootfs: str, sm, holder: NamespaceHolder | None = None, 
                 # Kernel < 4.7 single-instance devpts: newinstance is a no-op
                 # and stacking the lone instance on its own bind EBUSYs; the
                 # devpts already at the target is that instance, reuse it.
-                if sm.fstype == "devpts" and e.errno == errno.EBUSY and leaf and _mount_fs_and_options(leaf)[0] == "devpts":
+                if (
+                    sm.fstype == "devpts"
+                    and e.errno == errno.EBUSY
+                    and leaf
+                    and _mount_fs_and_options(leaf)[0] == "devpts"
+                ):
                     log.debug(
                         "devpts is single-instance on this kernel; reusing the instance already mounted at %s",
                         leaf,

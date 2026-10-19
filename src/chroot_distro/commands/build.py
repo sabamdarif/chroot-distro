@@ -381,7 +381,9 @@ def command_build(args: typing.Any) -> None:
             if cap > 0:
                 dropped, reclaimed = build_cache.prune(cap)
                 if dropped and not quiet:
-                    log_info(f"Pruned {dropped} cached step(s) ({fmt_size(reclaimed)}) to stay under the build cache cap.")
+                    log_info(
+                        f"Pruned {dropped} cached step(s) ({fmt_size(reclaimed)}) to stay under the build cache cap."
+                    )
 
             if not quiet:
                 log_info("Build complete.")
@@ -391,8 +393,7 @@ def command_build(args: typing.Any) -> None:
                     label = f"Layers ({result.platform})" if len(results) > 1 else "Layers"
                     total_size = sum(layer["size"] for layer in result.layers)
                     msg(
-                        f"{C['CYAN']}{label}: {C['GREEN']}{len(result.layers)} "
-                        f"({fmt_size(total_size)} total){C['RST']}"
+                        f"{C['CYAN']}{label}: {C['GREEN']}{len(result.layers)} ({fmt_size(total_size)} total){C['RST']}"
                     )
                 msg()
 
@@ -531,7 +532,9 @@ def _parse_export_specs(raw: list[str]) -> list[tuple[str, str]]:
         kind = fields.pop("type", "")
         dest = fields.pop("dest", "")
         if kind not in ("local", "tar"):
-            crit_error(f"--export type '{kind}' is not supported; the rootfs is exported as 'type=local' or 'type=tar'.")
+            crit_error(
+                f"--export type '{kind}' is not supported; the rootfs is exported as 'type=local' or 'type=tar'."
+            )
             sys.exit(1)
         if not dest or fields:
             crit_error(f"invalid --export '{item}' (expected type={kind},dest={'DIR' if kind == 'local' else 'FILE'}).")
@@ -563,12 +566,16 @@ def _import_cache_dirs(specs: list[tuple[str, str]], quiet: bool, insecure: bool
             crit_error(f"cannot import the build cache from '{value}': {quote_path(str(exc))}.")
             sys.exit(1)
         if refused:
-            warn(f"Ignored {refused} cache entr{'y' if refused == 1 else 'ies'} from '{value}' that could not be verified.")
+            warn(
+                f"Ignored {refused} cache entr{'y' if refused == 1 else 'ies'} from '{value}' that could not be verified."
+            )
         if not quiet:
             log_info(f"Imported {added} cached step(s) from '{value}'.")
 
 
-def _export_cache_dirs(specs: list[tuple[str, str]], results: list[PlatformResult], quiet: bool, insecure: bool = False) -> None:
+def _export_cache_dirs(
+    specs: list[tuple[str, str]], results: list[PlatformResult], quiet: bool, insecure: bool = False
+) -> None:
     """Write every `--cache-to` target from the steps this build dispatched.
 
     One set across the whole matrix: two platforms sharing a step share its entry,

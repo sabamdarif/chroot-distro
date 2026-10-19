@@ -330,7 +330,7 @@ goes through it:
 | `helpers/session.py`           | the per-container session refcount                          |
 | `helpers/session_registry.py`  | one JSON file per live session                              |
 | `helpers/mount_manager.py`     | every mount, unmount, `/dev` node and propagation change    |
-| `helpers/mount_targets.py`     | the O_NOFOLLOW walk every mount target resolves through      |
+| `helpers/mount_targets.py`     | the O_NOFOLLOW walk every mount target resolves through     |
 | `commands/login/__init__.py`   | resolve a session, mount for it, enter it                   |
 | `commands/login/bindings.py`   | name the mounts a session needs, mount nothing              |
 | `commands/login/chroot_cmd.py` | `ChrootConfig`, and the argv only `--get-chroot-cmd` prints |
@@ -363,7 +363,7 @@ are the whole interface.
 | `syscalls/_libc.py`             | the one libc handle, `check_syscall`, two backports                 |
 | `syscalls/mount.py`             | binds, filesystem mounts, propagation changes                       |
 | `syscalls/umount.py`            | umount2(2)                                                          |
-| `syscalls/chroot.py`            | three ways to enter a chroot, plus `spawn_detached`                  |
+| `syscalls/chroot.py`            | three ways to enter a chroot, plus `spawn_detached`                 |
 | `syscalls/unshare.py`           | make namespaces, and hold them open                                 |
 | `syscalls/nsenter.py`           | join namespaces with setns(2)                                       |
 | `syscalls/idmap.py`             | idmapped mounts, so no rootfs needs chowning                        |
@@ -464,14 +464,14 @@ the caller (`build_engine/constants.is_host_exec_var`, applied in
 | `helpers/binfmt.py`         | the binfmt_misc entry a foreign-arch guest runs on        |
 | `arch.py`                   | host arch, image arch, and what a rootfs turned out to be |
 | `commands/info.py`          | one report a bug can be filed with                        |
-| `commands/kernel_config.py` | which kernel features work here, probed by trying them     |
+| `commands/kernel_config.py` | which kernel features work here, probed by trying them    |
 
 ### Output and shared utilities
 
-| File                  | Owns                                              |
-| --------------------- | ------------------------------------------------- |
-| `message.py`          | every user-facing line, and the rules they follow |
-| `progress.py`         | bars, spinners, byte counters                     |
+| File          | Owns                                              |
+| ------------- | ------------------------------------------------- |
+| `message.py`  | every user-facing line, and the rules they follow |
+| `progress.py` | bars, spinners, byte counters                     |
 
 ### Adding or changing a command
 

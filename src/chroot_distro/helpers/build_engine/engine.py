@@ -751,8 +751,7 @@ class BuildEngine:
                     h = HANDLERS.get(trig_instr["name"])
                     if h is None:
                         raise BuildError(
-                            f"FROM {base_ref}: ONBUILD trigger uses unsupported "
-                            f"instruction '{trig_instr['name']}'."
+                            f"FROM {base_ref}: ONBUILD trigger uses unsupported instruction '{trig_instr['name']}'."
                         )
                     self._run_with_history(h, trig_instr)
         finally:

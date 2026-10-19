@@ -12,8 +12,8 @@ FROM alpine:latest
 ADD http://127.0.0.1:8099/short /truncated.bin
 DOCKERFILE
 set +e
-sudo chroot-distro build /tmp/short-build -t test-build-short:latest \
-	--progress plain --install-as test-build-short >/tmp/short-build.log 2>&1
+sudo sh -c 'chroot-distro build /tmp/short-build -t test-build-short:latest \
+	--progress plain --install-as test-build-short >/tmp/short-build.log 2>&1' 
 rc=$?
 set -e
 cat /tmp/short-build.log

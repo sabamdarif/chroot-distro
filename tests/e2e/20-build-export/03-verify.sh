@@ -12,7 +12,7 @@ test -f /tmp/export-dir/etc/alpine-release
 echo "PASS: the directory export is the rootfs"
 
 # The tarball lists the same marker at its root, and no OCI layout beside it.
-sudo tar -tf /tmp/export.tar > /tmp/export-list.txt
+sudo tar -tf /tmp/export.tar | tee /tmp/export-list.txt >/dev/null
 grep -qx "export-marker.txt" /tmp/export-list.txt
 if grep -q "oci-layout\|index.json\|manifest.json" /tmp/export-list.txt; then
 	echo "FAIL: the tarball carries OCI layout documents"

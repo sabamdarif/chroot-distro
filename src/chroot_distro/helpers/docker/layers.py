@@ -77,6 +77,7 @@ log = logging.getLogger(__name__)
 # threads more time between lock acquisitions on the shared progress counter.
 _READ_CHUNK = 262144
 
+
 # Transient network and SSL issues, all worth retrying.
 def _probe_blob(url: str, headers: dict[str, str], insecure: bool = False) -> _ProbeResult | None:
     """Send HEAD (or fallback GET Range:0-0) to discover size + Range support.
@@ -382,7 +383,5 @@ def materialize_rootfs(layers: list[dict[str, typing.Any]], rootfs_fd: int) -> N
         digest = layer["digest"]
         layer_path = layer_cache_path(digest)
         if not os.path.isfile(layer_path):
-            raise RuntimeError(
-                f"Layer blob {digest} is missing from the cache; cannot rebuild the rootfs."
-            )
+            raise RuntimeError(f"Layer blob {digest} is missing from the cache; cannot rebuild the rootfs.")
         apply_layer(layer_path, rootfs_fd)

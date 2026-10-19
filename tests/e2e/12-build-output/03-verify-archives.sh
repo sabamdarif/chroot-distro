@@ -10,7 +10,7 @@ here=$(cd "$(dirname "$0")" && pwd)
 
 # Root-owned: the archive is published from a 0600 temporary.
 sudo python3 "$here/verify-oci.py" /tmp/out-build.tar | tee /tmp/oci-report.txt
-sudo python3 "$here/verify-oci.py" /tmp/out-build.tar.gz > /tmp/oci-report-gz.txt
+sudo python3 "$here/verify-oci.py" /tmp/out-build.tar.gz | tee /tmp/oci-report-gz.txt >/dev/null
 cat /tmp/oci-report-gz.txt
 
 # Every blob hashed to its own name, so the tar carries the whole

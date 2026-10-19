@@ -7,8 +7,8 @@
 set -e
 
 set +e
-sudo chroot-distro build /tmp/out-build -t test-build-out:latest \
-  --install-as test-build-out --progress plain > /tmp/taken.log 2>&1
+sudo sh -c 'chroot-distro build /tmp/out-build -t test-build-out:latest \
+  --install-as test-build-out --progress plain >/tmp/taken.log 2>&1'
 rc=$?
 set -e
 cat /tmp/taken.log

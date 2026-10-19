@@ -12,11 +12,11 @@ FROM standalone
 DOCKERFILE
 
 rm -rf /tmp/bctx/exported
-sudo chroot-distro build /tmp/bctx/fromctx \
+sudo sh -c 'chroot-distro build /tmp/bctx/fromctx \
 	-t test-build-context-from:latest \
 	--export type=local,dest=/tmp/bctx/exported \
 	--build-context standalone=/tmp/bctx/standalone \
-	--progress plain >/tmp/bctx/from.log 2>&1
+	--progress plain >/tmp/bctx/from.log 2>&1' 
 
 # The rootfs is the named directory's tree and nothing else: the file is
 # there, and no base image's /etc/alpine-release came along.

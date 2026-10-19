@@ -13,8 +13,8 @@ printf 'FROM alpine:latest\nCOPY nope\033file.txt /nope.txt\n' \
 	>/tmp/escape-build/Dockerfile
 cat -v /tmp/escape-build/Dockerfile
 set +e
-sudo chroot-distro build /tmp/escape-build -t test-build-escape:latest \
-	--progress plain >/tmp/escape-build.log 2>&1
+sudo sh -c 'chroot-distro build /tmp/escape-build -t test-build-escape:latest \
+	--progress plain >/tmp/escape-build.log 2>&1' 
 rc=$?
 set -e
 cat -v /tmp/escape-build.log

@@ -266,6 +266,7 @@ BPF_LD_W_ABS: int = 0x20
 BPF_JMP_JEQ_K: int = 0x15
 BPF_RET_K: int = 0x06
 
+
 def cli_flags_to_bitmask(flags: list[str]) -> int:
     """Convert a list of CLI-style namespace flags to a CLONE_* bitmask.
 

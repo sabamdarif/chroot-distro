@@ -84,6 +84,7 @@ _DENIED_CODES = (401, 403)
 # Redraw the upload bar at most every 256 KiB moved.
 _PROGRESS_THROTTLE_BYTES = 262144
 
+
 # Connection/transport errors worth retrying.
 def _push_chunk_size() -> int:
     raw = os.environ.get("CD_PUSH_CHUNK_SIZE", "").strip()
