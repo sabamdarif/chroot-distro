@@ -21,7 +21,9 @@ file and one mode 0600 locks the host out of its own accounts.
 written. The service re-executes this package as root, so a non-root owner or a
 group or other write bit anywhere along the path to it turns the unit into a
 local privilege escalation; the same walk catches a `pip install --user` tree,
-which root's Python could not import at all.
+which root's Python could not import at all. The interpreter gets the same
+walk, since the units exec it: a root-owned package run under a user-owned
+venv's Python still hands root to whoever owns that binary.
 """
 
 import argparse
@@ -41,6 +43,29 @@ from chroot_distro.exceptions import ChrootDistroError
 from chroot_distro.message import log_info, msg, warn
 
 _DAEMON_CMD = f"{sys.executable} -m chroot_distro daemon"
+
+# A systemd bounding set is inherited by every command the daemon forks, so it
+# has to be the guest's keep set (capabilities.py CAPS_TO_KEEP) plus what the
+# root side needs to run the drop and scan /proc. Narrowing it to the daemon's
+# own syscalls would strip the caps containers rely on.
+_DAEMON_CAPABILITIES = (
+    "CAP_CHOWN",
+    "CAP_DAC_OVERRIDE",
+    "CAP_FOWNER",
+    "CAP_FSETID",
+    "CAP_KILL",
+    "CAP_MKNOD",
+    "CAP_SETGID",
+    "CAP_SETUID",
+    "CAP_SETPCAP",
+    "CAP_NET_BIND_SERVICE",
+    "CAP_NET_RAW",
+    "CAP_AUDIT_WRITE",
+    "CAP_SYS_CHROOT",
+    "CAP_SETFCAP",
+    "CAP_SYS_ADMIN",
+    "CAP_SYS_PTRACE",
+)
 
 _SUPPORTED_INITS = "systemd, OpenRC, runit, dinit, or sysvinit"
 
@@ -72,6 +97,7 @@ Requires=chroot-distro.socket
 Type=exec
 ExecStart=@CMD@
 Delegate=yes
+CapabilityBoundingSet=@CAPS@
 """
 
 _OPENRC_SCRIPT = """#!/sbin/openrc-run
@@ -271,7 +297,10 @@ def _runit_service_dir() -> str | None:
 def _install_service(init: str) -> None:
     if init == "systemd":
         _write(_SYSTEMD_SOCKET_PATH, _SYSTEMD_SOCKET)
-        _write(_SYSTEMD_SERVICE_PATH, _SYSTEMD_SERVICE.replace("@CMD@", _DAEMON_CMD))
+        _write(
+            _SYSTEMD_SERVICE_PATH,
+            _SYSTEMD_SERVICE.replace("@CMD@", _DAEMON_CMD).replace("@CAPS@", " ".join(_DAEMON_CAPABILITIES)),
+        )
         _run_quiet(["systemctl", "daemon-reload"])
         if not _run_quiet(["systemctl", "enable", "--now", "chroot-distro.socket"]):
             warn(
@@ -366,6 +395,20 @@ def command_setup(args: argparse.Namespace) -> None:
             "Reinstall system-wide as root and re-run setup, for example:\n"
             "    sudo pip install chroot-distro\n"
             "    sudo chroot-distro setup"
+        )
+
+    # The units exec this interpreter, so it is held to the same rule as the
+    # package: a root-owned package under a user-owned venv's Python still
+    # lets that user replace what root runs.
+    interpreter_offender = _writable_by_non_root(sys.executable)
+    if interpreter_offender is not None:
+        raise ChrootDistroError(
+            "the Python interpreter the daemon service would exec is writable "
+            "by a non-root user:\n"
+            f"    {sys.executable}\n"
+            f"(offending path component: {interpreter_offender})\n\n"
+            "Install chroot-distro with a system interpreter (not a user-owned "
+            "venv or a Python under $HOME) and re-run setup."
         )
 
     if getattr(args, "uninstall", False):

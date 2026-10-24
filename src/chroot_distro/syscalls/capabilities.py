@@ -93,6 +93,7 @@ _CAP_NAMES: dict[int, str] = {
     13: "CAP_NET_RAW",
     16: "CAP_SYS_MODULE",
     17: "CAP_SYS_RAWIO",
+    18: "CAP_SYS_CHROOT",
     19: "CAP_SYS_PTRACE",
     21: "CAP_SYS_ADMIN",
     22: "CAP_SYS_BOOT",

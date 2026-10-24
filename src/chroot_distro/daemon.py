@@ -25,7 +25,9 @@ The server forks per request and re-execs the CLI as root on the client's own
 stdio, which arrives over the socket via SCM_RIGHTS, so an interactive `login`
 works with no pty of the daemon's own. The client relays terminal signals
 (`_RELAY_SIGNALS` plus SIGWINCH) to that child and exits with the code the server
-reports.
+reports. The child starts with `-I` and a rebuilt environment: the client's cwd
+is where the command ran, not a place to import code from, and nothing but the
+allowlist crosses into a root process.
 
 Under systemd the listening socket is passed in by activation (`LISTEN_FDS`).
 Under OpenRC, runit, dinit or sysvinit the daemon binds it itself and, unless
@@ -104,7 +106,11 @@ def run_client(argv: list[str]) -> int | None:
         conn.close()
         return None
 
-    header = json.dumps({"argv": argv, "cwd": os.getcwd(), "env": _client_env()}).encode()
+    try:
+        cwd = os.getcwd()
+    except OSError:
+        cwd = "/"
+    header = json.dumps({"argv": argv, "cwd": cwd, "env": _client_env()}).encode()
     try:
         socket.send_fds(conn, [header], [0, 1, 2])
     except OSError:
@@ -240,7 +246,10 @@ def _spawn(header: dict, fds: list[int], *, peer_uid: int = 0) -> int:
             os.chdir(header.get("cwd") or "/")
         except OSError:
             os.chdir("/")
-        argv = [sys.executable, "-m", "chroot_distro", *header["argv"]]
+        # -I keeps the client's cwd out of sys.path: without it the cwd lands at
+        # the front of the module search path, and a planted chroot_distro.py in
+        # the directory the user ran from would be imported as root.
+        argv = [sys.executable, "-I", "-m", "chroot_distro", *header["argv"]]
         os.execve(sys.executable, argv, env)
     finally:
         os._exit(127)
