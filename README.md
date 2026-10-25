@@ -1,6 +1,6 @@
 # Chroot-Distro
 
-Chroot-Distro lets you run real Linux systems (Ubuntu, Debian, Alpine, Arch, and more) inside `Termux` (on a rooted Android device) or on any `Regular Linux` machine.
+Chroot-Distro lets you run real Linux systems (Ubuntu, Debian, Alpine, Arch, and more) on any Linux host: a regular Linux machine, or `Termux` on a rooted Android device.
 
 It works in three simple steps: it downloads an image from Docker Hub (or extracts a tarball you give it), unpacks it into a folder, and enters it using the Linux kernel's own `chroot` and `mount` features. Because it talks to the kernel directly, everything runs at native speed. It can also build images from a Dockerfile and push them to a registry.
 
@@ -42,6 +42,15 @@ It works in three simple steps: it downloads an image from Docker Hub (or extrac
 Chroot-Distro needs Python 3.10 or newer. It has no third-party dependencies, apart
 from `backports-zstd` for below Python 3.14, which is what gives the zstd support.
 
+### Install on regular Linux
+
+```sh
+sudo apt install python3-pip   # Debian/Ubuntu example
+sudo pip install chroot-distro --break-system-packages --root-user-action=ignore
+```
+
+Installing system-wide with `sudo` lets you turn on [passwordless](#passwordless-setup-linux-only) mode. A plain `pip install` works too: every command then elevates itself with `sudo`, `doas`, `pkexec` or `su` as it runs.
+
 ### Install on Termux (Android)
 
 1. Root your device (Magisk, KernelSU, APatch, or similar).
@@ -53,16 +62,7 @@ pkg install python
 pip install chroot-distro
 ```
 
-No `sudo` or `tsu` package is needed.
-
-### Install on regular Linux
-
-```sh
-sudo apt install python3-pip   # Debian/Ubuntu example
-sudo pip install chroot-distro --break-system-packages --root-user-action=ignore
-```
-
-Install with `sudo` (system-wide), soy you can use it in a [passwordless](#passwordless-setup-linux-only) mode. If you don't want it then just install it normally.
+No `sudo` or `tsu` package is needed: the root manager's `su` is used directly.
 
 ### Passwordless setup (Linux only)
 
@@ -111,7 +111,7 @@ Create a container. `IMAGE` can be:
 | Option                      | Description                                                                                                                                   |
 | --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
 | `-n`, `--name NAME`         | Give the container a custom name. Default is the image name. Needed to install the same image twice. `--override-alias` is an accepted alias. |
-| `-a`, `--architecture ARCH` | Install for a different CPU type (`aarch64`, `x86_64`, `linux/arm64`, ...). Default is your device's CPU.                                     |
+| `-a`, `--architecture ARCH` | Install for a different CPU type (`aarch64`, `x86_64`, `linux/arm64`, ...). Default is your host's CPU.                                       |
 | `--allow-insecure`          | Skip TLS certificate checks when downloading. Only for registries with self-signed certificates.                                              |
 | `-q`, `--quiet`             | Only show errors.                                                                                                                             |
 
@@ -164,7 +164,7 @@ Every mode mounts fresh pseudo-filesystems instead of binding the host's. `/dev`
 
 Several sessions of one container share its options. A session that joins a container someone is already logged into gets that container's `--bind` mounts, `--shared-*` folders and `-e`/`--env` values, and whatever it asks for on top is added to the running container, so a second `login` no longer needs an `unmount` to bring a folder in. Two exceptions: a `--bind` whose destination the running container already fills from another source is ignored (with a warning), and `--isolated` shares nothing, so asking for it while a normal session is running is still an error. `CD_USE_NS` cannot be turned on for a container that is already running either, and a mismatch there is a warning.
 
-GPU acceleration works on regular Linux with no flag. AMD and Intel render nodes (`/dev/dri/*`) are bound into the fresh `/dev` individually, so the guest renders with its own Mesa packages; a host NVIDIA driver's devices, libraries, ICD descriptors and tools are bound in and switched on automatically.
+GPU acceleration needs no flag on regular Linux. AMD and Intel render nodes (`/dev/dri/*`) are bound into the fresh `/dev` individually, so the guest renders with its own Mesa packages; a host NVIDIA driver's devices, libraries, ICD descriptors and tools are bound in and switched on automatically. On Termux `login` binds no GPU nodes.
 
 ### run
 
@@ -386,7 +386,7 @@ chroot-distro info
 Aliases: version-info, nf
 ```
 
-Print a diagnostics report: versions, device details, host capabilities, kernel support, installed containers, and basic health checks. Attach it when filing a bug report.
+Print a diagnostics report: versions, host details, capabilities, kernel support, installed containers, and basic health checks. Attach it when filing a bug report.
 
 It always runs as root, and stops with an error when root cannot be obtained. The kernel support section is probed by trying each feature, not read from a kernel build config, so it reports what the running kernel does.
 
@@ -415,7 +415,7 @@ Build an image from a Dockerfile, like `docker build` but without Docker. `PATH`
 | `-t`, `--tag REF`                 | Name the image (like `myapp:1.0`). Can be given more than once.                                                                                                                        |
 | `--build-arg K=V`                 | Set a build-time `ARG`. Can be given more than once.                                                                                                                                   |
 | `--build-context name=VALUE`      | Give a name to another source the Dockerfile can use. `VALUE` is a local folder or an image reference. See [Named build contexts](#named-build-contexts). Can be given more than once. |
-| `-a`, `--architecture ARCH`       | Build for a different CPU type. Default is your device's CPU. The one-platform spelling of `--platform`.                                                                               |
+| `-a`, `--architecture ARCH`       | Build for a different CPU type. Default is your host's CPU. The one-platform spelling of `--platform`.                                                                                 |
 | `--platform LIST`                 | Build one image per platform, comma-separated (`linux/amd64,linux/arm64`). Can be given more than once.                                                                                |
 | `--target STAGE`                  | Stop at a named stage of a multi-stage build.                                                                                                                                          |
 | `-o`, `--output FILE`             | Also save the image as an OCI tarball (`.oci.tar`, `.oci.tar.gz`, `.oci.tar.xz`). Can be given more than once.                                                                         |
@@ -491,7 +491,7 @@ Where those images end up:
 
 - `--output` writes one archive holding an OCI image index over every platform, sharing the layers they have in common. `docker load` reads the first platform you asked for out of it, since its own format cannot hold more than one; `chroot-distro install FILE` picks the platform matching your CPU.
 - Every `--tag` records every platform in the local cache, so `chroot-distro install myapp:1.0` installs the one for your CPU and `chroot-distro install myapp:1.0 -a arm64` the other. `chroot-distro push` uploads one of them per run, chosen the same way.
-- `--install-as` installs one container, so it takes the platform your device can run. A set of platforms with nothing your device runs is refused before the build starts.
+- `--install-as` installs one container, so it takes the platform your host can run. A set of platforms with nothing your host runs is refused before the build starts.
 
 ```sh
 chroot-distro build -t myapp:1.0 --install-as myapp .
@@ -543,7 +543,7 @@ Upload an image you built with `build -t` to Docker Hub or another registry. Lay
 
 | Option                      | Description                                                                     |
 | --------------------------- | ------------------------------------------------------------------------------- |
-| `-a`, `--architecture ARCH` | Push the image built for that CPU type. Default is your device's CPU.           |
+| `-a`, `--architecture ARCH` | Push the image built for that CPU type. Default is your host's CPU.             |
 | `--allow-insecure`          | Skip TLS certificate checks. Only for registries with self-signed certificates. |
 | `-q`, `--quiet`             | Only show errors.                                                               |
 
