@@ -268,6 +268,7 @@ def _list(sub):
     vq = p.add_mutually_exclusive_group()
     vq.add_argument("-v", "--verbose", action="store_true")
     vq.add_argument("-q", "--quiet", action="store_true")
+    vq.add_argument("--json", action="store_true")
 
 
 def _backup(sub):
@@ -506,7 +507,9 @@ def _kill(sub):
 def _ps(sub):
     p = sub.add_parser("ps", add_help=False)
     p._cd_command = "ps"
-    p.add_argument("-q", "--quiet", action="store_true")
+    qj = p.add_mutually_exclusive_group()
+    qj.add_argument("-q", "--quiet", action="store_true")
+    qj.add_argument("--json", action="store_true")
     p.add_argument("-h", "--help", action="store_true")
 
 
@@ -514,6 +517,7 @@ def _diff(sub):
     p = sub.add_parser("diff", add_help=False)
     p._cd_command = "diff"
     p.add_argument("container_name", nargs="?", default=None)
+    p.add_argument("--json", action="store_true")
     p.add_argument("-h", "--help", action="store_true")
 
 
@@ -545,4 +549,5 @@ def _daemon(sub):
 def _info(sub):
     p = sub.add_parser("info", aliases=["version-info", "nf"], add_help=False)
     p._cd_command = "info"
+    p.add_argument("--json", action="store_true")
     p.add_argument("-h", "--help", action="store_true")

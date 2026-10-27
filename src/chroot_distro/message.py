@@ -11,6 +11,12 @@ password prompt or a full-screen UI, and a progress bar drawn over one loses the
 prompt. `termios` is imported behind a guard because the test suite runs where
 there is none.
 
+`emit_json` is the one exception to the stderr rule, since a `--json` document is
+the command's own output rather than a line about it. It writes to stdout and
+skips the TTY gate for the same reason: a caller parsing the document never sees
+the prompt the gate protects. Both envelopes it builds carry `JSON_SCHEMA_VERSION`,
+so every document a consumer can receive says which schema it speaks.
+
 Colours are resolved once at import (`C`), off a TTY check and `CD_FORCE_NO_COLORS`,
 so no caller has to ask; the tables are keyed by name so `C['BLUE']` is either the
 escape or the empty string. Quiet mode splits the two log levels: `log_info` goes
@@ -23,6 +29,7 @@ it, never the assembled message: the colour codes above are control characters b
 definition.
 """
 
+import json
 import os
 import sys
 from typing import Any
@@ -132,6 +139,29 @@ def set_quiet(enabled: bool) -> None:
 def is_quiet() -> bool:
     """Return True when quiet mode has been enabled for this process."""
     return _quiet
+
+
+JSON_SCHEMA_VERSION = 1
+"""Bumped when a `--json` key is renamed, removed or changes type.
+
+Adding a key is not a bump: a consumer ignores keys it does not know.
+"""
+
+
+def emit_json(command: str, payload: dict) -> None:
+    """Write one `--json` document to stdout.
+
+    The envelope is built here rather than by each command, so every document
+    carries `schema` and `command`, including the error ones.
+    """
+    document = {"schema": JSON_SCHEMA_VERSION, "command": command, **payload}
+    sys.stdout.write(json.dumps(document, sort_keys=True) + "\n")
+    sys.stdout.flush()
+
+
+def emit_json_error(command: str, text: str) -> None:
+    """Write an error document to stdout, for a command running under --json."""
+    emit_json(command, {"error": text})
 
 
 def msg(*args):

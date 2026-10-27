@@ -27,6 +27,12 @@ base distribution and no shell at all, so the report says which containers those
 are and reads their arch out of the manifest instead of calling them broken. A
 directory left over from an interrupted install is not listed as an image either,
 which is what `paths.is_install_incomplete` settles.
+
+Gathering and rendering are separate because `--json` needs the same report as
+data: `_gather_program_info` and `_gather_kernel_support` run the reads and the
+probes once, and both the text renderers and the document are built from what
+they return. The kernel probes in particular mount and unmount a scratch devpts,
+so they must not run twice.
 """
 
 import ctypes
@@ -35,7 +41,7 @@ import os
 import platform
 import shutil
 import sys
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 
 from chroot_distro.arch import detect_installed_arch, get_device_cpu_arch, needs_emulation, supports_32bit
 from chroot_distro.commands.kernel_config import (
@@ -65,7 +71,7 @@ from chroot_distro.constants import (
 )
 from chroot_distro.helpers.binfmt import BINFMT_DIR, covered_arches
 from chroot_distro.locking import container_busy_status
-from chroot_distro.message import C, msg
+from chroot_distro.message import C, emit_json, msg
 from chroot_distro.paths import container_dir, container_manifest, container_rootfs
 from chroot_distro.progress import fmt_size, loading_line
 
@@ -596,19 +602,25 @@ def _render_section(title: str) -> None:
     msg()
 
 
-def _render_basic() -> None:
-    label_w = 18
-    _render_section(f"{CANONICAL_PROGRAM_NAME}")
-    msg(_kv("Program", PROGRAM_NAME, label_w))
-    msg(_kv("Version", PROGRAM_VERSION, label_w))
-    msg(_kv("Python", platform.python_version(), label_w))
+_PROGRAM_FIELD_LABELS = (
+    ("program", "Program"),
+    ("version", "Version"),
+    ("python", "Python"),
+    ("executable", "Executable"),
+    ("module_path", "Module path"),
+    ("data_location", "Data location"),
+    ("cache_location", "Cache location"),
+    ("layer_cache", "OCI layer cache"),
+)
 
+
+def _gather_program_info() -> dict[str, str]:
+    """The program half of the report, gathered once for both renderers."""
     exe_path = shutil.which("chroot-distro")
     if not exe_path and sys.argv and os.path.exists(sys.argv[0]):
         exe_path = os.path.abspath(sys.argv[0])
     if not exe_path:
         exe_path = "unknown"
-    msg(_kv("Executable", exe_path, label_w))
 
     module_dir = "unknown"
     try:
@@ -618,11 +630,34 @@ def _render_basic() -> None:
             module_dir = os.path.dirname(os.path.dirname(os.path.abspath(chroot_distro.__file__)))
     except Exception:
         pass
-    msg(_kv("Module path", module_dir, label_w))
 
-    msg(_kv("Data location", RUNTIME_DIR, label_w))
-    msg(_kv("Cache location", BASE_CACHE_DIR, label_w))
-    msg(_kv("OCI layer cache", LAYER_CACHE_DIR, label_w))
+    return {
+        "program": PROGRAM_NAME,
+        "version": PROGRAM_VERSION,
+        "python": platform.python_version(),
+        "executable": exe_path,
+        "module_path": module_dir,
+        "data_location": RUNTIME_DIR,
+        "cache_location": BASE_CACHE_DIR,
+        "layer_cache": LAYER_CACHE_DIR,
+    }
+
+
+def _render_basic(program: dict[str, str]) -> None:
+    label_w = 18
+    _render_section(f"{CANONICAL_PROGRAM_NAME}")
+    for key, label in _PROGRAM_FIELD_LABELS:
+        msg(_kv(label, program[key], label_w))
+
+
+def _host_document(host: _HostInfo, host_arch: str) -> dict:
+    """The HOST section as a document; `fields` becomes one object, not pairs."""
+    return {
+        "type": host.kind,
+        "arch": host_arch,
+        "supports_32bit": supports_32bit() if host_arch in ("aarch64", "x86_64") else None,
+        "fields": dict(host.fields),
+    }
 
 
 def _render_host(host: _HostInfo, host_arch: str) -> None:
@@ -726,7 +761,59 @@ def _feature_status(feature: KernelFeature, probe: str) -> tuple[str, str, str, 
     return "\u2022", "CYAN", "unknown", False
 
 
-def _render_kernel_support() -> None:
+@dataclass(frozen=True)
+class _ProbedFeature:
+    """One feature after its probe ran, so a renderer never probes again."""
+
+    key: str
+    label: str
+    purpose: str
+    required: bool
+    probe: str
+    # The human renderer's glyph and colour, resolved once with the state so
+    # `--json` never has to re-derive them.
+    glyph: str
+    color: str
+    state: str
+    counts_missing: bool
+
+
+@dataclass(frozen=True)
+class _ProbedGroup:
+    title: str
+    features: tuple[_ProbedFeature, ...]
+
+
+def _gather_kernel_support() -> list[_ProbedGroup]:
+    """Probe every kernel feature once, for both the report and `--json`.
+
+    Probing is the expensive and root-requiring half (a devpts probe mounts and
+    unmounts a scratch instance), so it happens here and nowhere else.
+    """
+    groups: list[_ProbedGroup] = []
+    for group in KERNEL_FEATURE_GROUPS:
+        features = []
+        for feature in group.features:
+            probe = probe_feature(feature.key)
+            glyph, color, state, counts_missing = _feature_status(feature, probe)
+            features.append(
+                _ProbedFeature(
+                    key=feature.key,
+                    label=feature.label,
+                    purpose=feature.purpose,
+                    required=feature.required,
+                    probe=probe,
+                    glyph=glyph,
+                    color=color,
+                    state=state,
+                    counts_missing=counts_missing,
+                )
+            )
+        groups.append(_ProbedGroup(title=group.title, features=tuple(features)))
+    return groups
+
+
+def _render_kernel_support(groups: list[_ProbedGroup]) -> None:
     """Show which kernel features chroot-distro relies on work on this host.
 
     Every line is a probe against the running kernel, so the section reads the
@@ -735,19 +822,17 @@ def _render_kernel_support() -> None:
     _render_section("KERNEL SUPPORT")
 
     missing_required: list[str] = []
-    for group in KERNEL_FEATURE_GROUPS:
+    for group in groups:
         msg()
         msg(f"  {C['WHITE']}{group.title}{C['RST']}")
         label_w = max(len(feature.label) for feature in group.features) + 1
         for feature in group.features:
-            probe = probe_feature(feature.key)
-            glyph, color, state, counts_missing = _feature_status(feature, probe)
-            if counts_missing:
+            if feature.counts_missing:
                 missing_required.append(feature.label)
             msg(
-                f"    {C[color]}{glyph}{C['RST']} "
+                f"    {C[feature.color]}{feature.glyph}{C['RST']} "
                 f"{C['CYAN']}{feature.label + ':':<{label_w}}{C['RST']} "
-                f"{C['WHITE']}{state}{C['RST']} "
+                f"{C['WHITE']}{feature.state}{C['RST']} "
                 f"{C['CYAN']}({feature.purpose}){C['RST']}"
             )
 
@@ -792,15 +877,52 @@ def command_info(args) -> None:
     Read-only. Runs as root, by the elevation `cli.py` performs before dispatch.
     """
     host_arch = get_device_cpu_arch()
+    program = _gather_program_info()
     host = _gather_host_info()
     images = _gather_images(host_arch)
     capabilities = _gather_capabilities(images, host_arch)
+    kernel = _gather_kernel_support()
     running = _running_summary(images)
 
-    _render_basic()
+    if getattr(args, "json", False):
+        emit_json(
+            "info",
+            {
+                "program": program,
+                "host": _host_document(host, host_arch),
+                "capabilities": [
+                    {"label": cap.label, "value": cap.value, "level": cap.level} for cap in capabilities
+                ],
+                "kernel": [
+                    {
+                        "title": group.title,
+                        "features": [
+                            {
+                                "key": f.key,
+                                "label": f.label,
+                                "purpose": f.purpose,
+                                "required": f.required,
+                                "probe": f.probe,
+                                "state": f.state,
+                            }
+                            for f in group.features
+                        ],
+                    }
+                    for group in kernel
+                ],
+                "containers": [asdict(img) for img in images],
+                "running": running,
+                "analysis": [
+                    {"name": img.name, "findings": img.findings} for img in images if img.findings
+                ],
+            },
+        )
+        return
+
+    _render_basic(program)
     _render_host(host, host_arch)
     _render_capabilities(capabilities)
-    _render_kernel_support()
+    _render_kernel_support(kernel)
     _render_images(images)
     if images:
         msg()

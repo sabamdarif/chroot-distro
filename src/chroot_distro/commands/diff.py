@@ -12,12 +12,15 @@ than shown a diff against nothing.
 never image content, so the output is the user's own changes, as `docker diff`
 reads. Only a shared `ContainerLock` is taken: this reads, and the snapshot is of
 whatever the rootfs holds while it runs.
+
+Every failure raises a `ChrootDistroError` rather than exiting here, so `cli.main`
+turns it into both the stderr line and, under `--json`, the error document.
 """
 
 import json
 import os
-import sys
 
+from chroot_distro.exceptions import ChrootDistroError, ContainerNotFoundError
 from chroot_distro.helpers.docker import layer_cache_path
 from chroot_distro.helpers.layer_diff import (
     baseline_cache_is_valid,
@@ -26,7 +29,7 @@ from chroot_distro.helpers.layer_diff import (
     snapshot,
 )
 from chroot_distro.locking import ContainerLock
-from chroot_distro.message import C, crit_error, msg
+from chroot_distro.message import C, emit_json, msg
 from chroot_distro.names import require_valid_name
 from chroot_distro.paths import container_dir, container_manifest, container_rootfs
 from chroot_distro.progress import loading_line
@@ -50,6 +53,11 @@ def _load_layer_digests(manifest_path: str) -> list[str]:
     return [layer.get("digest", "") for layer in layers if layer.get("digest")]
 
 
+def _json_paths(paths: list[str]) -> list[str]:
+    """Absolute, sorted, exclusion-free paths, matching what the human rows show."""
+    return [f"/{p}" for p in sorted(paths) if not _is_excluded(p)]
+
+
 def command_diff(args) -> None:
     """Show files/directories changed in a container relative to its image."""
     container_name = args.container_name
@@ -57,27 +65,23 @@ def command_diff(args) -> None:
 
     rootfs = container_rootfs(container_name)
     if not os.path.isdir(rootfs):
-        crit_error(f"container '{container_name}' is not installed.")
-        sys.exit(1)
+        raise ContainerNotFoundError(f"container '{container_name}' is not installed.")
 
     manifest_path = container_manifest(container_name)
     if not os.path.isfile(manifest_path):
-        crit_error(
+        raise ChrootDistroError(
             f"container '{container_name}' has no image manifest; "
             f"diff is only available for containers installed from an OCI/Docker image."
         )
-        sys.exit(1)
 
     with ContainerLock(container_name, exclusive=False, command="diff"):
         try:
             digests = _load_layer_digests(manifest_path)
         except (OSError, ValueError) as exc:
-            crit_error(f"failed to read manifest for '{container_name}': {exc}")
-            sys.exit(1)
+            raise ChrootDistroError(f"failed to read manifest for '{container_name}': {exc}") from exc
 
         if not digests:
-            crit_error(f"container '{container_name}' manifest lists no image layers.")
-            sys.exit(1)
+            raise ChrootDistroError(f"container '{container_name}' manifest lists no image layers.")
 
         baseline_cache = os.path.join(container_dir(container_name), "diff_baseline.json")
 
@@ -89,18 +93,29 @@ def command_diff(args) -> None:
         if not baseline_cache_is_valid(baseline_cache, digests):
             missing = [d for d, p in zip(digests, layer_paths, strict=False) if not os.path.isfile(p)]
             if missing:
-                crit_error(
+                raise ChrootDistroError(
                     f"cannot diff '{container_name}': {len(missing)} image layer(s) are no longer "
                     f"in the cache and no baseline has been recorded yet. "
                     f"Run 'chroot-distro diff' before 'clear-cache', or reinstall to rebuild the cache."
                 )
-                sys.exit(1)
         with loading_line("Reconstructing image baseline..."):
             baseline = cached_baseline_from_layers(layer_paths, digests, baseline_cache)
         with loading_line("Scanning container filesystem..."):
             live = snapshot(rootfs)
 
     added, modified, deleted = diff_against_baseline(baseline, live)
+
+    if getattr(args, "json", False):
+        emit_json(
+            "diff",
+            {
+                "container": container_name,
+                "added": _json_paths(added),
+                "modified": _json_paths(modified),
+                "deleted": _json_paths(deleted),
+            },
+        )
+        return
 
     rows: list[tuple[str, str, str]] = []
     for path in modified:

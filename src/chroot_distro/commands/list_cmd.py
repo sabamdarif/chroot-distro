@@ -16,6 +16,11 @@ at a filesystem boundary, so a mount under the rootfs is not counted into the
 container's own size. `_ensure_manifest_readable` widens a manifest a rooted install
 left mode 0600, because the unelevated Termux run cannot otherwise read the image
 reference out of it, and nothing in that file is secret.
+
+`_read_manifest_info` opens the manifest once and both the table row and the
+`--json` document read that one record, so the SOURCE column and the JSON `source`
+field cannot drift. `--json` always carries the detail `-v` prints, since a
+consumer should not have to know which flag adds a field.
 """
 
 import errno
@@ -26,9 +31,29 @@ from dataclasses import dataclass
 
 from chroot_distro.constants import CONTAINERS_DIR, PROGRAM_NAME
 from chroot_distro.locking import container_busy_status
-from chroot_distro.message import C, msg, warn
+from chroot_distro.message import C, emit_json, msg, warn
 from chroot_distro.paths import container_manifest, container_rootfs, is_install_incomplete
 from chroot_distro.progress import fmt_size, loading_line
+
+
+@dataclass(frozen=True)
+class _ManifestInfo:
+    """What `manifest.json` says about one container, read once per row.
+
+    `source` is the display string `list`'s SOURCE column shows, kept here so
+    the column and the JSON field cannot disagree: `"ref (arch)"` for an image
+    reference, `"local archive"` when the manifest names none, `"unknown"` when
+    it could not be parsed.
+    """
+
+    source: str = "local archive"
+    image_ref: str = ""
+    arch: str = ""
+    source_url: str = ""
+    image_type: str = ""
+    user: str = ""
+    workdir: str = ""
+    ports: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -37,15 +62,8 @@ class _ContainerRow:
     size: str
     source: str
     status: str
-
-
-@dataclass(frozen=True)
-class _VerboseInfo:
-    source_url: str = ""
-    image_type: str = ""
-    default_user: str = ""
-    workdir: str = ""
-    exposed_ports: str = ""
+    size_bytes: int = 0
+    manifest: _ManifestInfo = _ManifestInfo()
 
 
 def _iter_container_names() -> tuple[list[str], list[str]]:
@@ -128,75 +146,74 @@ def _ensure_manifest_readable(manifest_path: str) -> None:
         warn(f"Failed to change permissions on manifest '{manifest_path}': {exc}")
 
 
-def _read_verbose_info(name: str) -> _VerboseInfo:
-    """Extract detailed image config fields from manifest.json."""
+def _read_manifest_info(name: str) -> _ManifestInfo:
+    """Read the manifest once and resolve both the display source and the fields.
+
+    A manifest that cannot be read is not a failure of `list`: the container is
+    still installed, so the row reports what it knows and the reason goes to a
+    warning.
+    """
     manifest_path = container_manifest(name)
     if not os.path.isfile(manifest_path):
-        return _VerboseInfo()
-    _ensure_manifest_readable(manifest_path)
-    try:
-        with open(manifest_path, encoding="utf-8") as fh:
-            data = json.loads(fh.read())
-    except (OSError, json.JSONDecodeError) as exc:
-        warn(f"Failed to read or parse manifest '{manifest_path}': {exc}")
-        return _VerboseInfo()
-    cfg = (data.get("image_config") or {}).get("config") or {}
-    labels = cfg.get("Labels") or {}
-    source_url = labels.get("org.opencontainers.image.source", "")
-    image_type = labels.get("IMAGE_TYPE", "")
-    default_user = cfg.get("User", "")
-    workdir = cfg.get("WorkingDir", "")
-    ports_dict = cfg.get("ExposedPorts") or {}
-    exposed_ports = ", ".join(sorted(ports_dict.keys())) if ports_dict else ""
-    return _VerboseInfo(
-        source_url=source_url,
-        image_type=image_type,
-        default_user=default_user,
-        workdir=workdir,
-        exposed_ports=exposed_ports,
-    )
-
-
-def _read_image_source(name: str) -> str:
-    manifest_path = container_manifest(name)
-    if not os.path.isfile(manifest_path):
-        return "local archive"
+        return _ManifestInfo()
     _ensure_manifest_readable(manifest_path)
     try:
         with open(manifest_path, encoding="utf-8") as fh:
             raw = fh.read()
-        if not raw.strip():
-            return "local archive"
-        data: dict[str, typing.Any] = json.loads(raw)
     except OSError as exc:
         if exc.errno in (errno.EACCES, errno.EPERM):
-            return name
+            return _ManifestInfo(source=name)
         warn(f"Failed to read manifest '{manifest_path}': {exc}")
-        return "unknown"
+        return _ManifestInfo(source="unknown")
+    try:
+        data: dict[str, typing.Any] = json.loads(raw) if raw.strip() else {}
     except json.JSONDecodeError as exc:
         warn(f"Failed to parse manifest '{manifest_path}': {exc}")
-        return "unknown"
-    image_ref = data.get("image_ref") or ""
+        return _ManifestInfo(source="unknown")
+
+    cfg = (data.get("image_config") or {}).get("config") or {}
+    labels = cfg.get("Labels") or {}
+    image_ref = str(data.get("image_ref") or "")
+    arch = str(data.get("arch") or "")
     if not image_ref:
-        return "local archive"
-    arch = data.get("arch") or ""
-    if arch:
-        return f"{image_ref} ({arch})"
-    return str(image_ref)
+        source = "local archive"
+    elif arch:
+        source = f"{image_ref} ({arch})"
+    else:
+        source = image_ref
+    return _ManifestInfo(
+        source=source,
+        image_ref=image_ref,
+        arch=arch,
+        source_url=labels.get("org.opencontainers.image.source", ""),
+        image_type=labels.get("IMAGE_TYPE", ""),
+        user=cfg.get("User", ""),
+        workdir=cfg.get("WorkingDir", ""),
+        ports=tuple(sorted((cfg.get("ExposedPorts") or {}).keys())),
+    )
+
+
+def _read_image_source(name: str) -> str:
+    return _read_manifest_info(name).source
 
 
 def _container_row(name: str) -> _ContainerRow:
     rootfs = container_rootfs(name)
+    size_bytes = 0
     try:
-        size = fmt_size(_rootfs_size_bytes(rootfs))
+        size_bytes = _rootfs_size_bytes(rootfs)
+        size = fmt_size(size_bytes)
     except OSError as exc:
         warn(f"Failed to calculate rootfs size for '{name}': {exc}")
         size = "?"
+    manifest = _read_manifest_info(name)
     return _ContainerRow(
         name=name,
         size=size,
-        source=_read_image_source(name),
+        source=manifest.source,
         status=container_busy_status(name),
+        size_bytes=size_bytes,
+        manifest=manifest,
     )
 
 
@@ -220,15 +237,41 @@ def _format_table(rows: list[_ContainerRow]) -> list[str]:
     return lines
 
 
+def _row_document(row: _ContainerRow) -> dict[str, typing.Any]:
+    """One container as `--json` shows it: numbers stay numbers, flags stay booleans."""
+    m = row.manifest
+    return {
+        "name": row.name,
+        "size": row.size,
+        "size_bytes": row.size_bytes,
+        "status": row.status,
+        "in_use": row.status.startswith("in use"),
+        "source": row.source,
+        "image_ref": m.image_ref or None,
+        "arch": m.arch or None,
+        "source_url": m.source_url or None,
+        "image_type": m.image_type or None,
+        "user": m.user or None,
+        "workdir": m.workdir or None,
+        "ports": list(m.ports),
+    }
+
+
 def command_list(args) -> None:
     """List every container directory that contains a rootfs/."""
     quiet = getattr(args, "quiet", False)
     verbose = getattr(args, "verbose", False)
+    json_mode = getattr(args, "json", False)
     entries, incomplete = _iter_container_names()
 
     if quiet:
         for name in entries:
             print(name)
+        return
+
+    if json_mode:
+        documents = [_row_document(_container_row(name)) for name in entries]
+        emit_json("list", {"containers": documents, "incomplete": incomplete})
         return
 
     msg()
@@ -238,14 +281,11 @@ def command_list(args) -> None:
         msg(f"{C['CYAN']}Install one with: {C['GREEN']}{PROGRAM_NAME} install ubuntu:25.10{C['RST']}")
     else:
         rows: list[_ContainerRow] = []
-        verbose_infos: dict[str, _VerboseInfo] = {}
         total = len(entries)
         with loading_line("Gathering container info...") as update:
             for index, name in enumerate(entries, start=1):
                 update(f"Scanning {name} ({index}/{total})...")
                 rows.append(_container_row(name))
-                if verbose:
-                    verbose_infos[name] = _read_verbose_info(name)
         msg(f"{C['CYAN']}Installed containers:{C['RST']}")
         msg()
         for line in _format_table(rows):
@@ -253,16 +293,14 @@ def command_list(args) -> None:
         if verbose:
             msg()
             for row in rows:
-                info = verbose_infos.get(row.name)
-                if not info:
-                    continue
+                info = row.manifest
                 has_detail = any(
                     [
                         info.source_url,
                         info.image_type,
-                        info.default_user,
+                        info.user,
                         info.workdir,
-                        info.exposed_ports,
+                        info.ports,
                     ]
                 )
                 if not has_detail:
@@ -272,12 +310,12 @@ def command_list(args) -> None:
                     msg(f"    {C['CYAN']}Source:{C['RST']}  {info.source_url}")
                 if info.image_type:
                     msg(f"    {C['CYAN']}Type:{C['RST']}    {info.image_type}")
-                if info.default_user:
-                    msg(f"    {C['CYAN']}User:{C['RST']}    {info.default_user}")
+                if info.user:
+                    msg(f"    {C['CYAN']}User:{C['RST']}    {info.user}")
                 if info.workdir:
                     msg(f"    {C['CYAN']}WorkDir:{C['RST']} {info.workdir}")
-                if info.exposed_ports:
-                    msg(f"    {C['CYAN']}Ports:{C['RST']}   {info.exposed_ports}")
+                if info.ports:
+                    msg(f"    {C['CYAN']}Ports:{C['RST']}   {', '.join(info.ports)}")
         msg()
         msg(f"{C['CYAN']}Log in with: {C['GREEN']}{PROGRAM_NAME} login <name>{C['RST']}")
     if incomplete:

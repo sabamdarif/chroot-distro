@@ -130,7 +130,7 @@ def test_render_kernel_support_reports_missing_required():
         patch.object(info, "probe_feature", side_effect=fake_probe),
         patch.object(info, "msg", side_effect=_capture(lines)),
     ):
-        info._render_kernel_support()
+        info._render_kernel_support(info._gather_kernel_support())
     blob = "\n".join(lines)
     assert "PID namespace" in blob
     assert "cannot work fully without" in blob
@@ -144,7 +144,7 @@ def test_render_kernel_support_unknown_does_not_block():
         patch.object(info, "probe_feature", return_value=kc.PROBE_UNKNOWN),
         patch.object(info, "msg", side_effect=_capture(lines)),
     ):
-        info._render_kernel_support()
+        info._render_kernel_support(info._gather_kernel_support())
     blob = "\n".join(lines)
     assert "cannot work fully without" not in blob
     assert "unknown" in blob
@@ -157,7 +157,7 @@ def test_render_kernel_support_all_present_is_ok():
         patch.object(info, "probe_feature", return_value=kc.PROBE_PRESENT),
         patch.object(info, "msg", side_effect=_capture(lines)),
     ):
-        info._render_kernel_support()
+        info._render_kernel_support(info._gather_kernel_support())
     assert "All kernel features required for namespace isolation are available" in "\n".join(lines)
 
 
@@ -167,7 +167,7 @@ def test_render_kernel_support_states_the_devpts_shape():
         patch.object(info, "probe_feature", return_value=kc.PROBE_ABSENT),
         patch.object(info, "msg", side_effect=_capture(lines)),
     ):
-        info._render_kernel_support()
+        info._render_kernel_support(info._gather_kernel_support())
     blob = "\n".join(lines)
     assert "single shared instance" in blob
     # Optional, so it must not be listed as blocking isolation.

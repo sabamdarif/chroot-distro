@@ -12,6 +12,7 @@ from unittest.mock import patch
 import pytest
 
 from chroot_distro import constants
+from chroot_distro.commands import ps as ps_mod
 from chroot_distro.commands.ps import _fmt_command, _fmt_uptime, command_ps
 from chroot_distro.helpers import session_registry
 
@@ -368,3 +369,41 @@ def test_register_session_flock_fails(tmp_path):
         assert res is None
         mock_warn.assert_called_once()
         assert "Failed to flock session file" in mock_warn.call_args[0][0]
+
+
+def test_command_ps_json_carries_raw_values(capsys):
+    fd = _make_live(
+        424242,
+        "ubuntu",
+        kind="login",
+        command=["/bin/bash", "-l"],
+        user="alice",
+        detached=True,
+    )
+    try:
+        command_ps(SimpleNamespace(quiet=False, json=True))
+        document = json.loads(capsys.readouterr().out)
+    finally:
+        fd.close()
+
+    session = document["sessions"][0]
+    assert session["pid"] == 424242
+    assert session["container"] == "ubuntu"
+    # No `*` suffix and no formatted uptime: a consumer gets the raw values.
+    assert session["kind"] == "login"
+    assert session["detached"] is True
+    assert isinstance(session["uptime_seconds"], float)
+    assert session["command"] == ["/bin/bash", "-l"]
+    assert document["untracked"] == []
+
+
+def test_command_ps_json_lists_orphans_per_container(capsys):
+    with (
+        patch.object(ps_mod, "active_sessions", return_value=[]),
+        patch.object(ps_mod, "containers_with_active_pids", return_value={"debian": [5555]}),
+        patch.object(ps_mod, "has_tracked_ancestor", return_value=False),
+    ):
+        command_ps(SimpleNamespace(quiet=False, json=True))
+    document = json.loads(capsys.readouterr().out)
+    assert document["sessions"] == []
+    assert document["untracked"] == [{"container": "debian", "pids": [5555]}]

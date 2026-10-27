@@ -11,7 +11,10 @@ processes and never gets such a row, and a process descending from a tracked PID
 dropped too, since a double-forked child reparented to init is not an orphan.
 
 `--quiet` prints bare PIDs to stdout so `kill` or `xargs` can consume them; the
-table goes to stderr, like every other human-facing output here.
+table goes to stderr, like every other human-facing output here. `--json` is the
+third form: one document on stdout, built from the registry records themselves
+rather than from the table cells, so uptime stays a number of seconds and
+`detached` stays a boolean instead of the `*` the table appends.
 """
 
 from __future__ import annotations
@@ -23,7 +26,7 @@ import time
 from chroot_distro.constants import PROGRAM_NAME
 from chroot_distro.helpers.session import has_tracked_ancestor
 from chroot_distro.helpers.session_registry import active_sessions, containers_with_active_pids
-from chroot_distro.message import C, msg
+from chroot_distro.message import C, emit_json, msg
 
 # Fixed columns (everything except the trailing, space-filling COMMAND).
 _HEADERS = ("PID", "CONTAINER", "TYPE", "USER", "UPTIME", "COMMAND")
@@ -48,6 +51,7 @@ def command_ps(args) -> None:
     # Group by container so the table shows one row per container, not per PID.
     untracked_rows: list[tuple[str, str, str, str, str, str]] = []
     all_untracked_pids: list[str] = []  # flat list for --quiet mode
+    untracked_by_container: dict[str, list[int]] = {}  # kept for --json
     try:
         untracked = containers_with_active_pids()
     except Exception:
@@ -62,6 +66,7 @@ def command_ps(args) -> None:
         orphan_pids = [p for p in pids if not has_tracked_ancestor(p, tracked_pids)]
         if orphan_pids:
             all_untracked_pids.extend(str(p) for p in orphan_pids)
+            untracked_by_container[cname] = orphan_pids
             count = len(orphan_pids)
             pid_label = str(orphan_pids[0]) if count == 1 else f"{orphan_pids[0]}+{count - 1}"
             untracked_rows.append(
@@ -80,6 +85,20 @@ def command_ps(args) -> None:
             print(sess.get("pid", ""))
         for pid_str in all_untracked_pids:
             print(pid_str)
+        return
+
+    if getattr(args, "json", False):
+        now = time.time()
+        emit_json(
+            "ps",
+            {
+                "sessions": [_session_document(sess, now) for sess in sessions],
+                "untracked": [
+                    {"container": name, "pids": pids}
+                    for name, pids in sorted(untracked_by_container.items())
+                ],
+            },
+        )
         return
 
     msg()
@@ -151,6 +170,28 @@ def command_ps(args) -> None:
         )
     if has_detached or has_untracked:
         msg()
+
+
+def _session_document(sess: dict, now: float) -> dict:
+    """One registry record as `--json` shows it, with no display formatting.
+
+    `detached` is a real boolean and `kind` is the bare session type, so a
+    consumer never has to strip the `*` the table appends.
+    """
+    started = sess.get("start_time", now)
+    command = sess.get("command")
+    return {
+        "pid": sess.get("pid"),
+        "container": str(sess.get("container", "")),
+        "kind": str(sess.get("kind", "")),
+        "command": [str(part) for part in command] if isinstance(command, (list, tuple)) else command,
+        "user": str(sess.get("user", "")),
+        "start_time": started,
+        "uptime_seconds": round(max(0.0, now - started), 3) if isinstance(started, (int, float)) else None,
+        "isolated": bool(sess.get("isolated", False)),
+        "minimal": bool(sess.get("minimal", False)),
+        "detached": bool(sess.get("detached", False)),
+    }
 
 
 def _fmt_uptime(seconds: float) -> str:

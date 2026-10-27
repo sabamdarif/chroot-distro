@@ -32,10 +32,11 @@ It works in three simple steps: it downloads an image from Docker Hub (or extrac
     - [`push`](#push)
     - [`clear-cache`](#clear-cache)
     - [`remove`](#remove)
-3. [Storage layout](#storage-layout)
-4. [Environment variables](#environment-variables)
-5. [Limitations](#limitations)
-6. [Donate](#donate)
+3. [JSON output](#json-output)
+4. [Storage layout](#storage-layout)
+5. [Environment variables](#environment-variables)
+6. [Limitations](#limitations)
+7. [Donate](#donate)
 
 ## Introduction
 
@@ -197,10 +198,11 @@ Aliases: li, ls
 
 Show installed containers with their size, image source, and whether they are in use.
 
-| Option            | Description                                                                                          |
-| ----------------- | ---------------------------------------------------------------------------------------------------- |
-| `-v`, `--verbose` | Also show image details: source URL, image type, default user, working directory, and exposed ports. |
-| `-q`, `--quiet`   | Print only container names, one per line.                                                            |
+| Option            | Description                                                                                                                                    |
+| ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `-v`, `--verbose` | Also show image details: source URL, image type, default user, working directory, and exposed ports.                                            |
+| `-q`, `--quiet`   | Print only container names, one per line.                                                                                                      |
+| `--json`          | Print one JSON document on stdout instead of the table, with every field `-v` shows plus `size_bytes`. Mutually exclusive with `-v` and `-q`.   |
 
 ### ps
 
@@ -210,9 +212,10 @@ chroot-distro ps [OPTIONS]
 
 Show active sessions: PID, container, type (`login` or `run`), user, uptime, and command. Detached sessions are marked with `*`.
 
-| Option          | Description                                       |
-| --------------- | ------------------------------------------------- |
-| `-q`, `--quiet` | Print only PIDs, one per line. Useful in scripts. |
+| Option          | Description                                                                                                                            |
+| --------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `-q`, `--quiet` | Print only PIDs, one per line. Useful in scripts.                                                                                      |
+| `--json`        | Print one JSON document on stdout: every session record with `uptime_seconds`, plus orphaned processes per container. Mutually exclusive with `-q`. |
 
 ### copy
 
@@ -346,10 +349,14 @@ gpg -d ubuntu.tar.gpg | chroot-distro restore
 ### diff
 
 ```
-chroot-distro diff CONTAINER
+chroot-distro diff [OPTIONS] CONTAINER
 ```
 
 Show what changed inside a container compared to its original image, like `docker diff`. `A` means added, `C` changed, `D` deleted. Needs the image layers to still be in the cache, so avoid `clear-cache` if you want `diff` to keep working.
+
+| Option   | Description                                                                                                          |
+| -------- | -------------------------------------------------------------------------------------------------------------------- |
+| `--json` | Print one JSON document on stdout: the container name and its `added`, `modified` and `deleted` paths, each absolute. |
 
 ### search
 
@@ -382,9 +389,13 @@ One-time passwordless setup on regular Linux. See [Passwordless setup](#password
 ### info
 
 ```
-chroot-distro info
+chroot-distro info [OPTIONS]
 Aliases: version-info, nf
 ```
+
+| Option   | Description                                                                                       |
+| -------- | ------------------------------------------------------------------------------------------------- |
+| `--json` | Print the same report as one JSON document on stdout, one key per section the text report shows. |
 
 Print a diagnostics report: versions, host details, capabilities, kernel support, installed containers, and basic health checks. Attach it when filing a bug report.
 
@@ -596,6 +607,27 @@ Delete a container and all its data. There is no confirmation and no undo. Activ
 | ----------------- | ----------------------- |
 | `-v`, `--verbose` | Show each deleted file. |
 | `-q`, `--quiet`   | Only show errors.       |
+
+## JSON output
+
+`list`, `ps`, `diff` and `info` take `--json` and write one JSON document to stdout. Human output, progress and warnings stay on stderr, so `chroot-distro list --json | jq .` works without filtering.
+
+Every document, success or failure, is an object carrying the schema version and the command that produced it:
+
+```jsonc
+{"schema": 1, "command": "list", "containers": [ ... ], "incomplete": []}
+
+// on failure, still exit code 1, and the same message is on stderr
+{"schema": 1, "command": "diff", "error": "container 'nope' is not installed."}
+```
+
+`schema` is bumped only when a key is renamed, removed or changes type, so a consumer can ignore keys it does not know and keep working. The field rules are the same in all four documents: a byte count is an integer named `*_bytes` with its formatted twin beside it, a duration is `*_seconds`, a path is absolute, a flag is a real `true`/`false`, an unknown value is `null`, and a list is always present even when empty.
+
+```sh
+chroot-distro list --json | jq -r '.containers[] | "\(.name) \(.status)"'
+chroot-distro ps --json | jq '.sessions[] | select(.detached)'
+chroot-distro diff ubuntu --json | jq -r '.added[]'
+```
 
 ## Storage layout
 

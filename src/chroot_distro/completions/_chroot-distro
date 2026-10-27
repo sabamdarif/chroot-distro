@@ -199,6 +199,8 @@ _chroot_distro() {
 		list)
 			_arguments \
 				'(-h --help)'{-h,--help}'[show help]' \
+				'(-v --verbose)'{-v,--verbose}'[show image config details]' \
+				'(-q --quiet -v --verbose)--json[print one JSON document on stdout]' \
 				'(-q --quiet)'{-q,--quiet}'[suppress non-error output]'
 			;;
 
@@ -301,6 +303,7 @@ _chroot_distro() {
 		ps)
 			_arguments \
 				'(-h --help)'{-h,--help}'[show help]' \
+				'(-q --quiet)--json[print one JSON document on stdout]' \
 				'(-q --quiet)'{-q,--quiet}'[print only PIDs]'
 			;;
 
@@ -308,6 +311,7 @@ _chroot_distro() {
 		diff)
 			_arguments \
 				'(-h --help)'{-h,--help}'[show help]' \
+				'--json[print one JSON document on stdout]' \
 				'1:container:_chroot_distro_containers'
 			;;
 
@@ -357,7 +361,8 @@ _chroot_distro() {
 		# -----------------------------------------------------------
 		info)
 			_arguments \
-				'(-h --help)'{-h,--help}'[show help]'
+				'(-h --help)'{-h,--help}'[show help]' \
+				'--json[print the report as one JSON document on stdout]'
 			;;
 
 		# -----------------------------------------------------------

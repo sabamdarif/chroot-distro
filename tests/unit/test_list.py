@@ -16,6 +16,7 @@ def test_command_list_empty():
     ):
         args = MagicMock()
         args.quiet = False
+        args.json = False
         command_list(args)
         mock_msg.assert_any_call("No containers are installed.")
 
@@ -44,6 +45,7 @@ def test_command_list_with_items():
         mock_loading.return_value.__enter__.return_value = lambda _text: None
         args = MagicMock()
         args.quiet = False
+        args.json = False
         command_list(args)
         mock_loading.assert_called_once()
         printed = [str(c.args[0]) for c in mock_msg.call_args_list if c.args]
@@ -59,6 +61,7 @@ def test_command_list_quiet():
     ):
         args = MagicMock()
         args.quiet = True
+        args.json = False
         command_list(args)
         mock_print.assert_any_call("alpine")
         mock_print.assert_any_call("debian")
@@ -185,6 +188,7 @@ def test_command_list_mentions_interrupted_installs():
     ):
         args = MagicMock()
         args.quiet = False
+        args.json = False
         command_list(args)
         printed = [str(c.args[0]) for c in mock_msg.call_args_list if c.args]
         assert any("No containers are installed." in line for line in printed)
@@ -200,3 +204,66 @@ def test_installed_containers_excludes_incomplete(tmp_path, monkeypatch):
     from chroot_distro.paths import installed_containers
 
     assert installed_containers() == ["alpine"]
+
+
+def test_command_list_json_carries_numbers_and_booleans(capsys):
+    import json
+
+    from chroot_distro.commands.list_cmd import _ManifestInfo
+
+    row = _ContainerRow(
+        name="ubuntu",
+        size="87.0 MiB",
+        source="ubuntu:24.04 (aarch64)",
+        status="in use (PID 1: login)",
+        size_bytes=91234567,
+        manifest=_ManifestInfo(
+            source="ubuntu:24.04 (aarch64)",
+            image_ref="ubuntu:24.04",
+            arch="aarch64",
+            source_url="https://example.invalid/src",
+            image_type="docker",
+            user="root",
+            workdir="/app",
+            ports=("80/tcp", "443/tcp"),
+        ),
+    )
+    with (
+        patch("chroot_distro.commands.list_cmd._iter_container_names", return_value=(["ubuntu"], ["broken"])),
+        patch("chroot_distro.commands.list_cmd._container_row", return_value=row),
+    ):
+        args = MagicMock()
+        args.quiet = False
+        args.verbose = False
+        args.json = True
+        command_list(args)
+
+    document = json.loads(capsys.readouterr().out)
+    container = document["containers"][0]
+    assert container["size_bytes"] == 91234567
+    assert container["in_use"] is True
+    assert container["image_ref"] == "ubuntu:24.04"
+    assert container["arch"] == "aarch64"
+    assert container["ports"] == ["80/tcp", "443/tcp"]
+    assert document["incomplete"] == ["broken"]
+
+
+def test_command_list_json_leaves_absent_fields_null(capsys):
+    import json
+
+    row = _ContainerRow("plain", "1 B", "local archive", "idle", size_bytes=1)
+    with (
+        patch("chroot_distro.commands.list_cmd._iter_container_names", return_value=(["plain"], [])),
+        patch("chroot_distro.commands.list_cmd._container_row", return_value=row),
+    ):
+        args = MagicMock()
+        args.quiet = False
+        args.verbose = False
+        args.json = True
+        command_list(args)
+
+    container = json.loads(capsys.readouterr().out)["containers"][0]
+    # Absent is null, never the string "unknown", and a list stays a list.
+    assert container["image_ref"] is None
+    assert container["arch"] is None
+    assert container["ports"] == []

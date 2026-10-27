@@ -127,7 +127,9 @@ def test_command_info_runs_without_containers():
         patch.object(info, "_gather_capabilities", return_value=[]),
         patch.object(info, "msg") as mock_msg,
     ):
-        info.command_info(MagicMock())
+        args = MagicMock()
+        args.json = False
+        info.command_info(args)
     # Report rendered something to stderr via msg().
     assert mock_msg.called
     rendered = " ".join(str(c.args[0]) for c in mock_msg.call_args_list if c.args)
@@ -206,7 +208,7 @@ def test_gather_capabilities_reports_no_escalation_tool():
 
 def test_render_basic_outputs_new_fields():
     with patch.object(info, "msg") as mock_msg:
-        info._render_basic()
+        info._render_basic(info._gather_program_info())
     assert mock_msg.called
     rendered = " ".join(str(c.args[0]) for c in mock_msg.call_args_list if c.args)
     assert "Executable" in rendered
@@ -334,3 +336,55 @@ def test_gather_capabilities_privilege_states():
         priv = next(c for c in caps if c.label == "Privileges")
         assert priv.level == "info"
         assert "can elevate via daemon socket" in priv.value
+
+
+def test_command_info_json_has_every_section(capsys):
+    import json
+
+    img = info._ImageInfo(
+        name="alpine",
+        size="1 MiB",
+        size_bytes=1024,
+        arch="x86_64",
+        status="idle",
+        findings=["rootfs is empty"],
+    )
+    with (
+        patch.object(info, "_gather_program_info", return_value={"program": "chroot-distro"}),
+        patch.object(info, "_gather_host_info", return_value=info._HostInfo("Linux", [("Kernel", "6.0")])),
+        patch.object(info, "_gather_images", return_value=[img]),
+        patch.object(info, "_gather_capabilities", return_value=[info._Capability("Privileges", "root", "ok")]),
+        patch.object(info, "_gather_kernel_support", return_value=[]),
+        patch.object(info, "get_device_cpu_arch", return_value="aarch64"),
+        patch.object(info, "supports_32bit", return_value=True),
+    ):
+        args = MagicMock()
+        args.json = True
+        info.command_info(args)
+
+    document = json.loads(capsys.readouterr().out)
+    assert document["program"] == {"program": "chroot-distro"}
+    assert document["host"]["arch"] == "aarch64"
+    assert document["host"]["supports_32bit"] is True
+    assert document["capabilities"] == [{"label": "Privileges", "value": "root", "level": "ok"}]
+    assert document["kernel"] == []
+    assert document["containers"][0]["arch"] == "x86_64"
+    assert document["running"] == 0
+    assert document["analysis"] == [{"name": "alpine", "findings": ["rootfs is empty"]}]
+
+
+def test_gather_kernel_support_probes_each_feature_once():
+    calls = []
+
+    def _probe(key):
+        calls.append(key)
+        return "present"
+
+    with patch.object(info, "probe_feature", side_effect=_probe):
+        groups = info._gather_kernel_support()
+
+    expected = [f.key for group in info.KERNEL_FEATURE_GROUPS for f in group.features]
+    assert calls == expected
+    assert [g.title for g in groups] == [g.title for g in info.KERNEL_FEATURE_GROUPS]
+    # The state text is resolved with the probe, so a renderer never probes again.
+    assert all(feature.state for group in groups for feature in group.features)

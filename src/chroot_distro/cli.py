@@ -40,7 +40,7 @@ from typing import Any
 
 from chroot_distro.constants import IS_TERMUX, PROGRAM_NAME
 from chroot_distro.exceptions import ChrootDistroError, RootRequiredError
-from chroot_distro.message import crit_error, msg, set_quiet
+from chroot_distro.message import crit_error, emit_json_error, msg, set_quiet
 from chroot_distro.parser import (
     ALIAS_TO_CANONICAL,
     REQUIRED_ARGS,
@@ -253,14 +253,24 @@ def main() -> None:
         crit_error(f"unknown command '{command}'.")
         sys.exit(1)
 
+    # A --json caller gets its failure as a document too, so one parse handles
+    # both outcomes. The stderr line stays, which is what a human reads.
+    json_mode = getattr(args, "json", False)
+
+    def _emit_json_error(text: str) -> None:
+        if json_mode:
+            emit_json_error(canonical, text)
+
     try:
         handler(args)
     except ChrootDistroError as e:
+        _emit_json_error(str(e))
         msg()
         crit_error(str(e))
         msg()
         sys.exit(1)
     except KeyboardInterrupt:
+        _emit_json_error("Aborted by user.")
         msg()
         crit_error("Aborted by user.")
         msg()
@@ -268,11 +278,13 @@ def main() -> None:
         sys.stderr.flush()
         os._exit(1)
     except NotImplementedError as e:
+        _emit_json_error(str(e))
         msg()
         crit_error(str(e))
         msg()
         sys.exit(1)
     except Exception as e:
+        _emit_json_error(f"unexpected error: {e}")
         msg()
         crit_error(f"unexpected error: {e}")
         msg()

@@ -496,11 +496,17 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
         ),
         "options": [
             ("-h, --help", "Show this help."),
+            ("-v, --verbose", "Also show the image config: source URL, image type, default user, working directory and exposed ports."),
             ("-q, --quiet", "Print only container names, one per line."),
+            (
+                "--json",
+                "Print one JSON document on stdout instead of the table, carrying every field -v shows plus size in bytes. Mutually exclusive with -v and -q.",
+            ),
         ],
         "examples": [
             f"{PROGRAM_NAME} list",
             f"{PROGRAM_NAME} list -q",
+            f"{PROGRAM_NAME} list --json",
         ],
     },
     "login": {
@@ -853,14 +859,19 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
         "options": [
             ("-h, --help", "Show this help."),
             ("-q, --quiet", "Print only PIDs, one per line (for scripting)."),
+            (
+                "--json",
+                "Print one JSON document on stdout: every session record with uptime in seconds, plus any orphaned processes found per container. Mutually exclusive with -q.",
+            ),
         ],
         "examples": [
             f"{PROGRAM_NAME} ps",
             f"{PROGRAM_NAME} ps -q",
+            f"{PROGRAM_NAME} ps --json",
         ],
     },
     "diff": {
-        "usage": "diff CONTAINER",
+        "usage": "diff [OPTIONS] CONTAINER",
         "summary": (
             "Inspect changes to files and directories in a container's "
             "filesystem relative to the OCI/Docker image it was installed "
@@ -876,9 +887,14 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
         ),
         "options": [
             ("-h, --help", "Show this help."),
+            (
+                "--json",
+                "Print one JSON document on stdout instead of the marked list: the container name and its added, modified and deleted paths.",
+            ),
         ],
         "examples": [
             f"{PROGRAM_NAME} diff ubuntu",
+            f"{PROGRAM_NAME} diff ubuntu --json",
         ],
     },
     "search": {
@@ -953,7 +969,7 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
         ],
     },
     "info": {
-        "usage": "info",
+        "usage": "info [OPTIONS]",
         "aliases": ("version-info", "nf"),
         "summary": (
             "Print a structured diagnostics report about the host and installed "
@@ -993,9 +1009,14 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
         ),
         "options": [
             ("-h, --help", "Show this help."),
+            (
+                "--json",
+                "Print the same report as one JSON document on stdout, with every section the text report shows: program, host, capabilities, kernel support, containers, running count, and analysis findings.",
+            ),
         ],
         "examples": [
             f"{PROGRAM_NAME} info",
+            f"{PROGRAM_NAME} info --json",
         ],
     },
     "sync": {

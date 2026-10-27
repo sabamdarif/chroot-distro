@@ -177,3 +177,22 @@ def test_parser_clear_cache_build_cache():
     args = parser.parse_args(["clear-cache", "--build-cache", "--verbose"])
     assert args.build_cache is True
     assert args.verbose is True
+
+
+@pytest.mark.parametrize("command", ["list", "ps", "info", "diff"])
+def test_parser_json_flag(command):
+    parser = build_parser()
+    argv = [command, "--json"] if command != "diff" else [command, "demo", "--json"]
+    assert parser.parse_args(argv).json is True
+
+    plain = [command] if command != "diff" else [command, "demo"]
+    assert parser.parse_args(plain).json is False
+
+
+@pytest.mark.parametrize("command", ["list", "ps"])
+def test_parser_json_and_quiet_are_exclusive(command):
+    parser = build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args([command, "--json", "-q"])
+    with pytest.raises(SystemExit):
+        parser.parse_args([command, "-q", "--json"])

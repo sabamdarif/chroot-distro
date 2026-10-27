@@ -52,7 +52,7 @@ _chroot_distro() {
 	# Complete the subcommand itself
 	if [[ ${cword} -eq 1 ]]; then
 		if [[ "${cur}" == -* ]]; then
-			_chroot_distro_compgen_words "-h --help" "${cur}"
+			_chroot_distro_compgen_words "-h --help --json" "${cur}"
 		else
 			_chroot_distro_compgen_words "${_all_commands}" "${cur}"
 		fi
@@ -157,7 +157,7 @@ _chroot_distro() {
 
 	# -----------------------------------------------------------------------
 	list)
-		_chroot_distro_compgen_words "-q --quiet -h --help" "${cur}"
+		_chroot_distro_compgen_words "-v --verbose -q --quiet -h --help --json" "${cur}"
 		;;
 
 	# -----------------------------------------------------------------------
@@ -267,7 +267,7 @@ _chroot_distro() {
 	# -----------------------------------------------------------------------
 	unmount)
 		if [[ "${cur}" == -* ]]; then
-			_chroot_distro_compgen_words "-h --help" "${cur}"
+			_chroot_distro_compgen_words "-h --help --json" "${cur}"
 		else
 			_chroot_distro_compgen_words "$(_chroot_distro_get_containers)" "${cur}"
 		fi
@@ -351,7 +351,7 @@ _chroot_distro() {
 	# -----------------------------------------------------------------------
 	kill)
 		if [[ "${cur}" == -* ]]; then
-			_chroot_distro_compgen_words "-h --help" "${cur}"
+			_chroot_distro_compgen_words "-h --help --json" "${cur}"
 		else
 			_chroot_distro_compgen_words "$(_chroot_distro_get_containers)" "${cur}"
 		fi
@@ -359,13 +359,13 @@ _chroot_distro() {
 
 	# -----------------------------------------------------------------------
 	ps)
-		_chroot_distro_compgen_words "-q --quiet -h --help" "${cur}"
+		_chroot_distro_compgen_words "-q --quiet -h --help --json" "${cur}"
 		;;
 
 	# -----------------------------------------------------------------------
 	diff)
 		if [[ "${cur}" == -* ]]; then
-			_chroot_distro_compgen_words "-h --help" "${cur}"
+			_chroot_distro_compgen_words "-h --help --json" "${cur}"
 		else
 			_chroot_distro_compgen_words "$(_chroot_distro_get_containers)" "${cur}"
 		fi
@@ -385,7 +385,7 @@ _chroot_distro() {
 
 	# -----------------------------------------------------------------------
 	info)
-		_chroot_distro_compgen_words "-h --help" "${cur}"
+		_chroot_distro_compgen_words "-h --help --json" "${cur}"
 		;;
 
 	# -----------------------------------------------------------------------

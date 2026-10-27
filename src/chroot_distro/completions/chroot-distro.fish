@@ -274,6 +274,10 @@ complete -c chroot-distro -f -n __chroot_distro_seen_login \
 # list (+ aliases li, ls)
 # ---------------------------------------------------------------------------
 complete -c chroot-distro -f -n __chroot_distro_seen_list \
+    -s v -l verbose    -d 'Show image config details'
+complete -c chroot-distro -f -n __chroot_distro_seen_list \
+    -l json            -d 'Print one JSON document on stdout'
+complete -c chroot-distro -f -n __chroot_distro_seen_list \
     -s q -l quiet      -d 'Suppress non-error output'
 complete -c chroot-distro -f -n __chroot_distro_seen_list \
     -s h -l help       -d 'Show help'
@@ -471,6 +475,8 @@ complete -c chroot-distro -f -n __chroot_distro_seen_kill \
 # ps
 # ---------------------------------------------------------------------------
 complete -c chroot-distro -f -n __chroot_distro_seen_ps \
+    -l json            -d 'Print one JSON document on stdout'
+complete -c chroot-distro -f -n __chroot_distro_seen_ps \
     -s q -l quiet      -d 'Print only PIDs'
 complete -c chroot-distro -f -n __chroot_distro_seen_ps \
     -s h -l help       -d 'Show help'
@@ -480,6 +486,8 @@ complete -c chroot-distro -f -n __chroot_distro_seen_ps \
 # ---------------------------------------------------------------------------
 complete -c chroot-distro -f -n __chroot_distro_seen_diff \
     -a '(__chroot_distro_containers)' -d 'Container'
+complete -c chroot-distro -f -n __chroot_distro_seen_diff \
+    -l json            -d 'Print one JSON document on stdout'
 complete -c chroot-distro -f -n __chroot_distro_seen_diff \
     -s h -l help       -d 'Show help'
 
@@ -496,6 +504,8 @@ complete -c chroot-distro -f -n __chroot_distro_seen_search \
 # ---------------------------------------------------------------------------
 # info (+ aliases version-info, nf)
 # ---------------------------------------------------------------------------
+complete -c chroot-distro -f -n __chroot_distro_seen_info \
+    -l json            -d 'Print the report as one JSON document on stdout'
 complete -c chroot-distro -f -n __chroot_distro_seen_info \
     -s h -l help       -d 'Show help'
 

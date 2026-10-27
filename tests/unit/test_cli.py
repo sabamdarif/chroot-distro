@@ -181,3 +181,41 @@ def test_main_linux_info_always_elevates():
         assert exc_info.value.code == 1
         mock_elevate.assert_called_once()
         mock_info.assert_not_called()
+
+
+def _finish(*_args, **_kwargs):
+    from chroot_distro.exceptions import ChrootDistroError
+
+    raise ChrootDistroError("container 'ghost' is not installed.")
+
+
+def test_main_json_error_writes_a_document(capsys):
+    import json
+
+    with (
+        patch("sys.argv", ["chroot-distro", "diff", "ghost", "--json"]),
+        patch("os.getuid", return_value=0),
+        patch.dict("chroot_distro.cli._COMMAND_HANDLERS", {"diff": _finish}),
+        pytest.raises(SystemExit) as exc_info,
+    ):
+        main()
+
+    assert exc_info.value.code == 1
+    captured = capsys.readouterr()
+    document = json.loads(captured.out)
+    assert document["command"] == "diff"
+    assert document["error"] == "container 'ghost' is not installed."
+    assert document["schema"] == 1
+    # The human line stays, so a person sees the same reason.
+    assert "container 'ghost' is not installed." in captured.err
+
+
+def test_main_without_json_writes_no_document(capsys):
+    with (
+        patch("sys.argv", ["chroot-distro", "diff", "ghost"]),
+        patch("os.getuid", return_value=0),
+        patch.dict("chroot_distro.cli._COMMAND_HANDLERS", {"diff": _finish}),
+        pytest.raises(SystemExit),
+    ):
+        main()
+    assert capsys.readouterr().out == ""
