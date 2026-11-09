@@ -18,26 +18,16 @@ into `/system/etc`, which resolve on the host to a read-only filesystem and
 would fail the write with EROFS.
 
 `termux_home_owner_ids` takes the app uid from the ownership of `TERMUX_HOME`
-rather than `getuid()`, which is 0 by the time this runs. `ensure_data_suid`
-clears nosuid, nodev and noexec from the host `/data`, which `sudo` in the guest
-and apt's gpgv under `--shared-tmp` both need; a remount replaces the whole VFS
-flag word, so the flags in force are read back from `/proc/mounts` first and the
-filesystem's own options are passed through untouched.
+rather than `getuid()`, which is 0 by the time this runs. `_read_data_mount` is
+read-only, for `info`; a login never remounts the host `/data`. The per-session
+suid/exec bind that a nosuid rootfs needs lives in `mount_manager`, so the
+device's mount flags stay as Android set them.
 """
 
 import logging
 import os
 
 from chroot_distro.constants import IS_TERMUX, TERMUX_HOME
-from chroot_distro.message import warn
-from chroot_distro.syscalls.mount import (
-    MS_NODEV,
-    MS_NOEXEC,
-    MS_NOSUID,
-    MS_REMOUNT,
-    _parse_and_split_mount_options,
-    native_mount,
-)
 
 log = logging.getLogger(__name__)
 
@@ -64,42 +54,6 @@ def _read_data_mount() -> tuple[str, str, str] | None:
     except OSError as exc:
         log.debug("Failed to read /proc/mounts: %s", exc)
     return None
-
-
-def ensure_data_suid() -> bool:
-    """Remount host /data with suid+exec when nosuid or noexec is set.
-
-    Required for sudo in chroot (nosuid) and for gpgv/apt to work
-    when --shared-tmp bind-mounts $PREFIX/tmp as /tmp (noexec).
-
-    A remount takes its whole VFS flag word from this one call, so the flags
-    already in force are read back out of /proc/mounts and only nosuid, nodev
-    and noexec are cleared.  Whatever in that option field is the filesystem's
-    own (lazytime, seclabel, an f2fs tunable) goes back as mount(2) data
-    untouched, since stripping it is what earns an EINVAL.
-    """
-    if not IS_TERMUX:
-        return False
-
-    entry = _read_data_mount()
-    if not entry:
-        log.debug("ensure_data_suid: /data not found in /proc/mounts")
-        return False
-
-    device, _mount_point, opts = entry
-    if "nosuid" not in opts and "noexec" not in opts:
-        return True
-
-    flags, data = _parse_and_split_mount_options(opts)
-    flags &= ~(MS_NOSUID | MS_NODEV | MS_NOEXEC)
-    try:
-        native_mount(device, "/data", None, MS_REMOUNT | flags, data or None)
-    except OSError as exc:
-        warn(f"Failed to enable SUID on /data (remount failed): {exc}")
-        return False
-
-    log.info("Remounted /data with suid enabled")
-    return True
 
 
 ANDROID_GROUPS = {

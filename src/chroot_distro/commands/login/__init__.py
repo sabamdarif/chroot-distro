@@ -112,7 +112,7 @@ from chroot_distro.constants import (
     TERMUX_PREFIX,
 )
 from chroot_distro.helpers import isolation
-from chroot_distro.helpers.android import ensure_data_suid, termux_home_owner_ids
+from chroot_distro.helpers.android import termux_home_owner_ids
 from chroot_distro.helpers.display import (
     resolve_display_env,
     resolve_display_socket_binds,
@@ -1201,10 +1201,12 @@ def _command_login_inner_once(container_name: str, args) -> None:
             else:
                 namespace.write_isolation_mode(container_name, namespace.ISOLATION_MODE_HOST)
 
-            if IS_TERMUX and not skip_extra_mounts and not minimal:
-                ensure_data_suid()
             with contextlib.suppress(Exception):
                 mount_manager.unmount_all(rootfs, holder=holder)
+            # Android's /data is nosuid; bind the host-mode rootfs onto itself
+            # with suid/exec. A namespace holder cloned its mounts and locks them.
+            if holder is None:
+                mount_manager.ensure_rootfs_exec(rootfs)
             # best_effort_bind_sources() entries warn+skip on failure;
             # anything else aborts. Binds under /dev (GPU nodes, binderfs)
             # wait for apply_special_mounts: the fresh tmpfs /dev it mounts
@@ -1232,13 +1234,25 @@ def _command_login_inner_once(container_name: str, args) -> None:
             for rslave_path in rslave_targets:
                 mount_manager.make_rslave(rslave_path, holder=holder)
 
-            # Termux's $PREFIX/tmp is mode 700, which breaks guest users like
-            # _apt; restore the standard world-writable sticky /tmp.
-            if IS_TERMUX and shared_tmp and dist_type != "termux":
-                chroot_tmp = os.path.join(rootfs, "tmp")
-                if os.path.isdir(chroot_tmp):
-                    with contextlib.suppress(OSError):
-                        os.chmod(chroot_tmp, 0o1777)  # lgtm[py/overly-permissive-file]
+            # Termux shares $PREFIX/tmp, which is mode 700. Never chmod the
+            # host directory for the guest: a non-root guest user simply gets
+            # host semantics, and the user can change the mode if intended.
+            if (
+                IS_TERMUX
+                and shared_tmp
+                and dist_type != "termux"
+                and login_user != "root"
+                and not skip_extra_mounts
+                and not minimal
+            ):
+                host_tmp = os.path.join(TERMUX_PREFIX, "tmp")
+                with contextlib.suppress(OSError):
+                    if not os.stat(host_tmp).st_mode & 0o002:
+                        warn(
+                            f"{host_tmp} is not world-writable; guest user "
+                            f"'{login_user}' may not be able to write to the "
+                            f"shared /tmp. Run 'chmod 1777 {host_tmp}' if intended."
+                        )
 
             try:
                 isolation.apply_special_mounts(

@@ -261,7 +261,7 @@ def _detect_escalation_tool() -> str:
 
 
 def _data_mount_flags() -> tuple[str, str]:
-    """Return (options, level) describing Termux /data suid/exec flags."""
+    """Return (options, level) describing Termux /data mount flags."""
     from chroot_distro.helpers.android import _read_data_mount
 
     entry = _read_data_mount()
@@ -270,7 +270,7 @@ def _data_mount_flags() -> tuple[str, str]:
     _device, _mount, opts = entry
     problems = [flag for flag in ("nosuid", "noexec") if flag in opts]
     if problems:
-        return f"{opts} ({', '.join(problems)} breaks sudo/apt)", "warn"
+        return f"{opts} ({', '.join(problems)}; a default login binds the rootfs with suid/exec)", "info"
     return opts, "ok"
 
 

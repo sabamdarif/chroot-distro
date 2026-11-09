@@ -36,6 +36,11 @@ sometimes everything, and a bare tmpfs is better than no tmpfs. But
 `ensure_no_mounts` is the opposite and must stay that way: a leftover mount under a
 rootfs about to be deleted is host data, so it raises rather than proceed.
 
+A rootfs on a filesystem that denies suid or exec (Android's `/data`) gets a
+self-bind with those flags cleared, `ensure_rootfs_exec`, recorded by a marker in
+the container directory and released by `unmount_all`. Remounting the host
+filesystem would change the flags for everything on it, not just this container.
+
 Two platform-shaped paths. A single-instance devpts kernel has one global superblock,
 so a devpts mount(2) would reconfigure the host's /dev/pts until reboot, and the host
 instance is bound instead. Inside a user namespace mknod of a device node is EPERM
@@ -64,8 +69,17 @@ from chroot_distro.dirfd import _chmod_fd
 from chroot_distro.exceptions import MountError, MountRefusedError
 from chroot_distro.helpers import mount_targets
 from chroot_distro.message import warn
-from chroot_distro.syscalls._constants import MS_PRIVATE, MS_REC, MS_SLAVE
-from chroot_distro.syscalls.mount import fd_path, set_propagation
+from chroot_distro.paths import container_rootfs_exec_marker
+from chroot_distro.syscalls._constants import (
+    MS_BIND,
+    MS_NOEXEC,
+    MS_NOSUID,
+    MS_PRIVATE,
+    MS_REC,
+    MS_REMOUNT,
+    MS_SLAVE,
+)
+from chroot_distro.syscalls.mount import _parse_and_split_mount_options, fd_path, native_mount, set_propagation
 from chroot_distro.syscalls.umount import native_umount
 
 if TYPE_CHECKING:
@@ -452,11 +466,118 @@ def safe_unmount(target: str, holder: NamespaceHolder | None = None) -> None:
             raise MountError(f"Failed to unmount {target} (lazy umount also failed): {e_lazy}") from e_lazy
 
 
+def _containing_mount_options(path: str) -> str:
+    """Return the option field of the deepest mount holding *path*."""
+    path_abs = os.path.normpath(os.path.realpath(path))
+    best_len = -1
+    options = ""
+    try:
+        with open("/proc/self/mounts") as f:
+            for line in f:
+                parts = line.strip().split()
+                if len(parts) < 4:
+                    continue
+                mount_point = decode_mount_path(parts[1])
+                if path_abs != mount_point and not path_abs.startswith(mount_point.rstrip("/") + os.sep):
+                    continue
+                if len(mount_point) > best_len:
+                    best_len = len(mount_point)
+                    options = parts[3]
+    except OSError:
+        return ""
+    return options
+
+
+def _rootfs_exec_marker(rootfs: str) -> str:
+    return container_rootfs_exec_marker(os.path.realpath(rootfs))
+
+
+def ensure_rootfs_exec(rootfs: str) -> bool:
+    """Bind the rootfs onto itself with suid and exec when its filesystem denies them.
+
+    Android mounts /data nosuid (some hosts add noexec), so a guest's setuid
+    binaries and executables on the rootfs would be refused. Remounting the
+    host filesystem would change flags for every mount of that superblock, so
+    the rootfs gets a bind of itself with only those two flags cleared. A marker
+    under the container's directory records it, and `unmount_all` removes both.
+    """
+    rootfs_abs = os.path.normpath(os.path.realpath(rootfs))
+    if is_mounted(rootfs_abs):
+        return False
+    flags, _data = _parse_and_split_mount_options(_containing_mount_options(rootfs_abs))
+    denied = MS_NOSUID | MS_NOEXEC
+    if not flags & denied:
+        return False
+
+    marker = _rootfs_exec_marker(rootfs_abs)
+    try:
+        os.close(os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600))
+    except OSError as exc:
+        log.debug("Not creating the rootfs exec mount: %s: %s", marker, exc)
+        return False
+
+    rootfs_fd = mount_targets.open_rootfs_fd(rootfs_abs)
+    if rootfs_fd < 0:
+        with contextlib.suppress(OSError):
+            os.unlink(marker)
+        return False
+    try:
+        target = fd_path(rootfs_fd)
+        native_mount(target, target, None, MS_BIND, None)
+    except OSError as exc:
+        log.debug("Could not bind the rootfs %s onto itself: %s", rootfs_abs, exc)
+        with contextlib.suppress(OSError):
+            os.unlink(marker)
+        return False
+    finally:
+        with contextlib.suppress(OSError):
+            os.close(rootfs_fd)
+
+    # A descriptor opened before the bind still names the old mount, so the
+    # remount re-resolves the rootfs after the bind has landed.
+    remount_fd = mount_targets.open_rootfs_fd(rootfs_abs)
+    try:
+        if remount_fd < 0:
+            raise OSError("cannot reopen the rootfs after the self-bind")
+        native_mount("", fd_path(remount_fd), None, MS_REMOUNT | MS_BIND | (flags & ~denied), None)
+    except OSError as exc:
+        if is_mounted(rootfs_abs):
+            with contextlib.suppress(OSError):
+                native_umount(rootfs_abs)
+        if not is_mounted(rootfs_abs):
+            with contextlib.suppress(OSError):
+                os.unlink(marker)
+        log.debug("Could not enable suid/exec on the rootfs %s: %s", rootfs_abs, exc)
+        return False
+    finally:
+        if remount_fd >= 0:
+            with contextlib.suppress(OSError):
+                os.close(remount_fd)
+    return True
+
+
+def release_rootfs_exec(rootfs: str) -> None:
+    """Remove the self-bind `ensure_rootfs_exec` made, if it is still there."""
+    rootfs_abs = os.path.normpath(os.path.realpath(rootfs))
+    marker = _rootfs_exec_marker(rootfs_abs)
+    if not os.path.lexists(marker):
+        return
+    if is_mounted(rootfs_abs):
+        try:
+            safe_unmount(rootfs_abs)
+        except MountError as exc:
+            log.debug("Could not unmount the rootfs exec mount %s: %s", rootfs_abs, exc)
+            return
+    with contextlib.suppress(OSError):
+        os.unlink(marker)
+
+
 def unmount_all(rootfs: str, holder: NamespaceHolder | None = None) -> None:
     """Unmount all active mount points nested under rootfs in correct order."""
     mounts = get_active_mounts(rootfs, holder=holder)
     for m in mounts:
         safe_unmount(m, holder=holder)
+    release_rootfs_exec(rootfs)
 
 
 def _sweep_matching_mounts(marker: str) -> int:

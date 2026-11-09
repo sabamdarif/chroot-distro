@@ -585,17 +585,69 @@ def test_termux_home_owner_ids(tmp_path):
         assert termux_home_owner_ids() == (uid, gid)
 
 
-def test_ensure_data_suid_skips_when_already_suid():
-    from chroot_distro.helpers.android import ensure_data_suid
+def test_ensure_rootfs_exec_skips_when_suid_and_exec_present(tmp_path, monkeypatch):
+    from chroot_distro.helpers import mount_manager
 
-    with (
-        patch("chroot_distro.helpers.android.IS_TERMUX", True),
-        patch(
-            "chroot_distro.helpers.android._read_data_mount",
-            return_value=("tmpfs", "/data", "rw,seclabel,suid"),
-        ),
-    ):
-        assert ensure_data_suid() is True
+    rootfs = tmp_path / "containers" / "c" / "rootfs"
+    rootfs.mkdir(parents=True)
+    monkeypatch.setattr(mount_manager, "_containing_mount_options", lambda _path: "rw,relatime")
+    calls = []
+    monkeypatch.setattr(mount_manager, "native_mount", lambda *args: calls.append(args))
+
+    assert mount_manager.ensure_rootfs_exec(str(rootfs)) is False
+    assert calls == []
+
+
+def test_ensure_rootfs_exec_binds_rootfs_and_release_removes_it(tmp_path, monkeypatch):
+    from chroot_distro.helpers import mount_manager
+    from chroot_distro.syscalls.mount import MS_BIND, MS_NOEXEC, MS_NOSUID, MS_RELATIME, MS_REMOUNT
+
+    rootfs = tmp_path / "containers" / "c" / "rootfs"
+    rootfs.mkdir(parents=True)
+    mounted = {"value": False}
+    calls = []
+    opened = []
+
+    def fake_native_mount(source, target, fstype=None, flags=0, data=None):
+        calls.append(flags)
+        if flags & MS_BIND and not flags & MS_REMOUNT:
+            mounted["value"] = True
+
+    original_open = mount_manager.mount_targets.open_rootfs_fd
+
+    def fake_open_rootfs(path):
+        opened.append(True)
+        return original_open(path)
+
+    monkeypatch.setattr(mount_manager, "is_mounted", lambda _target, holder=None: mounted["value"])
+    monkeypatch.setattr(mount_manager, "native_mount", fake_native_mount)
+    monkeypatch.setattr(mount_manager.mount_targets, "open_rootfs_fd", fake_open_rootfs)
+    monkeypatch.setattr(
+        mount_manager,
+        "_containing_mount_options",
+        lambda _path: "rw,nosuid,nodev,noexec,relatime",
+    )
+
+    assert mount_manager.ensure_rootfs_exec(str(rootfs)) is True
+    marker = tmp_path / "containers" / "c" / ".rootfs_exec_mount"
+    assert marker.exists()
+    assert len(opened) == 2, "the remount must re-resolve the rootfs after the bind"
+    assert calls[0] == MS_BIND
+    assert calls[1] & MS_REMOUNT
+    assert not calls[1] & MS_NOSUID
+    assert not calls[1] & MS_NOEXEC
+    assert calls[1] & MS_RELATIME
+
+    unmounted = []
+
+    def fake_safe_unmount(target, holder=None):
+        unmounted.append(target)
+        mounted["value"] = False
+
+    monkeypatch.setattr(mount_manager, "safe_unmount", fake_safe_unmount)
+    mount_manager.release_rootfs_exec(str(rootfs))
+    assert unmounted == [os.path.realpath(str(rootfs))]
+    assert not marker.exists()
 
 
 def test_special_mounts_default():

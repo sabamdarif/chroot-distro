@@ -85,6 +85,11 @@ def container_manifest(name: str) -> str:
     return os.path.join(container_dir(name), "manifest.json")
 
 
+def container_rootfs_exec_marker(rootfs: str) -> str:
+    """Return the marker that records the rootfs suid/exec self-bind."""
+    return os.path.join(os.path.dirname(os.path.normpath(rootfs)), ".rootfs_exec_mount")
+
+
 def container_incomplete_marker(name: str) -> str:
     """Return the path of the marker that flags an in-progress install.
 

@@ -180,10 +180,10 @@ def test_namespace_status_reports_userns_separately():
     assert "user namespaces disabled" in value
 
 
-def test_data_mount_flags_warns_on_nosuid():
+def test_data_mount_flags_reports_nosuid_without_warning():
     with patch("chroot_distro.helpers.android._read_data_mount", return_value=("/dev/x", "/data", "rw,nosuid,noexec")):
         value, level = info._data_mount_flags()
-    assert level == "warn"
+    assert level == "info"
     assert "nosuid" in value and "noexec" in value
 
 
