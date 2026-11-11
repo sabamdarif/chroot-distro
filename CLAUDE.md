@@ -29,8 +29,7 @@ works:
   it is a debt to remove, not a pattern to copy: prefer deleting the call over
   keeping it alive. The one carve-out is host administration, which drives another
   program's own state and no syscall replaces: `elevate.py`
-  (`sudo`/`doas`/`pkexec`/`su`) and `commands/setup.py` (`groupadd`/`usermod` and
-  the init-system tools). `shutil.which` for a _capability report_
+  (`sudo`/`doas`/`pkexec`/`su`). `shutil.which` for a _capability report_
   (`commands/info.py`) is a probe, not a call; `shutil.which` to then exec the
   thing is not.
 - **No third-party runtime dependencies.** Stdlib only, plus `backports-zstd`
@@ -238,7 +237,7 @@ things:
 paths by hand.
 
 **Debug/escape hatches, deliberately undocumented:**
-`CD_NO_DAEMON=1` (skip the daemon socket), `CD_NO_CAP_DROP=1` (keep the full
+`CD_NO_CAP_DROP=1` (keep the full
 capability bounding set), `CD_NO_BINFMT=1` (never register a binfmt_misc
 handler), `CD_SU_PATH` / `CD_SU_MOUNT_MASTER=1` (Termux `su` selection and
 namespace), `CD_SUBID_BASE` (user-namespace subid base), `CD_PUSH_CHUNK_SIZE`,
@@ -317,10 +316,7 @@ goes through it:
 
 | File                     | Owns                                                                     |
 | ------------------------ | ------------------------------------------------------------------------ |
-| `elevate.py`             | re-exec as root: caps, Termux `su`, the socket, then sudo/doas/pkexec/su |
-| `daemon.py`              | the group-gated socket, its client, and the forked root child            |
-| `commands/daemon_cmd.py` | the init system's entry point                                            |
-| `commands/setup.py`      | the group, the service for five init systems, `--uninstall`              |
+| `elevate.py`             | re-exec as root: caps, Termux `su`, then sudo/doas/pkexec/su            |
 
 ### Session lifecycle (`login`, `run`, `build`)
 
@@ -489,7 +485,7 @@ Four places, all required:
 
 - Uses `su` from root manager (Magisk/KernelSU/APatch), the only binary called
   to get root here
-- No daemon, every command elevates via `su`
+- Every command elevates via `su`
 - The root side needs a Termux-aware prelude (PATH, `LD_PRELOAD=/data/data/com.termux/files/usr/lib/libtermux-exec-ld-preload.so`,
   writable HOME, TMPDIR); see `elevate._termux_root_env_exports`
 - Prefix: `$PREFIX` (usually `/data/data/com.termux/files/usr`)
@@ -499,8 +495,6 @@ Four places, all required:
 
 **Regular Linux:**
 
-- Daemon-based (socket `/run/chroot-distro.sock`) after `setup`
-- Falls back to `sudo` if the daemon is not running, and errors out when neither
-  is available
+- Elevates with `sudo`, `doas`, `pkexec` or `su`, and errors out when none is available
 - Containers live in root's XDG dirs
 - GPU passthrough auto-detected (NVIDIA/AMD/Intel)

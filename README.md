@@ -25,7 +25,6 @@ It works in three simple steps: it downloads an image from Docker Hub (or extrac
     - [`restore`](#restore)
     - [`diff`](#diff)
     - [`search`](#search)
-    - [`setup`](#setup)
     - [`info`](#info)
     - [`help`](#help)
     - [`build`](#build)
@@ -50,7 +49,7 @@ sudo apt install python3-pip   # Debian/Ubuntu example
 sudo pip install chroot-distro --break-system-packages --root-user-action=ignore
 ```
 
-Installing system-wide with `sudo` lets you turn on [passwordless](#passwordless-setup-linux-only) mode. A plain `pip install` works too: every command then elevates itself with `sudo`, `doas`, `pkexec` or `su` as it runs.
+Every command elevates itself with `sudo`, `doas`, `pkexec` or `su` as it runs.
 
 ### Install on Termux (Android)
 
@@ -64,21 +63,6 @@ pip install chroot-distro
 ```
 
 No `sudo` or `tsu` package is needed: the root manager's `su` is used directly.
-
-### Passwordless setup (Linux only)
-
-Run this once so you never have to type a password again:
-
-```sh
-sudo chroot-distro setup
-```
-
-It creates a `chroot-distro` group, adds you to it, and starts a small root service (works with systemd, OpenRC, runit, dinit, and sysvinit). Log out and back in (or run `newgrp chroot-distro`) and you are done.
-
-Add more users later with `sudo usermod -aG chroot-distro <username>`. Remove the service with `sudo chroot-distro setup --uninstall`.
-
-> [!WARNING]
-> Members of the `chroot-distro` group get root-equivalent access, exactly like the `docker` group. Only add people you trust.
 
 ### Quick start
 
@@ -373,20 +357,6 @@ Search Docker Hub. Shows image name, stars, official status, and a short descrip
 | ----------------- | ------------------------------------------- |
 | `-l`, `--limit N` | Show up to N results (default 25, max 100). |
 | `-q`, `--quiet`   | Only show errors.                           |
-
-### setup
-
-```
-chroot-distro setup [OPTIONS]
-```
-
-One-time passwordless setup on regular Linux. See [Passwordless setup](#passwordless-setup-linux-only). Not needed on Termux.
-
-| Option            | Description                                                                         |
-| ----------------- | ----------------------------------------------------------------------------------- |
-| `--user USERNAME` | Add this user to the `chroot-distro` group instead of the user who ran the command. |
-| `--uninstall`     | Stop and remove the daemon service. The group is kept.                              |
-| `-q`, `--quiet`   | Only show errors.                                                                   |
 
 ### info
 

@@ -18,12 +18,6 @@ from chroot_distro.elevate import (
 from chroot_distro.exceptions import RootRequiredError
 
 
-@pytest.fixture(autouse=True)
-def mock_try_daemon_delegation():
-    with patch("chroot_distro.elevate._try_daemon_delegation", return_value=None):
-        yield
-
-
 def test_is_root():
     with patch("os.getuid", return_value=0):
         assert is_root() is True
@@ -352,45 +346,26 @@ def test_is_root_available_termux():
 def test_is_root_available_linux():
     from chroot_distro.elevate import is_root_available
 
-    # 1. daemon socket available and connects successfully
+    # 1. required file capabilities already present
     with (
         patch("chroot_distro.elevate.is_root", return_value=False),
-        patch("chroot_distro.elevate.has_required_capabilities", return_value=False),
-        patch("os.environ.get", return_value="0"),
-        patch("os.path.exists", return_value=True),
-        patch("socket.socket") as mock_sock_cls,
+        patch("chroot_distro.elevate.has_required_capabilities", return_value=True),
+        patch("chroot_distro.elevate._find_escalation_tool", return_value=None),
     ):
-        mock_sock = mock_sock_cls.return_value
-        assert is_root_available() is True
-        mock_sock.connect.assert_called_once()
-
-    # 2. daemon socket exists but fails connection, but fallback tool available
-    with (
-        patch("chroot_distro.elevate.is_root", return_value=False),
-        patch("chroot_distro.elevate.has_required_capabilities", return_value=False),
-        patch("os.environ.get", return_value="0"),
-        patch("os.path.exists", return_value=True),
-        patch("socket.socket") as mock_sock_cls,
-        patch("chroot_distro.elevate._find_escalation_tool", return_value=["sudo"]),
-    ):
-        mock_sock = mock_sock_cls.return_value
-        mock_sock.connect.side_effect = OSError("Connection refused")
         assert is_root_available() is True
 
-    # 3. daemon socket not used (CD_NO_DAEMON=1), but fallback tool available
+    # 2. no capabilities, but a fallback tool is available
     with (
         patch("chroot_distro.elevate.is_root", return_value=False),
         patch("chroot_distro.elevate.has_required_capabilities", return_value=False),
-        patch.dict("os.environ", {"CD_NO_DAEMON": "1"}),
         patch("chroot_distro.elevate._find_escalation_tool", return_value=["sudo"]),
     ):
         assert is_root_available() is True
 
-    # 4. no daemon, no fallback tools
+    # 3. no capabilities and no fallback tool
     with (
         patch("chroot_distro.elevate.is_root", return_value=False),
         patch("chroot_distro.elevate.has_required_capabilities", return_value=False),
-        patch.dict("os.environ", {"CD_NO_DAEMON": "1"}),
         patch("chroot_distro.elevate._find_escalation_tool", return_value=None),
     ):
         assert is_root_available() is False

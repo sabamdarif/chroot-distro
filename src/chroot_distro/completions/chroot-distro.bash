@@ -43,7 +43,6 @@ _chroot_distro() {
 	local cur prev words cword
 	_init_completion || return
 
-	# `setup` and `daemon` are host administration, deliberately not offered here.
 	local -r _all_commands="install add i in ins remove rm rename reset login sh list li ls
         backup bak bkp restore clear-cache clear cl copy cp sync run build push
         kill k stop ps diff search find se info version-info nf

@@ -465,7 +465,7 @@ def _gather_capabilities(images: list["_ImageInfo"], host_arch: str) -> list[_Ca
         elif tool:
             caps.append(_Capability("Privileges", f"not root, can elevate via {tool}", "info"))
         else:
-            caps.append(_Capability("Privileges", "not root, can elevate via daemon socket", "info"))
+            caps.append(_Capability("Privileges", "not root, has the required file capabilities", "info"))
     else:
         if IS_TERMUX:
             caps.append(_Capability("Privileges", "not root, root is not available (su not found)", "bad"))

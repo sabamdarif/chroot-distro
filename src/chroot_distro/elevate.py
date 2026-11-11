@@ -6,7 +6,7 @@ Root is assumed everywhere else in the tree, so this is the one place that gets
 it, and there is no unprivileged mode to degrade to. `elevate_or_die()` tries, in
 order: already root; the required file capabilities already present
 (REQUIRED_CAPS, checked through PR_CAP_AMBIENT rather than assumed);
-Termux `su`; the Linux daemon socket; then sudo, doas, pkexec or su.
+Termux `su`; then sudo, doas, pkexec or su.
 `_CHROOT_DISTRO_ELEVATING=1` in the child's environment is what turns a failed
 elevation into an error instead of an infinite re-exec.
 
@@ -22,9 +22,9 @@ process-tree walk then has nothing to find.
 A value that may hold a secret never goes in argv, which is world-readable through
 /proc/*/cmdline: `_SECRET_ENV_VARS` are written to a 0600 tempfile and its path
 forwarded as `CD_SECRET_FILE`, which the root side reads and unlinks. That path
-arrives as an ordinary `CD_*` variable the daemon forwards from a client, so
+arrives as an ordinary `CD_*` variable from the invoking environment, so
 `_load_secret_file` adopts only the two names the channel exists for; taking
-arbitrary keys from it would let a client set PATH or LD_PRELOAD on the root side.
+arbitrary keys from it would let a caller set PATH or LD_PRELOAD on the root side.
 
 Termux is the other half. `su -c` from Magisk, KernelSU or APatch drops into a raw
 Android environment (toybox PATH, no writable HOME, no /usr/bin for a shebang to
@@ -127,19 +127,6 @@ def is_root_available() -> bool:
         help_text = _su_help_text(su)
         return "Termux does not supply tools" not in help_text and "No su program found" not in help_text
 
-    from chroot_distro.daemon import SOCKET_PATH
-
-    if os.environ.get("CD_NO_DAEMON") != "1" and os.path.exists(SOCKET_PATH):
-        import socket
-
-        conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        try:
-            conn.connect(SOCKET_PATH)
-            return True
-        except OSError:
-            pass
-        finally:
-            conn.close()
     return _find_escalation_tool() is not None
 
 
@@ -187,9 +174,9 @@ def _load_secret_file() -> None:
     if isinstance(values, dict):
         for key, val in values.items():
             # Only the vars this channel exists for: the path arrives as a
-            # CD_* var, which the daemon forwards from the calling client,
-            # so an arbitrary key here would let a client set any root-side
-            # variable (PATH, LD_PRELOAD, ...).
+            # CD_* var from the invoking environment, so an arbitrary key
+            # here would let a caller set any root-side variable (PATH,
+            # LD_PRELOAD, ...).
             if key in _SECRET_ENV_VARS and isinstance(val, str):
                 os.environ[key] = val
     with contextlib.suppress(OSError):
@@ -439,20 +426,6 @@ def _elevate_termux() -> None:
         raise RootRequiredError(f"Failed to execute '{su}': {e}") from e
 
 
-def _try_daemon_delegation() -> None:
-    """Delegate to the root daemon socket when available.
-
-    Exits the process with the delegated command's exit code on success;
-    returns normally when the daemon is unavailable or access was denied
-    so the caller can fall back to sudo/doas/pkexec/su.
-    """
-    from chroot_distro.daemon import run_client
-
-    exit_code = run_client(sys.argv[1:])
-    if exit_code is not None:
-        sys.exit(exit_code)
-
-
 def elevate_or_die() -> None:
     """Attempt to re-execute the current process with root privileges.
 
@@ -462,9 +435,7 @@ def elevate_or_die() -> None:
     2. Required file capabilities are present → return (no elevation).
     3. Termux → exec Android's ``su`` directly with a Termux-aware
        environment (no external sudo/tsu wrapper required).
-    4. Linux → delegate to the group-gated root daemon socket if
-       ``chroot-distro setup`` has been run (passwordless).
-    5. Fall back to sudo/doas/pkexec/su.
+    4. Linux → rerun under sudo, doas, pkexec or su.
 
     Raises RootRequiredError when elevation loops or no mechanism exists.
     """
@@ -486,14 +457,11 @@ def elevate_or_die() -> None:
         _elevate_termux()
         return  # unreachable: _elevate_termux never returns on success
 
-    _try_daemon_delegation()
-
     tool_cmd = _find_escalation_tool()
     if not tool_cmd:
         raise RootRequiredError(
             "chroot-distro requires root privileges, but no privilege elevation tool "
-            "(sudo, doas, pkexec, su) was found on the system. For passwordless "
-            "operation run 'chroot-distro setup' once as root."
+            "(sudo, doas, pkexec, su) was found on the system."
         )
 
     os.environ["_CHROOT_DISTRO_ELEVATING"] = "1"

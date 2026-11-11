@@ -10,10 +10,9 @@ uses `not`, which also catches the empty list an `nargs="*"` positional produces
 Unknown-argument detection reparses up to a `--` for `login` and `run`, since
 everything after it belongs to the guest command.
 
-Root policy is decided here and nowhere else. `help`, `search` and `daemon` never
-elevate; `daemon` additionally refuses to elevate itself, because it is started by an
-init system and self-elevation could recurse through the socket it serves. On Termux
-`list` and `ps` read only /proc and container metadata so they stay unprivileged.
+Root policy is decided here and nowhere else. `help` and `search` never elevate.
+On Termux `list` and `ps` read only /proc and container metadata so they stay
+unprivileged.
 Everything else elevates, `info` included: its kernel answers come from probes that
 need root, and a rootless report would be the one a bug cannot be filed with. There is
 no rootless fallback, so a command that needs root and cannot get it fails here.
@@ -69,8 +68,6 @@ _COMMAND_HANDLERS: dict[str, str | Callable] = {
     "ps": "chroot_distro.commands.ps:command_ps",
     "diff": "chroot_distro.commands.diff:command_diff",
     "search": "chroot_distro.commands.search:command_search",
-    "setup": "chroot_distro.commands.setup:command_setup",
-    "daemon": "chroot_distro.commands.daemon_cmd:command_daemon",
     "info": "chroot_distro.commands.info:command_info",
     "help": "chroot_distro.commands.help:command_help",
 }
@@ -225,14 +222,8 @@ def main() -> None:
     # by root and live in root's data dir, so they still elevate there to read
     # the right location. `info` always elevates: its kernel probes and the
     # data directories are root's, and a partial report is worse than none.
-    if canonical == "daemon" and os.getuid() != 0:
-        # The daemon is started by the init system and must already be
-        # root; never self-elevate it (that could recurse through itself).
-        crit_error("the daemon must be started as root (normally by your init system).")
-        sys.exit(1)
-
     requires_root = False
-    if canonical in ("help", "search", "daemon"):
+    if canonical in ("help", "search"):
         requires_root = False
     elif IS_TERMUX:
         requires_root = canonical not in ("list", "ps")

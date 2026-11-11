@@ -319,7 +319,7 @@ def test_gather_capabilities_privilege_states():
         assert priv.level == "bad"
         assert "root is not available (su not found)" in priv.value
 
-    # 4. Linux, not root, can elevate via daemon
+    # 4. Linux, not root, elevation comes from file capabilities
     with (
         patch("os.getuid", return_value=1000),
         patch("chroot_distro.commands.info.IS_TERMUX", False),
@@ -335,7 +335,7 @@ def test_gather_capabilities_privilege_states():
         caps = info._gather_capabilities(images=[], host_arch="x86_64")
         priv = next(c for c in caps if c.label == "Privileges")
         assert priv.level == "info"
-        assert "can elevate via daemon socket" in priv.value
+        assert "has the required file capabilities" in priv.value
 
 
 def test_command_info_json_has_every_section(capsys):
