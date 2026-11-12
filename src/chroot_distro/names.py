@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: GPL-3.0-only
 # Copyright (C) 2025-2026 Md Arif
-"""The container-name rule, in one place, with the hint the error message uses.
+"""The container-name rule and the diagnostic for a rejected name.
 
-A name reaches the filesystem as a directory component under the data and cache
-roots, so it is validated before anything is built from it, `restore` included:
-an archive names a container, and this is what keeps that name from naming a path.
+Callers must validate names from command arguments and backup archives before
+using them as components of runtime paths.
 """
 
 import re
@@ -22,6 +21,6 @@ def is_valid_name(name: str) -> bool:
 
 
 def require_valid_name(name: str, kind: str = "container name") -> None:
-    """Raise InvalidNameError when *name* is invalid; otherwise return None."""
+    """Raise InvalidNameError when *name* is invalid."""
     if not is_valid_name(name):
-        raise InvalidNameError(f"{kind} '{name}' is not valid. {NAME_RULE_HINT}")
+        raise InvalidNameError(f"{kind} {name!a} is not valid. {NAME_RULE_HINT}")
