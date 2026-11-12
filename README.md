@@ -1,5 +1,9 @@
 # Chroot-Distro
 
+[![Repo Size](https://img.shields.io/github/repo-size/sabamdarif/chroot-distro)](https://github.com/sabamdarif/chroot-distro)
+[![GitHub License](https://img.shields.io/github/license/sabamdarif/chroot-distro)](https://github.com/sabamdarif/chroot-distro/blob/main/LICENSE)
+[![PyPI Downloads](https://static.pepy.tech/personalized-badge/chroot-distro?period=monthly&units=INTERNATIONAL_SYSTEM&left_color=BLACK&right_color=GREEN&left_text=downloads%2Fmonth)](https://pepy.tech/projects/chroot-distro)
+
 Chroot-Distro lets you run real Linux systems (Ubuntu, Debian, Alpine, Arch, and more) on any Linux host: a regular Linux machine, or `Termux` on a rooted Android device.
 
 It works in three simple steps: it downloads an image from Docker Hub (or extracts a tarball you give it), unpacks it into a folder, and enters it using the Linux kernel's own `chroot` and `mount` features. Because it talks to the kernel directly, everything runs at native speed. It can also build images from a Dockerfile and push them to a registry.
@@ -93,17 +97,15 @@ Create a container. `IMAGE` can be:
 | Local file       | `./rootfs.tar.gz`, `./image.oci.tar` |
 | Web link         | `https://example.com/rootfs.tar.xz`  |
 
-A registry reference is read by Docker's own grammar, so `localhost:5000/foo` names a
-registry on this machine and `Ubuntu` is refused rather than asked for as a repository
-no registry can have. Pinning an image by digest (`debian@sha256:...`) is not supported
-yet.
+References follow Docker's own grammar, so `localhost:5000/foo` names a registry on
+this machine. Pinning an image by digest (`debian@sha256:...`) is not supported yet.
 
-| Option                      | Description                                                                                                                                   |
-| --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| `-n`, `--name NAME`         | Give the container a custom name. Default is the image name. Needed to install the same image twice. `--override-alias` is an accepted alias. |
-| `-a`, `--architecture ARCH` | Install for a different CPU type (`aarch64`, `x86_64`, `linux/arm64`, ...). Default is your host's CPU.                                       |
+| Option                      | Description                                                                                                                                                              |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `-n`, `--name NAME`         | Give the container a custom name. Default is the image name. Needed to install the same image twice. `--override-alias` is an accepted alias.                            |
+| `-a`, `--architecture ARCH` | Install for a different CPU type (`aarch64`, `x86_64`, `linux/arm64`, ...). Default is your host's CPU.                                                                  |
 | `--allow-insecure`          | Permit insecure transport when downloading: an untrusted certificate, or a redirect from HTTPS to plain HTTP. Only for sources you trust; Docker Hub is always verified. |
-| `-q`, `--quiet`             | Only show errors.                                                                                                                             |
+| `-q`, `--quiet`             | Only show errors.                                                                                                                                                        |
 
 For private images, set `CD_DOCKER_AUTH` first:
 
@@ -112,37 +114,25 @@ export CD_DOCKER_AUTH=myuser:mypassword
 chroot-distro install myuser/private-image:tag
 ```
 
-You can also just pass the personal access token as well,
-so `export CD_DOCKER_AUTH=myuser:ghp_xxxxxxxx` works the same way.
+The password half can also be a personal access token (`myuser:ghp_xxxxxxxx`).
+Credentials are checked before the download starts and go only to that registry
+and its login service.
 
-Most registries trade these credentials for a short-lived access token.
-A registry that checks the password itself, such as a self-hosted one with a
-password file, gets the credentials directly on every request. Either way,
-they are sent only to that registry and its login service, and are checked
-before the download or push starts, so a wrong password is reported as one.
-
-**Pull rate limits.** Registries limit how often you may pull. Docker Hub
-counts anonymous pulls per network address, and mobile or shared networks
-give one address to many people. When a registry answers "too many
-requests" (HTTP 429), the install stops and says whose limit it is and when
-to try again, if the registry says. Pulling with an account
-(`CD_DOCKER_AUTH`) gets a limit of its own.
-
-Some registries only pass requests on to Docker Hub, for example
-`docker.n8n.io`. Everyone pulling through them anonymously shares one
-Docker Hub limit, so it is often used up. The error message names the
-image's Docker Hub name; install from there instead:
+**Pull rate limits.** Anonymous Docker Hub pulls are limited per IP address, so
+shared networks often hit them. A "too many requests" error (HTTP 429) names the
+limit and when to retry; logging in with `CD_DOCKER_AUTH` gets a limit of its
+own. Proxies like `docker.n8n.io` share Docker Hub's anonymous limit, so install
+the image straight from Docker Hub instead:
 
 ```sh
 # Instead of docker.n8n.io/n8nio/n8n:latest
 chroot-distro install n8nio/n8n:latest
 ```
 
-A container for another CPU needs QEMU's user-mode emulator on the host: install
-`qemu-user-static` (Linux) or `qemu-user-ARCH` (Termux), `login`
-then registers it with the kernel's `binfmt_misc` the first time you enter the
-container, and the registration stays until the host reboots.
-`chroot-distro info` lists which architectures are covered.
+A container for another CPU needs QEMU's user-mode emulator on the host:
+install `qemu-user-static` (Linux) or `qemu-user-ARCH` (Termux); `login`
+registers it with the kernel on first use. `chroot-distro info` lists which
+architectures are covered.
 
 ### login
 
@@ -158,28 +148,28 @@ chroot-distro login ubuntu
 chroot-distro login ubuntu -- uname -a
 ```
 
-| Option                              | Description                                                                                                                                                                                                                                             |
-| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `-u`, `--user USER`                 | Log in as this user instead of root. Accepts a name, `name:group`, a numeric `uid`, or `uid:gid`.                                                                                                                                                       |
-| `--isolated`                        | Maximum isolation: no host path is shared except `/sys`, which a user namespace cannot replace with a fresh sysfs; the container gets its own mount, PID, UTS, and IPC namespaces. `--shared-*` and `--bind` are ignored here. `--isolate` is an alias. |
-| `--minimal`                         | Bare minimum mode: fresh `/dev`, `/proc`, `/sys` and `/dev/shm` pseudo-filesystems and a stripped environment, nothing else. Cannot be combined with `--isolated`.                                                                                      |
-| `--shared-home`                     | Make your host home folder available inside the container.                                                                                                                                                                                              |
-| `--shared-tmp`                      | Share the host `/tmp` with the container. By default the container gets its own empty `/tmp`.                                                                                                                                                           |
-| `--shared-display`                  | Share the host screen (X11/Wayland), audio, and D-Bus, so GUI apps work. `--shared-x11` is an accepted alias.                                                                                                                                           |
-| `-b`, `--bind SRC[:DEST[:OPTIONS]]` | Make any host folder available inside the container. Optional mount options like `ro` or `ro,nosuid`. A single device node under `/dev` is allowed too, e.g. `--bind /dev/ttyUSB0`, Docker's `--device` equivalent. Can be given more than once.        |
-| `-w`, `--work-dir PATH`             | Start in this folder instead of the user's home.                                                                                                                                                                                                        |
-| `-e`, `--env VAR=VALUE`             | Set an environment variable inside the container. Can be given more than once.                                                                                                                                                                          |
-| `--get-chroot-cmd`                  | Print the exact chroot command that would run, without running it.                                                                                                                                                                                      |
+| Option                              | Description                                                                                                                                                                                                                                     |
+| ----------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `-u`, `--user USER`                 | Log in as this user instead of root. Accepts a name, `name:group`, a numeric `uid`, or `uid:gid`.                                                                                                                                               |
+| `--isolated`                        | Maximum isolation: own mount, PID, UTS and IPC namespaces, and no host path shared except `/sys`. `--shared-*` and `--bind` are ignored. `--isolate` is an alias.                                                                               |
+| `--minimal`                         | Bare minimum mode: fresh `/dev`, `/proc`, `/sys` and `/dev/shm` and a stripped environment, nothing else. Cannot be combined with `--isolated`.                                                                                                 |
+| `--shared-home`                     | Make your host home folder available inside the container.                                                                                                                                                                                      |
+| `--shared-tmp`                      | Share the host `/tmp` with the container. By default the container gets its own empty `/tmp`.                                                                                                                                                   |
+| `--shared-display`                  | Share the host screen (X11/Wayland), audio, and D-Bus, so GUI apps work. `--shared-x11` is an accepted alias.                                                                                                                                   |
+| `-b`, `--bind SRC[:DEST[:OPTIONS]]` | Make any host folder available inside the container, with optional mount options like `ro,nosuid`. A single device node under `/dev` is also allowed, e.g. `--bind /dev/ttyUSB0` (Docker's `--device` equivalent). Can be given more than once. |
+| `-w`, `--work-dir PATH`             | Start in this folder instead of the user's home.                                                                                                                                                                                                |
+| `-e`, `--env VAR=VALUE`             | Set an environment variable inside the container. Can be given more than once.                                                                                                                                                                  |
+| `--get-chroot-cmd`                  | Print the exact chroot command that would run, without running it.                                                                                                                                                                              |
 
-If you want namespace isolation but still keep all the normal shared folders, set `CD_USE_NS=1` instead of using `--isolated`.
+Set `CD_USE_NS=1` for namespace isolation while keeping the normal shared folders, instead of `--isolated`.
 
-Every mode mounts fresh pseudo-filesystems instead of binding the host's. `/dev` is a fresh tmpfs with only the core device nodes (`null`, `zero`, `full`, `random`, `urandom`, `tty`), `/dev/pts` and `/dev/shm` are fresh instances, and `/sys` is a fresh read-only sysfs. When the kernel or SELinux refuses one of these, the host tree is bound instead, with a warning. Some proc and sys paths are covered or made read-only in every mode, following Docker's defaults: `/proc/kcore` and `/proc/keys` are masked (a `/dev/null` or an empty read-only tmpfs), and `/proc/sys`, `/proc/bus` and `/proc/sysrq-trigger` are read-only.
+Every mode mounts fresh pseudo-filesystems instead of binding the host's: a minimal `/dev`, fresh `/dev/pts`, `/dev/shm` and `/proc`, and a read-only `/sys`, following Docker's defaults (`/proc/kcore` and `/proc/keys` masked, `/proc/sys` read-only). When the kernel or SELinux refuses one, the host tree is bound with a warning.
 
-On Termux, Android mounts `/data` with `nosuid`, which would stop the guest from running setuid binaries such as `sudo` or `passwd`. A default (non-namespaced) login binds the container's own rootfs onto itself with `suid` and `exec` enabled instead of remounting `/data`, so the device's mount flags stay as Android set them, and the bind is removed when the last session ends. `--shared-tmp` binds `$PREFIX/tmp` as it is; it never changes that directory's mode, so make it world-writable yourself if a non-root guest user must write there.
+On Termux, Android mounts `/data` with `nosuid`, so a default login binds the container's rootfs onto itself with `suid` and `exec` enabled, letting setuid binaries like `sudo` work without touching Android's mount flags. `--shared-tmp` binds `$PREFIX/tmp` as it is; make it world-writable yourself if a non-root guest user must write there.
 
-Several sessions of one container share its options. A session that joins a container someone is already logged into gets that container's `--bind` mounts, `--shared-*` folders and `-e`/`--env` values, and whatever it asks for on top is added to the running container, so a second `login` no longer needs an `unmount` to bring a folder in. Two exceptions: a `--bind` whose destination the running container already fills from another source is ignored (with a warning), and `--isolated` shares nothing, so asking for it while a normal session is running is still an error. `CD_USE_NS` cannot be turned on for a container that is already running either, and a mismatch there is a warning.
+A second `login` to a busy container joins the running session and adds whatever extra `--bind`/`--shared-*`/`--env` it asks for, so no `unmount` is needed to bring a folder in. Conflicting `--bind` destinations are ignored with a warning; `--isolated` and `CD_USE_NS` cannot be turned on for a container that is already running.
 
-GPU acceleration needs no flag on regular Linux. AMD and Intel render nodes (`/dev/dri/*`) are bound into the fresh `/dev` individually, so the guest renders with its own Mesa packages; a host NVIDIA driver's devices, libraries, ICD descriptors and tools are bound in and switched on automatically. On Termux `login` binds no GPU nodes.
+GPU acceleration needs no flag on regular Linux: AMD/Intel render nodes (`/dev/dri/*`) and a host NVIDIA driver's devices, libraries and tools are bound in automatically. On Termux `login` binds no GPU nodes.
 
 ### run
 
@@ -189,7 +179,7 @@ chroot-distro run [OPTIONS] CONTAINER [-- ARG ...]
 
 Run the start command (Entrypoint/Cmd) defined by the container's image, like `docker run`. Mainly for server images (nginx, nextcloud, databases). Only works for containers installed from Docker/OCI images.
 
-`run` is the only way into an image that ships no shell, a `scratch` image or a distroless one: an interactive session needs a shell the image does not have, so `login` refuses such a container and points here.
+`run` is the only way into an image that ships no shell (`scratch`, distroless): `login` refuses those and points here.
 
 `run` accepts all `login` options above, plus:
 
@@ -212,11 +202,11 @@ Aliases: li, ls
 
 Show installed containers with their size, image source, and whether they are in use.
 
-| Option            | Description                                                                                                                                    |
-| ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| `-v`, `--verbose` | Also show image details: source URL, image type, default user, working directory, and exposed ports.                                            |
-| `-q`, `--quiet`   | Print only container names, one per line.                                                                                                      |
-| `--json`          | Print one JSON document on stdout instead of the table, with every field `-v` shows plus `size_bytes`. Mutually exclusive with `-v` and `-q`.   |
+| Option            | Description                                                                                                                                   |
+| ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| `-v`, `--verbose` | Also show image details: source URL, image type, default user, working directory, and exposed ports.                                          |
+| `-q`, `--quiet`   | Print only container names, one per line.                                                                                                     |
+| `--json`          | Print one JSON document on stdout instead of the table, with every field `-v` shows plus `size_bytes`. Mutually exclusive with `-v` and `-q`. |
 
 ### ps
 
@@ -226,9 +216,9 @@ chroot-distro ps [OPTIONS]
 
 Show active sessions: PID, container, type (`login` or `run`), user, uptime, and command. Detached sessions are marked with `*`.
 
-| Option          | Description                                                                                                                            |
-| --------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| `-q`, `--quiet` | Print only PIDs, one per line. Useful in scripts.                                                                                      |
+| Option          | Description                                                                                                                                         |
+| --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `-q`, `--quiet` | Print only PIDs, one per line. Useful in scripts.                                                                                                   |
 | `--json`        | Print one JSON document on stdout: every session record with `uptime_seconds`, plus orphaned processes per container. Mutually exclusive with `-q`. |
 
 ### copy
@@ -242,13 +232,13 @@ Copy files between the host and a container, or between two containers. Containe
 
 Ownership (numeric uid/gid), permissions and timestamps are preserved; `--chown` sets the owner by name on the destination side instead. Symlinks are copied as symlinks; hardlinks become independent copies; device nodes, FIFOs and sockets are skipped with a warning.
 
-| Option                 | Description                                                                                                                                                                                                                                                                                                                                          |
-| ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `-r`, `--recursive`    | Copy folders with everything inside them.                                                                                                                                                                                                                                                                                                            |
-| `-m`, `--move`         | Move instead of copy (source is deleted after).                                                                                                                                                                                                                                                                                                      |
-| `--chown USER[:GROUP]` | Give every transferred entry this owner instead of the source's ids. Names are looked up on the destination side, the container's `/etc/passwd` and `/etc/group` for a `name:path` destination and the host's otherwise, so `--chown arif` means whatever `arif` is over there. Numbers are used as they stand, and `:GROUP` changes only the group. |
-| `-v`, `--verbose`      | Show each copied file.                                                                                                                                                                                                                                                                                                                               |
-| `-q`, `--quiet`        | Only show errors.                                                                                                                                                                                                                                                                                                                                    |
+| Option                 | Description                                                                                                                                                                                                                          |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `-r`, `--recursive`    | Copy folders with everything inside them.                                                                                                                                                                                            |
+| `-m`, `--move`         | Move instead of copy (source is deleted after).                                                                                                                                                                                      |
+| `--chown USER[:GROUP]` | Give every transferred entry this owner instead of the source's ids. Names are looked up on the destination side, so `--chown arif` means whatever `arif` is there. Numbers are used as they stand; `:GROUP` changes only the group. |
+| `-v`, `--verbose`      | Show each copied file.                                                                                                                                                                                                               |
+| `-q`, `--quiet`        | Only show errors.                                                                                                                                                                                                                    |
 
 ```sh
 chroot-distro copy ./file.txt ubuntu:/root/file.txt
@@ -261,17 +251,15 @@ chroot-distro copy -r ./project ubuntu:/home/user/ --chown user
 chroot-distro sync [OPTIONS] [CONTAINER:]SRC [CONTAINER:]DEST
 ```
 
-Like `copy`, but only transfers files that changed. Always recursive. Files are compared by size and modification time.
+Like `copy`, but only transfers files that changed. Always recursive. Files are compared by size and modification time. Metadata-only changes (permissions, timestamps) are applied without rewriting the file.
 
-Ownership, permissions and timestamps are preserved for directories as well as files, and a change to any of them alone is applied without rewriting the file. With `--chown` the owner it names stands in for the source's, so a destination already carrying it is left alone.
-
-| Option                 | Description                                                                                                                                                                                                                                                                                                                                          |
-| ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `-c`, `--checksum`     | Compare by checksum instead of modification time. Slower but more precise.                                                                                                                                                                                                                                                                           |
-| `-d`, `--delete`       | Also delete files at the destination that no longer exist at the source.                                                                                                                                                                                                                                                                             |
-| `--chown USER[:GROUP]` | Give every transferred entry this owner instead of the source's ids. Names are looked up on the destination side, the container's `/etc/passwd` and `/etc/group` for a `name:path` destination and the host's otherwise, so `--chown arif` means whatever `arif` is over there. Numbers are used as they stand, and `:GROUP` changes only the group. |
-| `-v`, `--verbose`      | Show each synced or deleted file.                                                                                                                                                                                                                                                                                                                    |
-| `-q`, `--quiet`        | Only show errors.                                                                                                                                                                                                                                                                                                                                    |
+| Option                 | Description                                                                                                                                                                                                                          |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `-c`, `--checksum`     | Compare by checksum instead of modification time. Slower but more precise.                                                                                                                                                           |
+| `-d`, `--delete`       | Also delete files at the destination that no longer exist at the source.                                                                                                                                                             |
+| `--chown USER[:GROUP]` | Give every transferred entry this owner instead of the source's ids. Names are looked up on the destination side, so `--chown arif` means whatever `arif` is there. Numbers are used as they stand; `:GROUP` changes only the group. |
+| `-v`, `--verbose`      | Show each synced or deleted file.                                                                                                                                                                                                    |
+| `-q`, `--quiet`        | Only show errors.                                                                                                                                                                                                                    |
 
 ```sh
 chroot-distro sync ./dotfiles/ ubuntu:/home/user/ --chown user:user
@@ -368,8 +356,8 @@ chroot-distro diff [OPTIONS] CONTAINER
 
 Show what changed inside a container compared to its original image, like `docker diff`. `A` means added, `C` changed, `D` deleted. Needs the image layers to still be in the cache, so avoid `clear-cache` if you want `diff` to keep working.
 
-| Option   | Description                                                                                                          |
-| -------- | -------------------------------------------------------------------------------------------------------------------- |
+| Option   | Description                                                                                                           |
+| -------- | --------------------------------------------------------------------------------------------------------------------- |
 | `--json` | Print one JSON document on stdout: the container name and its `added`, `modified` and `deleted` paths, each absolute. |
 
 ### search
@@ -393,15 +381,13 @@ chroot-distro info [OPTIONS]
 Aliases: version-info, nf
 ```
 
-| Option   | Description                                                                                       |
-| -------- | ------------------------------------------------------------------------------------------------- |
+| Option   | Description                                                                                      |
+| -------- | ------------------------------------------------------------------------------------------------ |
 | `--json` | Print the same report as one JSON document on stdout, one key per section the text report shows. |
 
 Print a diagnostics report: versions, host details, capabilities, kernel support, installed containers, and basic health checks. Attach it when filing a bug report.
 
-It always runs as root, and stops with an error when root cannot be obtained. The kernel support section is probed by trying each feature, not read from a kernel build config, so it reports what the running kernel does.
-
-An image with no base distribution is described rather than flagged. A `scratch` image and a distroless one ship no shell, so nothing in the rootfs answers the architecture probe: the report reads the architecture out of the image manifest instead and says how the container is started.
+It always runs as root. The kernel support section is probed by trying each feature, not read from a kernel build config. A `scratch` or distroless image ships no shell, so its architecture is read from the image manifest instead.
 
 ### help
 
@@ -423,7 +409,7 @@ Build an image from a Dockerfile, like `docker build` but without Docker. `PATH`
 | Option                            | Description                                                                                                                                                                            |
 | --------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `-f`, `--file PATH`               | Use a Dockerfile at a different location. Pass `-` to read it from stdin.                                                                                                              |
-| `-t`, `--tag REF`                 | Name the image (like `myapp:1.0`), without a digest. Can be given more than once.                                                                                                     |
+| `-t`, `--tag REF`                 | Name the image (like `myapp:1.0`), without a digest. Can be given more than once.                                                                                                      |
 | `--build-arg K=V`                 | Set a build-time `ARG`. Can be given more than once.                                                                                                                                   |
 | `--build-context name=VALUE`      | Give a name to another source the Dockerfile can use. `VALUE` is a local folder or an image reference. See [Named build contexts](#named-build-contexts). Can be given more than once. |
 | `-a`, `--architecture ARCH`       | Build for a different CPU type. Default is your host's CPU. The one-platform spelling of `--platform`.                                                                                 |
@@ -458,7 +444,7 @@ Every instruction is supported: `ADD`, `ARG`, `CMD`, `COPY`, `ENTRYPOINT`, `ENV`
 | `HEALTHCHECK`        | Recorded in the image, options and all, for a runtime that runs checks. chroot-distro never runs one.                                                               |
 | `SHELL`              | Sets what a shell-form `RUN`, `CMD` and `ENTRYPOINT` are wrapped in. JSON form only, like Docker.                                                                   |
 
-These fail with a clear error rather than being ignored, because each one would otherwise build something other than what the Dockerfile says:
+These fail with a clear error rather than being ignored:
 
 | Not supported                                             | Reason                                                                                                                                    |
 | --------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
@@ -490,19 +476,19 @@ COPY --from=assets logo.png /usr/share/myapp/
 FROM assets AS bundled   # a local folder: scratch plus the tree copied in
 ```
 
-The value is a local folder or an image reference. A folder is read like the main build context, with its own `.dockerignore`, and a stage `FROM` one starts empty and copies the folder in. An image reference is pulled, so `COPY --from=baseimg` and `FROM baseimg` use it as a base. A stage declared with `AS` in the same Dockerfile still wins over a named context of the same name, as it does in Docker. Git URLs (`git+https://...` and friends) are refused with a message naming the alternative, because there is no git client here: clone the repository yourself and pass the checkout as a local folder.
+The value is a local folder or an image reference. A folder is read like the main build context, with its own `.dockerignore`; a stage `FROM` one starts empty and copies the folder in. An image reference is pulled and used as a base. A stage declared with `AS` in the same Dockerfile still wins over a same-named context, as in Docker. Git URLs are refused (there is no git client here): clone the repository yourself and pass the checkout as a local folder.
 
 #### Platforms and output
 
-`FROM --platform` picks one stage's platform, so `FROM --platform=$BUILDPLATFORM` builds that stage for your own CPU while the image stays the platform the build targets. An emulator is then only needed for a stage that has a `RUN` _and_ targets a foreign CPU. `TARGETPLATFORM`, `TARGETOS`, `TARGETARCH`, `TARGETVARIANT` and the matching `BUILD*` names are set automatically, and like Docker they live outside the stages: a bare `ARG TARGETARCH` inside a stage is what lets a `RUN` there read one.
+`FROM --platform` picks one stage's platform, so `FROM --platform=$BUILDPLATFORM` builds that stage for your own CPU while the image stays on the build's platform. `TARGETPLATFORM`, `TARGETARCH` and the other `BUILD*`/`TARGET*` names are set automatically; a bare `ARG TARGETARCH` inside a stage is what lets a `RUN` there read one.
 
-`--platform linux/amd64,linux/arm64` builds one image per platform, one after another, in the order you asked. Two spellings of one platform (`linux/arm64` and `linux/aarch64`) are one image. `--architecture` names a single platform, so passing both is only allowed when they agree. Each platform is built completely on its own, and if one fails the build stops there and publishes nothing.
+`--platform linux/amd64,linux/arm64` builds one image per platform, one after another, in the order you asked. Two spellings of one platform (`linux/arm64` and `linux/aarch64`) are one image. Each platform is built on its own; if one fails, the build stops and publishes nothing.
 
 Where those images end up:
 
-- `--output` writes one archive holding an OCI image index over every platform, sharing the layers they have in common. `docker load` reads the first platform you asked for out of it, since its own format cannot hold more than one; `chroot-distro install FILE` picks the platform matching your CPU.
-- Every `--tag` records every platform in the local cache, so `chroot-distro install myapp:1.0` installs the one for your CPU and `chroot-distro install myapp:1.0 -a arm64` the other. `chroot-distro push` uploads one of them per run, chosen the same way.
-- `--install-as` installs one container, so it takes the platform your host can run. A set of platforms with nothing your host runs is refused before the build starts.
+- `--output` writes one archive holding an OCI image index over every platform, sharing common layers. `docker load` reads the first platform out of it; `chroot-distro install FILE` picks the one matching your CPU.
+- Every `--tag` records every platform in the local cache: `install myapp:1.0` installs yours, `install myapp:1.0 -a arm64` the other.
+- `--install-as` installs one container, so it takes the platform your host can run and refuses a set with nothing your host runs.
 
 ```sh
 chroot-distro build -t myapp:1.0 --install-as myapp .
@@ -536,13 +522,12 @@ chroot-distro build -t myapp:1.0 \
     --cache-to type=registry,ref=ghcr.io/me/myapp-cache:latest .
 ```
 
-Both backends hold the same document: a `build-cache.json` that lists the steps plus one blob per layer. `type=local` keeps it as a plain folder (`src=`/`dest=`); `type=registry` stores it as a single OCI artifact at `ref=`, which a private registry wants `CD_DOCKER_AUTH` for. Both options can be given more than once, and the two are interchangeable.
+Both backends hold the same document: a `build-cache.json` listing the steps plus one blob per layer. `type=local` keeps it as a plain folder (`src=`/`dest=`); `type=registry` stores it as a single OCI artifact at `ref=` (a private registry wants `CD_DOCKER_AUTH` for it). Both can be given more than once, and the two are interchangeable.
 
-- Only the steps this build ran are exported, so the target carries no layer from a build that has nothing to do with it.
-- An export adds to what the target already holds and nothing ever removes anything, so a shared one only grows. Delete it to start over.
-- A folder that is not there yet is not an error: the first build reports that it imported nothing and carries on. A folder that is there and is not a cache folder stops the build.
-- Every layer is checked against its own checksums on the way in, and one that does not match is dropped so its step rebuilds. What that cannot check is whether the source tells the truth about which step a layer belongs to, so point `--cache-from` only at one you trust, the same as with `docker buildx`.
-- `--no-cache` skips the import, since no step would consult it. The export still runs, and records what the build rebuilt.
+- Only the steps this build ran are exported, and an export only adds to what the target already holds; delete the target to start over.
+- A folder that is not there yet imports nothing (no error); one that is there and is not a cache folder stops the build.
+- Layers are checksum-checked on the way in, but the source can still lie about which step a layer belongs to, so point `--cache-from` only at one you trust.
+- `--no-cache` skips the import; the export still runs.
 
 ### push
 
@@ -552,17 +537,13 @@ chroot-distro push [OPTIONS] IMAGE
 
 Upload an image you built with `build -t` to Docker Hub or another registry. Layers already on the registry are skipped.
 
-| Option                      | Description                                                                     |
-| --------------------------- | ------------------------------------------------------------------------------- |
-| `-a`, `--architecture ARCH` | Push the image built for that CPU type. Default is your host's CPU.             |
+| Option                      | Description                                                                                                                                                |
+| --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `-a`, `--architecture ARCH` | Push the image built for that CPU type. Default is your host's CPU.                                                                                        |
 | `--allow-insecure`          | Permit insecure transport: an untrusted certificate, or a redirect from HTTPS to plain HTTP. Only for registries you trust; Docker Hub is always verified. |
-| `-q`, `--quiet`             | Only show errors.                                                               |
+| `-q`, `--quiet`             | Only show errors.                                                                                                                                          |
 
-Set `CD_DOCKER_AUTH=username:password` before pushing to a private repository. The
-password half can be a personal access token, which is what GHCR wants: a token with
-the `write:packages` scope in place of the password. A "too many requests" answer
-(HTTP 429) stops the push with a message saying whose limit it is, and a short wait
-the registry asks for is waited out automatically.
+Set `CD_DOCKER_AUTH=username:password` before pushing to a private repository. The password half can be a personal access token, which is what GHCR wants. A "too many requests" answer (HTTP 429) stops the push with a message saying whose limit it is; a short wait the registry asks for is waited out automatically.
 
 ### clear-cache
 
@@ -580,7 +561,7 @@ Delete all cached downloads (image layers, manifests, build cache) and show how 
 | `-v`, `--verbose` | Show each deleted file.                                                                         |
 | `-q`, `--quiet`   | Only show errors.                                                                               |
 
-Every `RUN` a build executes is recorded against the layer it produced, so a later build with the same parent, instruction and inputs reuses it. Without a cap nothing evicts those entries, and every edit to a Dockerfile strands the ones before it, so the build cache is the part that only grows.
+Every `RUN` a build executes is recorded against the layer it produced, so a later build with the same inputs reuses it. Without a cap nothing evicts these entries, so the build cache only grows.
 
 ```sh
 # Reclaim the build cache, keep the downloaded images
@@ -590,11 +571,11 @@ chroot-distro clear-cache --build-cache
 chroot-distro clear-cache --build-cache --keep 500M
 ```
 
-Without `--keep` this removes the index and then deletes the layers nothing else points at. The layers of images you still have are kept, so what goes is the build's own bookkeeping, the intermediates no image held on to, and any leftover blob from a killed download. The next `build` re-runs every step. With `--keep`, only the least-recently-used entries past `SIZE` are evicted and the rest stay warm for the next build. It refuses to run while another `chroot-distro` command holds a lock, since a build in progress has recorded steps whose layers this would unpin. To skip cache lookups for a single build without deleting anything, use `build --no-cache` instead, which still records what it builds.
+Without `--keep` this removes the index and then deletes the layers nothing else points at; the layers of images you still have are kept, and the next `build` re-runs every step. With `--keep`, only the least-recently-used entries past `SIZE` are evicted. It refuses to run while another `chroot-distro` command holds a lock. To skip cache lookups for a single build without deleting anything, use `build --no-cache`.
 
-Set `CD_BUILD_CACHE_MAX` (for example `CD_BUILD_CACHE_MAX=1G`) and every `build` prunes itself against that cap once it finishes, so the cache stays bounded without a manual `clear-cache`.
+Set `CD_BUILD_CACHE_MAX` (for example `CD_BUILD_CACHE_MAX=1G`) and every `build` prunes itself against that cap when it finishes, so the cache stays bounded without a manual `clear-cache`.
 
-A folder written by `build --cache-to` is yours, not part of this cache, so nothing here touches it. Delete that folder yourself when you want it gone.
+A folder written by `build --cache-to` is yours, not part of this cache; delete it yourself when you want it gone.
 
 ### remove
 
@@ -623,7 +604,7 @@ Every document, success or failure, is an object carrying the schema version and
 {"schema": 1, "command": "diff", "error": "container 'nope' is not installed."}
 ```
 
-`schema` is bumped only when a key is renamed, removed or changes type, so a consumer can ignore keys it does not know and keep working. The field rules are the same in all four documents: a byte count is an integer named `*_bytes` with its formatted twin beside it, a duration is `*_seconds`, a path is absolute, a flag is a real `true`/`false`, an unknown value is `null`, and a list is always present even when empty.
+`schema` is bumped only when a key is renamed, removed or changes type, so a consumer can ignore keys it does not know and keep working. Field rules: a byte count is an integer named `*_bytes` with its formatted twin beside it, a duration is `*_seconds`, a path is absolute, a flag is a real `true`/`false`, an unknown value is `null`, and a list is always present even when empty.
 
 ```sh
 chroot-distro list --json | jq -r '.containers[] | "\(.name) \(.status)"'
@@ -688,7 +669,7 @@ All of these are optional.
 
 - **No full init systems.** `systemd` and similar will not work inside containers. Individual long-running programs are fine.
 - **Isolation is partial.** `--isolated` covers mount, PID, UTS, and IPC namespaces (no network isolation). It is not a full container runtime like Docker or Podman.
-- **`--isolated` writes land as the container uid.** Under the subordinate uid remap (Tier B, where the kernel and `/etc/subuid` allow it) the guest's processes run as unprivileged host uids and the rootfs is served through an idmapped mount, so a file the guest creates is owned on the host by the same uid it appears to be inside: container root writes host-uid-0 files. The uid remap scopes the guest's privileges; it does not protect the rootfs from the guest.
+- **`--isolated` writes land as the container uid.** Where the kernel and `/etc/subuid` allow it, the guest's processes run as unprivileged host uids through an idmapped mount, so a file the guest creates carries the same host uid it shows inside. This scopes the guest's privileges; it does not protect the rootfs from the guest.
 - **Default mode has no boundary.** Without `--isolated` or `CD_USE_NS` the guest runs as host root: `/proc` lists host processes, and `/proc/<pid>/root` reaches the host filesystem of any listed process. Use the namespace modes when the guest is not your own.
 - **The capability drop spares what desktop programs need.** The bounding set keeps `CAP_SYS_ADMIN` (mounts, FUSE) and `CAP_SYS_CHROOT` (the setuid sandbox helpers of Chromium and Electron), so a namespace mode is the boundary for a guest you do not trust.
 - **Builds are not full BuildKit.** `RUN` steps execute under chroot, few BuildKit features are not supported so they are rejected with an error.
