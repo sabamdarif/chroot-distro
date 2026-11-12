@@ -35,10 +35,6 @@ the file itself. The name is unpredictable and was just created, so nothing can
 be waiting under it, and a directory re-pointed in the window between strands
 those bytes under a random name and fails the rename rather than publishing them
 somewhere else.
-
-Ported from proot-distro (https://github.com/termux/proot-distro), created by
-Sylirre <sylirre@termux.dev> for the Termux project and licensed GPL-3.0, and
-adapted to this project's two writers and their `mode=` handling.
 """
 
 import contextlib

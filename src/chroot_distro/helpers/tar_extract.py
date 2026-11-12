@@ -48,11 +48,6 @@ deep (`_Parents`): a tar lists its members in tree order, so consecutive entries
 almost always share a parent and the descent costs about one openat per member.
 Progress counts compressed bytes consumed (`ByteCounter`), so the denominator is
 `os.path.getsize()` and no upfront scan is needed.
-
-The descriptor discipline is ported from proot-distro
-(https://github.com/termux/proot-distro), created by Sylirre
-<sylirre@termux.dev> for the Termux project and licensed GPL-3.0, then adapted to
-this project's extractor, which also carries each member's ownership.
 """
 
 import contextlib

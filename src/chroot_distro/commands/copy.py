@@ -18,10 +18,6 @@ be read is reported and stepped over rather than ending the transfer, which is
 source in place because the copy it would be deleting is incomplete, including
 when the only thing missing is a device, FIFO or socket, which no tree this
 module writes carries across.
-
-Ported from proot-distro (https://github.com/termux/proot-distro), created by
-Sylirre <sylirre@termux.dev> for the Termux project and licensed GPL-3.0, then
-adapted to chroot-distro's message helpers and path resolution.
 """
 
 import errno

@@ -56,6 +56,7 @@ from chroot_distro.helpers.docker.transport import (
     get_auth_token,
     opener,
     push_denied_msg,
+    same_auth_origin,
 )
 from chroot_distro.helpers.download import (
     is_retryable_http_error,
@@ -118,6 +119,20 @@ def _resolve_upload_url(base: str, location: str) -> str:
     if location.startswith("/"):
         return base + location
     return base.rstrip("/") + "/" + location
+
+
+def _headers_for(headers: dict[str, str], base: str, url: str) -> dict[str, str]:
+    """*headers* for a request to *url*: the token only on the registry.
+
+    The Bearer token was issued for the registry at *base*, and the
+    upload Location is a header the registry's answer named, so an
+    absolute one can point anywhere. The request itself still goes (a
+    registry may hand out a pre-signed upload URL on a store of its own),
+    it simply goes without the credential.
+    """
+    if same_auth_origin(base, url):
+        return headers
+    return {k: v for k, v in headers.items() if k != "Authorization"}
 
 
 def _blob_exists(
@@ -204,7 +219,7 @@ def _upload_blob_bytes(
             data=data,
             method="PUT",
             headers={
-                **headers,
+                **_headers_for(headers, base, full_put_url),
                 "Content-Type": "application/octet-stream",
                 "Content-Length": str(len(data)),
             },
@@ -275,7 +290,7 @@ def _upload_blob_monolithic(
                 data=reader,
                 method="PUT",
                 headers={
-                    **headers,
+                    **_headers_for(headers, base, put_url),
                     "Content-Type": "application/octet-stream",
                     "Content-Length": str(size),
                 },
@@ -329,7 +344,7 @@ def _upload_blob_chunked(
                     data=chunk,
                     method="PATCH",
                     headers={
-                        **headers,
+                        **_headers_for(headers, base, upload_url),
                         "Content-Type": "application/octet-stream",
                         "Content-Length": str(len(chunk)),
                         "Content-Range": f"{offset}-{end}",
@@ -369,7 +384,7 @@ def _upload_blob_chunked(
                     put_url,
                     data=b"",
                     method="PUT",
-                    headers={**headers, "Content-Length": "0"},
+                    headers={**_headers_for(headers, base, put_url), "Content-Length": "0"},
                 )
                 op = auth_opener() if not insecure else opener(insecure)
                 with op.open(put_req) as resp:

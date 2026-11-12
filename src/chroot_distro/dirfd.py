@@ -4,10 +4,6 @@
 
 Every walk here reaches an entry through openat(2) with O_NOFOLLOW off a pinned
 directory fd, so no path this program did not validate is ever resolved twice.
-
-Ported from proot-distro (https://github.com/termux/proot-distro), created by
-Sylirre <sylirre@termux.dev> for the Termux project and licensed GPL-3.0, and
-trimmed to what chroot-distro's `copy` and `sync` need.
 """
 
 import contextlib

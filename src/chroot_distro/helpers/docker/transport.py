@@ -62,24 +62,51 @@ def _ua() -> dict:
     return {"User-Agent": f"{PROGRAM_NAME}/{PROGRAM_VERSION}"}
 
 
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+
+
+def same_auth_origin(from_url: str, to_url: str) -> bool:
+    """Whether a credential sent with *from_url* may also go to *to_url*.
+
+    An Authorization header is addressed to an origin (scheme, host and
+    port), and carrying it to another hands the secret to whoever answers
+    there. The one scheme change allowed is an upgrade to HTTPS on the
+    default ports, which reaches the same server more securely. A URL
+    that cannot be read is not the same origin as anything.
+    """
+    try:
+        src = urllib.parse.urlsplit(from_url)
+        dst = urllib.parse.urlsplit(to_url)
+        src_host, dst_host = src.hostname, dst.hostname
+        src_port, dst_port = src.port, dst.port
+    except ValueError:
+        return False
+    if not src_host or src_host != dst_host:
+        return False
+    if src.scheme == dst.scheme:
+        default = _DEFAULT_PORTS.get(src.scheme)
+        return (src_port or default) == (dst_port or default)
+    return (
+        src.scheme == "http" and dst.scheme == "https" and src_port in (None, 80) and dst_port in (None, 443)
+    )
+
+
 class AuthStrippingRedirectHandler(urllib.request.HTTPRedirectHandler):
-    """Strip the Authorization header when following a cross-host redirect.
+    """Strip the Authorization header when following a redirect off-origin.
 
     Docker Hub blob endpoints redirect to CDN pre-signed URLs. Those CDN
     hosts return HTTP 400 when they receive a Bearer token. Python's
     default redirect handler forwards all headers unchanged, so we
-    override it to drop Authorization whenever the redirect target
-    host differs from the source host.
+    override it to drop Authorization whenever the redirect target is not
+    the origin the request was addressed to (same_auth_origin).
     """
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
-        """Forward the redirect, dropping Authorization on a cross-host hop."""
+        """Forward the redirect, dropping Authorization off-origin."""
         new_req = super().redirect_request(req, fp, code, msg, headers, newurl)
         if new_req is None:
             return None
-        orig_host = urllib.parse.urlparse(req.full_url).netloc
-        new_host = urllib.parse.urlparse(newurl).netloc
-        if orig_host != new_host:
+        if not same_auth_origin(req.full_url, newurl):
             new_req.headers.pop("Authorization", None)
         return new_req
 

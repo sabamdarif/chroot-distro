@@ -37,10 +37,6 @@ The work is three passes: `_collect_rels` records the source's relative paths,
 `_mirror_at` writes, and `_collect_extras_at` / `_remove_extras_at` prune. All
 three carry directory fds down an explicit stack, so the number of open fds
 follows the depth of the tree rather than its size.
-
-Ported from proot-distro (https://github.com/termux/proot-distro), created by
-Sylirre <sylirre@termux.dev> for the Termux project and licensed GPL-3.0, then
-adapted to chroot-distro's message helpers and path resolution.
 """
 
 import contextlib

@@ -33,11 +33,6 @@ other refusal is an entry this program did not create, and becomes
 `_unusable_storage`. ENOTDIR is ambiguous (an O_NOFOLLOW open declining a link,
 or a component that is simply not a directory), so a refusal is only reported as
 a race once the component has been confirmed to be a symlink.
-
-The chroot-semantics resolver, the overlap guard and the descriptor pins below
-are ported from proot-distro (https://github.com/termux/proot-distro), created
-by Sylirre <sylirre@termux.dev> for the Termux project and licensed GPL-3.0,
-then adapted to chroot-distro's exception-based error reporting.
 """
 
 import contextlib

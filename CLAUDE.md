@@ -8,9 +8,9 @@ without Docker or Podman. It needs Python 3.10+ (CI tests 3.10, 3.12 and 3.14,
 the versions straddling the 3.12 and 3.14 version gates; add a version when one
 gains a gate of its own; `.python-version` pins 3.12 for local dev), a Linux
 kernel, and root access.
-GPL-3.0-only; the files ported from
-[proot-distro](https://github.com/termux/proot-distro) say so in their docstring,
-and a new port must too.
+GPL-3.0-only. A port from
+[proot-distro](https://github.com/termux/proot-distro) is credited by the
+`Co-authored-by:` trailer in its commit, not by a note in the file.
 
 Each rule has exactly one home: behaviour in [How to Work Here](#how-to-work-here)
 and [YAGNI](#yagni), files in [Code conventions](#code-conventions), messages in
