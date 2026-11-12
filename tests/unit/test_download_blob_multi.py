@@ -410,7 +410,7 @@ class TestDownloadBlobSegmented:
 
             with (
                 mock.patch("chroot_distro.helpers.docker.layers._probe_blob", return_value=probe_result),
-                mock.patch("urllib.request.build_opener", return_value=mock_opener_first),
+                mock.patch("chroot_distro.helpers.download.http_opener", return_value=mock_opener_first),
                 mock.patch("chroot_distro.helpers.download._interruptible_sleep"),
                 pytest.raises(Exception),
             ):
@@ -444,7 +444,7 @@ class TestDownloadBlobSegmented:
 
             with (
                 mock.patch("chroot_distro.helpers.docker.layers._probe_blob", return_value=probe_result),
-                mock.patch("urllib.request.build_opener", return_value=mock_opener_second),
+                mock.patch("chroot_distro.helpers.download.http_opener", return_value=mock_opener_second),
                 mock.patch("chroot_distro.helpers.download._interruptible_sleep"),
             ):
                 result_path = download_blob(

@@ -25,7 +25,9 @@ since the insecure opener skips verification and so cannot produce that error at
 `AuthStrippingRedirectHandler` exists because Docker Hub redirects blob reads to
 pre-signed CDN URLs that answer 400 if a Bearer token comes with them, and urllib
 forwards every header across a redirect. Dropping Authorization on a cross-host hop is
-also the right thing for a credential regardless of what the CDN would do.
+also the right thing for a credential regardless of what the CDN would do. It is a
+subclass of download's redirect handler, so a hop from HTTPS to plain HTTP is refused
+unless `--allow-insecure`, and a hop that is followed under it still loses the header.
 
 `CD_DOCKER_AUTH` is `username:secret` and nothing else, and the secret half is a
 password or a personal access token: every registry that issues tokens takes either
@@ -50,6 +52,7 @@ import urllib.request
 
 from chroot_distro.constants import PROGRAM_NAME, PROGRAM_VERSION
 from chroot_distro.helpers.download import (
+    RedirectPolicyHandler,
     certificate_error_msg,
     http_opener,
     is_cert_verification_error,
@@ -96,7 +99,7 @@ def same_auth_origin(from_url: str, to_url: str) -> bool:
     )
 
 
-class AuthStrippingRedirectHandler(urllib.request.HTTPRedirectHandler):
+class AuthStrippingRedirectHandler(RedirectPolicyHandler):
     """Strip the Authorization header when following a redirect off-origin.
 
     Docker Hub blob endpoints redirect to CDN pre-signed URLs. Those CDN
@@ -104,6 +107,11 @@ class AuthStrippingRedirectHandler(urllib.request.HTTPRedirectHandler):
     default redirect handler forwards all headers unchanged, so we
     override it to drop Authorization whenever the redirect target is not
     the origin the request was addressed to (same_auth_origin).
+
+    Whether a redirect is followed at all is the base class's question,
+    asked first: a step down from HTTPS to plain HTTP is refused unless
+    *allow_plaintext* (--allow-insecure), and one that is followed there
+    still loses the header, since it is not the same origin.
     """
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
@@ -119,12 +127,13 @@ class AuthStrippingRedirectHandler(urllib.request.HTTPRedirectHandler):
 def opener(insecure: bool = False) -> urllib.request.OpenerDirector:
     """Build and return a new opener that strips Auth across hosts.
 
-    The *insecure* variant additionally installs an HTTPS handler whose SSL
-    context skips certificate verification, so HTTPS endpoints presenting an
-    untrusted certificate can be reached under ``--allow-insecure``. Every
-    request made through the returned opener gets a default socket timeout.
+    The *insecure* variant skips certificate verification, so HTTPS endpoints
+    presenting an untrusted certificate can be reached under
+    ``--allow-insecure``, and lets a redirect step down from HTTPS to plain
+    HTTP, which the verifying one refuses. Every request made through the
+    returned opener gets a default socket timeout.
     """
-    return http_opener(AuthStrippingRedirectHandler(), insecure=insecure)
+    return http_opener(insecure=insecure, redirect=AuthStrippingRedirectHandler(allow_plaintext=insecure))
 
 
 def auth_opener():
@@ -173,7 +182,7 @@ def _http_registry_reachable(registry: str, timeout: float = 6.0) -> bool:
     """
     req = urllib.request.Request(f"http://{registry}/v2/", headers=_ua())
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with http_opener().open(req, timeout=timeout) as resp:
             resp.read(64)
         return True
     except urllib.error.HTTPError:

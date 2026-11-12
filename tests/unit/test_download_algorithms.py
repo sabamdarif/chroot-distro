@@ -183,7 +183,7 @@ class TestSegmentReconnection:
 
         # Mock the build_opener and sleep
         with (
-            mock.patch("urllib.request.build_opener", return_value=mock_opener),
+            mock.patch("chroot_distro.helpers.download.http_opener", return_value=mock_opener),
             mock.patch("chroot_distro.helpers.download._interruptible_sleep"),
             mock.patch("chroot_distro.helpers.download._get_max_retries", return_value=1),
         ):

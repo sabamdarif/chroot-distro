@@ -16,6 +16,11 @@ certificate this host does not trust is answered with the `--allow-insecure` hin
 peer not speaking TLS at all is answered with "use the http:// scheme", and OpenSSL's
 own handshake reason proves which it is, so no second probe is needed.
 
+Every request goes through `http_opener()`, the one place an opener is built: HTTP and
+HTTPS and nothing else, with a redirect handler that refuses a step down from HTTPS to
+plain HTTP. No manifest, `install <url>` archive or `ADD <url>` file is pinned to a
+digest, so a plaintext hop would let whoever sits on it choose what is installed.
+
 Segmentation is earned, never assumed: HEAD first, a `Range: bytes=0-0` GET when HEAD
 is silent about ranges or answers 405, and segments only when Range works *and* the
 length is known. `MIN_SEGMENT_BYTES` keeps a small file whole, and a split that yields
@@ -68,7 +73,7 @@ from chroot_distro.constants import (
     PROGRAM_NAME,
     PROGRAM_VERSION,
 )
-from chroot_distro.message import log_error, log_info, msg, warn
+from chroot_distro.message import log_error, log_info, msg, quote_path, warn
 from chroot_distro.progress import (
     REDRAW_THRESHOLD_BYTES,
     AggregateByteProgress,
@@ -87,8 +92,11 @@ __all__ = (
     "NETWORK_ERRORS",
     "NETWORK_TIMEOUT",
     "IncompleteResponse",
+    "RedirectPolicyHandler",
+    "RedirectRefused",
     "_LiveResponses",
     "certificate_error_msg",
+    "check_redirect",
     "declared_length",
     "download_file",
     "http_opener",
@@ -189,24 +197,129 @@ class _Opener(urllib.request.OpenerDirector):
         return super().open(fullurl, data, timeout)
 
 
-def http_opener(*handlers, insecure: bool = False):
+class RedirectRefused(http.client.HTTPException):
+    """A redirect this program will not follow.
+
+    Raised by check_redirect(). An HTTPException so every net catches it
+    through NETWORK_ERRORS, and one retry_http never repeats, since the
+    server gives the same answer every time. *plaintext* is True when the
+    refusal is a step down from HTTPS to plain HTTP, the one kind insecure
+    transport permits.
+    """
+
+    def __init__(self, message: str, plaintext: bool = False):
+        super().__init__(message)
+        self.plaintext = plaintext
+
+
+# The schemes a redirect may lead to: the same two every URL this program
+# accepts from the user is held to.
+_FOLLOWED_SCHEMES = ("http", "https")
+
+
+def check_redirect(from_url: str, location: str, *, allow_plaintext: bool = False) -> None:
+    """Raise RedirectRefused unless a redirect to *location* may be followed.
+
+    *location* is the header as the server sent it, relative or not, and is
+    resolved against *from_url* the way the redirect itself will be. A target
+    that is not a URL, any scheme but http or https, one naming no host, and
+    (unless *allow_plaintext*) a step down from HTTPS to plain HTTP are all
+    refusals. Nothing pins a tag's manifest, an `install <url>` archive or an
+    `ADD <url>` file to a digest, so whoever sat on the plaintext hop decides
+    what is installed or built.
+    """
+    try:
+        target = urllib.parse.urljoin(from_url, location)
+        src = urllib.parse.urlsplit(from_url)
+        dst = urllib.parse.urlsplit(target)
+    except ValueError:
+        raise RedirectRefused(
+            f"Refusing to follow a redirect from '{quote_path(from_url)}': "
+            f"its target '{quote_path(location)}' is not a valid URL."
+        ) from None
+    if dst.scheme not in _FOLLOWED_SCHEMES or not dst.hostname:
+        raise RedirectRefused(
+            f"Refusing to follow a redirect from '{quote_path(from_url)}' "
+            f"to '{quote_path(target)}': only http:// and https:// URLs "
+            f"naming a host are followed."
+        )
+    if src.scheme == "https" and dst.scheme == "http" and not allow_plaintext:
+        raise RedirectRefused(
+            f"Refusing to follow a redirect from '{quote_path(from_url)}' "
+            f"to '{quote_path(target)}': it leaves HTTPS for plain HTTP, "
+            f"so what arrives would no longer be protected by TLS.",
+            plaintext=True,
+        )
+
+
+class RedirectPolicyHandler(urllib.request.HTTPRedirectHandler):
+    """urllib's redirect handler, following only what check_redirect allows.
+
+    The check runs twice on purpose. http_error_30x runs it on the raw
+    Location before urllib's own handling touches it, because that handling
+    answers a malformed header with a bare ValueError and a scheme it
+    dislikes with an HTTPError whose 3xx code retry_http reads as transient.
+    redirect_request runs it on the absolute URL the new request is built
+    for, which is what a subclass calls directly.
+    """
+
+    def __init__(self, allow_plaintext: bool = False):
+        super().__init__()
+        self.allow_plaintext = allow_plaintext
+
+    def _refuse(self, fp, from_url: str, location: str) -> None:
+        try:
+            check_redirect(from_url, location, allow_plaintext=self.allow_plaintext)
+        except RedirectRefused:
+            if fp is not None:
+                fp.close()
+            raise
+
+    def http_error_302(self, req, fp, code, msg, headers):
+        location = headers.get("location")
+        if location is None:
+            location = headers.get("uri")
+        if location is not None:
+            self._refuse(fp, req.full_url, location)
+        return super().http_error_302(req, fp, code, msg, headers)
+
+    http_error_301 = http_error_303 = http_error_307 = http_error_302
+    http_error_308 = http_error_302
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        self._refuse(fp, req.full_url, newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def http_opener(
+    *,
+    insecure: bool = False,
+    redirect: urllib.request.HTTPRedirectHandler | None = None,
+) -> urllib.request.OpenerDirector:
     """Return an opener for HTTP(S) requests with a default timeout.
 
-    *handlers* are added ahead of the standard set, which is how the
-    registry transport installs its credential-stripping redirect handler.
-    With *insecure* the HTTPS handler skips certificate verification.
+    urllib.request.urlopen() and build_opener() also install handlers for
+    ftp://, file:// and data:, and a redirect handler that follows HTTPS to
+    plain HTTP without a word. Nothing this program fetches is legitimately
+    anything but HTTP(S), so this opener has the default set minus those
+    three and a RedirectPolicyHandler in place of urllib's.
+
+    With *insecure* the HTTPS handler skips certificate verification and the
+    redirect policy lets HTTPS step down to plain HTTP: both are what
+    --allow-insecure means. *redirect* substitutes a handler of the caller's
+    own, which is how the registry transport adds credential stripping.
     """
+    if redirect is None:
+        redirect = RedirectPolicyHandler(allow_plaintext=insecure)
     context = insecure_ssl_context() if insecure else None
     opener = _Opener()
-    for handler in handlers:
-        opener.add_handler(handler)
     for handler in (
         urllib.request.ProxyHandler(),
         urllib.request.UnknownHandler(),
         urllib.request.HTTPHandler(),
         urllib.request.HTTPSHandler(context=context),
         urllib.request.HTTPDefaultErrorHandler(),
-        urllib.request.HTTPRedirectHandler(),
+        redirect,
         urllib.request.HTTPErrorProcessor(),
     ):
         opener.add_handler(handler)
@@ -291,7 +404,7 @@ _DELTA_SECONDS_RE = re.compile(r"[0-9]+")
 _RETRY_LATER_CODES = (429, 503)
 
 
-def retry_after(exc: BaseException):
+def retry_after(exc: BaseException) -> float | None:
     """Seconds the Retry-After of HTTP error *exc* asks to wait, or None.
 
     Both forms of the header are read: delta-seconds, and an HTTP-date
@@ -320,10 +433,11 @@ def retry_after(exc: BaseException):
 
 def _quota_spent(exc: urllib.error.HTTPError) -> bool:
     """Whether HTTP error *exc* reports its request quota used up."""
-    if exc.headers is None:
+    headers = getattr(exc, "headers", None)
+    if headers is None:
         return False
     for name in _QUOTA_REMAINING_HEADERS:
-        value = exc.headers.get(name)
+        value = headers.get(name)
         if isinstance(value, str) and _QUOTA_SPENT_RE.match(value.strip()):
             return True
     return False
@@ -354,6 +468,9 @@ def is_retryable_http_error(exc: BaseException) -> bool:
     if isinstance(exc, urllib.error.URLError):
         return not (is_cert_verification_error(exc) or is_plaintext_http_tls_error(exc))
     if isinstance(exc, (FileNotFoundError, PermissionError)):
+        return False
+    if isinstance(exc, RedirectRefused):
+        # The server's answer, and it will be the same one next time.
         return False
     return isinstance(exc, (OSError, ssl.SSLError, http.client.HTTPException))
 
@@ -574,11 +691,8 @@ def _probe_server(url: str, headers: dict[str, str], insecure: bool = False) -> 
 
     Returns *None* on any network error so the caller can fall back silently.
     """
-    if insecure:
-        op = urllib.request.build_opener(urllib.request.HTTPSHandler(context=insecure_ssl_context()))
-        open_fn = functools.partial(op.open, timeout=_SOCKET_TIMEOUT)
-    else:
-        open_fn = None
+    op = http_opener(insecure=insecure)
+    open_fn = functools.partial(op.open, timeout=_SOCKET_TIMEOUT)
     return _probe_url(url, headers, open_fn=open_fn)
 
 
@@ -708,10 +822,7 @@ def _download_segment(
 
     # Each thread gets its own opener to avoid urllib's internal
     # connection serialisation when sharing the default global opener.
-    if insecure:
-        opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=insecure_ssl_context()))
-    else:
-        opener = urllib.request.build_opener()
+    opener = http_opener(insecure=insecure)
 
     reconnections = 0
     while reconnections <= _MAX_RECONNECTIONS:
@@ -801,7 +912,7 @@ def _download_segment(
                 reconnections += 1
                 if reconnections > _MAX_RECONNECTIONS:
                     raise
-                opener = urllib.request.build_opener()
+                opener = http_opener(insecure=insecure)
                 break  # re-enter the reconnection loop
 
     raise RuntimeError(
@@ -990,10 +1101,9 @@ def _download_single(
     prev_sigint = signal.getsignal(signal.SIGINT)
     with contextlib.suppress(ValueError):
         signal.signal(signal.SIGINT, _on_sigint)
-    context = insecure_ssl_context() if insecure else None
     try:
         return _download_single_loop(
-            req, dest, bucket, max_retries, retry_delays, abort_event, last_exc, context=context, insecure=insecure
+            req, dest, bucket, max_retries, retry_delays, abort_event, last_exc, insecure=insecure
         )
     finally:
         with contextlib.suppress(ValueError):
@@ -1008,10 +1118,10 @@ def _download_single_loop(
     retry_delays: tuple[float, ...],
     abort_event: threading.Event,
     last_exc: BaseException | None,
-    context: ssl.SSLContext | None = None,
     insecure: bool = False,
 ) -> None:
     url = req.full_url
+    opener = http_opener(insecure=insecure)
     for attempt in range(max_retries + 1):
         if attempt > 0:
             delay = retry_delays[attempt - 1]
@@ -1021,7 +1131,7 @@ def _download_single_loop(
         try:
             with (
                 atomic_replace(dest) as tmp,
-                urllib.request.urlopen(req, context=context, timeout=_SOCKET_TIMEOUT) as resp,
+                opener.open(req, timeout=_SOCKET_TIMEOUT) as resp,
                 open(tmp, "wb") as fh,
             ):
                 total = int(resp.headers.get("Content-Length", 0))
@@ -1079,6 +1189,21 @@ def _download_single_loop(
             raise RuntimeError(f"Cannot download {url}: {exc}") from exc
 
 
+def _redirect_error(url: str, exc: "RedirectRefused") -> RuntimeError:
+    """The error reporting a redirect refused while fetching *url*.
+
+    Only a step down from HTTPS is what --allow-insecure lifts, so only
+    that one names the flag; a redirect off HTTP is refused either way.
+    """
+    remedy = (
+        " If you trust this source and the network path to it, re-run with "
+        "'--allow-insecure' to follow the redirect."
+        if exc.plaintext
+        else ""
+    )
+    return RuntimeError(f"Cannot download {url}: {exc}{remedy}")
+
+
 def download_file(
     url: str,
     dest: str,
@@ -1104,8 +1229,11 @@ def download_file(
     bucket = TokenBucket(rate) if rate > 0 else None
 
     if connections > 1:
-        with loading_line("Connecting..."):
-            probe = _probe_server(url, _ua_headers(), insecure=insecure)
+        try:
+            with loading_line("Connecting..."):
+                probe = _probe_server(url, _ua_headers(), insecure=insecure)
+        except RedirectRefused as exc:
+            raise _redirect_error(url, exc) from exc
 
         if probe is None:
             log_info("Server probe failed, falling back to single connection.")
@@ -1126,6 +1254,8 @@ def download_file(
             except Exception as exc:
                 clear_bar()
                 host = urllib.parse.urlparse(url).netloc or url
+                if isinstance(exc, RedirectRefused):
+                    raise _redirect_error(url, exc) from exc
                 if isinstance(exc, urllib.error.URLError):
                     if not insecure and is_cert_verification_error(exc):
                         raise RuntimeError(certificate_error_msg(host)) from exc
@@ -1140,7 +1270,10 @@ def download_file(
                     raise RuntimeError(f"Cannot download {url}: HTTP {exc.code} {exc.reason}") from exc
                 raise RuntimeError(f"Cannot download {url}: {exc}") from exc
 
-    _download_single(url, dest, bucket, insecure=insecure)
+    try:
+        _download_single(url, dest, bucket, insecure=insecure)
+    except RedirectRefused as exc:
+        raise _redirect_error(url, exc) from exc
 
 
 def sha256_file(path: str) -> str:

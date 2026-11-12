@@ -28,6 +28,19 @@ from chroot_distro.helpers.download import (
 # ---------------------------------------------------------------------------
 
 
+def _opener(obj):
+    """An opener-shaped stand-in for http_opener(): *obj* is what .open() yields."""
+    opener = mock.MagicMock()
+    if isinstance(obj, BaseException) or callable(obj):
+        opener.open.side_effect = obj
+    else:
+        opener.open.return_value = obj
+    return opener
+
+
+HTTP_OPENER = "chroot_distro.helpers.download.http_opener"
+
+
 class _FakeResp:
     """Minimal fake urllib response for testing."""
 
@@ -77,7 +90,7 @@ class TestProbeServer:
             headers={"Content-Length": "1024", "Accept-Ranges": "bytes"},
             url="http://cdn.example.com/final.tar",
         )
-        with mock.patch("urllib.request.urlopen", return_value=resp):
+        with mock.patch(HTTP_OPENER, return_value=_opener(resp)):
             result = _probe_server("http://example.com/file.tar", {})
         assert result is not None
         assert result.range_ok is True
@@ -89,7 +102,7 @@ class TestProbeServer:
             status=200,
             headers={"Content-Length": "2048"},
         )
-        with mock.patch("urllib.request.urlopen", return_value=resp):
+        with mock.patch(HTTP_OPENER, return_value=_opener(resp)):
             result = _probe_server("http://example.com/file.tar", {})
         assert result is not None
         assert result.range_ok is False
@@ -100,7 +113,7 @@ class TestProbeServer:
             status=200,
             headers={"Content-Length": "512", "Accept-Ranges": "none"},
         )
-        with mock.patch("urllib.request.urlopen", return_value=resp):
+        with mock.patch(HTTP_OPENER, return_value=_opener(resp)):
             result = _probe_server("http://example.com/file.tar", {})
         assert result is not None
         assert result.range_ok is False
@@ -126,7 +139,7 @@ class TestProbeServer:
                 raise head_exc
             return get_resp
 
-        with mock.patch("urllib.request.urlopen", side_effect=_urlopen_side_effect):
+        with mock.patch(HTTP_OPENER, return_value=_opener(_urlopen_side_effect)):
             result = _probe_server("http://example.com/file.tar", {})
         assert result is not None
         assert result.range_ok is True
@@ -136,8 +149,8 @@ class TestProbeServer:
         import urllib.error
 
         with mock.patch(
-            "urllib.request.urlopen",
-            side_effect=urllib.error.URLError("Connection refused"),
+            HTTP_OPENER,
+            return_value=_opener(urllib.error.URLError("Connection refused")),
         ):
             result = _probe_server("http://example.com/file.tar", {})
         assert result is None
@@ -209,7 +222,7 @@ class TestDownloadSegment:
         resp = _FakeResp(status=200, body=b"x" * 100)
         abort = threading.Event()
         with (
-            mock.patch("urllib.request.build_opener", return_value=self._mock_opener(resp)),
+            mock.patch(HTTP_OPENER, return_value=self._mock_opener(resp)),
             pytest.raises(_RangeNotSupportedError),
         ):
             _download_segment(seg, "http://example.com/f", {}, None, abort)
@@ -220,7 +233,7 @@ class TestDownloadSegment:
         resp = _FakeResp(status=206, body=b"x" * 50)
         abort = threading.Event()
         with (
-            mock.patch("urllib.request.build_opener", return_value=self._mock_opener(resp)),
+            mock.patch(HTTP_OPENER, return_value=self._mock_opener(resp)),
             pytest.raises(RuntimeError, match="expected 100 bytes, got 50"),
         ):
             _download_segment(seg, "http://example.com/f", {}, None, abort)
@@ -230,7 +243,7 @@ class TestDownloadSegment:
         body = b"A" * 100
         resp = _FakeResp(status=206, body=body)
         abort = threading.Event()
-        with mock.patch("urllib.request.build_opener", return_value=self._mock_opener(resp)):
+        with mock.patch(HTTP_OPENER, return_value=self._mock_opener(resp)):
             _download_segment(seg, "http://example.com/f", {}, None, abort)
         assert os.path.getsize(seg.tmp_path) == 100
         with open(seg.tmp_path, "rb") as f:
@@ -249,7 +262,7 @@ class TestDownloadSegment:
         abort.set()  # pre-set abort
 
         with (
-            mock.patch("urllib.request.build_opener", return_value=self._mock_opener(resp)),
+            mock.patch(HTTP_OPENER, return_value=self._mock_opener(resp)),
             pytest.raises(KeyboardInterrupt),
         ):
             _download_segment(seg, "http://example.com/f", {}, None, abort)
@@ -306,7 +319,7 @@ class TestDownloadFile:
 
         with (
             mock.patch("chroot_distro.constants.layer_download_workers", return_value=1),
-            mock.patch("urllib.request.urlopen", return_value=resp),
+            mock.patch(HTTP_OPENER, return_value=_opener(resp)),
             mock.patch("chroot_distro.helpers.download.atomic_replace") as mock_ar,
         ):
             mock_ar.return_value.__enter__ = mock.Mock(return_value=dest)
@@ -331,7 +344,7 @@ class TestDownloadFile:
         with (
             mock.patch("chroot_distro.constants.layer_download_workers", return_value=4),
             mock.patch("chroot_distro.helpers.download._probe_server", return_value=fake_probe),
-            mock.patch("urllib.request.urlopen", return_value=single_resp),
+            mock.patch(HTTP_OPENER, return_value=_opener(single_resp)),
             mock.patch("chroot_distro.helpers.download.atomic_replace") as mock_ar,
         ):
             mock_ar.return_value.__enter__ = mock.Mock(return_value=dest)
@@ -387,7 +400,7 @@ class TestDownloadFile:
         with (
             mock.patch("chroot_distro.constants.layer_download_workers", return_value=4),
             mock.patch("chroot_distro.helpers.download._probe_server", return_value=probe_result),
-            mock.patch("urllib.request.build_opener", return_value=mock_opener_first),
+            mock.patch(HTTP_OPENER, return_value=mock_opener_first),
             mock.patch("chroot_distro.helpers.download._interruptible_sleep"),
             pytest.raises(Exception),
         ):
@@ -416,7 +429,7 @@ class TestDownloadFile:
         with (
             mock.patch("chroot_distro.constants.layer_download_workers", return_value=4),
             mock.patch("chroot_distro.helpers.download._probe_server", return_value=probe_result),
-            mock.patch("urllib.request.build_opener", return_value=mock_opener_second),
+            mock.patch(HTTP_OPENER, return_value=mock_opener_second),
             mock.patch("chroot_distro.helpers.download._interruptible_sleep"),
         ):
             download_file("http://example.com/output.tar", dest)
@@ -504,7 +517,7 @@ class TestTwoStageRangeDetection:
             # GET Range:0-0 request
             return get_resp
 
-        with mock.patch("urllib.request.urlopen", side_effect=_urlopen_side_effect):
+        with mock.patch(HTTP_OPENER, return_value=_opener(_urlopen_side_effect)):
             result = _probe_server("http://example.com/file.tar", {})
 
         assert result is not None
@@ -535,7 +548,7 @@ class TestTwoStageRangeDetection:
                 return head_resp
             return get_resp
 
-        with mock.patch("urllib.request.urlopen", side_effect=_urlopen_side_effect):
+        with mock.patch(HTTP_OPENER, return_value=_opener(_urlopen_side_effect)):
             result = _probe_server("http://example.com/file.tar", {})
 
         assert result is not None
@@ -557,7 +570,7 @@ class TestTwoStageRangeDetection:
             call_count += 1
             return resp
 
-        with mock.patch("urllib.request.urlopen", side_effect=_urlopen_side_effect):
+        with mock.patch(HTTP_OPENER, return_value=_opener(_urlopen_side_effect)):
             result = _probe_server("http://example.com/file.tar", {})
 
         assert result is not None
@@ -579,7 +592,7 @@ class TestTwoStageRangeDetection:
             call_count += 1
             return resp
 
-        with mock.patch("urllib.request.urlopen", side_effect=_urlopen_side_effect):
+        with mock.patch(HTTP_OPENER, return_value=_opener(_urlopen_side_effect)):
             result = _probe_server("http://example.com/file.tar", {})
 
         assert result is not None

@@ -77,11 +77,7 @@ from chroot_distro.helpers.build_engine.parsing import (
     split_operands,
 )
 from chroot_distro.helpers.build_engine.users import resolve_chown
-from chroot_distro.helpers.docker import (
-    AuthStrippingRedirectHandler,
-    layer_cache_path,
-    pull_image,
-)
+from chroot_distro.helpers.docker import layer_cache_path, pull_image
 from chroot_distro.helpers.dockerfile import expand_vars
 from chroot_distro.helpers.download import http_opener
 from chroot_distro.helpers.layer_diff import MapSources, write_files_layer
@@ -810,13 +806,17 @@ def _copy_url(
     urllib wraps what it can into URLError, which is an OSError, but
     http.client's own family for a response that is malformed or cut short is
     not one, and used to walk out of here and out of `build` as a traceback.
+
+    Fetched through download.http_opener, so a redirect from HTTPS to plain
+    HTTP is refused: the build has no --allow-insecure, and nothing pins the
+    file to a digest. A Dockerfile that means plain HTTP writes `ADD http://`.
     """
     if dest.endswith("/"):
         name = os.path.basename(urllib.parse.urlparse(url).path) or "index"
         arcname = dest.lstrip("/") + name
     else:
         arcname = dest.lstrip("/")
-    opener = http_opener(AuthStrippingRedirectHandler())
+    opener = http_opener()
     try:
         with opener.open(url) as resp:
             declared = _declared_length(resp)

@@ -14,6 +14,7 @@ import urllib.parse
 import urllib.request
 
 from chroot_distro.constants import PROGRAM_NAME, PROGRAM_VERSION
+from chroot_distro.helpers.download import http_opener
 from chroot_distro.message import C, crit_error, msg
 from chroot_distro.progress import loading_line
 
@@ -26,7 +27,7 @@ def _fetch(term: str, limit: int) -> list[dict]:
     query = urllib.parse.urlencode({"query": term, "page_size": str(limit), "page": "1"})
     url = f"{_HUB_SEARCH_URL}?{query}"
     req = urllib.request.Request(url, headers={"User-Agent": f"{PROGRAM_NAME}/{PROGRAM_VERSION}"})
-    with urllib.request.urlopen(req, timeout=_SOCKET_TIMEOUT) as resp:
+    with http_opener().open(req, timeout=_SOCKET_TIMEOUT) as resp:
         data = json.loads(resp.read().decode("utf-8"))
     results = data.get("results") or []
     return results if isinstance(results, list) else []

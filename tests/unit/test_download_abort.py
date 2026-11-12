@@ -172,7 +172,7 @@ class TestDownloadSegmentAbort:
         abort.set()
         opener = mock.MagicMock()
         with (
-            mock.patch("urllib.request.build_opener", return_value=opener),
+            mock.patch("chroot_distro.helpers.download.http_opener", return_value=opener),
             pytest.raises(KeyboardInterrupt),
         ):
             _download_segment(seg, "http://example.com/f", {}, None, abort)
@@ -192,7 +192,7 @@ class TestDownloadSegmentAbort:
         opener.open.side_effect = _open
         start = time.monotonic()
         with (
-            mock.patch("urllib.request.build_opener", return_value=opener),
+            mock.patch("chroot_distro.helpers.download.http_opener", return_value=opener),
             pytest.raises(KeyboardInterrupt),
         ):
             _download_segment(seg, "http://example.com/f", {}, None, abort)
