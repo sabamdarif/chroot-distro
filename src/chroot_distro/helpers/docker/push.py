@@ -127,8 +127,8 @@ def _resolve_upload_url(base: str, location: str) -> str:
 def _headers_for(headers: dict[str, str], base: str, url: str) -> dict[str, str]:
     """*headers* for a request to *url*: the token only on the registry.
 
-    The Bearer token was issued for the registry at *base*, and the
-    upload Location is a header the registry's answer named, so an
+    The credential was issued for the registry at *base*, and the upload
+    Location is a header the registry's answer named, so an
     absolute one can point anywhere. The request itself still goes (a
     registry may hand out a pre-signed upload URL on a store of its own),
     it simply goes without the credential.
@@ -141,15 +141,15 @@ def _headers_for(headers: dict[str, str], base: str, url: str) -> dict[str, str]
 def _blob_exists(
     repo: str,
     digest: str,
-    token: str,
+    auth: str,
     base: str,
     insecure: bool = False,
 ) -> bool:
     """Return True iff blob *digest* already exists on the registry."""
     url = f"{base}/v2/{repo}/blobs/{digest}"
     headers = {**_ua()}
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
+    if auth:
+        headers["Authorization"] = auth
 
     def _do() -> bool:
         req = urllib.request.Request(url, method="HEAD", headers=headers)
@@ -207,12 +207,12 @@ def _upload_blob_bytes(
     repo: str,
     digest: str,
     data: bytes,
-    token: str,
+    auth: str,
     base: str,
     insecure: bool = False,
 ) -> None:
     """Upload a small in-memory blob (POST + monolithic PUT, retry-wrapped)."""
-    headers = _auth_headers(token)
+    headers = _auth_headers(auth)
 
     def _do() -> None:
         upload_url = _open_upload_session(base, repo, headers, insecure=insecure)
@@ -235,10 +235,10 @@ def _upload_blob_bytes(
     _with_retry(_do, f"upload {digest[:19]}")
 
 
-def _auth_headers(token: str) -> dict[str, str]:
+def _auth_headers(auth: str) -> dict[str, str]:
     headers = {**_ua()}
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
+    if auth:
+        headers["Authorization"] = auth
     return headers
 
 
@@ -410,7 +410,7 @@ def _upload_blob_file(
     repo: str,
     digest: str,
     file_path: str,
-    token: str,
+    auth: str,
     base: str,
     insecure: bool = False,
     label: str = "",
@@ -420,7 +420,7 @@ def _upload_blob_file(
     Blobs at or above the configured chunk size are uploaded in chunks
     (resumable); smaller blobs use a single retry-wrapped PUT.
     """
-    headers = _auth_headers(token)
+    headers = _auth_headers(auth)
     size = os.path.getsize(file_path)
 
     if size >= _push_chunk_size():
@@ -437,7 +437,7 @@ def _put_manifest(
     reference: str,
     body: bytes,
     media_type: str,
-    token: str,
+    auth: str,
     base: str,
     insecure: bool = False,
 ) -> str:
@@ -449,8 +449,8 @@ def _put_manifest(
         "Content-Type": media_type,
         "Content-Length": str(len(body)),
     }
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
+    if auth:
+        headers["Authorization"] = auth
 
     def _do() -> str:
         req = urllib.request.Request(url, data=body, method="PUT", headers=headers)
@@ -538,7 +538,7 @@ def push_image(image_ref: str, arch: str, insecure: bool = False) -> dict[str, t
 
     log_info(f"Authenticating with registry{auth_note()}...")
     try:
-        token, base = get_auth_token(repo, registry, actions="pull,push", insecure=insecure)
+        auth, base = get_auth_token(repo, registry, actions="pull,push", insecure=insecure)
     except urllib.error.HTTPError as exc:
         refusal = _refusal_msg(image_ref, parsed, exc)
         if refusal:
@@ -555,7 +555,7 @@ def push_image(image_ref: str, arch: str, insecure: bool = False) -> dict[str, t
         size = os.path.getsize(path)
 
         try:
-            if _blob_exists(repo, digest, token, base, insecure=insecure):
+            if _blob_exists(repo, digest, auth, base, insecure=insecure):
                 log_info(f"{short_id}: Layer {i + 1}/{n_layers} already exists on registry, skipping upload.")
                 continue
 
@@ -564,7 +564,7 @@ def push_image(image_ref: str, arch: str, insecure: bool = False) -> dict[str, t
                 repo,
                 digest,
                 path,
-                token,
+                auth,
                 base,
                 insecure=insecure,
                 label=short_id,
@@ -578,7 +578,7 @@ def push_image(image_ref: str, arch: str, insecure: bool = False) -> dict[str, t
 
     cfg_short = expected_cfg_digest.split(":")[-1][:12]
     try:
-        if _blob_exists(repo, expected_cfg_digest, token, base, insecure=insecure):
+        if _blob_exists(repo, expected_cfg_digest, auth, base, insecure=insecure):
             log_info(f"{cfg_short}: Image config already exists on registry, skipping upload.")
         else:
             log_info(f"{cfg_short}: Uploading image config ({fmt_size(len(config_bytes))})...")
@@ -586,7 +586,7 @@ def push_image(image_ref: str, arch: str, insecure: bool = False) -> dict[str, t
                 repo,
                 expected_cfg_digest,
                 config_bytes,
-                token,
+                auth,
                 base,
                 insecure=insecure,
             )
@@ -606,7 +606,7 @@ def push_image(image_ref: str, arch: str, insecure: bool = False) -> dict[str, t
             tag,
             manifest_bytes,
             manifest_media,
-            token,
+            auth,
             base,
             insecure=insecure,
         )

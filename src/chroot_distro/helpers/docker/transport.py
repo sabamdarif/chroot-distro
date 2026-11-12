@@ -8,10 +8,12 @@ the two together is the point: the scheme is not known until the registry has an
 so a caller that built its own URL would use the wrong one.
 
 Docker Hub takes a fixed token endpoint. Any other registry needs the full dance, and a
-public one is no exception: it answers 401 with a Bearer challenge naming the realm to
-ask, so the /v2/ probe happens even when no credentials exist. A registry that answers
-the probe outright needs no token, and an empty token is the normal result, not a
-failure.
+public one is no exception: it answers 401 with a challenge naming the realm to ask (or,
+for a registry that checks passwords itself, a Basic challenge), so the /v2/ probe
+happens even when no credentials exist. A registry that answers the probe outright needs
+no credential, and an empty one is the normal result, not a failure. What
+`get_auth_token` returns is the Authorization header value itself: `Bearer <token>` from
+a token service, `Basic <credentials>` for a Basic registry, or empty for nothing.
 
 TLS is enforced by default and downgraded only on request. A handshake error that looks
 like a plaintext reply, or failing that an active HTTP re-probe, is what distinguishes
@@ -315,6 +317,11 @@ def _parse_bearer_challenge(header_value: str) -> dict:
     return {key: (quoted if quoted else bare) for key, quoted, bare in _CHALLENGE_PARAM_RE.findall(header_value)}
 
 
+def _bearer(token: str) -> str:
+    """The Authorization value for a granted *token*; '' for no token."""
+    return f"Bearer {token}" if token else ""
+
+
 def _request_body(open_fn, req, what: str) -> bytes:
     """Open *req* via *open_fn* and return the full response body.
 
@@ -345,8 +352,9 @@ def env_basic_auth() -> str:
             "CD_DOCKER_AUTH must be in 'username:password' format "
             "(e.g. 'myuser:mypassword' or 'myuser:ghp_xxx', since a "
             "personal access token takes the password's place). "
-            "A bare token without a username cannot be used: registry "
-            "auth requires a token exchange with Basic credentials."
+            "A bare token without a username cannot be used: registries "
+            "take a username and a password (or access token) as Basic "
+            "credentials."
         )
     return "Basic " + base64.b64encode(raw.encode()).decode()
 
@@ -357,11 +365,21 @@ def get_auth_token(
     actions: str = "pull",
     insecure: bool = False,
 ) -> tuple[str, str]:
-    """Resolve a registry's base URL and an OAuth2 token for *repo*.
+    """Resolve a registry's base URL and the credential for *repo*.
 
-    Returns ``(token, base_url)`` where *base_url* is the resolved
+    Returns ``(authorization, base_url)`` where *base_url* is the resolved
     ``scheme://registry`` that every subsequent request for this image must
-    use. *token* is empty for wide-open registries.
+    use, and *authorization* the value of the Authorization header every one
+    of them carries: ``Bearer <token>`` for a registry with a token service,
+    ``Basic <credentials>`` for one that checks passwords itself, and empty
+    when there is nothing to send. The header goes only to *base_url*'s
+    origin: a redirect elsewhere drops it (AuthStrippingRedirectHandler), and
+    so does an upload Location elsewhere (push._headers_for).
+
+    A Basic challenge means the registry takes the credentials itself on
+    every request, so CD_DOCKER_AUTH is what it gets. It goes to the origin
+    that was probed, over the scheme the probe settled on, so plain HTTP still
+    needs *insecure*, as for a realm.
     """
     basic_auth = env_basic_auth()
 
@@ -372,7 +390,7 @@ def get_auth_token(
             req.add_header("Authorization", basic_auth)
         data = json.loads(_request_body(urllib.request.urlopen, req, f"Authenticating {repo}"))
         token = data.get("token") or data.get("access_token", "")
-        return token, REGISTRY_URL
+        return _bearer(token), REGISTRY_URL
 
     # Custom registry: probe /v2/ to resolve the scheme and discover the
     # Bearer realm. A registry serving public images still requires the dance:
@@ -389,10 +407,19 @@ def get_auth_token(
         except urllib.error.HTTPError as exc:
             if exc.code != 401:
                 raise
-            www_auth = exc.headers.get("WWW-Authenticate", "")
-            if not www_auth.lower().startswith("bearer "):
+            www_auth = exc.headers.get("WWW-Authenticate", "").strip()
+            auth_scheme, _, challenge = www_auth.partition(" ")
+            auth_scheme = auth_scheme.lower()
+            if auth_scheme == "basic":
+                # A registry that checks passwords itself (distribution with
+                # htpasswd auth, Nexus, Artifactory) has no token service and
+                # wants the credentials on every request. Taken for an open
+                # registry, nothing was ever sent and the refusal that
+                # followed told the user to check credentials it had not used.
+                return basic_auth, base
+            if auth_scheme != "bearer":
                 return "", base
-            params = _parse_bearer_challenge(www_auth.split(" ", 1)[1])
+            params = _parse_bearer_challenge(challenge)
             realm = params.get("realm", "")
             if not realm:
                 return "", base
@@ -407,7 +434,7 @@ def get_auth_token(
                 token_req.add_header("Authorization", basic_auth)
             data = json.loads(_request_body(op.open, token_req, "Requesting auth token"))
             token = data.get("token") or data.get("access_token", "")
-            return token, base
+            return _bearer(token), base
         except urllib.error.URLError as exc:
             # The server speaks TLS but its certificate is untrusted. Only
             # reachable when enforcing HTTPS (the insecure opener skips

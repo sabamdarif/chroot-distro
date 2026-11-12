@@ -110,6 +110,11 @@ chroot-distro install myuser/private-image:tag
 You can also just pass the personal access token as well,
 so `export CD_DOCKER_AUTH=myuser:ghp_xxxxxxxx` works the same way.
 
+Most registries trade these credentials for a short-lived access token.
+A registry that checks the password itself, such as a self-hosted one with a
+password file, gets the credentials directly on every request. Either way,
+they are sent only to that registry and its login service.
+
 **Pull rate limits.** Registries limit how often you may pull. Docker Hub
 counts anonymous pulls per network address, and mobile or shared networks
 give one address to many people. When a registry answers "too many

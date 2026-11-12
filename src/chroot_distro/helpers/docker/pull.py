@@ -111,7 +111,7 @@ def _check_layer_media_type(layer: dict[str, typing.Any], layer_index: int, n_la
 def _download_layers_parallel(
     repo: str,
     layers: list[dict[str, typing.Any]],
-    token: str | None,
+    auth: str,
     base: str,
     image_ref: str,
     insecure: bool = False,
@@ -161,7 +161,7 @@ def _download_layers_parallel(
             download_blob(
                 repo,
                 digest,
-                token or "",
+                auth,
                 base=base,
                 byte_progress=aggregate,
                 abort_event=abort_event,
@@ -218,11 +218,11 @@ def _download_layers_parallel(
             aggregate.clear()
 
 
-def _get_manifest(repo: str, ref: str, token: str, base: str, insecure: bool = False) -> dict[str, typing.Any]:
+def _get_manifest(repo: str, ref: str, auth: str, base: str, insecure: bool = False) -> dict[str, typing.Any]:
     url = f"{base}/v2/{repo}/manifests/{ref}"
     headers = {**_ua(), "Accept": _ACCEPT_HEADER}
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
+    if auth:
+        headers["Authorization"] = auth
     req = urllib.request.Request(url, headers=headers)
 
     def _attempt():
@@ -283,14 +283,14 @@ def _pick_platform(
 def _resolve_single_manifest(
     image_ref: str, platform: Platform, insecure: bool = False
 ) -> tuple[dict[str, typing.Any], str, str, str]:
-    """Return (single_image_manifest, token, repo, base) for the platform."""
+    """Return (single_image_manifest, auth, repo, base) for the platform."""
     registry, repo, tag = parse_image_ref(image_ref)
 
     log_info(f"Authenticating with registry{auth_note()}...")
-    token, base = get_auth_token(repo, registry, insecure=insecure)
+    auth, base = get_auth_token(repo, registry, insecure=insecure)
 
     log_info(f"Fetching manifest for '{image_ref}'...")
-    manifest = _get_manifest(repo, tag, token, base, insecure=insecure)
+    manifest = _get_manifest(repo, tag, auth, base, insecure=insecure)
 
     if manifest["_ct"] in _MANIFEST_LIST_TYPES or "manifests" in manifest:
         target = _pick_platform(
@@ -300,13 +300,13 @@ def _resolve_single_manifest(
             image_ref,
         )
         log_info(f"Fetching {platform} manifest...")
-        manifest = _get_manifest(repo, target["digest"], token, base, insecure=insecure)
+        manifest = _get_manifest(repo, target["digest"], auth, base, insecure=insecure)
 
-    return manifest, token, repo, base
+    return manifest, auth, repo, base
 
 
 def _fetch_config_blob(
-    repo: str, cfg_digest: str, token: str, base: str, insecure: bool = False
+    repo: str, cfg_digest: str, auth: str, base: str, insecure: bool = False
 ) -> dict[str, typing.Any]:
     """Fetch the image config blob; return parsed dict (empty on error)."""
     if not cfg_digest:
@@ -314,8 +314,8 @@ def _fetch_config_blob(
     try:
         url = f"{base}/v2/{repo}/blobs/{cfg_digest}"
         headers = {**_ua()}
-        if token:
-            headers["Authorization"] = f"Bearer {token}"
+        if auth:
+            headers["Authorization"] = auth
         req = urllib.request.Request(url, headers=headers)
 
         def _attempt():
@@ -353,7 +353,7 @@ def pull_image(image_ref: str, rootfs_fd: int, platform: Platform, insecure: boo
 
     The manifest is checked in the local cache first.
     """
-    token = None
+    auth = ""
     base = None
 
     manifest, repo, image_config = load_manifest_cache(image_ref, platform)
@@ -373,7 +373,7 @@ def pull_image(image_ref: str, rootfs_fd: int, platform: Platform, insecure: boo
             log_info(f"Downloading {missing} missing layer(s) for '{image_ref}' ({platform})...")
             try:
                 log_info(f"Authenticating with registry{auth_note()}...")
-                token, base = get_auth_token(repo, registry, insecure=insecure)
+                auth, base = get_auth_token(repo, registry, insecure=insecure)
             except (urllib.error.URLError, OSError) as net_err:
                 if isinstance(net_err, urllib.error.HTTPError):
                     if net_err.code in (401, 403):
@@ -390,7 +390,7 @@ def pull_image(image_ref: str, rootfs_fd: int, platform: Platform, insecure: boo
                 raise RuntimeError(f"Network error: {net_err}") from net_err
     else:
         try:
-            manifest, token, repo, base = _resolve_single_manifest(image_ref, platform, insecure=insecure)
+            manifest, auth, repo, base = _resolve_single_manifest(image_ref, platform, insecure=insecure)
         except (urllib.error.URLError, OSError) as net_err:
             if isinstance(net_err, urllib.error.HTTPError):
                 if net_err.code in (401, 403):
@@ -402,7 +402,7 @@ def pull_image(image_ref: str, rootfs_fd: int, platform: Platform, insecure: boo
             log_error(f"No cached manifest found for '{image_ref}' ({platform}).")
             raise RuntimeError(f"Network error: {net_err}") from net_err
         cfg_digest = manifest.get("config", {}).get("digest", "")
-        image_config = _fetch_config_blob(repo, cfg_digest, token, base, insecure=insecure)
+        image_config = _fetch_config_blob(repo, cfg_digest, auth, base, insecure=insecure)
         save_manifest_cache(image_ref, platform, manifest, repo, image_config)
 
     layers = manifest.get("layers", [])
@@ -413,7 +413,7 @@ def pull_image(image_ref: str, rootfs_fd: int, platform: Platform, insecure: boo
         base = registry_base_url(registry, insecure=insecure)
 
     n_layers = len(layers)
-    _download_layers_parallel(repo, layers, token, base, image_ref, insecure=insecure)
+    _download_layers_parallel(repo, layers, auth, base, image_ref, insecure=insecure)
 
     for i, layer in enumerate(layers):
         digest = layer["digest"]

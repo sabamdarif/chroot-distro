@@ -81,15 +81,15 @@ def push_cache(ref: str, recipes: typing.Iterable[str], insecure: bool = False) 
     os.unlink(blob)
 
     log_info(f"Authenticating with registry{auth_note()}...")
-    token, base = get_auth_token(repo, registry, actions="pull,push", insecure=insecure)
+    auth, base = get_auth_token(repo, registry, actions="pull,push", insecure=insecure)
     base = base or registry_base_url(registry, insecure=insecure)
 
     try:
-        if not _blob_exists(repo, _EMPTY_CONFIG_DIGEST, token, base, insecure=insecure):
-            _upload_blob_bytes(repo, _EMPTY_CONFIG_DIGEST, _EMPTY_CONFIG, token, base, insecure=insecure)
-        if not _blob_exists(repo, blob_digest, token, base, insecure=insecure):
+        if not _blob_exists(repo, _EMPTY_CONFIG_DIGEST, auth, base, insecure=insecure):
+            _upload_blob_bytes(repo, _EMPTY_CONFIG_DIGEST, _EMPTY_CONFIG, auth, base, insecure=insecure)
+        if not _blob_exists(repo, blob_digest, auth, base, insecure=insecure):
             log_info(f"Uploading the build cache ({len(blob_bytes)} bytes, {steps} step(s))...")
-            _upload_blob_bytes(repo, blob_digest, blob_bytes, token, base, insecure=insecure)
+            _upload_blob_bytes(repo, blob_digest, blob_bytes, auth, base, insecure=insecure)
         else:
             log_info("The build cache blob is already on the registry.")
 
@@ -111,7 +111,7 @@ def push_cache(ref: str, recipes: typing.Iterable[str], insecure: bool = False) 
             ],
         }
         media = manifest["mediaType"]
-        _put_manifest(repo, tag, canonical_json(manifest), str(media), token, base, insecure=insecure)
+        _put_manifest(repo, tag, canonical_json(manifest), str(media), auth, base, insecure=insecure)
     except urllib.error.HTTPError as exc:
         if exc.code in (401, 403):
             raise RuntimeError(push_denied_msg(ref, exc.code)) from exc
@@ -132,11 +132,11 @@ def pull_cache(ref: str, insecure: bool = False) -> tuple[int, int]:
         raise RuntimeError(f"cache reference '{ref}' does not name a repository.")
 
     log_info(f"Authenticating with registry{auth_note()}...")
-    token, base = get_auth_token(repo, registry, insecure=insecure)
+    auth, base = get_auth_token(repo, registry, insecure=insecure)
     base = base or registry_base_url(registry, insecure=insecure)
 
     log_info(f"Fetching the build cache manifest for '{ref}'...")
-    manifest = _get_manifest(repo, tag, token, base, insecure=insecure)
+    manifest = _get_manifest(repo, tag, auth, base, insecure=insecure)
     layers = manifest.get("layers", [])
     if len(layers) != 1:
         raise RuntimeError(
@@ -145,7 +145,7 @@ def pull_cache(ref: str, insecure: bool = False) -> tuple[int, int]:
     digest = layers[0]["digest"]
 
     log_info("Downloading the build cache blob...")
-    blob_path = download_blob(repo, digest, token, base, insecure=insecure)
+    blob_path = download_blob(repo, digest, auth, base, insecure=insecure)
 
     with tempfile.TemporaryDirectory(prefix="cd-cache-pull-") as stage:
         _unpack_directory(blob_path, stage)

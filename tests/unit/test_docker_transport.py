@@ -27,3 +27,76 @@ def test_opener_applies_a_default_timeout(monkeypatch):
     opener.open("https://reg.example", timeout=5)
     assert seen[-1] == 5
 
+
+
+class _Resp:
+    def __init__(self, body=b"", headers=None):
+        self._body = body
+        self.headers = headers or {}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_a):
+        return False
+
+    def read(self, *_a):
+        return self._body
+
+
+def _opener_raising(exc):
+    class _Opener:
+        def open(self, _req, timeout=None):
+            raise exc
+
+    return _Opener()
+
+
+def _challenge(value):
+    import email.message
+    import urllib.error
+
+    msg = email.message.Message()
+    msg["WWW-Authenticate"] = value
+    return urllib.error.HTTPError("https://reg.example/v2/", 401, "unauthorized", msg, None)
+
+
+def test_basic_challenge_returns_the_credentials(monkeypatch):
+    import base64
+
+    from chroot_distro.helpers.docker import transport
+
+    monkeypatch.setenv("CD_DOCKER_AUTH", "user:pass")
+    monkeypatch.setattr(transport, "opener", lambda *_a, **_k: _opener_raising(_challenge('Basic realm="registry"')))
+
+    auth, base = transport.get_auth_token("private/repo", "reg.example")
+
+    assert auth == "Basic " + base64.b64encode(b"user:pass").decode()
+    assert base == "https://reg.example"
+
+
+def test_bearer_token_carries_its_prefix(monkeypatch):
+    from chroot_distro.helpers.docker import transport
+
+    monkeypatch.delenv("CD_DOCKER_AUTH", raising=False)
+
+    class _Opener:
+        def open(self, req, timeout=None):
+            if "/v2/" in req.full_url:
+                raise _challenge('Bearer realm="https://auth.example/token",service="reg"')
+            return _Resp(b'{"token": "abc123"}', {"Content-Type": "application/json"})
+
+    monkeypatch.setattr(transport, "opener", lambda *_a, **_k: _Opener())
+
+    auth, base = transport.get_auth_token("repo", "reg.example")
+    assert auth == "Bearer abc123"
+    assert base == "https://reg.example"
+
+
+def test_an_open_registry_gets_no_credential(monkeypatch):
+    from chroot_distro.helpers.docker import transport
+
+    monkeypatch.delenv("CD_DOCKER_AUTH", raising=False)
+    monkeypatch.setattr(transport, "opener", lambda *_a, **_k: _opener_raising(_challenge("Negotiate")))
+
+    assert transport.get_auth_token("repo", "reg.example") == ("", "https://reg.example")

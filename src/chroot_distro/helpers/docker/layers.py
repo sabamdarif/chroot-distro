@@ -95,7 +95,7 @@ def _probe_blob(url: str, headers: dict[str, str], insecure: bool = False) -> _P
 def download_blob(
     repo: str,
     digest: str,
-    token: str,
+    auth: str,
     base: str = "",
     *,
     byte_progress: AggregateByteProgress | None = None,
@@ -105,6 +105,9 @@ def download_blob(
     insecure: bool = False,
 ) -> str:
     """Download a blob to the layer cache; return the local file path.
+
+    *auth* is the Authorization value transport.get_auth_token() resolved,
+    or '' for none.
 
     Streams the bytes through sha256 and verifies the result against the
     expected *digest* before promoting the .tmp file.
@@ -141,8 +144,8 @@ def download_blob(
         segments = None
         try:
             probe_headers = {**_ua()}
-            if token:
-                probe_headers["Authorization"] = f"Bearer {token}"
+            if auth:
+                probe_headers["Authorization"] = auth
             probe = _probe_blob(url, probe_headers, insecure=insecure)
 
             if probe is not None and probe.range_ok and probe.content_length > 0:
@@ -208,8 +211,8 @@ def download_blob(
                     original_parsed = urllib.parse.urlparse(url)
                     final_parsed = urllib.parse.urlparse(probe.final_url)
                     seg_headers = {**_ua()}
-                    if token and original_parsed.netloc == final_parsed.netloc:
-                        seg_headers["Authorization"] = f"Bearer {token}"
+                    if auth and original_parsed.netloc == final_parsed.netloc:
+                        seg_headers["Authorization"] = auth
 
                     local_abort = abort_event or threading.Event()
                     live = live_responses or _LiveResponses(lock=threading.Lock(), responses=set())
@@ -299,8 +302,8 @@ def download_blob(
             raise
 
     headers = {**_ua()}
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
+    if auth:
+        headers["Authorization"] = auth
     req = urllib.request.Request(url, headers=headers)
 
     def _attempt():

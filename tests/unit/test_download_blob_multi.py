@@ -208,7 +208,7 @@ class TestDownloadBlobSegmented:
                 result_path = download_blob(
                     repo="library/nextcloud",
                     digest=digest,
-                    token="test_token",
+                    auth="Bearer test_token",
                     connections=2,
                 )
 
@@ -251,7 +251,7 @@ class TestDownloadBlobSegmented:
                 download_blob(
                     repo="library/nextcloud",
                     digest=digest,
-                    token="test_token",
+                    auth="Bearer test_token",
                     connections=2,
                 )
         # Ensure target file was not created due to atomic replace failure
@@ -288,7 +288,7 @@ class TestDownloadBlobSegmented:
                 download_blob(
                     repo="library/nextcloud",
                     digest=digest,
-                    token="my_secret_token",
+                    auth="Bearer my_secret_token",
                     connections=2,
                 )
 
@@ -310,7 +310,7 @@ class TestDownloadBlobSegmented:
                 download_blob(
                     repo="library/nextcloud",
                     digest=digest,
-                    token="my_secret_token",
+                    auth="Bearer my_secret_token",
                     connections=2,
                 )
 
@@ -350,7 +350,7 @@ class TestDownloadBlobSegmented:
                 result_path = download_blob(
                     repo="library/nextcloud",
                     digest=digest,
-                    token="test_token",
+                    auth="Bearer test_token",
                     connections=2,
                 )
 
@@ -417,7 +417,7 @@ class TestDownloadBlobSegmented:
                 download_blob(
                     repo="library/nextcloud",
                     digest=digest,
-                    token="test_token",
+                    auth="Bearer test_token",
                     connections=2,
                 )
 
@@ -450,7 +450,7 @@ class TestDownloadBlobSegmented:
                 result_path = download_blob(
                     repo="library/nextcloud",
                     digest=digest,
-                    token="test_token",
+                    auth="Bearer test_token",
                     connections=2,
                 )
 
@@ -505,7 +505,7 @@ class TestDownloadBlobSegmented:
                 result_path = download_blob(
                     repo="library/nextcloud",
                     digest=digest,
-                    token="test_token",
+                    auth="Bearer test_token",
                     connections=2,
                     byte_progress=None,
                 )
@@ -553,7 +553,7 @@ class TestDownloadBlobSegmented:
                     download_blob(
                         repo="library/nextcloud",
                         digest=digest,
-                        token="test_token",
+                        auth="Bearer test_token",
                         connections=2,
                     )
 
