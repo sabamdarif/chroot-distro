@@ -101,6 +101,7 @@ from chroot_distro.helpers.build_engine import (
     solve_platforms,
 )
 from chroot_distro.helpers.dockerfile import (
+    MAX_DOCKERFILE_BYTES,
     DockerfileSyntaxError,
     parse_dockerfile,
 )
@@ -115,6 +116,24 @@ from chroot_distro.message import C, crit_error, log_error, log_info, msg, quote
 from chroot_distro.names import is_valid_name, require_valid_name
 from chroot_distro.paths import container_is_installed
 from chroot_distro.progress import fmt_size
+
+
+def _read_dockerfile(dockerfile: str) -> bytes | None:
+    """The Dockerfile's bytes, or None when there are more than the cap.
+
+    "-" is stdin, read as bytes like the file so both decode the same way
+    (the parser normalises line endings itself). One byte over the cap is
+    read and its presence is the refusal, so the bound is on what arrives
+    rather than on a size a file declares.
+    """
+    if dockerfile == "-":
+        data = sys.stdin.buffer.read(MAX_DOCKERFILE_BYTES + 1)
+    else:
+        with open(dockerfile, "rb") as fh:
+            data = fh.read(MAX_DOCKERFILE_BYTES + 1)
+    if len(data) > MAX_DOCKERFILE_BYTES:
+        return None
+    return data
 
 
 def command_build(args: typing.Any) -> None:
@@ -170,14 +189,14 @@ def command_build(args: typing.Any) -> None:
         sys.exit(1)
 
     try:
-        if dockerfile == "-":
-            text = sys.stdin.read()
-        else:
-            with open(dockerfile, "rb") as fh:
-                text = fh.read().decode("utf-8", errors="replace")
+        raw = _read_dockerfile(dockerfile)
     except OSError as exc:
         crit_error(f"cannot read Dockerfile: {exc}")
         sys.exit(1)
+    if raw is None:
+        crit_error(f"Dockerfile is larger than {MAX_DOCKERFILE_BYTES} bytes; refusing to read it.")
+        sys.exit(1)
+    text = raw.decode("utf-8", errors="replace")
 
     try:
         _directives, instructions = parse_dockerfile(text)

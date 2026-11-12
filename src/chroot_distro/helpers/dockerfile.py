@@ -81,6 +81,14 @@ _ONBUILD_FORBIDDEN: frozenset[str] = frozenset({"ONBUILD", "FROM", "MAINTAINER"}
 _DIRECTIVES: frozenset[str] = frozenset({"syntax", "escape", "check"})
 
 
+# How large a Dockerfile may be before `build` refuses to read it. The parser
+# holds the whole text and then one record per instruction on top of it, so its
+# size is the parser's memory, and 16 MiB is the ceiling every other whole-file
+# parse here shares. The cap is applied to the bytes read, not a stat: stdin has
+# no size and a file's can change.
+MAX_DOCKERFILE_BYTES = 16 * 1024 * 1024
+
+
 class DockerfileSyntaxError(Exception):
     """Raised when the Dockerfile cannot be parsed."""
 
