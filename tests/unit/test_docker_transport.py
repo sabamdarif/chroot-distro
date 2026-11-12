@@ -67,7 +67,14 @@ def test_basic_challenge_returns_the_credentials(monkeypatch):
     from chroot_distro.helpers.docker import transport
 
     monkeypatch.setenv("CD_DOCKER_AUTH", "user:pass")
-    monkeypatch.setattr(transport, "opener", lambda *_a, **_k: _opener_raising(_challenge('Basic realm="registry"')))
+
+    class _Opener:
+        def open(self, req, timeout=None):
+            if req.get_header("Authorization"):
+                return _Resp()
+            raise _challenge('Basic realm="registry"')
+
+    monkeypatch.setattr(transport, "opener", lambda *_a, **_k: _Opener())
 
     auth, base = transport.get_auth_token("private/repo", "reg.example")
 
@@ -100,3 +107,53 @@ def test_an_open_registry_gets_no_credential(monkeypatch):
     monkeypatch.setattr(transport, "opener", lambda *_a, **_k: _opener_raising(_challenge("Negotiate")))
 
     assert transport.get_auth_token("repo", "reg.example") == ("", "https://reg.example")
+
+
+def test_credentials_check_names_no_repository(monkeypatch):
+    import base64
+
+    from chroot_distro.helpers.docker import transport
+
+    seen = []
+
+    class _Opener:
+        def open(self, *_a, **_k):
+            raise AssertionError("the request body is patched out")
+
+    monkeypatch.setenv("CD_DOCKER_AUTH", "user:pass")
+    monkeypatch.setattr(transport, "auth_opener", lambda: _Opener())
+    monkeypatch.setattr(transport, "_request_body", lambda *_a, **_k: b'{"token": "abc"}')
+    monkeypatch.setattr(
+        transport, "_check_credentials", lambda open_fn, url, basic, registry, rejected: seen.append((url, basic, rejected))
+    )
+
+    auth, base = transport.get_auth_token("private/repo", "")
+
+    assert auth == "Bearer abc"
+    assert seen == [
+        (
+            transport._token_url(transport.AUTH_URL, transport.HUB_SERVICE),
+            "Basic " + base64.b64encode(b"user:pass").decode(),
+            transport._REJECTED_BY_TOKEN_SERVICE,
+        )
+    ]
+
+
+def test_check_credentials_reports_a_refusal_without_the_password(monkeypatch):
+    import email.message
+    import urllib.error
+
+    import pytest
+
+    from chroot_distro.helpers.docker import transport
+
+    msg = email.message.Message()
+    exc = urllib.error.HTTPError("https://reg.example/v2/", 403, "forbidden", msg, None)
+    monkeypatch.setattr(transport, "_request_body", lambda *_a, **_k: (_ for _ in ()).throw(exc))
+
+    with pytest.raises(RuntimeError) as caught:
+        transport._check_credentials(lambda *_a: None, "https://reg.example/v2/", "Basic dXNlcjpwYXNz", "reg.example", (401, 403))
+
+    text = str(caught.value)
+    assert "rejected the credentials in CD_DOCKER_AUTH (HTTP 403)" in text
+    assert "dXNlcjpwYXNz" not in text

@@ -113,7 +113,8 @@ so `export CD_DOCKER_AUTH=myuser:ghp_xxxxxxxx` works the same way.
 Most registries trade these credentials for a short-lived access token.
 A registry that checks the password itself, such as a self-hosted one with a
 password file, gets the credentials directly on every request. Either way,
-they are sent only to that registry and its login service.
+they are sent only to that registry and its login service, and are checked
+before the download or push starts, so a wrong password is reported as one.
 
 **Pull rate limits.** Registries limit how often you may pull. Docker Hub
 counts anonymous pulls per network address, and mobile or shared networks

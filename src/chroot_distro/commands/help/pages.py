@@ -267,6 +267,7 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
             "Private repositories require authentication. Set "
             'CD_DOCKER_AUTH="user:password" (or '
             '"user:personal-access-token") before running push. '
+            "The credentials are checked before anything is uploaded. "
             "Self-hosted registries that allow anonymous push do not "
             "need CD_DOCKER_AUTH set. Docker Hub is always reached over "
             "verified HTTPS, whatever --allow-insecure says."
@@ -459,7 +460,8 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
             "Private images require authentication. Set the environment "
             'variable CD_DOCKER_AUTH="user:password" before running '
             "the install command. Some registries use a personal access "
-            "token instead of password. Docker Hub is always reached "
+            "token instead of password. The credentials are checked "
+            "before the download starts. Docker Hub is always reached "
             "over verified HTTPS, whatever --allow-insecure says."
         ),
         "options": [
