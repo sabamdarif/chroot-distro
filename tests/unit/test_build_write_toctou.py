@@ -341,3 +341,15 @@ def test_snapshot_handles_a_deep_tree(tree):
         # is deeper than the interpreter's limit on purpose.
         dirfd.rmtree_at(root_fd, "d", force=True)
         os.close(root_fd)
+
+
+def test_materialise_dir_over_a_file_is_refused(tree):
+    rootfs, _outside = tree
+    (rootfs / "opt").write_text("in the way")
+
+    with pytest.raises(BuildError, match="non-directory"):
+        copy_step._materialise_files(
+            str(rootfs), {"opt": {"kind": "dir", "mode": 0o700, "uid": 0, "gid": 0, "mtime": 0}}
+        )
+
+    assert (rootfs / "opt").read_text() == "in the way"

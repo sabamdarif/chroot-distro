@@ -1247,11 +1247,22 @@ def _materialise_files(rootfs_dir: str, file_map: dict[str, typing.Any], *, root
                     f"Failed to write '{arcname}' into rootfs: '{'/'.join(resolved)}' is not a directory inside it"
                 )
             try:
-                _materialise_entry(dir_fd, parts[-1], entry, sources)
+                _materialise_entry(dir_fd, parts[-1], entry, sources, arcname)
             except OSError as exc:
                 raise BuildError(f"Failed to write '{arcname}' into rootfs: {exc}") from exc
             finally:
                 os.close(dir_fd)
+
+
+def _entry_kind(st: os.stat_result | None) -> str:
+    """What an lstat says stands at a name, for a message."""
+    if st is None:
+        return "entry that could not be examined"
+    if stat.S_ISREG(st.st_mode):
+        return "regular file"
+    if stat.S_ISLNK(st.st_mode):
+        return "symbolic link"
+    return "special file"
 
 
 def _materialise_entry(
@@ -1259,6 +1270,7 @@ def _materialise_entry(
     name: str,
     entry: dict[str, typing.Any],
     sources: MapSources,
+    arcname: str,
 ) -> None:
     """Write one file_map entry into the directory dir_fd refers to."""
     kind = entry["kind"]
@@ -1277,8 +1289,23 @@ def _materialise_entry(
             st = None
         if st is not None and stat.S_ISLNK(st.st_mode):
             dirfd.unlink_quietly(dir_fd, name)
-        with contextlib.suppress(FileExistsError):
+        try:
             os.mkdir(name, 0o777, dir_fd=dir_fd)
+        except FileExistsError:
+            # A directory already there is merged into. Anything else is a
+            # refusal: the mkdir's EEXIST used to be passed over, so the tree
+            # kept a file the base image put there while the layer recorded a
+            # directory, and the two halves of one instruction disagreed.
+            try:
+                existing = dirfd.lstat_at(dir_fd, name)
+            except OSError:
+                existing = None
+            if existing is None or not stat.S_ISDIR(existing.st_mode):
+                raise BuildError(
+                    f"Cannot write directory '{arcname}' into the rootfs: "
+                    f"a non-directory ({_entry_kind(existing)}) already "
+                    f"exists at that path."
+                ) from None
         # chmod_at opens O_PATH|O_NOFOLLOW and sets the mode on the descriptor:
         # fchmodat(2) has no AT_SYMLINK_NOFOLLOW, so naming the entry would hand
         # the mode to a link planted since the mkdir.
