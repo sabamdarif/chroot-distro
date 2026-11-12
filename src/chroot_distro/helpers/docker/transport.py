@@ -129,6 +129,17 @@ def auth_opener():
     return opener(False)
 
 
+def insecure_for(registry: str, insecure: bool) -> bool:
+    """Whether --allow-insecure reaches *registry* at all.
+
+    The flag is an opt-in for a registry the user names, served over plain
+    HTTP or behind a certificate that does not verify. Docker Hub (the
+    empty registry) is never one of those, so its manifests and blobs stay
+    on verified HTTPS whatever the flag says.
+    """
+    return bool(insecure and registry)
+
+
 def registry_base_url(registry: str, insecure: bool = False) -> str:
     """Return the base URL for *registry* (empty string ⇒ Docker Hub)."""
     if not registry:

@@ -97,7 +97,7 @@ Create a container. `IMAGE` can be:
 | --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
 | `-n`, `--name NAME`         | Give the container a custom name. Default is the image name. Needed to install the same image twice. `--override-alias` is an accepted alias. |
 | `-a`, `--architecture ARCH` | Install for a different CPU type (`aarch64`, `x86_64`, `linux/arm64`, ...). Default is your host's CPU.                                       |
-| `--allow-insecure`          | Skip TLS certificate checks when downloading. Only for registries with self-signed certificates.                                              |
+| `--allow-insecure`          | Skip TLS certificate checks when downloading. Only for registries with self-signed certificates; Docker Hub is always verified.           |
 | `-q`, `--quiet`             | Only show errors.                                                                                                                             |
 
 For private images, set `CD_DOCKER_AUTH` first:
@@ -527,7 +527,7 @@ Upload an image you built with `build -t` to Docker Hub or another registry. Lay
 | Option                      | Description                                                                     |
 | --------------------------- | ------------------------------------------------------------------------------- |
 | `-a`, `--architecture ARCH` | Push the image built for that CPU type. Default is your host's CPU.             |
-| `--allow-insecure`          | Skip TLS certificate checks. Only for registries with self-signed certificates. |
+| `--allow-insecure`          | Skip TLS certificate checks. Only for registries with self-signed certificates; Docker Hub is always verified.      |
 | `-q`, `--quiet`             | Only show errors.                                                               |
 
 Set `CD_DOCKER_AUTH=username:password` before pushing to a private repository. The

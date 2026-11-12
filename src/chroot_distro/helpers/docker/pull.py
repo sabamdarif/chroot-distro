@@ -68,6 +68,7 @@ from chroot_distro.helpers.docker.transport import (
     auth_denied_msg,
     auth_note,
     get_auth_token,
+    insecure_for,
     opener,
     registry_base_url,
 )
@@ -331,6 +332,9 @@ def pull_image(image_ref: str, rootfs_fd: int, platform: Platform, insecure: boo
 
     manifest, repo, image_config = load_manifest_cache(image_ref, platform)
     registry = parse_image_ref(image_ref)[0]
+    # Docker Hub is verified HTTPS whatever --allow-insecure says; decided
+    # here, once, so no request below can use the insecure opener for it.
+    insecure = insecure_for(registry, insecure)
 
     if manifest is not None:
         assert repo is not None
