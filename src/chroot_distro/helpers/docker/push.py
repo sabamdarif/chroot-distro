@@ -57,6 +57,7 @@ from chroot_distro.helpers.docker.transport import (
     insecure_for,
     opener,
     push_denied_msg,
+    rate_limited_msg,
     same_auth_origin,
 )
 from chroot_distro.helpers.download import (
@@ -462,6 +463,21 @@ def _put_manifest(
     return str(_with_retry(_do, "upload manifest"))
 
 
+def _refusal_msg(image_ref: str, ref: tuple[str, str, str], exc: urllib.error.HTTPError) -> str:
+    """The message for a registry refusing the push with *exc*, or ''.
+
+    401/403 is the registry refusing this account and 429 its rate limit;
+    both become a RuntimeError carrying this message. Any other HTTP error
+    is not a refusal this can explain, and propagates as itself for the
+    command to report as a network error.
+    """
+    if exc.code in _DENIED_CODES:
+        return push_denied_msg(image_ref, exc.code)
+    if exc.code == 429:
+        return rate_limited_msg(image_ref, ref, exc, action="push")
+    return ""
+
+
 def _strip_private_keys(d: dict[str, typing.Any]) -> dict[str, typing.Any]:
     """Return a shallow copy of *d* without keys starting with '_'.
 
@@ -499,7 +515,8 @@ def push_image(image_ref: str, arch: str, insecure: bool = False) -> dict[str, t
             f"Rebuild the image to repopulate the cache."
         )
 
-    registry, _, tag = parse_image_ref(image_ref)
+    parsed = parse_image_ref(image_ref)
+    registry, _, tag = parsed
     # Docker Hub is verified HTTPS whatever --allow-insecure says; every
     # upload helper below gets this answer.
     insecure = insecure_for(registry, insecure)
@@ -523,8 +540,9 @@ def push_image(image_ref: str, arch: str, insecure: bool = False) -> dict[str, t
     try:
         token, base = get_auth_token(repo, registry, actions="pull,push", insecure=insecure)
     except urllib.error.HTTPError as exc:
-        if exc.code in (401, 403):
-            raise RuntimeError(push_denied_msg(image_ref, exc.code)) from exc
+        refusal = _refusal_msg(image_ref, parsed, exc)
+        if refusal:
+            raise RuntimeError(refusal) from exc
         raise
 
     n_layers = len(layers)
@@ -553,8 +571,9 @@ def push_image(image_ref: str, arch: str, insecure: bool = False) -> dict[str, t
             )
             bytes_uploaded += size
         except urllib.error.HTTPError as exc:
-            if exc.code in _DENIED_CODES:
-                raise RuntimeError(push_denied_msg(image_ref, exc.code)) from exc
+            refusal = _refusal_msg(image_ref, parsed, exc)
+            if refusal:
+                raise RuntimeError(refusal) from exc
             raise
 
     cfg_short = expected_cfg_digest.split(":")[-1][:12]
@@ -573,8 +592,9 @@ def push_image(image_ref: str, arch: str, insecure: bool = False) -> dict[str, t
             )
             bytes_uploaded += len(config_bytes)
     except urllib.error.HTTPError as exc:
-        if exc.code in (401, 403):
-            raise RuntimeError(push_denied_msg(image_ref, exc.code)) from exc
+        refusal = _refusal_msg(image_ref, parsed, exc)
+        if refusal:
+            raise RuntimeError(refusal) from exc
         raise
 
     manifest_media = manifest.get("mediaType") or OCI_MANIFEST_MEDIA
@@ -591,8 +611,9 @@ def push_image(image_ref: str, arch: str, insecure: bool = False) -> dict[str, t
             insecure=insecure,
         )
     except urllib.error.HTTPError as exc:
-        if exc.code in (401, 403):
-            raise RuntimeError(push_denied_msg(image_ref, exc.code)) from exc
+        refusal = _refusal_msg(image_ref, parsed, exc)
+        if refusal:
+            raise RuntimeError(refusal) from exc
         raise
     bytes_uploaded += len(manifest_bytes)
 

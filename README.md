@@ -549,7 +549,9 @@ Upload an image you built with `build -t` to Docker Hub or another registry. Lay
 
 Set `CD_DOCKER_AUTH=username:password` before pushing to a private repository. The
 password half can be a personal access token, which is what GHCR wants: a token with
-the `write:packages` scope in place of the password.
+the `write:packages` scope in place of the password. A "too many requests" answer
+(HTTP 429) stops the push with a message saying whose limit it is, and a short wait
+the registry asks for is waited out automatically.
 
 ### clear-cache
 

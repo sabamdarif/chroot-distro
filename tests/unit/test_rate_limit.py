@@ -95,3 +95,10 @@ def test_rate_limited_message_for_a_front_end_names_the_hub_reference(monkeypatc
     text = rate_limited_msg("docker.n8n.io/n8nio/n8n:latest", ("docker.n8n.io", "n8nio/n8n", "latest"), exc)
     assert "passes requests on to Docker Hub" in text
     assert "'n8nio/n8n:latest'" in text
+
+
+def test_rate_limited_message_says_push_where_a_pull_says_serve(monkeypatch):
+    monkeypatch.delenv("CD_DOCKER_AUTH", raising=False)
+    text = rate_limited_msg("ghcr.io/o/i:1", ("ghcr.io", "o/i", "1"), _error(429), action="push")
+    assert "refused to accept" in text
+    assert "to push with an account" in text
