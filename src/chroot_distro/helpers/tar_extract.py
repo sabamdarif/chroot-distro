@@ -197,7 +197,7 @@ def _copy_hardlink(rootfs_fd, parents, dest_parts, src_parts, uid, gid) -> None:
             return
         dirfd.unlink_quietly(dst_fd, dest_resolved[-1])
         with contextlib.suppress(OSError):
-            dirfd.copy_file_at(src_fd, src_resolved[-1], dst_fd, dest_resolved[-1], st, owner=(uid, gid))
+            dirfd.copy_file_at(src_fd, src_resolved[-1], dst_fd, dest_resolved[-1], owner=(uid, gid))
     finally:
         os.close(src_fd)
 

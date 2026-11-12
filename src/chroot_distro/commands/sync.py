@@ -376,7 +376,6 @@ def _refresh_file_metadata(
 def _sync_file(
     src_fd: int,
     src_name: str,
-    src_st: os.stat_result,
     dst_fd: int,
     dst_name: str,
     ctx: _Ctx,
@@ -404,10 +403,14 @@ def _sync_file(
     Every failure here is per-entry: reported, counted, and stepped over. The temp
     file is removed on any exception, Ctrl-C included, or an interrupted sync would
     leave a half-copy sitting next to the real one.
+
+    Mode and times come from the descriptor the bytes are read through, not from
+    the lstat the caller decided on. The two are a moment apart, and a source
+    replaced in between used to have its new content written out under the old
+    entry's mode.
     """
     where = ctx.shown(rel)
     tmp = dirfd.temp_name(dst_name, _TMP_SUFFIX)
-    mode = stat.S_IMODE(src_st.st_mode)
 
     try:
         dst_st: os.stat_result | None = dirfd.lstat_at(dst_fd, dst_name)
@@ -425,6 +428,7 @@ def _sync_file(
         ctx.note_failure(rel)
         return False
 
+    mode = stat.S_IMODE(sfd_st.st_mode)
     try:
         try:
             try:
@@ -434,7 +438,7 @@ def _sync_file(
                 tfd, _ = dirfd.open_new_at(dst_fd, tmp, mode)
             try:
                 dirfd.copy_data(sfd, tfd, sfd_st)
-                dirfd.copy_metadata(sfd, tfd, src_st, owner=ctx.owner)
+                dirfd.copy_metadata(sfd, tfd, sfd_st, owner=ctx.owner)
             finally:
                 os.close(tfd)
             os.replace(tmp, dst_name, src_dir_fd=dst_fd, dst_dir_fd=dst_fd)
@@ -597,7 +601,7 @@ def _mirror_entries(src_fd: int, dst_fd: int, rel: str, ctx: _Ctx) -> list[str]:
             )
             if outcome == _META_REWRITE:
                 op = "Modified" if dirfd.exists_at(dst_fd, name) else "New"
-                if _sync_file(src_fd, name, src_st, dst_fd, name, ctx, child) and ctx.verbose:
+                if _sync_file(src_fd, name, dst_fd, name, ctx, child) and ctx.verbose:
                     log_info(f"({ctx.done + 1}/{ctx.total}) {op} file: {ctx.shown(child)}")
             elif outcome == _META_FIXED and ctx.verbose:
                 log_info(f"({ctx.done + 1}/{ctx.total}) Metadata: {ctx.shown(child)}")
@@ -894,7 +898,7 @@ def _do_sync(src: str, dest: str, verbose: bool, use_checksum: bool, delete: boo
             if src_is_dir:
                 _sync_directory(src_pin, dest_pin, ctx, delete)
             else:
-                _sync_single(src_pin, dest_pin, src_st, ctx)
+                _sync_single(src_pin, dest_pin, ctx)
         except KeyboardInterrupt:
             clear_bar()
             log_error("Aborted by user.")
@@ -912,17 +916,28 @@ def _do_sync(src: str, dest: str, verbose: bool, use_checksum: bool, delete: boo
     log_info("Finished synchronizing.")
 
 
-def _sync_single(src_pin: PinnedPath, dest_pin: PinnedPath, src_st: os.stat_result, ctx: _Ctx) -> None:
+def _sync_single(src_pin: PinnedPath, dest_pin: PinnedPath, ctx: _Ctx) -> None:
     """Sync a source that is a single file or symlink.
 
-    The type was settled in _do_sync; the tests below are what is left if it
-    changed since, in which case there is nothing to transfer. Failures are
-    reported per-entry even though the entry is the whole transfer, so the message
-    and the exit status keep the shape they have for a tree.
+    The entry is looked at again here, off the pinned directory, rather than
+    judged by the lstat _do_sync took of the path: that one came before the
+    destination was resolved, before the overlap check and before the pin. A
+    source replaced anywhere in between had its type, size and mtime answer for
+    the file that is there now, so a newer file with the old one's size compared
+    as up to date and was never transferred.
+
+    Failures are reported per-entry even though the entry is the whole transfer,
+    so the message and the exit status keep the shape they have for a tree.
     """
+    try:
+        src_st = dirfd.lstat_at(src_pin.dir_fd, src_pin.leaf)
+    except OSError as exc:
+        warn(f"cannot stat '{ctx.src_shown('')}': {quote_path(str(exc))}")
+        ctx.note_failure("")
+        return
     mode = src_st.st_mode
-    if _is_special(mode) or not (stat.S_ISLNK(mode) or stat.S_ISREG(mode)):
-        warn(f"source '{ctx.src_shown('')}' is no longer a regular file or directory, skipping.")
+    if not (stat.S_ISLNK(mode) or stat.S_ISREG(mode)):
+        warn(f"source '{ctx.src_shown('')}' is no longer a regular file or symlink, skipping.")
         ctx.note_failure("")
         return
     if stat.S_ISLNK(mode):
@@ -938,7 +953,7 @@ def _sync_single(src_pin: PinnedPath, dest_pin: PinnedPath, src_st: os.stat_resu
         else _refresh_file_metadata(src_st, dest_pin.dir_fd, dest_pin.leaf, ctx.owner)
     )
     if outcome == _META_REWRITE:
-        _sync_file(src_pin.dir_fd, src_pin.leaf, src_st, dest_pin.dir_fd, dest_pin.leaf, ctx, "")
+        _sync_file(src_pin.dir_fd, src_pin.leaf, dest_pin.dir_fd, dest_pin.leaf, ctx, "")
 
 
 def _sync_directory(src_pin: PinnedPath, dest_pin: PinnedPath, ctx: _Ctx, delete: bool) -> None:

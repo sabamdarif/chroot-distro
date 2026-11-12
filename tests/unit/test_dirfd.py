@@ -259,7 +259,7 @@ def test_copy_data_keeps_a_sparsely_stored_file_sparse(tmp_path):
         pytest.skip("this filesystem does not store the file sparsely")
 
     with opened(tmp_path) as fd:
-        dirfd.copy_file_at(fd, "sparse", fd, "copy", src_st)
+        dirfd.copy_file_at(fd, "sparse", fd, "copy")
 
     copy_st = os.stat(tmp_path / "copy")
     assert copy_st.st_size == size

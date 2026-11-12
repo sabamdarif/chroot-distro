@@ -515,7 +515,6 @@ def copy_file_at(
     src_name: str,
     dst_dir_fd: int,
     dst_name: str,
-    src_st: os.stat_result | None = None,
     *,
     replace: bool = False,
     owner: tuple[int, int] | None = None,
@@ -539,13 +538,15 @@ def copy_file_at(
     standing there now was planted since, and a pipe or a device is not
     something a copy has any business overwriting silently.
 
+    Mode and times are the open source descriptor's, never a stat the caller
+    took of the name beforehand: a file replaced in between had its new content
+    written out under the old entry's mode.
+
     Without replace the create is plain O_EXCL, which is all a fresh tree
     needs; merging into a tree that already exists passes replace=True.
     """
     sfd, sfd_st = open_regular_at(src_dir_fd, src_name, os.O_RDONLY)
     try:
-        if src_st is None:
-            src_st = sfd_st
         if replace:
             try:
                 dst_st: os.stat_result | None = lstat_at(dst_dir_fd, dst_name)
@@ -555,10 +556,10 @@ def copy_file_at(
                 raise OSError(errno.EEXIST, "destination exists and is not a regular file", dst_name)
         name = temp_name(dst_name, TMP_SUFFIX) if replace else dst_name
         try:
-            dfd, _ = open_new_at(dst_dir_fd, name, stat.S_IMODE(src_st.st_mode))
+            dfd, _ = open_new_at(dst_dir_fd, name, stat.S_IMODE(sfd_st.st_mode))
             try:
                 copy_data(sfd, dfd, sfd_st)
-                copy_metadata(sfd, dfd, src_st, owner=owner)
+                copy_metadata(sfd, dfd, sfd_st, owner=owner)
             finally:
                 os.close(dfd)
             if replace:
@@ -906,7 +907,7 @@ def copy_tree_at(
                     if not fresh:
                         make_writable(sub_dst)
                 elif stat.S_ISREG(mode):
-                    copy_file_at(src_fd, name, dst_fd, name, src_st, replace=merge, owner=owner)
+                    copy_file_at(src_fd, name, dst_fd, name, replace=merge, owner=owner)
                     if on_entry:
                         on_entry(child)
                 elif on_skip:
