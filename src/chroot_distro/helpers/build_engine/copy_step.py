@@ -59,7 +59,6 @@ import time
 import typing
 import urllib.error
 import urllib.parse
-import urllib.request
 
 from chroot_distro import dirfd
 from chroot_distro.atomic import publish_file
@@ -83,6 +82,7 @@ from chroot_distro.helpers.docker import (
     pull_image,
 )
 from chroot_distro.helpers.dockerfile import expand_vars
+from chroot_distro.helpers.download import http_opener
 from chroot_distro.helpers.layer_diff import MapSources, write_files_layer
 from chroot_distro.helpers.tar_extract import safe_resolve_parts
 from chroot_distro.message import log_info
@@ -813,7 +813,7 @@ def _copy_url(
         arcname = dest.lstrip("/") + name
     else:
         arcname = dest.lstrip("/")
-    opener = urllib.request.build_opener(AuthStrippingRedirectHandler)
+    opener = http_opener(AuthStrippingRedirectHandler())
     try:
         with opener.open(url) as resp:
             declared = _declared_length(resp)

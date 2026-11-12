@@ -136,7 +136,7 @@ def test_url_response_is_spooled(spool, monkeypatch):
         def open(self, _url):
             return _Resp(body)
 
-    monkeypatch.setattr(copy_step.urllib.request, "build_opener", lambda *_a: _Opener())
+    monkeypatch.setattr(copy_step, "http_opener", lambda *_a, **_k: _Opener())
 
     file_map = {}
     copy_step._copy_url("https://example.invalid/blob.bin", "/opt/blob.bin", file_map, 0, 0, None, spool)
@@ -205,7 +205,7 @@ def _add_url(spool, monkeypatch, resp_factory):
         def open(self, _url):
             return resp_factory()
 
-    monkeypatch.setattr(copy_step.urllib.request, "build_opener", lambda *_a: _Opener())
+    monkeypatch.setattr(copy_step, "http_opener", lambda *_a, **_k: _Opener())
     file_map = {}
     copy_step._copy_url("https://example.invalid/blob.bin", "/opt/blob.bin", file_map, 0, 0, None, spool)
     return file_map

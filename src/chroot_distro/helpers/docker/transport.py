@@ -48,7 +48,7 @@ import urllib.request
 from chroot_distro.constants import PROGRAM_NAME, PROGRAM_VERSION
 from chroot_distro.helpers.download import (
     certificate_error_msg,
-    insecure_ssl_context,
+    http_opener,
     is_cert_verification_error,
     is_plaintext_http_tls_error,
     retry_http,
@@ -116,12 +116,10 @@ def opener(insecure: bool = False) -> urllib.request.OpenerDirector:
 
     The *insecure* variant additionally installs an HTTPS handler whose SSL
     context skips certificate verification, so HTTPS endpoints presenting an
-    untrusted certificate can be reached under ``--allow-insecure``.
+    untrusted certificate can be reached under ``--allow-insecure``. Every
+    request made through the returned opener gets a default socket timeout.
     """
-    handlers: list[typing.Any] = [AuthStrippingRedirectHandler]
-    if insecure:
-        handlers.append(urllib.request.HTTPSHandler(context=insecure_ssl_context()))
-    return urllib.request.build_opener(*handlers)
+    return http_opener(AuthStrippingRedirectHandler(), insecure=insecure)
 
 
 def auth_opener():

@@ -60,6 +60,7 @@ from chroot_distro.helpers.docker.transport import (
     same_auth_origin,
 )
 from chroot_distro.helpers.download import (
+    NETWORK_TIMEOUT,
     is_retryable_http_error,
     retry_http,
 )
@@ -280,6 +281,9 @@ def _upload_blob_monolithic(
     insecure: bool = False,
 ) -> None:
     """POST a session then send the whole blob in one PUT (retry-wrapped)."""
+    # A registry may re-hash or copy the blob before answering the PUT, which
+    # grows with its size, so the commit gets a longer wait than the rest.
+    timeout = max(NETWORK_TIMEOUT, size / (1024 * 1024))
 
     def _do() -> None:
         upload_url = _open_upload_session(base, repo, headers, insecure=insecure)
@@ -297,7 +301,7 @@ def _upload_blob_monolithic(
                 },
             )
             op = auth_opener() if not insecure else opener(insecure)
-            with op.open(put_req) as resp:
+            with op.open(put_req, timeout=timeout) as resp:
                 if resp.status not in _OK_RANGE:
                     raise RuntimeError(f"Blob upload failed for {digest}: HTTP {resp.status}")
 
@@ -379,6 +383,8 @@ def _upload_blob_chunked(
                 progress._maybe_draw(final=False)
 
             put_url = _with_digest(upload_url, digest)
+            # The commit may take longer than a chunk, as in the monolithic path.
+            commit_timeout = max(NETWORK_TIMEOUT, size / (1024 * 1024))
 
             def _finalize() -> None:
                 put_req = urllib.request.Request(
@@ -388,7 +394,7 @@ def _upload_blob_chunked(
                     headers={**_headers_for(headers, base, put_url), "Content-Length": "0"},
                 )
                 op = auth_opener() if not insecure else opener(insecure)
-                with op.open(put_req) as resp:
+                with op.open(put_req, timeout=commit_timeout) as resp:
                     if resp.status not in _OK_RANGE:
                         raise RuntimeError(f"Blob finalize failed for {digest}: HTTP {resp.status}")
 

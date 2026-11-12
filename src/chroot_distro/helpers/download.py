@@ -80,11 +80,13 @@ log = logging.getLogger(__name__)
 __all__ = (
     "MAX_METADATA_BYTES",
     "NETWORK_ERRORS",
+    "NETWORK_TIMEOUT",
     "IncompleteResponse",
     "_LiveResponses",
     "certificate_error_msg",
     "declared_length",
     "download_file",
+    "http_opener",
     "insecure_ssl_context",
     "is_cert_verification_error",
     "is_plaintext_http_tls_error",
@@ -153,6 +155,56 @@ def insecure_ssl_context() -> ssl.SSLContext:
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
     return ctx
+
+
+# How long a request waits for a peer that says nothing. It is a socket
+# timeout, so it bounds each step (connect, handshake, every send, every
+# read) and not the whole transfer. Two minutes without a byte is a dead
+# peer rather than a slow one, and long enough for a mobile link to come
+# back from a gap.
+NETWORK_TIMEOUT = 120.0
+
+# Stands for "the caller named no timeout" in _Opener.open(), so the
+# default is looked up when the request is made.
+_DEFAULT_TIMEOUT = object()
+
+
+class _Opener(urllib.request.OpenerDirector):
+    """An OpenerDirector that gives every request a timeout by default.
+
+    urllib's default is the socket module's, which is none at all, so a
+    peer that accepted the connection and then said nothing blocked for
+    good and retry_http never got to act.
+    """
+
+    def open(self, fullurl, data=None, timeout=_DEFAULT_TIMEOUT):
+        if timeout is _DEFAULT_TIMEOUT:
+            timeout = NETWORK_TIMEOUT
+        return super().open(fullurl, data, timeout)
+
+
+def http_opener(*handlers, insecure: bool = False):
+    """Return an opener for HTTP(S) requests with a default timeout.
+
+    *handlers* are added ahead of the standard set, which is how the
+    registry transport installs its credential-stripping redirect handler.
+    With *insecure* the HTTPS handler skips certificate verification.
+    """
+    context = insecure_ssl_context() if insecure else None
+    opener = _Opener()
+    for handler in handlers:
+        opener.add_handler(handler)
+    for handler in (
+        urllib.request.ProxyHandler(),
+        urllib.request.UnknownHandler(),
+        urllib.request.HTTPHandler(),
+        urllib.request.HTTPSHandler(context=context),
+        urllib.request.HTTPDefaultErrorHandler(),
+        urllib.request.HTTPRedirectHandler(),
+        urllib.request.HTTPErrorProcessor(),
+    ):
+        opener.add_handler(handler)
+    return opener
 
 
 def is_cert_verification_error(exc: urllib.error.URLError) -> bool:
