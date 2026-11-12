@@ -13,6 +13,9 @@ here=$(cd "$(dirname "$0")" && pwd)
 # The suites resolve relative host paths against the repo root, which is where
 # the runner starts every step.
 cd "$here/../.."
+if [ -d ".venv/bin" ]; then
+	export PATH="$PWD/.venv/bin:$PATH"
+fi
 
 for suite in "$here"/[0-9][0-9]-*/[0-9][0-9]-*.sh; do
 	name=${suite#"$here"/}

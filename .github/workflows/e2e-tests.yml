@@ -26,6 +26,11 @@ jobs:
 
             - name: Install chroot-distro
               run: |
+                  # The suites run chroot-distro under sudo (root's install)
+                  # and import the library as the runner user (this install).
+                  # The user's pip runs first: the sudo one leaves a root-owned
+                  # egg-info in the tree that the user's build could not update.
+                  pip install .
                   sudo pip install . --break-system-packages
                   chroot-distro --version
 
