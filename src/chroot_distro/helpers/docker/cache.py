@@ -8,8 +8,8 @@ checked before `:` is rewritten to `_`, and a malformed digest raises instead of
 reaching the filesystem. `layer_cache_path` is therefore the same path for the same
 blob from any image, which is what lets two images share a layer.
 
-The manifest key is a sha256 of the canonical `registry/repo:tag_platform` string, so a
-reference has one spelling per platform no matter how the user typed it, and
+The manifest key is a sha256 of `canonical_ref()` plus the platform, so a reference has
+one spelling per platform no matter how the user typed it, and
 `linux/arm/v7` is not the same entry as another `arm` variant: the key carries the whole
 platform because the entry decides what a container or a build stage stands on. The key
 is over the *tag*, not a digest, so re-pulling a moved tag overwrites the entry, which is
@@ -40,7 +40,7 @@ import typing
 from chroot_distro.arch import Platform
 from chroot_distro.atomic import atomic_write
 from chroot_distro.constants import LAYER_CACHE_DIR, MANIFEST_CACHE_DIR
-from chroot_distro.helpers.docker.refs import parse_image_ref
+from chroot_distro.helpers.docker.refs import canonical_ref
 
 log = logging.getLogger(__name__)
 
@@ -81,8 +81,7 @@ def _legacy_manifest_cache_path(image_ref: str, arch_pd: str) -> str:
 
 
 def _manifest_cache_path(image_ref: str, suffix: str) -> str:
-    registry, repo, tag = parse_image_ref(image_ref)
-    canonical = f"{registry + '/' if registry else ''}{repo}:{tag}_{suffix}"
+    canonical = f"{canonical_ref(image_ref)}_{suffix}"
     # Total over every string, which strict UTF-8 is not: a byte on the
     # command line that is not UTF-8 arrives as a lone surrogate (a
     # --build-arg expanded into FROM, an `install` argument), and deriving

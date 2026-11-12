@@ -4,7 +4,8 @@
 
 The three source kinds are told apart by the reference's shape alone: a leading `/`,
 `./`, `../` or `~` is a local file, an `http://` or `https://` prefix a URL, anything
-else a registry reference. The container name is derived from whichever of those it is
+else a registry reference, which is then held to Docker's grammar before a name is
+derived from it or a lock taken. The container name is derived from whichever kind it is
 unless `--name` gave one, and a name that cannot be derived is an error asking for
 `--name` rather than a guess.
 
@@ -50,7 +51,7 @@ from chroot_distro.constants import (
     layer_download_workers,
 )
 from chroot_distro.helpers.android import configure_android_rootfs
-from chroot_distro.helpers.docker import derive_alias, pull_image
+from chroot_distro.helpers.docker import InvalidReferenceError, derive_alias, parse_reference, pull_image
 from chroot_distro.helpers.download import download_file
 from chroot_distro.helpers.rootfs import (
     guest_etc_path,
@@ -59,7 +60,7 @@ from chroot_distro.helpers.rootfs import (
     write_resolv_conf,
 )
 from chroot_distro.locking import ContainerLock
-from chroot_distro.message import C, crit_error, log_error, log_info, msg
+from chroot_distro.message import C, crit_error, log_error, log_info, msg, quote_path
 from chroot_distro.names import is_valid_name, require_valid_name
 from chroot_distro.paths import (
     container_dir,
@@ -152,6 +153,22 @@ def _install_one(image_ref: str, args, custom_container_name) -> None:
 
     local_path = os.path.expanduser(image_ref) if _is_local_path(image_ref) else None
     url = image_ref if _is_url(image_ref) else None
+
+    # Anything else is an image reference, and one Docker would refuse is refused
+    # here, before a container name is derived from it or a lock taken: `Ubuntu`
+    # used to reach the registry as a name no client can use.
+    if local_path is None and url is None:
+        try:
+            parsed = parse_reference(image_ref)
+        except InvalidReferenceError as exc:
+            crit_error(f"cannot install '{quote_path(image_ref)}': {exc}.")
+            sys.exit(1)
+        if parsed.digest:
+            crit_error(
+                f"cannot install '{quote_path(image_ref)}': installing by digest is not "
+                f"supported. Use a tag."
+            )
+            sys.exit(1)
 
     install_name = _resolve_install_name(
         image_ref,

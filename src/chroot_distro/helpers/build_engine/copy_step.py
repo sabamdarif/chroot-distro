@@ -77,7 +77,12 @@ from chroot_distro.helpers.build_engine.parsing import (
     split_operands,
 )
 from chroot_distro.helpers.build_engine.users import resolve_chown
-from chroot_distro.helpers.docker import layer_cache_path, pull_image
+from chroot_distro.helpers.docker import (
+    InvalidReferenceError,
+    layer_cache_path,
+    parse_reference,
+    pull_image,
+)
 from chroot_distro.helpers.dockerfile import expand_vars
 from chroot_distro.helpers.download import http_opener
 from chroot_distro.helpers.layer_diff import MapSources, write_files_layer
@@ -571,6 +576,12 @@ def _pull_throwaway_image(engine: typing.Any, image_ref: str) -> tuple[str, int]
     running on the build platform to assemble a target rootfs has to receive the
     target's files, and a stage that wants native ones names a FROM of its own.
     """
+    # Refused before anything is made for it or said about it, as FROM's is:
+    # the reference is the Dockerfile's text after ARG expansion.
+    try:
+        parse_reference(image_ref)
+    except InvalidReferenceError as exc:
+        raise BuildError(f"COPY --from={image_ref}: {exc}") from exc
     # Total, like the manifest-cache key: `--from=$IMG` can expand a
     # --build-arg holding a byte that is not UTF-8 (a lone surrogate).
     slot = hashlib.sha256(image_ref.encode("utf-8", "surrogatepass")).hexdigest()[:16]

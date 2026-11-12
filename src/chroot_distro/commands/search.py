@@ -14,6 +14,7 @@ import urllib.parse
 import urllib.request
 
 from chroot_distro.constants import PROGRAM_NAME, PROGRAM_VERSION
+from chroot_distro.helpers.docker import is_repository_path
 from chroot_distro.helpers.download import http_opener, new_request
 from chroot_distro.message import C, crit_error, msg
 from chroot_distro.progress import loading_line
@@ -81,7 +82,9 @@ def command_search(args) -> None:
     rows = []
     for item in results:
         name = str(item.get("repo_name") or item.get("name") or "")
-        if not name:
+        # Docker's repository-name grammar: a name failing it is not addressable
+        # by any client, so it is not a result worth printing.
+        if not is_repository_path(name):
             continue
         stars = int(item.get("star_count") or 0)
         official = "[OK]" if item.get("is_official") else ""

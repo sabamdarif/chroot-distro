@@ -93,6 +93,11 @@ Create a container. `IMAGE` can be:
 | Local file       | `./rootfs.tar.gz`, `./image.oci.tar` |
 | Web link         | `https://example.com/rootfs.tar.xz`  |
 
+A registry reference is read by Docker's own grammar, so `localhost:5000/foo` names a
+registry on this machine and `Ubuntu` is refused rather than asked for as a repository
+no registry can have. Pinning an image by digest (`debian@sha256:...`) is not supported
+yet.
+
 | Option                      | Description                                                                                                                                   |
 | --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
 | `-n`, `--name NAME`         | Give the container a custom name. Default is the image name. Needed to install the same image twice. `--override-alias` is an accepted alias. |
@@ -418,7 +423,7 @@ Build an image from a Dockerfile, like `docker build` but without Docker. `PATH`
 | Option                            | Description                                                                                                                                                                            |
 | --------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `-f`, `--file PATH`               | Use a Dockerfile at a different location. Pass `-` to read it from stdin.                                                                                                              |
-| `-t`, `--tag REF`                 | Name the image (like `myapp:1.0`). Can be given more than once.                                                                                                                        |
+| `-t`, `--tag REF`                 | Name the image (like `myapp:1.0`), without a digest. Can be given more than once.                                                                                                     |
 | `--build-arg K=V`                 | Set a build-time `ARG`. Can be given more than once.                                                                                                                                   |
 | `--build-context name=VALUE`      | Give a name to another source the Dockerfile can use. `VALUE` is a local folder or an image reference. See [Named build contexts](#named-build-contexts). Can be given more than once. |
 | `-a`, `--architecture ARCH`       | Build for a different CPU type. Default is your host's CPU. The one-platform spelling of `--platform`.                                                                                 |

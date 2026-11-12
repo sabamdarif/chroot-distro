@@ -100,6 +100,11 @@ from chroot_distro.helpers.build_engine import (
     plan_stages,
     solve_platforms,
 )
+from chroot_distro.helpers.docker import (
+    InvalidReferenceError,
+    parse_tag_reference,
+    with_explicit_tag,
+)
 from chroot_distro.helpers.dockerfile import (
     MAX_DOCKERFILE_BYTES,
     DockerfileSyntaxError,
@@ -271,17 +276,19 @@ def command_build(args: typing.Any) -> None:
             sys.exit(1)
         tags = [derived]
 
+    # Docker's reference grammar, not a check of the alias alone: the tag becomes
+    # the manifest-cache key, the build lock, the name `push` uploads under and the
+    # RepoTags an --output archive carries. The old check looked at the last
+    # component only, so `../../x:1` was taken (with `..` for a registry) and
+    # `localhost:5000/app` refused.
     for t in tags:
-        if not _is_valid_tag(t):
-            crit_error(
-                f"tag '{t}' is not valid. A tag must start with an "
-                f"alphanumeric character and contain only letters, "
-                f"digits, underscores, dots, hyphens, slashes, or a "
-                f"single colon for the version."
-            )
+        try:
+            parse_tag_reference(t)
+        except InvalidReferenceError as exc:
+            crit_error(f"tag '{quote_path(t)}' is not valid: {exc}.")
             sys.exit(1)
 
-    tags = [_with_explicit_tag(t) for t in tags]
+    tags = [with_explicit_tag(t) for t in tags]
     primary_tag = tags[0]
 
     for out_file in outputs:
@@ -852,38 +859,30 @@ def _parse_build_args(raw: list[str]) -> dict[str, str]:
 
 
 def _derive_tag_from_path(build_dir: str, dockerfile: str) -> str:
-    """Pick a default tag based on the build context basename."""
+    """Pick a default tag based on the build context basename.
+
+    Made to fit the reference grammar rather than merely checked against it:
+    lowercase, anything outside [a-z0-9._-] turned into '-', a run of separators
+    Docker does not allow ('._', '_-', '___') collapsed into one '-' as runs of '-'
+    always were, and none left at either end. A directory called `app_` or
+    `my._app` used to produce a tag no registry would take.
+    """
     base = os.path.basename(os.path.abspath(build_dir).rstrip("/"))
     if (not base or base in (".", "..")) and dockerfile and dockerfile != "-":
         base = os.path.basename(os.path.dirname(os.path.abspath(dockerfile)))
-    base = base.lower()
-    base = re.sub(r"[^a-z0-9_.\-]", "-", base).strip("-")
-    base = re.sub(r"-+", "-", base)
-    if not base or not is_valid_name(base):
+    base = re.sub(r"[^a-z0-9_.\-]", "-", base.lower())
+    base = re.sub(
+        r"[._-]+",
+        lambda m: m.group() if re.fullmatch(r"[._]|__|-+", m.group()) else "-",
+        base,
+    )
+    base = re.sub(r"-+", "-", base).strip("._-")
+    tag = f"{base}:latest"
+    try:
+        parse_tag_reference(tag)
+    except InvalidReferenceError:
         return ""
-    return f"{base}:latest"
-
-
-def _with_explicit_tag(tag: str) -> str:
-    """Append ':latest' if `tag`'s last path component lacks a tag part."""
-    last = tag.rsplit("/", maxsplit=1)[-1]
-    return tag if ":" in last else tag + ":latest"
-
-
-def _is_valid_tag(tag: str) -> bool:
-    if not tag:
-        return False
-    if ":" in tag:
-        name_part, tag_part = tag.rsplit(":", 1)
-        if not tag_part:
-            return False
-        # Tag part: starts with alphanumeric, then word chars + dot/dash.
-        if not re.match(r"^[A-Za-z0-9][\w.\-]*$", tag_part):
-            return False
-    else:
-        name_part = tag
-    last = name_part.split("/")[-1]
-    return is_valid_name(last)
+    return tag if is_valid_name(base) else ""
 
 
 def _install_as_container(install_name: str, image_ref: str, target_arch: str, quiet: bool) -> None:

@@ -61,7 +61,7 @@ from chroot_distro.helpers.docker.media import (
     OCI_INDEX_MEDIA,
     OCI_MANIFEST_MEDIA,
 )
-from chroot_distro.helpers.docker.refs import parse_image_ref
+from chroot_distro.helpers.docker.refs import parse_image_ref, parse_reference
 from chroot_distro.helpers.docker.transport import (
     _ua,
     auth_denied_msg,
@@ -285,7 +285,8 @@ def _resolve_single_manifest(
     image_ref: str, platform: Platform, insecure: bool = False
 ) -> tuple[dict[str, typing.Any], str, str, str]:
     """Return (single_image_manifest, auth, repo, base) for the platform."""
-    registry, repo, tag = parse_image_ref(image_ref)
+    parsed = parse_reference(image_ref)
+    registry, repo, tag = parsed.registry, parsed.repo, parsed.manifest_ref
 
     log_info(f"Authenticating with registry{auth_note()}...")
     auth, base = get_auth_token(repo, registry, insecure=insecure)
@@ -357,15 +358,20 @@ def pull_image(image_ref: str, rootfs_fd: int, platform: Platform, insecure: boo
     auth = ""
     base = None
 
-    manifest, repo, image_config = load_manifest_cache(image_ref, platform)
-    ref = parse_image_ref(image_ref)
-    registry = ref[0]
+    # The grammar again, since build's FROM and COPY --from reach here with a
+    # Dockerfile's text, and a digest is a pin this program cannot verify, so it
+    # does not pull by one.
+    parsed = parse_reference(image_ref)
+    if parsed.digest:
+        raise RuntimeError("pulling an image by digest is not supported; use a tag")
+    registry, repo = parsed.registry, parsed.repo
+    ref = (parsed.registry, parsed.repo, parsed.tag)
+    manifest, _cached_repo, image_config = load_manifest_cache(image_ref, platform)
     # Docker Hub is verified HTTPS whatever --allow-insecure says; decided
     # here, once, so no request below can use the insecure opener for it.
     insecure = insecure_for(registry, insecure)
 
     if manifest is not None:
-        assert repo is not None
         layers = manifest.get("layers", [])
         if all_layers_cached(layers):
             log_info(f"Image '{image_ref}' ({platform}) is cached.")

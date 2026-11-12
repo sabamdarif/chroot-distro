@@ -48,7 +48,7 @@ from chroot_distro.helpers.docker.media import (
     OCI_MANIFEST_MEDIA,
     canonical_json,
 )
-from chroot_distro.helpers.docker.refs import parse_image_ref
+from chroot_distro.helpers.docker.refs import parse_tag_reference
 from chroot_distro.helpers.docker.transport import (
     _ua,
     auth_note,
@@ -496,13 +496,19 @@ def push_image(image_ref: str, arch: str, insecure: bool = False) -> dict[str, t
     in MANIFEST_CACHE_DIR and the layer + config blobs in
     LAYER_CACHE_DIR using the same digests we transmit here.
     """
-    manifest, repo, image_config = load_manifest_cache(image_ref, platform_from_arch(arch))
+    # The grammar first, as pull_image does, and a digest is no name to push
+    # under. The repository comes from the reference and not from the cache
+    # entry's `repo`: the entry is a file a guest can write on Termux, and the
+    # repository is where the upload, the push-scoped token and the tag all go.
+    parsed_ref = parse_tag_reference(image_ref)
+    registry, repo, tag = parsed_ref.registry, parsed_ref.repo, parsed_ref.tag
+
+    manifest, _cached_repo, image_config = load_manifest_cache(image_ref, platform_from_arch(arch))
     if manifest is None:
         raise RuntimeError(
             f"No cached manifest for '{image_ref}' ({arch}). Build image "
             f"first with: {PROGRAM_NAME} build -t {image_ref}"
         )
-    assert repo is not None
 
     layers = manifest.get("layers", [])
     if not layers:
@@ -516,8 +522,6 @@ def push_image(image_ref: str, arch: str, insecure: bool = False) -> dict[str, t
             f"Rebuild the image to repopulate the cache."
         )
 
-    parsed = parse_image_ref(image_ref)
-    registry, _, tag = parsed
     # Docker Hub is verified HTTPS whatever --allow-insecure says; every
     # upload helper below gets this answer.
     insecure = insecure_for(registry, insecure)
@@ -541,7 +545,7 @@ def push_image(image_ref: str, arch: str, insecure: bool = False) -> dict[str, t
     try:
         auth, base = get_auth_token(repo, registry, actions="pull,push", insecure=insecure)
     except urllib.error.HTTPError as exc:
-        refusal = _refusal_msg(image_ref, parsed, exc)
+        refusal = _refusal_msg(image_ref, (registry, repo, tag), exc)
         if refusal:
             raise RuntimeError(refusal) from exc
         raise
@@ -572,7 +576,7 @@ def push_image(image_ref: str, arch: str, insecure: bool = False) -> dict[str, t
             )
             bytes_uploaded += size
         except urllib.error.HTTPError as exc:
-            refusal = _refusal_msg(image_ref, parsed, exc)
+            refusal = _refusal_msg(image_ref, (registry, repo, tag), exc)
             if refusal:
                 raise RuntimeError(refusal) from exc
             raise
@@ -593,7 +597,7 @@ def push_image(image_ref: str, arch: str, insecure: bool = False) -> dict[str, t
             )
             bytes_uploaded += len(config_bytes)
     except urllib.error.HTTPError as exc:
-        refusal = _refusal_msg(image_ref, parsed, exc)
+        refusal = _refusal_msg(image_ref, (registry, repo, tag), exc)
         if refusal:
             raise RuntimeError(refusal) from exc
         raise
@@ -612,7 +616,7 @@ def push_image(image_ref: str, arch: str, insecure: bool = False) -> dict[str, t
             insecure=insecure,
         )
     except urllib.error.HTTPError as exc:
-        refusal = _refusal_msg(image_ref, parsed, exc)
+        refusal = _refusal_msg(image_ref, (registry, repo, tag), exc)
         if refusal:
             raise RuntimeError(refusal) from exc
         raise

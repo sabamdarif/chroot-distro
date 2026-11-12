@@ -69,8 +69,10 @@ from chroot_distro.helpers.build_engine.handlers import HANDLERS, do_onbuild
 from chroot_distro.helpers.build_engine.parsing import split_args
 from chroot_distro.helpers.build_engine.stage import Stage
 from chroot_distro.helpers.docker import (
+    InvalidReferenceError,
     apply_layer,
     layer_cache_path,
+    parse_reference,
     pull_image,
 )
 from chroot_distro.helpers.dockerfile import DockerfileSyntaxError, expand_vars, parse_dockerfile
@@ -862,6 +864,13 @@ class BuildEngine:
         `FROM --platform=$BUILDPLATFORM` stage is the one that gets to run
         native while the image being built stays foreign.
         """
+        # pull_image refuses a reference the grammar does not accept as well;
+        # asked here first so the line below never echoes one, since it is the
+        # Dockerfile's text (after ARG expansion) and may hold anything.
+        try:
+            parse_reference(image_ref)
+        except InvalidReferenceError as exc:
+            raise BuildError(f"FROM {image_ref}: {exc}") from exc
         log_info(f"Pulling base image '{image_ref}' ({stage.platform})...")
         try:
             rootfs_fd = _stage_rootfs_fd(stage)

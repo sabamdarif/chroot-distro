@@ -20,8 +20,16 @@ from chroot_distro.helpers.docker.pull import pull_image
 from chroot_distro.helpers.docker.push import push_image
 from chroot_distro.helpers.docker.refs import (
     ARCH_TO_DOCKER,
+    DOCKER_TO_ARCH,
+    InvalidReferenceError,
+    Reference,
+    canonical_ref,
     derive_alias,
+    is_repository_path,
     parse_image_ref,
+    parse_reference,
+    parse_tag_reference,
+    with_explicit_tag,
 )
 from chroot_distro.helpers.docker.transport import (
     AuthStrippingRedirectHandler,
@@ -37,22 +45,29 @@ from chroot_distro.helpers.docker.transport import (
 
 __all__ = (
     "ARCH_TO_DOCKER",
+    "DOCKER_TO_ARCH",
     "AuthStrippingRedirectHandler",
+    "InvalidReferenceError",
+    "Reference",
     "all_layers_cached",
     "apply_layer",
     "auth_denied_msg",
     "auth_note",
     "auth_opener",
+    "canonical_ref",
     "credentials_rejected_msg",
     "derive_alias",
     "download_blob",
     "env_basic_auth",
     "get_auth_token",
+    "is_repository_path",
     "is_valid_digest",
     "layer_cache_path",
     "load_manifest_cache",
     "manifest_cache_path",
     "parse_image_ref",
+    "parse_reference",
+    "parse_tag_reference",
     "pull_image",
     "push_denied_msg",
     "push_image",
@@ -60,4 +75,5 @@ __all__ = (
     "registry_base_url",
     "save_manifest_cache",
     "validate_digest",
+    "with_explicit_tag",
 )

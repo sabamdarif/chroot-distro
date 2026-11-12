@@ -2,8 +2,9 @@
 # Copyright (C) 2025-2026 Md Arif
 """Push a locally built image to its registry.
 
-Argument work only: the tag is completed to `:latest` exactly the way `build` does so
-the short form works, the architecture is resolved, and the manifest cache is checked
+Argument work only: the reference is held to Docker's grammar, the tag is completed to
+`:latest` exactly the way `build` does so the short form works, the architecture is
+resolved, and the manifest cache is checked
 before any socket is opened, which catches a typoed tag without a network round trip.
 The `BuildLock` for this reference and architecture is held for the whole upload, so a
 concurrent build cannot replace the blobs being sent. `helpers/docker/push.py` does the
@@ -16,13 +17,16 @@ import typing
 from chroot_distro.arch import get_device_cpu_arch, normalize_arch, platform_from_arch
 from chroot_distro.constants import PROGRAM_NAME
 from chroot_distro.helpers.docker import (
+    InvalidReferenceError,
     load_manifest_cache,
     parse_image_ref,
+    parse_tag_reference,
     push_image,
+    with_explicit_tag,
 )
 from chroot_distro.helpers.download import NETWORK_ERRORS
 from chroot_distro.locking import BuildLock
-from chroot_distro.message import C, crit_error, log_error, log_info, msg
+from chroot_distro.message import C, crit_error, log_error, log_info, msg, quote_path
 from chroot_distro.progress import fmt_size
 
 
@@ -37,11 +41,18 @@ def command_push(args: typing.Any) -> None:
         crit_error("image reference is not specified (e.g. 'myrepo/myapp:1.0').")
         sys.exit(1)
 
+    # Refused here, before the cache is asked about it, so a reference that is
+    # no reference, or a digest, which is nothing a push can name, is reported
+    # as what it is rather than as "no image found".
+    try:
+        parse_tag_reference(image_ref)
+    except InvalidReferenceError as exc:
+        crit_error(f"cannot push '{quote_path(image_ref)}': {exc}.")
+        sys.exit(1)
+
     # Append :latest the same way build does, so users can push using the
     # short form even when they tagged the build with the implicit tag.
-    last = image_ref.split("/")[-1]
-    if ":" not in last:
-        image_ref = image_ref + ":latest"
+    image_ref = with_explicit_tag(image_ref)
 
     if override_arch:
         target_arch = normalize_arch(override_arch)
