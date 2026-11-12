@@ -92,6 +92,7 @@ __all__ = (
     "NETWORK_ERRORS",
     "NETWORK_TIMEOUT",
     "IncompleteResponse",
+    "InvalidRequest",
     "RedirectPolicyHandler",
     "RedirectRefused",
     "_LiveResponses",
@@ -104,6 +105,7 @@ __all__ = (
     "is_cert_verification_error",
     "is_plaintext_http_tls_error",
     "is_retryable_http_error",
+    "new_request",
     "require_complete_body",
     "retry_after",
     "retry_http",
@@ -157,6 +159,48 @@ def require_complete_body(received: int, declared: int, what: str = "") -> None:
         raise IncompleteResponse(f"{prefix}the response ended after {received} of {declared} bytes.")
 
 
+class InvalidRequest(http.client.HTTPException):
+    """A request that cannot be built or put on the wire as it stands.
+
+    urllib and http.client answer much of what is wrong with a URL by
+    raising ValueError, or its UnicodeError subclass, out of the middle of
+    the request rather than a URLError: brackets that do not close a valid
+    IPv6 address (`http://[`, the registry of a `[:5000/img` reference), a
+    host the IDNA codec refuses (an empty label as in `..example`, a label
+    past 63 characters), a path that is not ASCII, a header value with a
+    line break in it. None of those is an OSError or an HTTPException, so
+    each walked through every net in the program and ended `install`,
+    `build` or `push` in a traceback. new_request() and the opener's open()
+    turn all of it into this: an HTTPException, so every net catches it,
+    and never retried, since the same request fails the same way again.
+    """
+
+
+def _reason(exc: BaseException) -> str:
+    """What urllib or a codec said was wrong, safe to print.
+
+    Their messages already repr() whatever they quote, and escaping that
+    again would only double the backslashes. The exception is the NFKC
+    check, which names the host raw, so a message holding a character that
+    is not printable is escaped whole.
+    """
+    text = str(exc)
+    return text if text.isprintable() else quote_path(text)
+
+
+def new_request(url: str, **kwargs) -> urllib.request.Request:
+    """urllib.request.Request(*url*, ...), a malformed URL as InvalidRequest.
+
+    The constructor already parses the URL's host (for origin_req_host), so
+    a malformed one fails here, before any opener sees it. Every request in
+    the program is built through this.
+    """
+    try:
+        return urllib.request.Request(url, **kwargs)
+    except ValueError as exc:
+        raise InvalidRequest(f"'{quote_path(url)}' is not a valid URL: {_reason(exc)}") from exc
+
+
 def insecure_ssl_context() -> ssl.SSLContext:
     """Return an SSL context that skips certificate and hostname checks.
 
@@ -192,9 +236,27 @@ class _Opener(urllib.request.OpenerDirector):
     """
 
     def open(self, fullurl, data=None, timeout=_DEFAULT_TIMEOUT):
+        """Open *fullurl*, reporting a request that cannot be sent as one.
+
+        What new_request() does for the constructor, done for everything
+        after it: a URL handed over as a string is parsed in here, a host
+        is IDNA-encoded on the way to the resolver, a path and the headers
+        are encoded on the way to the socket, and a redirect's target goes
+        through all of it again, each of them a ValueError when it fails.
+        """
         if timeout is _DEFAULT_TIMEOUT:
             timeout = NETWORK_TIMEOUT
-        return super().open(fullurl, data, timeout)
+        if isinstance(fullurl, str):
+            # What OpenerDirector.open() would build, built the way every
+            # other request is, so a URL that does not parse says so.
+            fullurl, data = new_request(fullurl, data=data), None
+        try:
+            return super().open(fullurl, data, timeout)
+        except ValueError as exc:
+            url = getattr(fullurl, "full_url", fullurl)
+            raise InvalidRequest(
+                f"cannot send a request for '{quote_path(str(url))}': {_reason(exc)}"
+            ) from exc
 
 
 class RedirectRefused(http.client.HTTPException):
@@ -472,6 +534,9 @@ def is_retryable_http_error(exc: BaseException) -> bool:
     if isinstance(exc, RedirectRefused):
         # The server's answer, and it will be the same one next time.
         return False
+    if isinstance(exc, InvalidRequest):
+        # The request never left: nothing about it changes on a repeat.
+        return False
     return isinstance(exc, (OSError, ssl.SSLError, http.client.HTTPException))
 
 
@@ -601,7 +666,7 @@ def _range_probe(
         open_fn = functools.partial(urllib.request.urlopen, timeout=_SOCKET_TIMEOUT)
     try:
         range_headers = {**headers, "Range": "bytes=0-0", "Accept-Encoding": "identity"}
-        range_req = urllib.request.Request(url, headers=range_headers)
+        range_req = new_request(url, headers=range_headers)
         with open_fn(range_req) as resp:
             resp.read(1)
             if resp.status == 206:
@@ -649,7 +714,7 @@ def _probe_url(
 
     need_range_probe = False
     try:
-        head_req = urllib.request.Request(url, headers=headers, method="HEAD")
+        head_req = new_request(url, headers=headers, method="HEAD")
         with open_fn(head_req) as resp:
             content_length = int(resp.headers.get("Content-Length", 0))
             accept_ranges = (resp.headers.get("Accept-Ranges", "")).lower()
@@ -839,7 +904,7 @@ def _download_segment(
                     "Range": f"bytes={start_pos}-{seg.end}",
                     "Accept-Encoding": "identity",  # critical: no gzip, breaks range math
                 }
-                req = urllib.request.Request(url, headers=headers)
+                req = new_request(url, headers=headers)
                 mode = "ab" if downloaded > 0 else "wb"
                 with opener.open(req, timeout=_SOCKET_TIMEOUT) as resp, open(seg.tmp_path, mode) as fh:
                     if live_responses is not None:
@@ -1090,7 +1155,7 @@ def _download_single(
     max_retries = _get_max_retries()
     retry_delays = _get_retry_delays(max_retries)
 
-    req = urllib.request.Request(url, headers=_ua_headers())
+    req = new_request(url, headers=_ua_headers())
     last_exc: BaseException | None = None
     abort_event = threading.Event()
 
@@ -1189,16 +1254,17 @@ def _download_single_loop(
             raise RuntimeError(f"Cannot download {url}: {exc}") from exc
 
 
-def _redirect_error(url: str, exc: "RedirectRefused") -> RuntimeError:
-    """The error reporting a redirect refused while fetching *url*.
+def _refusal_error(url: str, exc: BaseException) -> RuntimeError:
+    """The error reporting a refused redirect or an unusable URL for *url*.
 
     Only a step down from HTTPS is what --allow-insecure lifts, so only
-    that one names the flag; a redirect off HTTP is refused either way.
+    that one names the flag; a redirect off HTTP, and a URL that is not
+    one, are refused either way.
     """
     remedy = (
         " If you trust this source and the network path to it, re-run with "
         "'--allow-insecure' to follow the redirect."
-        if exc.plaintext
+        if getattr(exc, "plaintext", False)
         else ""
     )
     return RuntimeError(f"Cannot download {url}: {exc}{remedy}")
@@ -1232,8 +1298,8 @@ def download_file(
         try:
             with loading_line("Connecting..."):
                 probe = _probe_server(url, _ua_headers(), insecure=insecure)
-        except RedirectRefused as exc:
-            raise _redirect_error(url, exc) from exc
+        except (RedirectRefused, InvalidRequest) as exc:
+            raise _refusal_error(url, exc) from exc
 
         if probe is None:
             log_info("Server probe failed, falling back to single connection.")
@@ -1254,8 +1320,8 @@ def download_file(
             except Exception as exc:
                 clear_bar()
                 host = urllib.parse.urlparse(url).netloc or url
-                if isinstance(exc, RedirectRefused):
-                    raise _redirect_error(url, exc) from exc
+                if isinstance(exc, (RedirectRefused, InvalidRequest)):
+                    raise _refusal_error(url, exc) from exc
                 if isinstance(exc, urllib.error.URLError):
                     if not insecure and is_cert_verification_error(exc):
                         raise RuntimeError(certificate_error_msg(host)) from exc
@@ -1272,8 +1338,8 @@ def download_file(
 
     try:
         _download_single(url, dest, bucket, insecure=insecure)
-    except RedirectRefused as exc:
-        raise _redirect_error(url, exc) from exc
+    except (RedirectRefused, InvalidRequest) as exc:
+        raise _refusal_error(url, exc) from exc
 
 
 def sha256_file(path: str) -> str:

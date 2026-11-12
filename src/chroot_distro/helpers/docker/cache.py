@@ -83,7 +83,13 @@ def _legacy_manifest_cache_path(image_ref: str, arch_pd: str) -> str:
 def _manifest_cache_path(image_ref: str, suffix: str) -> str:
     registry, repo, tag = parse_image_ref(image_ref)
     canonical = f"{registry + '/' if registry else ''}{repo}:{tag}_{suffix}"
-    key = hashlib.sha256(canonical.encode()).hexdigest()[:16]
+    # Total over every string, which strict UTF-8 is not: a byte on the
+    # command line that is not UTF-8 arrives as a lone surrogate (a
+    # --build-arg expanded into FROM, an `install` argument), and deriving
+    # the key raised UnicodeEncodeError before any request could say the
+    # reference was no good. `surrogatepass` changes nothing for a string
+    # that encoded before, so no existing key moves.
+    key = hashlib.sha256(canonical.encode("utf-8", "surrogatepass")).hexdigest()[:16]
     return os.path.join(MANIFEST_CACHE_DIR, key + ".json")
 
 

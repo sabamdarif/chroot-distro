@@ -40,7 +40,6 @@ import hashlib
 import json
 import os
 import signal
-import ssl
 import threading
 import typing
 import urllib.error
@@ -75,8 +74,10 @@ from chroot_distro.helpers.docker.transport import (
 )
 from chroot_distro.helpers.download import (
     MAX_METADATA_BYTES,
+    NETWORK_ERRORS,
     _LiveResponses,
     declared_length,
+    new_request,
     require_complete_body,
     retry_http,
 )
@@ -175,7 +176,7 @@ def _download_layers_parallel(
             if dl_err.code == 429:
                 raise RuntimeError(rate_limited_msg(image_ref, parse_image_ref(image_ref), dl_err)) from dl_err
             raise
-        except (ssl.SSLError, ConnectionError, OSError) as dl_err:
+        except NETWORK_ERRORS as dl_err:
             raise RuntimeError(f"Network error downloading layer {i + 1}/{n_layers} ({short_id}): {dl_err}") from dl_err
 
     def _on_sigint(_signum, _frame):
@@ -223,7 +224,7 @@ def _get_manifest(repo: str, ref: str, auth: str, base: str, insecure: bool = Fa
     headers = {**_ua(), "Accept": _ACCEPT_HEADER}
     if auth:
         headers["Authorization"] = auth
-    req = urllib.request.Request(url, headers=headers)
+    req = new_request(url, headers=headers)
 
     def _attempt():
         with opener(insecure).open(req) as resp:
@@ -316,7 +317,7 @@ def _fetch_config_blob(
         headers = {**_ua()}
         if auth:
             headers["Authorization"] = auth
-        req = urllib.request.Request(url, headers=headers)
+        req = new_request(url, headers=headers)
 
         def _attempt():
             with opener(insecure).open(req) as resp:
@@ -374,7 +375,7 @@ def pull_image(image_ref: str, rootfs_fd: int, platform: Platform, insecure: boo
             try:
                 log_info(f"Authenticating with registry{auth_note()}...")
                 auth, base = get_auth_token(repo, registry, insecure=insecure)
-            except (urllib.error.URLError, OSError) as net_err:
+            except NETWORK_ERRORS as net_err:
                 if isinstance(net_err, urllib.error.HTTPError):
                     if net_err.code in (401, 403):
                         raise RuntimeError(auth_denied_msg(image_ref, net_err.code)) from net_err
@@ -391,7 +392,7 @@ def pull_image(image_ref: str, rootfs_fd: int, platform: Platform, insecure: boo
     else:
         try:
             manifest, auth, repo, base = _resolve_single_manifest(image_ref, platform, insecure=insecure)
-        except (urllib.error.URLError, OSError) as net_err:
+        except NETWORK_ERRORS as net_err:
             if isinstance(net_err, urllib.error.HTTPError):
                 if net_err.code in (401, 403):
                     raise RuntimeError(auth_denied_msg(image_ref, net_err.code)) from net_err

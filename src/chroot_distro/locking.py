@@ -75,8 +75,12 @@ def container_lock_path(name: str) -> str:
 
 
 def _build_lock_path(image_ref: str, arch: str) -> str:
-    """Return the lock-file path for a build of (image_ref, arch)."""
-    key = hashlib.sha256(f"{image_ref}_{arch}".encode()).hexdigest()[:16]
+    """Return the lock-file path for a build of (image_ref, arch).
+
+    The key is derived the same total way as the manifest-cache key: a
+    reference off the command line can hold a lone surrogate.
+    """
+    key = hashlib.sha256(f"{image_ref}_{arch}".encode("utf-8", "surrogatepass")).hexdigest()[:16]
     return os.path.join(_BUILD_LOCKS_DIR, f"{key}.lock")
 
 

@@ -14,7 +14,7 @@ import urllib.parse
 import urllib.request
 
 from chroot_distro.constants import PROGRAM_NAME, PROGRAM_VERSION
-from chroot_distro.helpers.download import http_opener
+from chroot_distro.helpers.download import http_opener, new_request
 from chroot_distro.message import C, crit_error, msg
 from chroot_distro.progress import loading_line
 
@@ -26,7 +26,7 @@ _DESC_MAX = 60
 def _fetch(term: str, limit: int) -> list[dict]:
     query = urllib.parse.urlencode({"query": term, "page_size": str(limit), "page": "1"})
     url = f"{_HUB_SEARCH_URL}?{query}"
-    req = urllib.request.Request(url, headers={"User-Agent": f"{PROGRAM_NAME}/{PROGRAM_VERSION}"})
+    req = new_request(url, headers={"User-Agent": f"{PROGRAM_NAME}/{PROGRAM_VERSION}"})
     with http_opener().open(req, timeout=_SOCKET_TIMEOUT) as resp:
         data = json.loads(resp.read().decode("utf-8"))
     results = data.get("results") or []
@@ -45,6 +45,15 @@ def command_search(args) -> None:
     term = args.term
     if not term:
         crit_error("search term is not specified.")
+        sys.exit(1)
+
+    try:
+        term.encode("utf-8")
+    except UnicodeError:
+        # A byte on the command line that is not UTF-8 arrives as a lone
+        # surrogate, and urlencode() raised UnicodeEncodeError out of
+        # building the request.
+        crit_error("the search term is not valid text: it holds bytes that are not UTF-8.")
         sys.exit(1)
 
     limit = getattr(args, "limit", None) or 25

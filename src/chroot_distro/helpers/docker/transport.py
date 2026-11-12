@@ -52,11 +52,13 @@ import urllib.request
 
 from chroot_distro.constants import PROGRAM_NAME, PROGRAM_VERSION
 from chroot_distro.helpers.download import (
+    NETWORK_ERRORS,
     RedirectPolicyHandler,
     certificate_error_msg,
     http_opener,
     is_cert_verification_error,
     is_plaintext_http_tls_error,
+    new_request,
     retry_after,
     retry_http,
 )
@@ -180,14 +182,16 @@ def _http_registry_reachable(registry: str, timeout: float = 6.0) -> bool:
     unreachable. Any HTTP-level response, 401 and 404 included, confirms the
     host speaks HTTP on that endpoint.
     """
-    req = urllib.request.Request(f"http://{registry}/v2/", headers=_ua())
     try:
+        # Built inside the net, so a registry the URL cannot hold is "not
+        # reachable" rather than the question's own traceback.
+        req = new_request(f"http://{registry}/v2/", headers=_ua())
         with http_opener().open(req, timeout=timeout) as resp:
             resp.read(64)
         return True
     except urllib.error.HTTPError:
         return True
-    except (urllib.error.URLError, OSError):
+    except NETWORK_ERRORS:
         return False
 
 
@@ -347,6 +351,24 @@ def _bearer(token: str) -> str:
     return f"Bearer {token}" if token else ""
 
 
+def _granted_auth(data: dict, what: str) -> str:
+    """The Authorization value *data*, a token grant, yields.
+
+    The grant may hold no token at all, which is an open registry. Nor may
+    the string hold what a header cannot carry: a control character (a line
+    break most of all) or anything past Latin-1. http.client refuses both
+    with a ValueError from the middle of the next request, and its message
+    quotes the header value, so the refusal is made here, where it can say
+    what is wrong without printing the token.
+    """
+    token = data.get("token") or data.get("access_token", "")
+    if not isinstance(token, str):
+        raise RuntimeError(f"{what}: the registry's token grant is not a string.")
+    if any(ord(ch) < 0x20 or 0x7F <= ord(ch) < 0xA0 or ord(ch) > 0xFF for ch in token):
+        raise RuntimeError(f"{what}: the registry's token grant holds characters an HTTP header cannot carry.")
+    return _bearer(token)
+
+
 def _request_body(open_fn, req, what: str) -> bytes:
     """Open *req* via *open_fn* and return the full response body.
 
@@ -437,7 +459,7 @@ def _check_credentials(open_fn, url: str, basic_auth: str, registry: str, reject
     added. Anything else propagates as it would from the request the check
     comes before.
     """
-    req = urllib.request.Request(url, headers={**_ua(), "Authorization": basic_auth})
+    req = new_request(url, headers={**_ua(), "Authorization": basic_auth})
     try:
         _request_body(open_fn, req, "Checking credentials")
     except urllib.error.HTTPError as exc:
@@ -486,12 +508,12 @@ def get_auth_token(
                 _REJECTED_BY_TOKEN_SERVICE,
             )
         url = _token_url(AUTH_URL, HUB_SERVICE, f"repository:{repo}:{actions}")
-        req = urllib.request.Request(url, headers=_ua())
+        req = new_request(url, headers=_ua())
         if basic_auth:
             req.add_header("Authorization", basic_auth)
-        data = json.loads(_request_body(auth_opener().open, req, f"Authenticating {repo}"))
-        token = data.get("token") or data.get("access_token", "")
-        return _bearer(token), REGISTRY_URL
+        what = f"Authenticating {repo}"
+        data = json.loads(_request_body(auth_opener().open, req, what))
+        return _granted_auth(data, what), REGISTRY_URL
 
     # Custom registry: probe /v2/ to resolve the scheme and discover the
     # Bearer realm. A registry serving public images still requires the dance:
@@ -501,7 +523,7 @@ def get_auth_token(
     scheme = "https"
     while True:
         base = f"{scheme}://{registry}"
-        probe_req = urllib.request.Request(f"{base}/v2/", headers=_ua())
+        probe_req = new_request(f"{base}/v2/", headers=_ua())
         try:
             _request_body(op.open, probe_req, f"Probing {base}/v2/")
             return "", base  # registry is wide open; no token required
@@ -533,14 +555,13 @@ def get_auth_token(
             service = params.get("service", "")
             if basic_auth:
                 _check_credentials(op.open, _token_url(realm, service), basic_auth, registry, _REJECTED_BY_TOKEN_SERVICE)
-            token_req = urllib.request.Request(
+            token_req = new_request(
                 _token_url(realm, service, f"repository:{repo}:{actions}"), headers=_ua()
             )
             if basic_auth:
                 token_req.add_header("Authorization", basic_auth)
             data = json.loads(_request_body(op.open, token_req, "Requesting auth token"))
-            token = data.get("token") or data.get("access_token", "")
-            return _bearer(token), base
+            return _granted_auth(data, "Requesting auth token"), base
         except urllib.error.URLError as exc:
             # The server speaks TLS but its certificate is untrusted. Only
             # reachable when enforcing HTTPS (the insecure opener skips

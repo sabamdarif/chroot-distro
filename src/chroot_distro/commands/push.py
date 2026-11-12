@@ -12,7 +12,6 @@ work.
 
 import sys
 import typing
-import urllib.error
 
 from chroot_distro.arch import get_device_cpu_arch, normalize_arch, platform_from_arch
 from chroot_distro.constants import PROGRAM_NAME
@@ -21,6 +20,7 @@ from chroot_distro.helpers.docker import (
     parse_image_ref,
     push_image,
 )
+from chroot_distro.helpers.download import NETWORK_ERRORS
 from chroot_distro.locking import BuildLock
 from chroot_distro.message import C, crit_error, log_error, log_info, msg
 from chroot_distro.progress import fmt_size
@@ -78,7 +78,7 @@ def command_push(args: typing.Any) -> None:
             sys.stderr.flush()
         log_error("Aborted by user.")
         sys.exit(1)
-    except (urllib.error.URLError, OSError) as exc:
+    except NETWORK_ERRORS as exc:
         if sys.stderr.isatty():
             sys.stderr.write("\r\033[K")
             sys.stderr.flush()

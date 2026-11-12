@@ -63,6 +63,7 @@ from chroot_distro.helpers.docker.transport import (
 from chroot_distro.helpers.download import (
     NETWORK_TIMEOUT,
     is_retryable_http_error,
+    new_request,
     retry_http,
 )
 from chroot_distro.message import (
@@ -152,7 +153,7 @@ def _blob_exists(
         headers["Authorization"] = auth
 
     def _do() -> bool:
-        req = urllib.request.Request(url, method="HEAD", headers=headers)
+        req = new_request(url, method="HEAD", headers=headers)
         try:
             op = auth_opener() if not insecure else opener(insecure)
             with op.open(req) as resp:
@@ -217,7 +218,7 @@ def _upload_blob_bytes(
     def _do() -> None:
         upload_url = _open_upload_session(base, repo, headers, insecure=insecure)
         full_put_url = _with_digest(upload_url, digest)
-        put_req = urllib.request.Request(
+        put_req = new_request(
             full_put_url,
             data=data,
             method="PUT",
@@ -244,7 +245,7 @@ def _auth_headers(auth: str) -> dict[str, str]:
 
 def _open_upload_session(base: str, repo: str, headers: dict[str, str], insecure: bool = False) -> str:
     """POST a new blob upload session and return the upload URL."""
-    post_req = urllib.request.Request(
+    post_req = new_request(
         f"{base}/v2/{repo}/blobs/uploads/",
         data=b"",
         method="POST",
@@ -291,7 +292,7 @@ def _upload_blob_monolithic(
         put_url = _with_digest(upload_url, digest)
         with open(file_path, "rb") as fh:
             reader = _ProgressReader(fh, size, label or digest[:19])
-            put_req = urllib.request.Request(
+            put_req = new_request(
                 put_url,
                 data=reader,
                 method="PUT",
@@ -345,7 +346,7 @@ def _upload_blob_chunked(
                 if not chunk:
                     break
                 end = offset + len(chunk) - 1
-                patch_req = urllib.request.Request(
+                patch_req = new_request(
                     upload_url,
                     data=chunk,
                     method="PATCH",
@@ -388,7 +389,7 @@ def _upload_blob_chunked(
             commit_timeout = max(NETWORK_TIMEOUT, size / (1024 * 1024))
 
             def _finalize() -> None:
-                put_req = urllib.request.Request(
+                put_req = new_request(
                     put_url,
                     data=b"",
                     method="PUT",
@@ -453,7 +454,7 @@ def _put_manifest(
         headers["Authorization"] = auth
 
     def _do() -> str:
-        req = urllib.request.Request(url, data=body, method="PUT", headers=headers)
+        req = new_request(url, data=body, method="PUT", headers=headers)
         op = auth_opener() if not insecure else opener(insecure)
         with op.open(req) as resp:
             if resp.status not in _OK_RANGE:

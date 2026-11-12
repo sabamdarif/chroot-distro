@@ -65,6 +65,7 @@ from chroot_distro.helpers.download import (
     _probe_url,
     _ProbeResult,
     _Segment,
+    new_request,
     retry_http,
 )
 from chroot_distro.helpers.tar_extract import extract_tar_to_rootfs
@@ -304,7 +305,7 @@ def download_blob(
     headers = {**_ua()}
     if auth:
         headers["Authorization"] = auth
-    req = urllib.request.Request(url, headers=headers)
+    req = new_request(url, headers=headers)
 
     def _attempt():
         if abort_event is not None and abort_event.is_set():

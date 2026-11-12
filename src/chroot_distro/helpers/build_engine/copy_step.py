@@ -571,7 +571,9 @@ def _pull_throwaway_image(engine: typing.Any, image_ref: str) -> tuple[str, int]
     running on the build platform to assemble a target rootfs has to receive the
     target's files, and a stage that wants native ones names a FROM of its own.
     """
-    slot = hashlib.sha256(image_ref.encode()).hexdigest()[:16]
+    # Total, like the manifest-cache key: `--from=$IMG` can expand a
+    # --build-arg holding a byte that is not UTF-8 (a lone surrogate).
+    slot = hashlib.sha256(image_ref.encode("utf-8", "surrogatepass")).hexdigest()[:16]
     rootfs, rootfs_fd = _open_scratch_dir(engine, "copyfrom-" + slot)
     try:
         if dirfd.listdir_at(rootfs_fd):
@@ -812,7 +814,14 @@ def _copy_url(
     file to a digest. A Dockerfile that means plain HTTP writes `ADD http://`.
     """
     if dest.endswith("/"):
-        name = os.path.basename(urllib.parse.urlparse(url).path) or "index"
+        try:
+            url_path = urllib.parse.urlsplit(url).path
+        except ValueError as exc:
+            # `ADD https://[ /dir/`: urlsplit's ValueError walked out of the
+            # build as a traceback, before the request that would have said
+            # the same thing was even made.
+            raise BuildError(f"ADD {url}: not a valid URL ({exc}).") from None
+        name = os.path.basename(url_path) or "index"
         arcname = dest.lstrip("/") + name
     else:
         arcname = dest.lstrip("/")
