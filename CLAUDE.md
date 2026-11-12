@@ -316,7 +316,7 @@ goes through it:
 
 | File                     | Owns                                                                     |
 | ------------------------ | ------------------------------------------------------------------------ |
-| `elevate.py`             | re-exec as root: caps, Termux `su`, then sudo/doas/pkexec/su            |
+| `elevate.py`             | re-exec as root via Termux `su` or Linux sudo/doas/pkexec/su           |
 
 ### Session lifecycle (`login`, `run`, `build`)
 

@@ -53,7 +53,8 @@ sudo apt install python3-pip   # Debian/Ubuntu example
 sudo pip install chroot-distro --break-system-packages --root-user-action=ignore
 ```
 
-Every command elevates itself with `sudo`, `doas`, `pkexec` or `su` as it runs.
+Commands that need root use the first available tool in this order: `sudo`,
+`doas`, `pkexec`, `su`. Help, version and `search` run without elevation.
 
 ### Install on Termux (Android)
 
@@ -606,6 +607,11 @@ Every document, success or failure, is an object carrying the schema version and
 {"schema": 1, "command": "diff", "error": "container 'nope' is not installed."}
 ```
 
+If an elevation tool fails before starting chroot-distro as root, that tool
+controls the diagnostic and exit status. In that case stdout may be empty.
+Failures handled by chroot-distro, including failure to launch the elevation
+tool, use the JSON error document.
+
 `schema` is bumped only when a key is renamed, removed or changes type, so a consumer can ignore keys it does not know and keep working. Field rules: a byte count is an integer named `*_bytes` with its formatted twin beside it, a duration is `*_seconds`, a path is absolute, a flag is a real `true`/`false`, an unknown value is `null`, and a list is always present even when empty.
 
 ```sh
@@ -624,7 +630,11 @@ and nested inside the data folder on Termux:
 | Termux        | `$PREFIX/var/lib/chroot-distro/` | `$PREFIX/var/lib/chroot-distro/cache/` |
 | Regular Linux | `~/.local/share/chroot-distro/`  | `~/.cache/chroot-distro/`              |
 
-On regular Linux, commands run as root, so the folders are usually under `/root/` unless you set `XDG_DATA_HOME` / `XDG_CACHE_HOME`.
+On regular Linux, commands that access the store run as root. The default
+folders are usually under `/root/`. Set `XDG_DATA_HOME` and `XDG_CACHE_HOME`
+to use other base directories. If a previous sudo invocation used your home
+directory, point those variables to the previous bases, typically your
+`.local/share` and `.cache`, to reopen that store.
 
 Inside the data folder:
 

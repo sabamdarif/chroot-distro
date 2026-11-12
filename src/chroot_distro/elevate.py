@@ -2,82 +2,62 @@
 # Copyright (C) 2025-2026 Md Arif
 """Re-execute this program as root, by whatever mechanism the system offers.
 
-Root is assumed everywhere else in the tree, so this is the one place that gets
-it, and there is no unprivileged mode to degrade to. `elevate_or_die()` tries, in
-order: already root; the required file capabilities already present
-(REQUIRED_CAPS, checked through PR_CAP_AMBIENT rather than assumed);
-Termux `su`; then sudo, doas, pkexec or su.
+Commands that need root require effective UID 0. `elevate_or_die()` uses the
+root manager's `su` on Termux, or the first available tool on Linux in the
+order sudo, doas, pkexec, su.
 `_CHROOT_DISTRO_ELEVATING=1` in the child's environment is what turns a failed
 elevation into an error instead of an infinite re-exec.
 
-Crossing the boundary loses the environment, and that is what most of this file is
-about. Many sudoers policies strip it and ignore `sudo -E` outright, so every
-runtime variable that must survive is re-applied explicitly as an `env VAR=value`
-prefix: a new `CD_*` variable whose effect happens *after* elevation has to be
-added to `_FORWARDED_ENV_VARS`, or it will silently stop working under sudo.
+Elevation tools can reset the environment. Runtime settings that must survive
+are set explicitly in the new process. A new `CD_*` variable read after
+elevation needs an entry in `_FORWARDED_ENV_VARS` or the secret handoff.
 `_FORWARDED_DISPLAY_VARS` exists for the same reason on the display side, since
 doas, pkexec and su set no SUDO_UID and `helpers.x11.get_invoking_env()`'s
 process-tree walk then has nothing to find.
 
-A value that may hold a secret never goes in argv, which is world-readable through
-/proc/*/cmdline: `_SECRET_ENV_VARS` are written to a 0600 tempfile and its path
-forwarded as `CD_SECRET_FILE`, which the root side reads and unlinks. That path
-arrives as an ordinary `CD_*` variable from the invoking environment, so
-`_load_secret_file` adopts only the two names the channel exists for; taking
-arbitrary keys from it would let a caller set PATH or LD_PRELOAD on the root side.
+The elevation argv contains a 0600 tempfile path in `CD_SECRET_FILE` when
+`_SECRET_ENV_VARS` are set. The CLI's effective UID 0 shortcut bypasses the
+legacy reader because the path comes from the environment.
 
 Termux is the other half. `su -c` from Magisk, KernelSU or APatch drops into a raw
 Android environment (toybox PATH, no writable HOME, no /usr/bin for a shebang to
 name), so `_termux_root_env_exports` builds a shell prelude that puts Termux's bin
 dirs first, sets LD_PRELOAD to libtermux-exec's loader shim, points HOME at a
 writable `~/.suroot` and TMPDIR at Termux's tmp, and restores the working
-directory `su` changed. `su` is the one binary this program calls for work it
-cannot do itself; the `shutil.which` probes in `_find_escalation_tool` are the
-other, for the same reason. Nothing else here may grow into a shell-out.
+directory `su` changed. Linux tools receive an `env VAR=value` prefix, and
+Android's `su` receives shell exports.
 """
 
 import contextlib
-import logging
 import os
 import shlex
 import shutil
 import subprocess
 import sys
 import tempfile
+from importlib.machinery import ModuleSpec
 
 from chroot_distro.constants import (
     ANDROID_HOST_ENV_VARS,
     IS_TERMUX,
+    TERMUX_APP_PACKAGE,
     TERMUX_HOME,
     TERMUX_PREFIX,
 )
 from chroot_distro.exceptions import RootRequiredError
-from chroot_distro.syscalls._constants import (
-    CAP_DAC_OVERRIDE,
-    CAP_MKNOD,
-    CAP_SETGID,
-    CAP_SETUID,
-    CAP_SYS_ADMIN,
-    CAP_SYS_CHROOT,
-    PR_CAP_AMBIENT,
-    PR_CAP_AMBIENT_IS_SET,
-)
-from chroot_distro.syscalls._libc import libc_prctl
 
-log = logging.getLogger(__name__)
-
-# Runtime CD_* environment variables that influence behaviour *after* the
-# tool re-executes as root. They must be forwarded explicitly across the
-# privilege-elevation boundary because many sudoers policies strip the
-# environment and ignore `sudo -E` ("preserving the entire environment is
-# not supported, '-E' is ignored").
 _FORWARDED_ENV_VARS = (
     "CD_USE_NS",
     "CD_USE_ISOLATION",
     "CD_DOWNLOAD_WORKERS",
     "CD_DOWNLOAD_MAX_RETRIES",
     "CD_DOWNLOAD_RATE_LIMIT",
+    "CD_BUILD_CACHE_MAX",
+    "CD_USER",
+    "CD_WORKDIR",
+    "CD_ENTRYPOINT",
     "CD_FORCE_NO_COLORS",
+    "CD_NO_BINFMT",
     "CD_NO_CAP_DROP",
     "CD_NO_NEW_PRIVS",
     "CD_NO_SECCOMP",
@@ -110,15 +90,13 @@ _FORWARDED_DISPLAY_VARS = (
 
 
 def is_root() -> bool:
-    """Check if the current process is running with root privileges (UID 0)."""
-    return os.getuid() == 0
+    """Return whether the process has effective UID 0."""
+    return os.geteuid() == 0
 
 
 def is_root_available() -> bool:
     """Check if the current process is root or can obtain root privileges."""
     if is_root():
-        return True
-    if has_required_capabilities():
         return True
     if IS_TERMUX:
         su = _find_termux_su()
@@ -130,14 +108,34 @@ def is_root_available() -> bool:
     return _find_escalation_tool() is not None
 
 
-def _forwarded_env_assignments() -> list[str]:
-    """Return ``VAR=value`` strings for the forwarded vars present in the env."""
-    assignments: list[str] = []
-    for name in (*_FORWARDED_ENV_VARS, *_FORWARDED_DISPLAY_VARS, *ANDROID_HOST_ENV_VARS):
-        value = os.environ.get(name)
-        if value is not None:
-            assignments.append(f"{name}={value}")
-    return assignments
+def _module_entry_point() -> ModuleSpec | None:
+    spec = getattr(sys.modules["__main__"], "__spec__", None)
+    return spec if spec is not None and spec.name == "chroot_distro.__main__" else None
+
+
+def _forwarded_env(*, termux: bool = False) -> dict[str, str]:
+    names: tuple[str, ...] = (*_FORWARDED_ENV_VARS, *_FORWARDED_DISPLAY_VARS, *ANDROID_HOST_ENV_VARS)
+    if termux:
+        names += ("TERMUX_APP__APP_VERSION_NAME", "TERMUX_VERSION")
+    values = {name: os.environ[name] for name in names if name in os.environ}
+    if termux:
+        values.update(
+            TERMUX_APP__PACKAGE_NAME=TERMUX_APP_PACKAGE,
+            TERMUX__HOME=TERMUX_HOME,
+            TERMUX__PREFIX=TERMUX_PREFIX,
+        )
+    else:
+        for name in ("XDG_DATA_HOME", "XDG_CACHE_HOME"):
+            if value := os.environ.get(name):
+                values[name] = value if os.path.isabs(value) else os.path.join(os.getcwd(), value)
+
+    spec = _module_entry_point()
+    if spec is not None and spec.origin and not sys.flags.ignore_environment:
+        parent = os.path.dirname(os.path.dirname(os.path.abspath(spec.origin)))
+        pythonpath = os.environ.get("PYTHONPATH", "").split(os.pathsep)
+        if parent == os.getcwd() or any(os.path.abspath(entry) == parent for entry in pythonpath):
+            values["PYTHONPATH"] = parent
+    return values
 
 
 def _write_secret_file() -> str | None:
@@ -186,6 +184,9 @@ def _load_secret_file() -> None:
 def get_reexec_argv() -> list[str]:
     """Build the argument list for re-executing the current process."""
     args = list(sys.argv)
+    if _module_entry_point() is not None:
+        app_start = len(sys.orig_argv) - len(args) + 1
+        return [sys.executable, *sys.orig_argv[1:app_start], *args[1:]]
 
     executable = args[0]
     if not os.path.isabs(executable):
@@ -203,9 +204,9 @@ def get_reexec_argv() -> list[str]:
 
 
 def _find_escalation_tool() -> list[str] | None:
-    """Find the best escalation tool depending on the environment."""
+    """Find the first available Linux elevation tool."""
     if shutil.which("sudo"):
-        return ["sudo"] if IS_TERMUX else ["sudo", "-E"]
+        return ["sudo", "-E", "-H", "-u", "root", "--"]
     if shutil.which("doas"):
         return ["doas", "--"]
     if shutil.which("pkexec"):
@@ -214,52 +215,6 @@ def _find_escalation_tool() -> list[str] | None:
         return ["su", "-c"]
 
     return None
-
-
-REQUIRED_CAPS: tuple[int, ...] = (
-    CAP_SYS_CHROOT,  # chroot(2)
-    CAP_SYS_ADMIN,  # mount(2), umount2(2), unshare(2), setns(2)
-    CAP_SETUID,  # setuid(2), switch to container user
-    CAP_SETGID,  # setgid(2), setgroups(2)
-    CAP_MKNOD,  # mknod(2), create /dev nodes
-    CAP_DAC_OVERRIDE,  # file access inside rootfs
-)
-
-
-def _check_proc_cap(cap: int) -> bool:
-    """Fall back to reading /proc/self/status for the effective capability set."""
-    try:
-        with open("/proc/self/status") as fh:
-            for line in fh:
-                if line.startswith("CapEff:"):
-                    cap_hex = int(line.split(":")[1].strip(), 16)
-                    return bool(cap_hex & (1 << cap))
-    except (OSError, ValueError, IndexError) as exc:
-        log.warning("Failed to read capabilities from /proc/self/status: %s", exc)
-    return False
-
-
-def has_capability(cap: int) -> bool:
-    """Check if the current process has a specific Linux capability.
-
-    Tries ``prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, cap)`` first,
-    falls back to parsing ``/proc/self/status`` CapEff.
-    """
-    result = libc_prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, cap)
-    if result >= 0:
-        return bool(result)
-    # prctl may return -1 if ambient caps are not supported; fall back.
-    return _check_proc_cap(cap)
-
-
-def has_required_capabilities() -> bool:
-    """Return True if all required capabilities are available.
-
-    Root (UID 0) is assumed to have all capabilities.
-    """
-    if os.getuid() == 0:
-        return True
-    return all(has_capability(cap) for cap in REQUIRED_CAPS)
 
 
 # Known su binary locations on rooted Android (Magisk, KernelSU, APatch,
@@ -306,7 +261,7 @@ def _su_help_text(su: str) -> str:
 
 
 def _termux_root_env_exports(secret_file: str | None = None) -> str:
-    """Shell prelude replicating what termux-sudo sets up for the root side.
+    """Shell prelude that sets up Termux paths for the root side.
 
     Plain Magisk/KernelSU ``su -c`` drops into a raw Android environment
     (toybox PATH, mksh, no writable HOME). Four fixes make Termux binaries
@@ -343,10 +298,7 @@ def _termux_root_env_exports(secret_file: str | None = None) -> str:
         if os.path.exists(termux_exec):
             exports["LD_PRELOAD"] = termux_exec
             break
-    for name in (*_FORWARDED_ENV_VARS, *_FORWARDED_DISPLAY_VARS, *ANDROID_HOST_ENV_VARS):
-        value = os.environ.get(name)
-        if value is not None:
-            exports[name] = value
+    exports.update(_forwarded_env(termux=True))
     if secret_file:
         exports["CD_SECRET_FILE"] = secret_file
     return "; ".join(f"export {key}={shlex.quote(value)}" for key, value in exports.items())
@@ -429,25 +381,11 @@ def _elevate_termux() -> None:
 def elevate_or_die() -> None:
     """Attempt to re-execute the current process with root privileges.
 
-    The check order is:
-
-    1. Already root → return immediately.
-    2. Required file capabilities are present → return (no elevation).
-    3. Termux → exec Android's ``su`` directly with a Termux-aware
-       environment (no external sudo/tsu wrapper required).
-    4. Linux → rerun under sudo, doas, pkexec or su.
-
     Raises RootRequiredError when elevation loops or no mechanism exists.
     """
-    # Hydrate secrets that the pre-elevation process wrote to a tempfile to
-    # avoid embedding them in argv (visible in /proc/*/cmdline).
     _load_secret_file()
 
     if is_root():
-        return
-
-    if has_required_capabilities():
-        log.debug("Running with file capabilities, elevation not required")
         return
 
     if os.environ.get("_CHROOT_DISTRO_ELEVATING") == "1":
@@ -468,28 +406,16 @@ def elevate_or_die() -> None:
 
     reexec_argv = get_reexec_argv()
 
-    # Runtime CD_* vars set by the invoking user must cross the elevation
-    # boundary explicitly: `sudo -E` is frequently ignored by sudoers policy,
-    # which would silently drop e.g. CD_USE_NS and skip namespace isolation.
-    # The loop sentinel is forwarded the same way so it survives a stripped
-    # environment and still prevents an elevation loop.
-    env_assignments = ["_CHROOT_DISTRO_ELEVATING=1", *_forwarded_env_assignments()]
+    env_assignments = ["_CHROOT_DISTRO_ELEVATING=1"]
+    env_assignments.extend(f"{name}={value}" for name, value in _forwarded_env().items())
 
-    # Secrets and guest env entries travel via a 0600 tempfile, not argv, to
-    # stay out of /proc/*/cmdline. The root-side elevate_or_die() call reads
-    # and unlinks the file before is_root() returns.
     secret_path = _write_secret_file()
     if secret_path:
         env_assignments.append(f"CD_SECRET_FILE={secret_path}")
 
     tool_name = tool_cmd[0]
 
-    # Prefix the re-executed program with `env VAR=value ...` so the
-    # forwarded variables are set by the root-side `env` binary. This is
-    # independent of the elevation tool's own environment policy (sudoers
-    # env_keep / -E, doas keepenv, pkexec sanitisation), which can otherwise
-    # silently drop CD_USE_NS and skip namespace isolation.
-    env_prefix = ["env", *env_assignments] if env_assignments else []
+    env_prefix = ["env", *env_assignments]
 
     if tool_cmd[-1] == "-c":
         # su -c "<command string>": the whole invocation is a single string.

@@ -10,7 +10,7 @@ uses `not`, which also catches the empty list an `nargs="*"` positional produces
 For `login` and `run`, the sub-parser hands the guest arguments straight to the
 handler and checks only the host arguments.
 
-Root policy is decided here and nowhere else. `help` and `search` never elevate.
+`help` and `search` never elevate.
 On Termux `list` and `ps` read only /proc and container metadata so they stay
 unprivileged.
 Everything else elevates, `info` included: its kernel answers come from probes that
@@ -83,17 +83,11 @@ def _sigquit_to_keyboard_interrupt(_signum: int, _frame: Any) -> None:
 
 
 def _ensure_root_user() -> None:
-    """Ensure that we are running as root, elevating if necessary/possible.
+    """Elevate when needed and keep the legacy credential reader out of the root path."""
+    from chroot_distro.elevate import elevate_or_die, is_root
 
-    Unlike proot-distro (which is rootless), chroot-distro uses the host's
-    native chroot and mount mechanisms, requiring root privileges.
-    """
-    if os.getuid() == 0:
-        return
-
-    from chroot_distro.elevate import elevate_or_die
-
-    elevate_or_die()
+    if not is_root():
+        elevate_or_die()
 
 
 def _dispatch_help(raw_args: list[str]) -> bool:

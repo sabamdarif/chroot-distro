@@ -240,9 +240,6 @@ PR_SET_NO_NEW_PRIVS: int = 38
 PR_CAP_AMBIENT: int = 47
 """Ambient capability operations."""
 
-PR_CAP_AMBIENT_IS_SET: int = 1
-"""Check if an ambient capability is set."""
-
 PR_CAP_AMBIENT_CLEAR_ALL: int = 4
 """Clear the whole ambient capability set."""
 

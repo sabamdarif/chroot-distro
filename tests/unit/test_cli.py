@@ -9,12 +9,16 @@ from chroot_distro.exceptions import RootRequiredError
 
 def test_ensure_root_user():
     # As non-root, it should call elevate_or_die
-    with patch("os.getuid", return_value=1000), patch("chroot_distro.elevate.elevate_or_die") as mock_elevate:
+    with patch("os.geteuid", return_value=1000), patch("chroot_distro.elevate.elevate_or_die") as mock_elevate:
         _ensure_root_user()
         mock_elevate.assert_called_once()
 
     # As root, it should pass without raising and not call elevate_or_die
-    with patch("os.getuid", return_value=0), patch("chroot_distro.elevate.elevate_or_die") as mock_elevate:
+    with (
+        patch("os.getuid", return_value=1000),
+        patch("os.geteuid", return_value=0),
+        patch("chroot_distro.elevate.elevate_or_die") as mock_elevate,
+    ):
         _ensure_root_user()
         mock_elevate.assert_not_called()
 
@@ -101,7 +105,7 @@ def test_main_list():
     mock_list = MagicMock()
     with (
         patch("sys.argv", ["chroot-distro", "list"]),
-        patch("os.getuid", return_value=0),
+        patch("os.geteuid", return_value=0),
         patch.dict("chroot_distro.cli._COMMAND_HANDLERS", {"list": mock_list}),
     ):
         main()
@@ -113,7 +117,7 @@ def test_main_login_requires_root():
     # Mock elevate_or_die to raise RootRequiredError to simulate failed/disabled elevation
     with (
         patch("sys.argv", ["chroot-distro", "login", "alpine"]),
-        patch("os.getuid", return_value=1000),
+        patch("os.geteuid", return_value=1000),
         patch("chroot_distro.elevate.elevate_or_die", side_effect=RootRequiredError("mock error")),
     ):
         with pytest.raises(SystemExit) as exc_info:
@@ -127,7 +131,7 @@ def test_main_termux_list_does_not_require_root():
     mock_list = MagicMock()
     with (
         patch("sys.argv", ["chroot-distro", "list"]),
-        patch("os.getuid", return_value=1000),
+        patch("os.geteuid", return_value=1000),
         patch("chroot_distro.elevate.elevate_or_die") as mock_elevate,
         patch.dict("chroot_distro.cli._COMMAND_HANDLERS", {"list": mock_list}),
     ):
@@ -142,7 +146,7 @@ def test_main_linux_list_requires_root():
     mock_list = MagicMock()
     with (
         patch("sys.argv", ["chroot-distro", "list"]),
-        patch("os.getuid", return_value=1000),
+        patch("os.geteuid", return_value=1000),
         patch("chroot_distro.elevate.elevate_or_die", side_effect=RootRequiredError("mock error")) as mock_elevate,
         patch.dict("chroot_distro.cli._COMMAND_HANDLERS", {"list": mock_list}),
     ):
@@ -175,7 +179,7 @@ def test_main_termux_clears_preload():
     mock_list = MagicMock()
     with (
         patch("sys.argv", ["chroot-distro", "list"]),
-        patch("os.getuid", return_value=1000),
+        patch("os.geteuid", return_value=1000),
         patch.dict("os.environ", {"LD_PRELOAD": "fake-preload", "LD_LIBRARY_PATH": "fake-libpath"}),
         patch.dict("chroot_distro.cli._COMMAND_HANDLERS", {"list": mock_list}),
     ):
@@ -194,7 +198,7 @@ def test_main_termux_info_always_elevates():
     mock_info = MagicMock()
     with (
         patch("sys.argv", ["chroot-distro", "info"]),
-        patch("os.getuid", return_value=1000),
+        patch("os.geteuid", return_value=1000),
         patch("chroot_distro.elevate.elevate_or_die", side_effect=RootRequiredError("mock error")) as mock_elevate,
         patch.dict("chroot_distro.cli._COMMAND_HANDLERS", {"info": mock_info}),
     ):
@@ -211,7 +215,7 @@ def test_main_info_fails_when_root_is_unobtainable():
     mock_info = MagicMock()
     with (
         patch("sys.argv", ["chroot-distro", "info"]),
-        patch("os.getuid", return_value=1000),
+        patch("os.geteuid", return_value=1000),
         patch("chroot_distro.elevate.elevate_or_die", side_effect=RootRequiredError("no root here")),
         patch.dict("chroot_distro.cli._COMMAND_HANDLERS", {"info": mock_info}),
     ):
@@ -227,7 +231,7 @@ def test_main_linux_info_always_elevates():
     # On Linux, info must elevate regardless of is_root_available
     with (
         patch("sys.argv", ["chroot-distro", "info"]),
-        patch("os.getuid", return_value=1000),
+        patch("os.geteuid", return_value=1000),
         patch("chroot_distro.elevate.elevate_or_die", side_effect=RootRequiredError("mock error")) as mock_elevate,
         patch.dict("chroot_distro.cli._COMMAND_HANDLERS", {"info": mock_info}),
     ):
@@ -253,7 +257,7 @@ def _assert_json_error(capsys, command, error):
 def test_main_json_error_writes_a_document(capsys):
     with (
         patch("sys.argv", ["chroot-distro", "diff", "ghost", "--json"]),
-        patch("os.getuid", return_value=0),
+        patch("os.geteuid", return_value=0),
         patch.dict("chroot_distro.cli._COMMAND_HANDLERS", {"diff": _finish}),
         pytest.raises(SystemExit) as exc_info,
     ):
@@ -330,7 +334,7 @@ def test_main_json_handler_import_error(capsys):
     missing_module = "chroot_distro.commands._missing_for_test"
     with (
         patch("sys.argv", ["chroot-distro", "ls", "--json"]),
-        patch("os.getuid", return_value=0),
+        patch("os.geteuid", return_value=0),
         patch.dict("chroot_distro.cli._COMMAND_HANDLERS", {"list": f"{missing_module}:command_list"}),
         pytest.raises(SystemExit) as exc_info,
     ):
@@ -358,7 +362,7 @@ def test_main_json_help(capsys):
 def test_main_without_json_writes_no_document(capsys):
     with (
         patch("sys.argv", ["chroot-distro", "diff", "ghost"]),
-        patch("os.getuid", return_value=0),
+        patch("os.geteuid", return_value=0),
         patch.dict("chroot_distro.cli._COMMAND_HANDLERS", {"diff": _finish}),
         pytest.raises(SystemExit),
     ):

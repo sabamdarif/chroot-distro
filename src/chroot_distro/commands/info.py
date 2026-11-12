@@ -453,24 +453,19 @@ def _gather_capabilities(images: list["_ImageInfo"], host_arch: str) -> list[_Ca
     """Collect host capability checks relevant to launching containers."""
     caps: list[_Capability] = []
 
-    from chroot_distro.elevate import is_root_available
+    from chroot_distro.elevate import is_root, is_root_available
 
-    is_root = os.getuid() == 0
-    if is_root:
+    if is_root():
         caps.append(_Capability("Privileges", "running as root", "ok"))
-    elif is_root_available():
-        tool = _detect_escalation_tool()
-        if IS_TERMUX:
+    elif IS_TERMUX:
+        if is_root_available():
             caps.append(_Capability("Privileges", "not root, root is available (can elevate via su)", "info"))
-        elif tool:
-            caps.append(_Capability("Privileges", f"not root, can elevate via {tool}", "info"))
         else:
-            caps.append(_Capability("Privileges", "not root, has the required file capabilities", "info"))
-    else:
-        if IS_TERMUX:
             caps.append(_Capability("Privileges", "not root, root is not available (su not found)", "bad"))
-        else:
-            caps.append(_Capability("Privileges", "not root, no sudo/doas/pkexec/su found", "bad"))
+    elif tool := _detect_escalation_tool():
+        caps.append(_Capability("Privileges", f"not root, can elevate via {tool}", "info"))
+    else:
+        caps.append(_Capability("Privileges", "not root, no sudo/doas/pkexec/su found", "bad"))
 
     if IS_TERMUX:
         value, level = _data_mount_flags()
