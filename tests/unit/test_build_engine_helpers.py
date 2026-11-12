@@ -358,3 +358,17 @@ def test_undecodable_passwd_does_not_raise(rootfs):
         fh.write(b"root:x:0:0::/root:/bin/sh\n\xff\xfe:x:1:1::/:/bin/sh\n")
 
     assert users.resolve_id(rootfs, "root", is_group=False, default=7) == 0
+
+
+# ── parsing.parse_chmod ───────────────────────────────────────────────────────
+def test_parse_chmod_accepts_an_octal_mode():
+    instr = {"name": "COPY", "lineno": 3}
+    assert parsing.parse_chmod("755", instr) == 0o755
+    assert parsing.parse_chmod("07777", instr) == 0o7777
+
+
+@pytest.mark.parametrize("value", ["u+x", "0x755", "", "17777", "77777777777777", "755x"])
+def test_parse_chmod_refuses_anything_else(value):
+    instr = {"name": "COPY", "lineno": 3}
+    with pytest.raises(BuildError, match="--chmod"):
+        parsing.parse_chmod(value, instr)

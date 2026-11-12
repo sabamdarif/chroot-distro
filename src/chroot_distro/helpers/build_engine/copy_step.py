@@ -72,6 +72,7 @@ from chroot_distro.helpers.build_engine.parsing import (
     is_tar_header,
     looks_like_git,
     looks_like_url,
+    parse_chmod,
     refuse_git_message,
     split_operands,
 )
@@ -440,7 +441,9 @@ def _do_copy_or_add(
         dest = os.path.normpath(os.path.join(stage.workdir or "/", dest))
 
     uid, gid = resolve_chown(stage.rootfs_dir, chown, root_fd=stage.rootfs_fd) if chown else (0, 0)
-    mode_override = int(chmod, 8) if chmod and re.match(r"^[0-7]+$", chmod) else None
+    # Validated before anything is read or written, since it is applied to
+    # every entry and reaches os.fchmod() as it is.
+    mode_override = parse_chmod(chmod, instr) if chmod is not None else None
 
     file_map: dict[str, typing.Any] = {}
     spool = _Spool(*_open_scratch_dir(engine, "add-spool")) if allow_url or auto_extract or heredocs else None

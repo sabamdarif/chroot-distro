@@ -65,6 +65,30 @@ def split_operands(value: typing.Any, instr: dict[str, typing.Any]) -> list[str]
         raise BuildError(f"Cannot parse {instr['name']} at line {instr['lineno']}: {exc}.") from exc
 
 
+# The bits a mode can carry: permissions plus setuid/setgid/sticky. It is what
+# chmod(2) keeps of its argument, and Docker's own bound for --chmod.
+MAX_FILE_MODE = 0o7777
+
+
+def parse_chmod(value: typing.Any, instr: dict[str, typing.Any]) -> int:
+    """The mode a COPY/ADD `--chmod=` names, or raise BuildError.
+
+    Docker's rule: an octal string between 0 and 07777. Anything else used to
+    be quietly no override at all, and a long string of octal digits reached
+    os.fchmod() as an int C cannot hold.
+    """
+    text = str(value)
+    if text and all(ch in "01234567" for ch in text):
+        mode = int(text, 8)
+        if mode <= MAX_FILE_MODE:
+            return mode
+    raise BuildError(
+        f"Invalid {instr['name']} --chmod value '{text}' at line "
+        f"{instr['lineno']}: it should be an octal string between 0 and "
+        f"07777."
+    )
+
+
 def parse_kv_list(value: typing.Any) -> list[tuple[str, str]]:
     """Parse ENV/LABEL key=value pairs (with shell-like quoting)."""
     s = str(value).strip()
