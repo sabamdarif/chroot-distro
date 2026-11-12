@@ -110,6 +110,23 @@ chroot-distro install myuser/private-image:tag
 You can also just pass the personal access token as well,
 so `export CD_DOCKER_AUTH=myuser:ghp_xxxxxxxx` works the same way.
 
+**Pull rate limits.** Registries limit how often you may pull. Docker Hub
+counts anonymous pulls per network address, and mobile or shared networks
+give one address to many people. When a registry answers "too many
+requests" (HTTP 429), the install stops and says whose limit it is and when
+to try again, if the registry says. Pulling with an account
+(`CD_DOCKER_AUTH`) gets a limit of its own.
+
+Some registries only pass requests on to Docker Hub, for example
+`docker.n8n.io`. Everyone pulling through them anonymously shares one
+Docker Hub limit, so it is often used up. The error message names the
+image's Docker Hub name; install from there instead:
+
+```sh
+# Instead of docker.n8n.io/n8nio/n8n:latest
+chroot-distro install n8nio/n8n:latest
+```
+
 A container for another CPU needs QEMU's user-mode emulator on the host: install
 `qemu-user-static` (Linux) or `qemu-user-ARCH` (Termux), `login`
 then registers it with the kernel's `binfmt_misc` the first time you enter the

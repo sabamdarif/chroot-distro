@@ -70,6 +70,7 @@ from chroot_distro.helpers.docker.transport import (
     get_auth_token,
     insecure_for,
     opener,
+    rate_limited_msg,
     registry_base_url,
 )
 from chroot_distro.helpers.download import (
@@ -171,6 +172,8 @@ def _download_layers_parallel(
         except urllib.error.HTTPError as dl_err:
             if dl_err.code in (401, 403):
                 raise RuntimeError(auth_denied_msg(image_ref, dl_err.code)) from dl_err
+            if dl_err.code == 429:
+                raise RuntimeError(rate_limited_msg(image_ref, parse_image_ref(image_ref), dl_err)) from dl_err
             raise
         except (ssl.SSLError, ConnectionError, OSError) as dl_err:
             raise RuntimeError(f"Network error downloading layer {i + 1}/{n_layers} ({short_id}): {dl_err}") from dl_err
@@ -354,7 +357,8 @@ def pull_image(image_ref: str, rootfs_fd: int, platform: Platform, insecure: boo
     base = None
 
     manifest, repo, image_config = load_manifest_cache(image_ref, platform)
-    registry = parse_image_ref(image_ref)[0]
+    ref = parse_image_ref(image_ref)
+    registry = ref[0]
     # Docker Hub is verified HTTPS whatever --allow-insecure says; decided
     # here, once, so no request below can use the insecure opener for it.
     insecure = insecure_for(registry, insecure)
@@ -374,6 +378,8 @@ def pull_image(image_ref: str, rootfs_fd: int, platform: Platform, insecure: boo
                 if isinstance(net_err, urllib.error.HTTPError):
                     if net_err.code in (401, 403):
                         raise RuntimeError(auth_denied_msg(image_ref, net_err.code)) from net_err
+                    if net_err.code == 429:
+                        raise RuntimeError(rate_limited_msg(image_ref, ref, net_err)) from net_err
                     if net_err.code == 404:
                         raise RuntimeError(
                             f"Image not found: '{image_ref}' does not exist on the registry."
@@ -389,6 +395,8 @@ def pull_image(image_ref: str, rootfs_fd: int, platform: Platform, insecure: boo
             if isinstance(net_err, urllib.error.HTTPError):
                 if net_err.code in (401, 403):
                     raise RuntimeError(auth_denied_msg(image_ref, net_err.code)) from net_err
+                if net_err.code == 429:
+                    raise RuntimeError(rate_limited_msg(image_ref, ref, net_err)) from net_err
                 if net_err.code == 404:
                     raise RuntimeError(f"Image not found: '{image_ref}' does not exist on the registry.") from net_err
             log_error(f"No cached manifest found for '{image_ref}' ({platform}).")
