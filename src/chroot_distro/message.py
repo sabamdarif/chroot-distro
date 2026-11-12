@@ -2,9 +2,8 @@
 # Copyright (C) 2025-2026 Md Arif
 """Every user-facing line this program writes, and the rules they all follow.
 
-Two of those rules are why nothing here should be replaced with a bare `print`.
-Everything goes to stderr, so stdout stays the command's own output and remains
-parseable when a caller pipes it. And every write is gated on
+Human diagnostics go to stderr, so stdout stays the command's own output and
+remains parseable when a caller pipes it. Diagnostic writes are gated on
 `tty_safe_for_writes`, which answers False while another process holds stderr's
 TTY for interactive input: `termios.tcgetattr` with ECHO or ICANON cleared is a
 password prompt or a full-screen UI, and a progress bar drawn over one loses the
@@ -26,12 +25,15 @@ first, since `progress.py` leaves the cursor mid-line.
 `quote_path` is the escaping boundary for text this program did not choose, and
 its own docstring says what it defends against. Pass the untrusted name through
 it, never the assembled message: the colour codes above are control characters by
-definition.
+definition. `stdout_output` marks pipe errors at stdout so dispatch can distinguish
+them from failures elsewhere in a command.
 """
 
 import json
 import os
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any
 
 termios: Any
@@ -148,6 +150,19 @@ Adding a key is not a bump: a consumer ignores keys it does not know.
 """
 
 
+class StdoutBrokenPipeError(BrokenPipeError):
+    """A write or flush failed because stdout's pipe closed."""
+
+
+@contextmanager
+def stdout_output() -> Iterator[None]:
+    """Mark a broken pipe from a stdout write or flush."""
+    try:
+        yield
+    except BrokenPipeError as exc:
+        raise StdoutBrokenPipeError(*exc.args) from exc
+
+
 def emit_json(command: str, payload: dict) -> None:
     """Write one `--json` document to stdout.
 
@@ -155,8 +170,10 @@ def emit_json(command: str, payload: dict) -> None:
     carries `schema` and `command`, including the error ones.
     """
     document = {"schema": JSON_SCHEMA_VERSION, "command": command, **payload}
-    sys.stdout.write(json.dumps(document, sort_keys=True) + "\n")
-    sys.stdout.flush()
+    line = json.dumps(document, sort_keys=True) + "\n"
+    with stdout_output():
+        sys.stdout.write(line)
+        sys.stdout.flush()
 
 
 def emit_json_error(command: str, text: str) -> None:

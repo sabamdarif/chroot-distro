@@ -31,7 +31,7 @@ from dataclasses import dataclass
 
 from chroot_distro.constants import CONTAINERS_DIR, PROGRAM_NAME
 from chroot_distro.locking import container_busy_status
-from chroot_distro.message import C, emit_json, msg, warn
+from chroot_distro.message import C, emit_json, msg, stdout_output, warn
 from chroot_distro.paths import container_manifest, container_rootfs, is_install_incomplete
 from chroot_distro.progress import fmt_size, loading_line
 
@@ -265,8 +265,9 @@ def command_list(args) -> None:
     entries, incomplete = _iter_container_names()
 
     if quiet:
-        for name in entries:
-            print(name)
+        with stdout_output():
+            for name in entries:
+                print(name)
         return
 
     if json_mode:

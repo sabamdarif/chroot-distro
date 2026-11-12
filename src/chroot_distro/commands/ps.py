@@ -26,7 +26,7 @@ import time
 from chroot_distro.constants import PROGRAM_NAME
 from chroot_distro.helpers.session import has_tracked_ancestor
 from chroot_distro.helpers.session_registry import active_sessions, containers_with_active_pids
-from chroot_distro.message import C, emit_json, msg
+from chroot_distro.message import C, emit_json, msg, stdout_output
 
 # Fixed columns (everything except the trailing, space-filling COMMAND).
 _HEADERS = ("PID", "CONTAINER", "TYPE", "USER", "UPTIME", "COMMAND")
@@ -81,10 +81,11 @@ def command_ps(args) -> None:
             )
 
     if quiet:
-        for sess in sessions:
-            print(sess.get("pid", ""))
-        for pid_str in all_untracked_pids:
-            print(pid_str)
+        with stdout_output():
+            for sess in sessions:
+                print(sess.get("pid", ""))
+            for pid_str in all_untracked_pids:
+                print(pid_str)
         return
 
     if getattr(args, "json", False):

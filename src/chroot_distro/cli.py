@@ -28,7 +28,8 @@ shell sets a loader shim that must not follow this process into a chroot.
 After parsing, argument validation and dispatch report failures on stderr and
 also emit an error document when the command accepted `--json`. Dispatch keeps
 the messages of expected failures and unsupported operations. Other dispatch
-exceptions get an "unexpected error" prefix.
+exceptions get an "unexpected error" prefix. The entry point flushes buffered
+stdout and handles pipe closure after command cleanup.
 """
 
 import importlib
@@ -36,11 +37,20 @@ import os
 import signal
 import sys
 from collections.abc import Callable
+from contextlib import suppress
 from typing import Any
 
 from chroot_distro.constants import IS_TERMUX, PROGRAM_NAME
 from chroot_distro.exceptions import ChrootDistroError
-from chroot_distro.message import crit_error, emit_json_error, msg, set_quiet
+from chroot_distro.message import (
+    StdoutBrokenPipeError,
+    crit_error,
+    emit_json_error,
+    escape_controls,
+    msg,
+    set_quiet,
+    stdout_output,
+)
 from chroot_distro.parser import ALIAS_TO_CANONICAL, REQUIRED_ARGS, build_parser, strip_global_separator
 
 # "module:function" refs; imported on dispatch (tests patch in callables).
@@ -124,12 +134,32 @@ def _reject_unknown_command(raw_args: list[str]) -> None:
         sys.exit(1)
 
 
-def main() -> None:
-    """CLI entry point.
+def _flush_stdout() -> None:
+    if sys.stdout is not None:
+        with stdout_output():
+            sys.stdout.flush()
 
-    Validates the runtime environment, parses arguments, and dispatches
-    to the chosen command's handler.
-    """
+
+def main() -> None:
+    """Run the CLI and redirect a broken pipe before Python's shutdown flush."""
+    try:
+        try:
+            _run()
+        except SystemExit:
+            _flush_stdout()
+            raise
+        _flush_stdout()
+    except StdoutBrokenPipeError:
+        try:
+            with open(os.devnull, "wb") as sink:
+                os.dup2(sink.fileno(), sys.stdout.fileno())
+        except OSError:
+            os._exit(1)
+        raise SystemExit(1) from None
+
+
+def _run() -> None:
+    """Validate arguments, elevate when needed, and dispatch the command."""
     if IS_TERMUX:
         os.environ.pop("LD_PRELOAD", None)
         os.environ.pop("LD_LIBRARY_PATH", None)
@@ -139,7 +169,9 @@ def main() -> None:
     if len(sys.argv) >= 2 and sys.argv[1] in ("--version", "-V"):
         from chroot_distro.constants import PROGRAM_VERSION
 
-        print(f"{PROGRAM_NAME} {PROGRAM_VERSION}")
+        version_line = f"{PROGRAM_NAME} {PROGRAM_VERSION}"
+        with stdout_output():
+            print(version_line)
         sys.exit(0)
 
     if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help"):
@@ -184,7 +216,7 @@ def main() -> None:
         if json_mode:
             emit_json_error(canonical, text)
         msg()
-        crit_error(text)
+        crit_error(escape_controls(text))
 
     if unknown:
         from chroot_distro.commands.help import HELP_COMMANDS
@@ -231,12 +263,15 @@ def main() -> None:
         if handler is None:
             raise ChrootDistroError(f"unknown command {command!a}.")
         handler(args)
+    except StdoutBrokenPipeError:
+        raise
     except (ChrootDistroError, NotImplementedError) as exc:
         report_error(str(exc))
     except KeyboardInterrupt:
-        report_error("Aborted by user.")
-        msg()
-        sys.stdout.flush()
+        with suppress(StdoutBrokenPipeError):
+            report_error("Aborted by user.")
+            msg()
+            _flush_stdout()
         sys.stderr.flush()
         os._exit(1)
     except Exception as exc:

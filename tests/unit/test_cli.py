@@ -1,10 +1,14 @@
 import json
+import os
+import subprocess
+import sys
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from chroot_distro.cli import _ensure_root_user, main
-from chroot_distro.exceptions import RootRequiredError
+from chroot_distro.exceptions import ChrootDistroError, RootRequiredError
 
 
 def test_ensure_root_user():
@@ -253,6 +257,82 @@ def _assert_json_error(capsys, command, error):
     captured = capsys.readouterr()
     assert json.loads(captured.out) == {"command": command, "error": error, "schema": 1}
     assert error in captured.err
+
+
+_PIPE_TEST_COMMANDS = """
+import atexit
+import sys
+from chroot_distro import cli
+from chroot_distro.commands import list_cmd, ps
+
+def interrupt(_args):
+    atexit.register(lambda: print("shutdown hook ran", file=sys.stderr))
+    raise KeyboardInterrupt
+
+cli._ensure_root_user = lambda: None
+cli._COMMAND_HANDLERS["info"] = interrupt
+list_cmd._iter_container_names = lambda: (["demo"], [])
+ps.active_sessions = lambda: [{"pid": 42}]
+ps.containers_with_active_pids = dict
+cli.main()
+"""
+
+
+@pytest.mark.skipif(os.name != "posix", reason="Requires POSIX CLI signals and pipes")
+@pytest.mark.parametrize("unbuffered", [False, True])
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        pytest.param(("-m", "chroot_distro", "--version"), id="version"),
+        pytest.param(("-m", "chroot_distro", "diff", "--json"), id="validation"),
+        pytest.param(("-m", "chroot_distro", "ps", "--json", "--quiet"), id="parser"),
+        pytest.param(("-c", _PIPE_TEST_COMMANDS, "ps", "--json"), id="json-result"),
+        pytest.param(("-c", _PIPE_TEST_COMMANDS, "ps", "--quiet"), id="pids"),
+        pytest.param(("-c", _PIPE_TEST_COMMANDS, "list", "--quiet"), id="names"),
+        pytest.param(("-c", _PIPE_TEST_COMMANDS, "info", "--json"), id="interrupt"),
+    ],
+)
+def test_cli_closed_stdout_pipe(arguments, unbuffered):
+    env = {**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[2] / "src")}
+    env.pop("PYTHONUNBUFFERED", None)
+    command = [sys.executable]
+    if unbuffered:
+        command.append("-u")
+    read_fd, write_fd = os.pipe()
+    os.close(read_fd)
+    with os.fdopen(write_fd, "wb") as output:
+        result = subprocess.run(
+            [*command, *arguments], stdout=output, stderr=subprocess.PIPE, env=env, timeout=10
+        )
+
+    assert result.returncode == 1, result.stderr
+    assert result.stderr == b""
+
+
+@pytest.mark.parametrize(
+    ("error_type", "prefix"),
+    [
+        (ChrootDistroError, ""),
+        (NotImplementedError, ""),
+        (BrokenPipeError, "unexpected error: "),
+    ],
+)
+def test_dispatch_escapes_stderr_without_changing_json(error_type, prefix, capsys):
+    text = "peer\x1b[2J\x9b\u202e\nclosed"
+    handler = MagicMock(side_effect=error_type(text))
+    with (
+        patch("sys.argv", ["chroot-distro", "diff", "demo", "--json"]),
+        patch("chroot_distro.cli._ensure_root_user"),
+        patch.dict("chroot_distro.cli._COMMAND_HANDLERS", {"diff": handler}),
+        pytest.raises(SystemExit) as exc_info,
+    ):
+        main()
+
+    assert exc_info.value.code == 1
+    out, err = capsys.readouterr()
+    assert json.loads(out) == {"command": "diff", "error": prefix + text, "schema": 1}
+    assert prefix + r"peer\e[2J\x9b\u202e\nclosed" in err
+    assert not any(char in err for char in ("\x1b", "\x9b", "\u202e"))
 
 
 def test_main_json_error_writes_a_document(capsys):
