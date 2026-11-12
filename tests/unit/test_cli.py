@@ -344,9 +344,19 @@ def test_main_json_handler_import_error(capsys):
     _assert_json_error(capsys, "list", f"unexpected error: No module named '{missing_module}'")
 
 
-def test_main_json_help(capsys):
+@pytest.mark.parametrize(
+    ("arguments", "command"),
+    [
+        (["diff", "--json", "--help"], "diff"),
+        (["ls", "--json", "--verbose", "--help"], "list"),
+        (["ps", "--json", "--quiet", "-h"], "ps"),
+        (["find", "--limit", "--help"], "search"),
+        (["nf", "--usage"], "info"),
+    ],
+)
+def test_main_help_precedes_validation(arguments, command, capsys):
     with (
-        patch("sys.argv", ["chroot-distro", "diff", "--json", "--help"]),
+        patch("sys.argv", ["chroot-distro", *arguments]),
         patch("chroot_distro.cli._ensure_root_user") as ensure_root,
         pytest.raises(SystemExit) as exc_info,
     ):
@@ -356,7 +366,23 @@ def test_main_json_help(capsys):
     ensure_root.assert_not_called()
     captured = capsys.readouterr()
     assert captured.out == ""
-    assert "chroot-distro diff" in captured.err
+    assert f"chroot-distro {command}" in captured.err
+
+
+def test_main_keeps_help_tokens_in_option_values_and_guest_arguments(capsys):
+    handler = MagicMock()
+    with (
+        patch("sys.argv", ["chroot-distro", "run", "box", "--entrypoint=--help", "--", "--help"]),
+        patch("chroot_distro.cli._ensure_root_user"),
+        patch.dict("chroot_distro.cli._COMMAND_HANDLERS", {"run": handler}),
+    ):
+        main()
+
+    handler.assert_called_once()
+    args = handler.call_args.args[0]
+    assert args.entrypoint == "--help"
+    assert args.run_args == ["--help"]
+    assert capsys.readouterr() == ("", "")
 
 
 def test_main_without_json_writes_no_document(capsys):

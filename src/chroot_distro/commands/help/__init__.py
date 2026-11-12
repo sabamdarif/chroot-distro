@@ -64,7 +64,8 @@ def command_help(args=None) -> None:
 
     section("GETTING HELP")
     paragraph(
-        f"Run '{PROGRAM_NAME} help <command>' or '{PROGRAM_NAME} <command> --help' for details.",
+        f"Run '{PROGRAM_NAME} help <command>' or '{PROGRAM_NAME} <command> --help' for details. "
+        "Use -V or --version to print the version.",
         width,
     )
 

@@ -2,10 +2,9 @@
 # Copyright (C) 2025-2026 Md Arif
 """The text of every help page, written by hand because argparse's is never shown.
 
-`cli.main` intercepts `--help` and an unknown command before argparse gets to
-print anything, so the sub-parsers in `parser.py` carry no user-visible help and
-this file is the only description of a flag a user will read. Adding a flag there
-without adding it here ships it undocumented.
+`cli.main` intercepts exact help flags before parsing host arguments.
+The sub-parsers in `parser.py` carry no user-visible help. Update these pages
+when adding or changing a command option.
 
 `HELP_PAGES` is keyed by canonical command name, the same keys
 `parser.ALIAS_TO_CANONICAL` resolves to, and every value is data for
@@ -43,7 +42,7 @@ _ISOLATED_OPT = (
     "(--shared-home, --shared-tmp, --shared-display, --bind) are ignored and a "
     "warning is printed, since they would expose a host path. "
     "Use CD_USE_NS=1 instead if you want namespace isolation but keep the "
-    "default mounts. Not a full container runtime (no network namespace).",
+    "default mounts. --isolate is an alias. There is no network namespace.",
 )
 _MINIMAL_OPT = (
     "--minimal",
@@ -163,9 +162,7 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
             ("--no-cache", "Disable build-step caching. Each instruction is executed fresh."),
             (
                 "--allow-insecure",
-                "Allow plain-HTTP registries for --cache-from/--cache-to "
-                "type=registry. TLS is enforced by default; this is for a "
-                "local registry you trust.",
+                "Allow untrusted certificates and plain HTTP when importing or exporting registry build cache.",
             ),
             (
                 "--cache-from [type=local,src=DIR | type=registry,ref=REF]",
@@ -293,6 +290,11 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
                 "riscv64, x86_64) or Docker platform strings "
                 "(linux/arm64, linux/amd64, ...). Default: host "
                 "architecture.",
+            ),
+            (
+                "--allow-insecure",
+                "Allow untrusted certificates and plain HTTP for a registry you trust. "
+                "Docker Hub always uses verified HTTPS.",
             ),
             ("-q, --quiet", "Suppress non-error output."),
         ],
@@ -484,7 +486,7 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
                 "Set a custom name for the container. Must start with "
                 "alphanumeric character and then may contain only latin "
                 "letters, numbers and special symbols dot, minus, underscore. "
-                "Default equals to image name without tag and registry prefix.",
+                "Default equals to image name without tag and registry prefix. --override-alias is an alias.",
             ),
             (
                 "-a, --architecture [ARCH]",
@@ -494,6 +496,11 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
                 "linux/386, linux/riscv64). A foreign architecture needs "
                 "QEMU's user-mode emulator installed on the host; login "
                 "registers it with binfmt_misc on first entry.",
+            ),
+            (
+                "--allow-insecure",
+                "Allow untrusted certificates or redirects from HTTPS to plain HTTP when downloading. "
+                "Docker Hub always uses verified HTTPS.",
             ),
             ("-q, --quiet", "Suppress non-error output."),
         ],
@@ -816,6 +823,10 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
             ),
             ("-w, --work-dir [PATH]", "Set the initial working directory."),
             ("-e, --env VAR=VALUE", "Set an environment variable. Can be specified multiple times."),
+            (
+                "--entrypoint EXECUTABLE",
+                "Replace the image Entrypoint and clear the image Cmd. Pass arguments for the executable after '--'.",
+            ),
             (
                 "-d, --detach",
                 "Run the command in the background and return immediately. "

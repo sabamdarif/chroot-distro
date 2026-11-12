@@ -80,7 +80,9 @@ chroot-distro remove ubuntu            # delete it
 
 ## Commands reference
 
-Every command accepts `-h` / `--help`. Run `chroot-distro -V` to print the version.
+Every command accepts `-h` and `--help` before the first standalone `--`.
+These flags show help before validating command arguments.
+Run `chroot-distro -V` or `chroot-distro --version` to print the version.
 
 ### install
 
@@ -154,6 +156,7 @@ chroot-distro login ubuntu -- uname -a
 | `-u`, `--user USER`                 | Log in as this user instead of root. Accepts a name, `name:group`, a numeric `uid`, or `uid:gid`.                                                                                                                                               |
 | `--isolated`                        | Maximum isolation: own mount, PID, UTS and IPC namespaces, and no host path shared except `/sys`. `--shared-*` and `--bind` are ignored. `--isolate` is an alias.                                                                               |
 | `--minimal`                         | Bare minimum mode: fresh `/dev`, `/proc`, `/sys` and `/dev/shm` and a stripped environment, nothing else. Cannot be combined with `--isolated`.                                                                                                 |
+| `--no-new-privs`                    | Prevent guest programs from gaining privileges through setuid binaries or file capabilities.                                                                                                                                                    |
 | `--shared-home`                     | Make your host home folder available inside the container.                                                                                                                                                                                      |
 | `--shared-tmp`                      | Share the host `/tmp` with the container. By default the container gets its own empty `/tmp`.                                                                                                                                                   |
 | `--shared-display`                  | Share the host screen (X11/Wayland), audio, and D-Bus, so GUI apps work. `--shared-x11` is an accepted alias.                                                                                                                                   |
@@ -424,6 +427,7 @@ Build an image from a Dockerfile, like `docker build` but without Docker. `PATH`
 | `--secret id=NAME[,src=PATH]`     | Give a secret to `RUN --mount=type=secret` steps. Without `src=`, the value comes from the environment variable `NAME`. Secrets never end up in the image.                             |
 | `--ssh ID[=SOCK]`                 | Give an SSH agent socket to `RUN --mount=type=ssh` steps. Default socket is `$SSH_AUTH_SOCK`.                                                                                          |
 | `--no-cache`                      | Rebuild every step from scratch instead of reusing cached steps.                                                                                                                       |
+| `--allow-insecure`                | Allow untrusted certificates and plain HTTP when importing or exporting registry build cache.                                                                                          |
 | `--cache-from type=local,src=DIR` | Reuse the cached steps a `--cache-to` saved in `DIR`. `type=registry,ref=REF` reads a registry instead. Can be given more than once.                                                   |
 | `--cache-to type=local,dest=DIR`  | Save this build's cached steps into `DIR`. `type=registry,ref=REF` pushes them to a registry. Can be given more than once.                                                             |
 | `--progress MODE`                 | Output style: `auto`, `plain`, `tty`, or `rawjson`.                                                                                                                                    |

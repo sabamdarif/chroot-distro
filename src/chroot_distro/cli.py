@@ -3,10 +3,10 @@
 """The entry point: validate, decide whether root is needed, then dispatch.
 
 `main()` does the argument work argparse cannot, because users are shown the
-hand-written pages in `commands/help/` and never argparse's own text. So `-h` is
-intercepted before parsing, an unknown first word is rejected with the help page
-rather than a usage line, and `REQUIRED_ARGS` positionals are checked here (the check
-uses `not`, which also catches the empty list an `nargs="*"` positional produces).
+hand-written pages in `commands/help/` and never argparse's own text. Exact
+`-h` and `--help` flags before the command's `--` take precedence over parsing.
+An unknown first word gets the front page, and `REQUIRED_ARGS` positionals are
+checked here (including empty lists from `nargs="*"`).
 For `login` and `run`, the sub-parser hands the guest arguments straight to the
 handler and checks only the host arguments.
 
@@ -91,9 +91,15 @@ def _ensure_root_user() -> None:
 
 
 def _dispatch_help(raw_args: list[str]) -> bool:
-    """Render per-command help when -h/--help/--usage is given."""
-    if len(raw_args) < 2 or raw_args[1] not in ("-h", "--help", "--usage"):
+    """Render command help before parsing host arguments."""
+    for index, arg in enumerate(raw_args[1:]):
+        if arg == "--":
+            return False
+        if arg in ("-h", "--help") or (index == 0 and arg == "--usage"):
+            break
+    else:
         return False
+
     from chroot_distro.commands.help import HELP_COMMANDS
 
     cmd = ALIAS_TO_CANONICAL.get(raw_args[0], raw_args[0])

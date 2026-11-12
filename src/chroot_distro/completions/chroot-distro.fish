@@ -23,14 +23,11 @@ function __chroot_distro_containers
     else
         set dir "$HOME/.local/share/chroot-distro/containers"
     end
-    if test -d "$dir"
-        for d in "$dir"/*/
-            set -l name (basename "$d")
-            if test -d "$dir/$name/rootfs"
-                echo $name
-            end
-        end
-    end
+	for d in "$dir"/*/
+		if test -d "$d/rootfs"
+			string replace -rf -- '(?s)\A.*/([A-Za-z0-9][A-Za-z0-9_.-]*)/\z' '$1' "$d"
+		end
+	end
 end
 
 # ---------------------------------------------------------------------------
@@ -61,8 +58,13 @@ end
 # Helpers: true when no subcommand has been seen yet, or when a given
 # canonical command (including all parser aliases) is active.
 # ---------------------------------------------------------------------------
+function __chroot_distro_seen_command
+	set -l tokens (commandline -opc)
+	contains -- "$tokens[2]" $argv
+end
+
 function __chroot_distro_no_subcommand
-    not __fish_seen_subcommand_from \
+	not __chroot_distro_seen_command \
         install add i in ins \
         remove rm \
         rename reset \
@@ -82,59 +84,59 @@ function __chroot_distro_no_subcommand
 end
 
 function __chroot_distro_seen_install
-    __fish_seen_subcommand_from install add i in ins
+	__chroot_distro_seen_command install add i in ins
 end
 
 function __chroot_distro_seen_remove
-    __fish_seen_subcommand_from remove rm
+	__chroot_distro_seen_command remove rm
 end
 
 function __chroot_distro_seen_login
-    __fish_seen_subcommand_from login sh
+	__chroot_distro_seen_command login sh
 end
 
 function __chroot_distro_seen_list
-    __fish_seen_subcommand_from list li ls
+	__chroot_distro_seen_command list li ls
 end
 
 function __chroot_distro_seen_backup
-    __fish_seen_subcommand_from backup bak bkp
+	__chroot_distro_seen_command backup bak bkp
 end
 
 function __chroot_distro_seen_clear_cache
-    __fish_seen_subcommand_from clear-cache clear cl
+	__chroot_distro_seen_command clear-cache clear cl
 end
 
 function __chroot_distro_seen_copy
-    __fish_seen_subcommand_from copy cp
+	__chroot_distro_seen_command copy cp
 end
 
 function __chroot_distro_seen_unmount
-    __fish_seen_subcommand_from unmount umount um
+	__chroot_distro_seen_command unmount umount um
 end
 
 function __chroot_distro_seen_kill
-    __fish_seen_subcommand_from kill k stop
+	__chroot_distro_seen_command kill k stop
 end
 
 function __chroot_distro_seen_ps
-    __fish_seen_subcommand_from ps
+	__chroot_distro_seen_command ps
 end
 
 function __chroot_distro_seen_diff
-    __fish_seen_subcommand_from diff
+	__chroot_distro_seen_command diff
 end
 
 function __chroot_distro_seen_search
-    __fish_seen_subcommand_from search find se
+	__chroot_distro_seen_command search find se
 end
 
 function __chroot_distro_seen_info
-    __fish_seen_subcommand_from info version-info nf
+	__chroot_distro_seen_command info version-info nf
 end
 
 function __chroot_distro_seen_help
-    __fish_seen_subcommand_from help h he hel
+	__chroot_distro_seen_command help h he hel
 end
 
 # ---------------------------------------------------------------------------
@@ -190,6 +192,7 @@ complete -c chroot-distro -f -n __chroot_distro_no_subcommand -a hel   -d 'Alias
 
 # Global flags (before subcommand)
 complete -c chroot-distro -f -n __chroot_distro_no_subcommand -s h -l help        -d 'Show help'
+complete -c chroot-distro -f -n __chroot_distro_no_subcommand -s V -l version     -d 'Print the version'
 
 # ---------------------------------------------------------------------------
 # install (+ aliases add, i, in, ins)
@@ -201,6 +204,8 @@ complete -c chroot-distro -f -n __chroot_distro_seen_install \
 complete -c chroot-distro -f -n __chroot_distro_seen_install \
     -s a -l architecture -r -d 'Target CPU architecture' \
     -a 'aarch64\tAArch64 arm\tARM(32-bit) i686\tx86(32-bit) riscv64\tRISC-V x86_64\tx86_64'
+complete -c chroot-distro -f -n __chroot_distro_seen_install \
+	-l allow-insecure -d 'Allow insecure transport when downloading'
 complete -c chroot-distro -f -n __chroot_distro_seen_install \
     -s q -l quiet      -d 'Suppress non-error output'
 complete -c chroot-distro -f -n __chroot_distro_seen_install \
@@ -221,21 +226,21 @@ complete -c chroot-distro -f -n __chroot_distro_seen_remove \
 # ---------------------------------------------------------------------------
 # rename
 # ---------------------------------------------------------------------------
-complete -c chroot-distro -f -n '__fish_seen_subcommand_from rename' \
+complete -c chroot-distro -f -n '__chroot_distro_seen_command rename' \
     -a '(__chroot_distro_containers)' -d 'Container'
-complete -c chroot-distro -f -n '__fish_seen_subcommand_from rename' \
+complete -c chroot-distro -f -n '__chroot_distro_seen_command rename' \
     -s q -l quiet      -d 'Suppress non-error output'
-complete -c chroot-distro -f -n '__fish_seen_subcommand_from rename' \
+complete -c chroot-distro -f -n '__chroot_distro_seen_command rename' \
     -s h -l help       -d 'Show help'
 
 # ---------------------------------------------------------------------------
 # reset
 # ---------------------------------------------------------------------------
-complete -c chroot-distro -f -n '__fish_seen_subcommand_from reset' \
+complete -c chroot-distro -f -n '__chroot_distro_seen_command reset' \
     -a '(__chroot_distro_containers)' -d 'Container'
-complete -c chroot-distro -f -n '__fish_seen_subcommand_from reset' \
+complete -c chroot-distro -f -n '__chroot_distro_seen_command reset' \
     -s q -l quiet      -d 'Suppress non-error output'
-complete -c chroot-distro -f -n '__fish_seen_subcommand_from reset' \
+complete -c chroot-distro -f -n '__chroot_distro_seen_command reset' \
     -s h -l help       -d 'Show help'
 
 # ---------------------------------------------------------------------------
@@ -246,7 +251,7 @@ complete -c chroot-distro -f -n __chroot_distro_seen_login \
 complete -c chroot-distro -f -n __chroot_distro_seen_login \
     -s u -l user       -r -d 'Run as this user (default: root)'
 complete -c chroot-distro -f -n __chroot_distro_seen_login \
-    -l isolated           -d 'Fewer host binds + mount/PID/UTS/IPC namespaces'
+	-l isolated -l isolate -d 'Fewer host binds + mount/PID/UTS/IPC namespaces'
 complete -c chroot-distro -f -n __chroot_distro_seen_login \
     -l minimal            -d 'Bare /dev, /proc, /sys only'
 complete -c chroot-distro -f -n __chroot_distro_seen_login \
@@ -302,11 +307,11 @@ complete -c chroot-distro -f -n __chroot_distro_seen_backup \
 # ---------------------------------------------------------------------------
 # restore
 # ---------------------------------------------------------------------------
-complete -c chroot-distro -n '__fish_seen_subcommand_from restore' \
+complete -c chroot-distro -n '__chroot_distro_seen_command restore' \
     -s v -l verbose    -d 'Print each extracted file'
-complete -c chroot-distro -n '__fish_seen_subcommand_from restore' \
+complete -c chroot-distro -n '__chroot_distro_seen_command restore' \
     -s q -l quiet      -d 'Suppress non-error output'
-complete -c chroot-distro -n '__fish_seen_subcommand_from restore' \
+complete -c chroot-distro -n '__chroot_distro_seen_command restore' \
     -s h -l help       -d 'Show help'
 
 # ---------------------------------------------------------------------------
@@ -344,115 +349,119 @@ complete -c chroot-distro -f -n __chroot_distro_seen_copy \
 # ---------------------------------------------------------------------------
 # sync
 # ---------------------------------------------------------------------------
-complete -c chroot-distro -f -n '__fish_seen_subcommand_from sync' \
+complete -c chroot-distro -f -n '__chroot_distro_seen_command sync' \
     -a '(__chroot_distro_containers)' -d 'Container (use container:path notation)'
-complete -c chroot-distro -f -n '__fish_seen_subcommand_from sync' \
+complete -c chroot-distro -f -n '__chroot_distro_seen_command sync' \
     -s v -l verbose    -d 'Print each synced file'
-complete -c chroot-distro -f -n '__fish_seen_subcommand_from sync' \
+complete -c chroot-distro -f -n '__chroot_distro_seen_command sync' \
     -s q -l quiet      -d 'Suppress non-error output'
-complete -c chroot-distro -f -n '__fish_seen_subcommand_from sync' \
+complete -c chroot-distro -f -n '__chroot_distro_seen_command sync' \
     -s c -l checksum      -d 'Use CRC32 checksum instead of size+mtime'
-complete -c chroot-distro -f -n '__fish_seen_subcommand_from sync' \
+complete -c chroot-distro -f -n '__chroot_distro_seen_command sync' \
     -s d -l delete        -d 'Remove destination entries absent from source'
-complete -c chroot-distro -f -n '__fish_seen_subcommand_from sync' \
+complete -c chroot-distro -f -n '__chroot_distro_seen_command sync' \
     -l chown -r           -d 'Give every synced entry this owner (USER[:GROUP])'
-complete -c chroot-distro -f -n '__fish_seen_subcommand_from sync' \
+complete -c chroot-distro -f -n '__chroot_distro_seen_command sync' \
     -s h -l help          -d 'Show help'
 
 # ---------------------------------------------------------------------------
 # run
 # ---------------------------------------------------------------------------
-complete -c chroot-distro -f -n '__fish_seen_subcommand_from run' \
+complete -c chroot-distro -f -n '__chroot_distro_seen_command run' \
     -a '(__chroot_distro_containers)' -d 'Container'
-complete -c chroot-distro -f -n '__fish_seen_subcommand_from run' \
+complete -c chroot-distro -f -n '__chroot_distro_seen_command run' \
     -s u -l user       -r -d 'Run as this user (default: root)'
-complete -c chroot-distro -f -n '__fish_seen_subcommand_from run' \
-    -l isolated           -d 'Fewer host binds + mount/PID/UTS/IPC namespaces'
-complete -c chroot-distro -f -n '__fish_seen_subcommand_from run' \
+complete -c chroot-distro -f -n '__chroot_distro_seen_command run' \
+	-l isolated -l isolate -d 'Fewer host binds + mount/PID/UTS/IPC namespaces'
+complete -c chroot-distro -f -n '__chroot_distro_seen_command run' \
     -l minimal            -d 'Bare /dev, /proc, /sys only'
-complete -c chroot-distro -f -n '__fish_seen_subcommand_from run' \
+complete -c chroot-distro -f -n '__chroot_distro_seen_command run' \
     -l shared-home        -d 'Bind host home into guest home'
-complete -c chroot-distro -f -n '__fish_seen_subcommand_from run' \
+complete -c chroot-distro -f -n '__chroot_distro_seen_command run' \
     -l shared-tmp         -d 'Share /tmp with the host'
-complete -c chroot-distro -f -n '__fish_seen_subcommand_from run' \
+complete -c chroot-distro -f -n '__chroot_distro_seen_command run' \
     -l shared-display     -d 'Share X11, Wayland, sound and D-Bus with the container'
-complete -c chroot-distro -f -n '__fish_seen_subcommand_from run' \
+complete -c chroot-distro -f -n '__chroot_distro_seen_command run' \
     -l shared-x11         -d 'Alias for --shared-display (backward compatibility)'
-complete -c chroot-distro -f -n '__fish_seen_subcommand_from run' \
+complete -c chroot-distro -f -n '__chroot_distro_seen_command run' \
     -l no-new-privs       -d 'Set PR_SET_NO_NEW_PRIVS: setuid binaries cannot elevate'
-complete -c chroot-distro -n '__fish_seen_subcommand_from run' \
+complete -c chroot-distro -n '__chroot_distro_seen_command run' \
     -s b -l bind       -r -d 'Bind-mount PATH[:DEST] into the container (repeatable)'
-complete -c chroot-distro -n '__fish_seen_subcommand_from run' \
+complete -c chroot-distro -n '__chroot_distro_seen_command run' \
     -s w -l work-dir   -r -d 'Initial working directory inside the container'
-complete -c chroot-distro -f -n '__fish_seen_subcommand_from run' \
+complete -c chroot-distro -f -n '__chroot_distro_seen_command run' \
     -s e -l env        -r -d 'Set environment variable VAR=VALUE (repeatable)'
-complete -c chroot-distro -f -n '__fish_seen_subcommand_from run' \
+complete -c chroot-distro -f -n '__chroot_distro_seen_command run' \
     -l entrypoint      -r -d 'Replace the image entrypoint for this run (Cmd cleared)'
-complete -c chroot-distro -f -n '__fish_seen_subcommand_from run' \
+complete -c chroot-distro -f -n '__chroot_distro_seen_command run' \
     -s d -l detach        -d 'Run the command in the background and return immediately'
-complete -c chroot-distro -f -n '__fish_seen_subcommand_from run' \
+complete -c chroot-distro -f -n '__chroot_distro_seen_command run' \
     -l get-chroot-cmd      -d 'Print the chroot command line and exit'
-complete -c chroot-distro -f -n '__fish_seen_subcommand_from run' \
+complete -c chroot-distro -f -n '__chroot_distro_seen_command run' \
     -s h -l help          -d 'Show help'
 
 # ---------------------------------------------------------------------------
 # build
 # ---------------------------------------------------------------------------
-complete -c chroot-distro -n '__fish_seen_subcommand_from build' \
+complete -c chroot-distro -n '__chroot_distro_seen_command build' \
     -s f -l file       -r -d 'Path to Dockerfile (- reads from stdin)'
-complete -c chroot-distro -f -n '__fish_seen_subcommand_from build' \
+complete -c chroot-distro -f -n '__chroot_distro_seen_command build' \
     -s t -l tag        -r -d 'Image reference to assign (repeatable)'
-complete -c chroot-distro -f -n '__fish_seen_subcommand_from build' \
+complete -c chroot-distro -f -n '__chroot_distro_seen_command build' \
     -l build-arg       -r -d 'Set a build-time ARG (repeatable)'
-complete -c chroot-distro -f -n '__fish_seen_subcommand_from build' \
+complete -c chroot-distro -f -n '__chroot_distro_seen_command build' \
     -l build-context   -r -d 'Define a named build context (repeatable)'
-complete -c chroot-distro -f -n '__fish_seen_subcommand_from build' \
+complete -c chroot-distro -f -n '__chroot_distro_seen_command build' \
     -s a -l architecture -r -d 'Target CPU architecture' \
     -a 'aarch64\tAArch64 arm\tARM(32-bit) i686\tx86(32-bit) riscv64\tRISC-V x86_64\tx86_64'
-complete -c chroot-distro -f -n '__fish_seen_subcommand_from build' \
+complete -c chroot-distro -f -n '__chroot_distro_seen_command build' \
     -l platform       -r -d 'Build one image per platform (comma-separated, repeatable)' \
     -a 'linux/amd64 linux/arm64 linux/arm/v7 linux/386 linux/riscv64'
-complete -c chroot-distro -f -n '__fish_seen_subcommand_from build' \
+complete -c chroot-distro -f -n '__chroot_distro_seen_command build' \
     -l target          -r -d 'Stop after this named build stage'
-complete -c chroot-distro -n '__fish_seen_subcommand_from build' \
+complete -c chroot-distro -n '__chroot_distro_seen_command build' \
     -s o -l output     -r -d 'Write OCI tarball to FILE (repeatable)'
-complete -c chroot-distro -f -n '__fish_seen_subcommand_from build' \
+complete -c chroot-distro -f -n '__chroot_distro_seen_command build' \
     -l export          -r -d 'Export the rootfs as a directory or tarball (repeatable)' \
     -a 'type=local,dest= type=tar,dest='
-complete -c chroot-distro -f -n '__fish_seen_subcommand_from build' \
+complete -c chroot-distro -f -n '__chroot_distro_seen_command build' \
     -l install-as      -r -d 'Install image as a local container after build' \
     -a '(__chroot_distro_containers)'
-complete -c chroot-distro -f -n '__fish_seen_subcommand_from build' \
+complete -c chroot-distro -f -n '__chroot_distro_seen_command build' \
     -l secret          -r -d 'Expose a secret to RUN --mount=type=secret (repeatable)'
-complete -c chroot-distro -f -n '__fish_seen_subcommand_from build' \
+complete -c chroot-distro -f -n '__chroot_distro_seen_command build' \
     -l ssh                -d 'Expose an SSH agent socket to RUN --mount=type=ssh (repeatable)'
-complete -c chroot-distro -f -n '__fish_seen_subcommand_from build' \
+complete -c chroot-distro -f -n '__chroot_distro_seen_command build' \
     -l cache-from      -r -d 'Import cached steps (repeatable)' \
     -a 'type=local,src= type=registry,ref='
-complete -c chroot-distro -f -n '__fish_seen_subcommand_from build' \
+complete -c chroot-distro -f -n '__chroot_distro_seen_command build' \
     -l cache-to        -r -d 'Export the cached steps of this build (repeatable)' \
     -a 'type=local,dest= type=registry,ref='
-complete -c chroot-distro -f -n '__fish_seen_subcommand_from build' \
+complete -c chroot-distro -f -n '__chroot_distro_seen_command build' \
+	-l allow-insecure -d 'Allow insecure transport for registry build cache'
+complete -c chroot-distro -f -n '__chroot_distro_seen_command build' \
     -l no-cache           -d 'Disable per-instruction build cache'
-complete -c chroot-distro -f -n '__fish_seen_subcommand_from build' \
+complete -c chroot-distro -f -n '__chroot_distro_seen_command build' \
     -l progress        -r -d 'Build output style' \
     -a 'auto plain tty rawjson'
-complete -c chroot-distro -f -n '__fish_seen_subcommand_from build' \
+complete -c chroot-distro -f -n '__chroot_distro_seen_command build' \
     -s v -l verbose       -d 'Echo each instruction and stream RUN output'
-complete -c chroot-distro -f -n '__fish_seen_subcommand_from build' \
+complete -c chroot-distro -f -n '__chroot_distro_seen_command build' \
     -s q -l quiet         -d 'Suppress non-error output'
-complete -c chroot-distro -f -n '__fish_seen_subcommand_from build' \
+complete -c chroot-distro -f -n '__chroot_distro_seen_command build' \
     -s h -l help          -d 'Show help'
 
 # ---------------------------------------------------------------------------
 # push
 # ---------------------------------------------------------------------------
-complete -c chroot-distro -f -n '__fish_seen_subcommand_from push' \
+complete -c chroot-distro -f -n '__chroot_distro_seen_command push' \
     -s a -l architecture -r -d 'Target CPU architecture' \
     -a 'aarch64\tAArch64 arm\tARM(32-bit) i686\tx86(32-bit) riscv64\tRISC-V x86_64\tx86_64'
-complete -c chroot-distro -f -n '__fish_seen_subcommand_from push' \
+complete -c chroot-distro -f -n '__chroot_distro_seen_command push' \
+	-l allow-insecure -d 'Allow insecure transport for the target registry'
+complete -c chroot-distro -f -n '__chroot_distro_seen_command push' \
     -s q -l quiet      -d 'Suppress non-error output'
-complete -c chroot-distro -f -n '__fish_seen_subcommand_from push' \
+complete -c chroot-distro -f -n '__chroot_distro_seen_command push' \
     -s h -l help       -d 'Show help'
 
 # ---------------------------------------------------------------------------
@@ -513,7 +522,7 @@ complete -c chroot-distro -f -n __chroot_distro_seen_info \
 # help (+ aliases h, he, hel)
 # ---------------------------------------------------------------------------
 complete -c chroot-distro -f -n __chroot_distro_seen_help \
-	-a 'install remove rename reset login list backup restore clear-cache copy sync run build push unmount kill ps diff search info help' \
+	-a 'install add i in ins remove rm rename reset login sh list li ls backup bak bkp restore clear-cache clear cl copy cp sync run build push unmount umount um kill k stop ps diff search find se info version-info nf help h he hel' \
 	-d 'Topic'
 complete -c chroot-distro -f -n __chroot_distro_seen_help \
 	-s h -l help -d 'Show help'
