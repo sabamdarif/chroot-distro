@@ -1,3 +1,4 @@
+import json
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -33,12 +34,23 @@ def test_main_help():
         mock_help.assert_called_once()
 
 
-def test_main_unknown_command():
-    # Running with unknown command should exit 1
-    with patch("sys.argv", ["chroot-distro", "unknowncommand"]):
-        with pytest.raises(SystemExit) as exc_info:
-            main()
-        assert exc_info.value.code == 1
+@pytest.mark.parametrize(
+    ("arguments", "diagnostic"),
+    [
+        (["bad\x1b[2J\n"], r"unknown command 'bad\x1b[2J\n'."),
+        (["--bad\x1b[2J"], r"unknown command '--bad\x1b[2J'."),
+        (["remove", "--bad\x1b[2J"], r"unrecognized option: '--bad\x1b[2J'."),
+        (["diff", "box", "bad\x9b\u202e"], r"unexpected argument: 'bad\x9b\u202e'."),
+    ],
+)
+def test_main_quotes_rejected_arguments(arguments, diagnostic, capsys):
+    with patch("sys.argv", ["chroot-distro", *arguments]), pytest.raises(SystemExit) as exc_info:
+        main()
+
+    assert exc_info.value.code == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert diagnostic in captured.err
 
 
 def test_main_list():
@@ -189,9 +201,13 @@ def _finish(*_args, **_kwargs):
     raise ChrootDistroError("container 'ghost' is not installed.")
 
 
-def test_main_json_error_writes_a_document(capsys):
-    import json
+def _assert_json_error(capsys, command, error):
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == {"command": command, "error": error, "schema": 1}
+    assert error in captured.err
 
+
+def test_main_json_error_writes_a_document(capsys):
     with (
         patch("sys.argv", ["chroot-distro", "diff", "ghost", "--json"]),
         patch("os.getuid", return_value=0),
@@ -201,13 +217,68 @@ def test_main_json_error_writes_a_document(capsys):
         main()
 
     assert exc_info.value.code == 1
+    _assert_json_error(capsys, "diff", "container 'ghost' is not installed.")
+
+
+@pytest.mark.parametrize(
+    ("arguments", "error"),
+    [
+        (["diff", "--json"], "container name is not specified."),
+        (["diff", "box", "--json", "--bad\x1b[2J"], r"unrecognized option: '--bad\x1b[2J'."),
+    ],
+)
+def test_main_json_validation_error(arguments, error, capsys):
+    with (
+        patch("sys.argv", ["chroot-distro", *arguments]),
+        patch("chroot_distro.cli._ensure_root_user") as ensure_root,
+        pytest.raises(SystemExit) as exc_info,
+    ):
+        main()
+
+    assert exc_info.value.code == 1
+    ensure_root.assert_not_called()
+    _assert_json_error(capsys, "diff", error)
+
+
+def test_main_json_elevation_error(capsys):
+    with (
+        patch("sys.argv", ["chroot-distro", "nf", "--json"]),
+        patch("chroot_distro.cli._ensure_root_user", side_effect=RootRequiredError("no root here")),
+        pytest.raises(SystemExit) as exc_info,
+    ):
+        main()
+
+    assert exc_info.value.code == 1
+    _assert_json_error(capsys, "info", "no root here")
+
+
+def test_main_json_handler_import_error(capsys):
+    missing_module = "chroot_distro.commands._missing_for_test"
+    with (
+        patch("sys.argv", ["chroot-distro", "ls", "--json"]),
+        patch("os.getuid", return_value=0),
+        patch.dict("chroot_distro.cli._COMMAND_HANDLERS", {"list": f"{missing_module}:command_list"}),
+        pytest.raises(SystemExit) as exc_info,
+    ):
+        main()
+
+    assert exc_info.value.code == 1
+    _assert_json_error(capsys, "list", f"unexpected error: No module named '{missing_module}'")
+
+
+def test_main_json_help(capsys):
+    with (
+        patch("sys.argv", ["chroot-distro", "diff", "--json", "--help"]),
+        patch("chroot_distro.cli._ensure_root_user") as ensure_root,
+        pytest.raises(SystemExit) as exc_info,
+    ):
+        main()
+
+    assert exc_info.value.code == 0
+    ensure_root.assert_not_called()
     captured = capsys.readouterr()
-    document = json.loads(captured.out)
-    assert document["command"] == "diff"
-    assert document["error"] == "container 'ghost' is not installed."
-    assert document["schema"] == 1
-    # The human line stays, so a person sees the same reason.
-    assert "container 'ghost' is not installed." in captured.err
+    assert captured.out == ""
+    assert "chroot-distro diff" in captured.err
 
 
 def test_main_without_json_writes_no_document(capsys):

@@ -25,9 +25,10 @@ Adding a top-level import here costs every invocation, including tab completion.
 Termux drops `LD_PRELOAD` and `LD_LIBRARY_PATH` from the environment first: the Termux
 shell sets a loader shim that must not follow this process into a chroot.
 
-Everything below is expected to fail by raising a `ChrootDistroError`, which becomes a
-one-line message and exit code 1. A bare `Exception` gets the same treatment with an
-"unexpected error" prefix, so no traceback ever reaches a user.
+After parsing, argument validation and dispatch report failures on stderr and
+also emit an error document when the command accepted `--json`. Dispatch keeps
+the messages of expected failures and unsupported operations. Other dispatch
+exceptions get an "unexpected error" prefix.
 """
 
 import importlib
@@ -38,7 +39,7 @@ from collections.abc import Callable
 from typing import Any
 
 from chroot_distro.constants import IS_TERMUX, PROGRAM_NAME
-from chroot_distro.exceptions import ChrootDistroError, RootRequiredError
+from chroot_distro.exceptions import ChrootDistroError
 from chroot_distro.message import crit_error, emit_json_error, msg, set_quiet
 from chroot_distro.parser import (
     ALIAS_TO_CANONICAL,
@@ -122,7 +123,7 @@ def _reject_unknown_command(raw_args: list[str]) -> None:
         from chroot_distro.commands.help import command_help
 
         msg()
-        crit_error(f"unknown command '{first}'.")
+        crit_error(f"unknown command {first!a}.")
         command_help()
         msg()
         sys.exit(1)
@@ -139,9 +140,6 @@ def main() -> None:
         os.environ.pop("LD_LIBRARY_PATH", None)
 
     signal.signal(signal.SIGQUIT, _sigquit_to_keyboard_interrupt)
-
-    if len(sys.argv) >= 2:
-        ALIAS_TO_CANONICAL.get(sys.argv[1], sys.argv[1])
 
     if len(sys.argv) >= 2 and sys.argv[1] in ("--version", "-V"):
         from chroot_distro.constants import PROGRAM_VERSION
@@ -169,12 +167,11 @@ def main() -> None:
         from chroot_distro.commands.help import command_help
 
         msg()
-        crit_error(f"unknown command '{raw_args[0]}'.")
+        crit_error(f"unknown command {raw_args[0]!a}.")
         command_help()
         msg()
         sys.exit(1)
 
-    assert command is not None
     canonical: str = ALIAS_TO_CANONICAL.get(command) or command
 
     if getattr(args, "help", False):
@@ -186,6 +183,14 @@ def main() -> None:
             command_help()
         sys.exit(0)
 
+    json_mode = getattr(args, "json", False)
+
+    def report_error(text: str) -> None:
+        if json_mode:
+            emit_json_error(canonical, text)
+        msg()
+        crit_error(text)
+
     check_unknown = unknown
     if canonical in ("login", "run") and "--" in raw_args:
         sep_idx = raw_args.index("--")
@@ -195,8 +200,7 @@ def main() -> None:
 
         bad = check_unknown[0]
         kind = "unrecognized option" if bad.startswith("-") else "unexpected argument"
-        msg()
-        crit_error(f"{kind}: '{bad}'.")
+        report_error(f"{kind}: {bad!a}.")
         if canonical in HELP_COMMANDS:
             HELP_COMMANDS[canonical]()
         msg()
@@ -208,8 +212,7 @@ def main() -> None:
         if not getattr(args, arg_name, None):
             from chroot_distro.commands.help import HELP_COMMANDS
 
-            msg()
-            crit_error(error_msg)
+            report_error(error_msg)
             if canonical in HELP_COMMANDS:
                 HELP_COMMANDS[canonical]()
             sys.exit(1)
@@ -230,56 +233,28 @@ def main() -> None:
     else:
         requires_root = True
 
-    if requires_root:
-        try:
-            _ensure_root_user()
-        except RootRequiredError as e:
-            msg()
-            crit_error(str(e))
-            msg()
-            sys.exit(1)
-
-    handler = _resolve_handler(canonical)
-    if handler is None:
-        crit_error(f"unknown command '{command}'.")
-        sys.exit(1)
-
-    # A --json caller gets its failure as a document too, so one parse handles
-    # both outcomes. The stderr line stays, which is what a human reads.
-    json_mode = getattr(args, "json", False)
-
-    def _emit_json_error(text: str) -> None:
-        if json_mode:
-            emit_json_error(canonical, text)
-
     try:
+        if requires_root:
+            _ensure_root_user()
+        handler = _resolve_handler(canonical)
+        if handler is None:
+            raise ChrootDistroError(f"unknown command {command!a}.")
         handler(args)
-    except ChrootDistroError as e:
-        _emit_json_error(str(e))
-        msg()
-        crit_error(str(e))
-        msg()
-        sys.exit(1)
+    except (ChrootDistroError, NotImplementedError) as exc:
+        report_error(str(exc))
     except KeyboardInterrupt:
-        _emit_json_error("Aborted by user.")
-        msg()
-        crit_error("Aborted by user.")
+        report_error("Aborted by user.")
         msg()
         sys.stdout.flush()
         sys.stderr.flush()
         os._exit(1)
-    except NotImplementedError as e:
-        _emit_json_error(str(e))
-        msg()
-        crit_error(str(e))
-        msg()
-        sys.exit(1)
-    except Exception as e:
-        _emit_json_error(f"unexpected error: {e}")
-        msg()
-        crit_error(f"unexpected error: {e}")
-        msg()
-        sys.exit(1)
+    except Exception as exc:
+        report_error(f"unexpected error: {exc}")
+    else:
+        return
+
+    msg()
+    sys.exit(1)
 
 
 if __name__ == "__main__":
