@@ -7,8 +7,8 @@ hand-written pages in `commands/help/` and never argparse's own text. So `-h` is
 intercepted before parsing, an unknown first word is rejected with the help page
 rather than a usage line, and `REQUIRED_ARGS` positionals are checked here (the check
 uses `not`, which also catches the empty list an `nargs="*"` positional produces).
-Unknown-argument detection reparses up to a `--` for `login` and `run`, since
-everything after it belongs to the guest command.
+For `login` and `run`, the sub-parser hands the guest arguments straight to the
+handler and checks only the host arguments.
 
 Root policy is decided here and nowhere else. `help` and `search` never elevate.
 On Termux `list` and `ps` read only /proc and container metadata so they stay
@@ -41,12 +41,7 @@ from typing import Any
 from chroot_distro.constants import IS_TERMUX, PROGRAM_NAME
 from chroot_distro.exceptions import ChrootDistroError
 from chroot_distro.message import crit_error, emit_json_error, msg, set_quiet
-from chroot_distro.parser import (
-    ALIAS_TO_CANONICAL,
-    REQUIRED_ARGS,
-    build_parser,
-    parse_cli_args,
-)
+from chroot_distro.parser import ALIAS_TO_CANONICAL, REQUIRED_ARGS, build_parser
 
 # "module:function" refs; imported on dispatch (tests patch in callables).
 _COMMAND_HANDLERS: dict[str, str | Callable] = {
@@ -147,7 +142,7 @@ def main() -> None:
         print(f"{PROGRAM_NAME} {PROGRAM_VERSION}")
         sys.exit(0)
 
-    if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help", "help", "hel", "he", "h"):
+    if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help"):
         from chroot_distro.commands.help import command_help
 
         command_help()
@@ -160,7 +155,7 @@ def main() -> None:
     _reject_unknown_command(raw_args)
 
     parser = build_parser()
-    args, unknown = parse_cli_args(parser, raw_args)
+    args, unknown = parser.parse_known_args(raw_args)
 
     command = args.command
     if command is None:
@@ -191,14 +186,10 @@ def main() -> None:
         msg()
         crit_error(text)
 
-    check_unknown = unknown
-    if canonical in ("login", "run") and "--" in raw_args:
-        sep_idx = raw_args.index("--")
-        _, check_unknown = parse_cli_args(parser, raw_args[:sep_idx])
-    if check_unknown:
+    if unknown:
         from chroot_distro.commands.help import HELP_COMMANDS
 
-        bad = check_unknown[0]
+        bad = unknown[0]
         kind = "unrecognized option" if bad.startswith("-") else "unexpected argument"
         report_error(f"{kind}: {bad!a}.")
         if canonical in HELP_COMMANDS:

@@ -196,8 +196,7 @@ def crit_error(text: str) -> None:
     msg(f"{C['BRED']}Error: {C['RED']}{text}{C['RST']}")
 
 
-_QUOTE_MAP = {
-    "\\": "\\\\",
+_CONTROL_ESCAPES = {
     "\n": "\\n",
     "\r": "\\r",
     "\t": "\\t",
@@ -205,29 +204,18 @@ _QUOTE_MAP = {
 }
 
 
+def escape_controls(text: str) -> str:
+    """Escape nonprintable characters in a plain diagnostic line."""
+    if text.isprintable():
+        return text
+    return "".join(ch if ch.isprintable() else _CONTROL_ESCAPES.get(ch, ascii(ch)[1:-1]) for ch in text)
+
+
 def quote_path(text: str) -> str:
-    """Render *text* printable, with C-style escapes for control characters.
+    """Escape backslashes and nonprintable characters in an untrusted path.
 
-    Names inside a container rootfs are chosen by whoever controls the guest,
-    and `copy` and `sync` print them freely: `--verbose` logs every entry, the
-    skip warning names the file it passed over, and an OSError carries the name
-    it failed on. A name holding ESC repaints the terminal, hides the lines
-    around it, or hands the emulator whatever sequence follows it, so nothing
-    below 0x20, nor DEL, is allowed through literally. Backslash is escaped
-    too, so an escape this produced cannot be confused with those characters
-    spelled out in a name.
-
-    Only the untrusted text is passed through here, never a whole message: the
-    colour codes the log helpers wrap it in are control characters by
-    definition.
+    A guest can put terminal controls and bidi overrides in a name. Escape
+    literal backslashes so readers can distinguish an escape from a name that
+    spells it out.
     """
-    out = []
-    for ch in text:
-        escaped = _QUOTE_MAP.get(ch)
-        if escaped is not None:
-            out.append(escaped)
-        elif ch < " " or ch == "\x7f":
-            out.append(f"\\x{ord(ch):02x}")
-        else:
-            out.append(ch)
-    return "".join(out)
+    return escape_controls(text.replace("\\", "\\\\"))

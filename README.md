@@ -355,6 +355,7 @@ chroot-distro diff [OPTIONS] CONTAINER
 ```
 
 Show what changed inside a container compared to its original image, like `docker diff`. `A` means added, `C` changed, `D` deleted. Needs the image layers to still be in the cache, so avoid `clear-cache` if you want `diff` to keep working.
+The text output escapes backslashes and nonprintable characters in paths. The JSON document preserves the original paths.
 
 | Option   | Description                                                                                                           |
 | -------- | --------------------------------------------------------------------------------------------------------------------- |
@@ -396,7 +397,8 @@ chroot-distro help [COMMAND]
 Aliases: h, he, hel
 ```
 
-Show detailed help for a command, or general usage when no command is given.
+Show detailed help for a command or alias, or general usage when no command is given.
+For example, `chroot-distro help info` shows the same page as `chroot-distro info --help`.
 
 ### build
 

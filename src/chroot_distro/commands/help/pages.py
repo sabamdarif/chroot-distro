@@ -60,6 +60,13 @@ _NO_NEW_PRIVS_OPT = (
 )
 
 HELP_PAGES: dict[str, dict[str, typing.Any]] = {
+    "help": {
+        "usage": "help [COMMAND]",
+        "aliases": ("h", "he", "hel"),
+        "summary": "Show detailed help for a command or alias, or general usage when no command is given.",
+        "options": [("-h, --help", "Show this help.")],
+        "examples": [f"{PROGRAM_NAME} help", f"{PROGRAM_NAME} help info"],
+    },
     "build": {
         "usage": "build [OPTIONS] [PATH]",
         "summary": (
@@ -1035,7 +1042,7 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
 
 
 TOP_COMMANDS = [
-    ("help", "Show this help."),
+    ("help", "Show general or command-specific help."),
     ("install", "Install distribution from OCI image or rootfs archive."),
     ("list", "List created containers."),
     ("login", "Start interactive shell inside a container."),

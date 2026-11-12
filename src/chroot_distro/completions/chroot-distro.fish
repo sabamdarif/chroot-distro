@@ -513,5 +513,7 @@ complete -c chroot-distro -f -n __chroot_distro_seen_info \
 # help (+ aliases h, he, hel)
 # ---------------------------------------------------------------------------
 complete -c chroot-distro -f -n __chroot_distro_seen_help \
-    -a 'install remove rename reset login list backup restore clear-cache copy sync run build push unmount kill ps diff search info' \
-    -d 'Topic'
+	-a 'install remove rename reset login list backup restore clear-cache copy sync run build push unmount kill ps diff search info help' \
+	-d 'Topic'
+complete -c chroot-distro -f -n __chroot_distro_seen_help \
+	-s h -l help -d 'Show help'

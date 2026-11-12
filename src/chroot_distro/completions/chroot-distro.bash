@@ -390,7 +390,7 @@ _chroot_distro() {
 	# -----------------------------------------------------------------------
 	help)
 		local topics="install remove rename reset login list backup restore clear-cache copy sync run build push
-                    kill ps diff search info unmount"
+			kill ps diff search info unmount help -h --help"
 		_chroot_distro_compgen_words "${topics}" "${cur}"
 		;;
 

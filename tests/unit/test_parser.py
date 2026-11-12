@@ -1,6 +1,6 @@
 import pytest
 
-from chroot_distro.parser import ALIAS_TO_CANONICAL, build_parser, parse_cli_args
+from chroot_distro.parser import ALIAS_TO_CANONICAL, build_parser
 
 
 def test_parser_basic():
@@ -28,12 +28,11 @@ def test_parser_install():
 def test_parser_login():
     parser = build_parser()
     # Test typical login options
-    args, unknown = parse_cli_args(parser, ["login", "alpine", "--shared-home", "--user", "user1", "--", "whoami"])
+    args, unknown = parser.parse_known_args(["login", "alpine", "--shared-home", "--user", "user1", "--", "whoami"])
     assert args.command == "login"
     assert args.container_name == "alpine"
     assert args.shared_home is True
     assert args.user == "user1"
-    # positional arguments after the login command are consumed by login_cmd (without '--')
     assert args.login_cmd == ["whoami"]
     assert unknown == []
 
@@ -66,16 +65,16 @@ def test_parser_run_isolate_alias():
 
 def test_parser_run_captures_run_args():
     parser = build_parser()
-    args, unknown = parse_cli_args(parser, ["run", "cloudflared", "--", "--help"])
+    args, unknown = parser.parse_known_args(["run", "cloudflared", "--", "--help"])
     assert args.command == "run"
     assert args.container_name == "cloudflared"
     assert args.run_args == ["--help"]
-    assert unknown == ["--help"]
+    assert unknown == []
 
 
 def test_parser_run_captures_multiple_run_args():
     parser = build_parser()
-    args, _ = parse_cli_args(parser, ["run", "alpine", "--isolate", "--", "tunnel", "run"])
+    args, _ = parser.parse_known_args(["run", "alpine", "--isolate", "--", "tunnel", "run"])
     assert args.isolated is True
     assert args.run_args == ["tunnel", "run"]
 
@@ -100,14 +99,14 @@ def test_parser_run_detach_short_flag():
 
 def test_parser_run_detach_with_run_args():
     parser = build_parser()
-    args, _ = parse_cli_args(parser, ["run", "alpine", "--detach", "--", "sleep", "100"])
+    args, _ = parser.parse_known_args(["run", "alpine", "--detach", "--", "sleep", "100"])
     assert args.detach is True
     assert args.run_args == ["sleep", "100"]
 
 
 def test_parser_run_entrypoint():
     parser = build_parser()
-    args, _ = parse_cli_args(parser, ["run", "alpine", "--entrypoint", "/bin/echo", "--", "hi"])
+    args, _ = parser.parse_known_args(["run", "alpine", "--entrypoint", "/bin/echo", "--", "hi"])
     assert args.command == "run"
     assert args.entrypoint == "/bin/echo"
     assert args.run_args == ["hi"]
@@ -122,9 +121,32 @@ def test_parser_run_entrypoint_defaults_none():
 def test_parser_login_has_no_entrypoint():
     # --entrypoint is a run-only flag; login must not define it.
     parser = build_parser()
-    args, unknown = parse_cli_args(parser, ["login", "alpine", "--entrypoint", "/bin/echo"])
+    args, unknown = parser.parse_known_args(["login", "alpine", "--entrypoint", "/bin/echo"])
     assert not hasattr(args, "entrypoint")
     assert "--entrypoint" in unknown
+
+
+@pytest.mark.parametrize(("command", "dest"), [("sh", "login_cmd"), ("run", "run_args")])
+@pytest.mark.parametrize("guest_args", [[], ["--help", "--", ""]])
+def test_guest_arguments_are_kept_verbatim(command, dest, guest_args):
+    args, unknown = build_parser().parse_known_args([command, "box", "--unknown", "--", *guest_args])
+    assert args.container_name == "box"
+    assert args.help is False
+    assert getattr(args, dest) == guest_args
+    assert unknown == ["--unknown"]
+
+
+def test_login_keeps_bare_guest_command():
+    args = build_parser().parse_args(["login", "box", "echo", "hello"])
+    assert args.login_cmd == ["echo", "hello"]
+
+
+def test_guest_argument_cannot_fill_a_host_option_value(capsys):
+    with pytest.raises(SystemExit) as exc_info:
+        build_parser().parse_args(["login", "box", "--user", "--", "alice"])
+
+    assert exc_info.value.code == 1
+    assert "expected one argument" in capsys.readouterr().err
 
 
 def test_parser_build_secret_and_ssh():

@@ -371,9 +371,9 @@ _chroot_distro() {
 			topics=(
 				install remove rename reset login list
 				backup restore clear-cache copy sync run
-				build push unmount kill ps diff search info
+				build push unmount kill ps diff search info help
 			)
-			_describe 'topic' topics
+			_arguments '(-h --help)'{-h,--help}'[show help]' "1:topic:(${(j: :)topics})"
 			;;
 
 		esac

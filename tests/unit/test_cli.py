@@ -35,12 +35,40 @@ def test_main_help():
 
 
 @pytest.mark.parametrize(
+    ("arguments", "usage"),
+    [
+        (["help"], "chroot-distro [COMMAND]"),
+        (["help", "info"], "chroot-distro info"),
+        (["he", "ls"], "chroot-distro list"),
+        (["help", "help"], "chroot-distro help [COMMAND]"),
+        (["h", "nf"], "chroot-distro info"),
+    ],
+)
+def test_main_help_topic(arguments, usage, capsys):
+    with (
+        patch("sys.argv", ["chroot-distro", *arguments]),
+        patch("chroot_distro.cli._ensure_root_user") as ensure_root,
+    ):
+        main()
+
+    ensure_root.assert_not_called()
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert usage in captured.err
+    assert ("QUICK START" in captured.err) == (arguments == ["help"])
+
+
+@pytest.mark.parametrize(
     ("arguments", "diagnostic"),
     [
         (["bad\x1b[2J\n"], r"unknown command 'bad\x1b[2J\n'."),
         (["--bad\x1b[2J"], r"unknown command '--bad\x1b[2J'."),
         (["remove", "--bad\x1b[2J"], r"unrecognized option: '--bad\x1b[2J'."),
         (["diff", "box", "bad\x9b\u202e"], r"unexpected argument: 'bad\x9b\u202e'."),
+        (["help", "bad\x1b[2J\u202e"], r"unknown help topic 'bad\x1b[2J\u202e'."),
+        (["help", ""], "unknown help topic ''."),
+        (["help", "info", "ls"], "unexpected argument: 'ls'."),
+        (["build", "--c=\x1b[2J\x9b\u202e"], r"ambiguous option: --c=\e[2J\x9b\u202e"),
     ],
 )
 def test_main_quotes_rejected_arguments(arguments, diagnostic, capsys):
@@ -51,6 +79,21 @@ def test_main_quotes_rejected_arguments(arguments, diagnostic, capsys):
     captured = capsys.readouterr()
     assert captured.out == ""
     assert diagnostic in captured.err
+    assert not any(control in captured.err for control in ("\x1b", "\x9b", "\u202e"))
+
+
+@pytest.mark.parametrize("command", ["login", "sh", "run"])
+def test_main_requires_container_before_guest_arguments(command, capsys):
+    with (
+        patch("sys.argv", ["chroot-distro", command, "--", "box", "--help"]),
+        patch("chroot_distro.cli._ensure_root_user") as ensure_root,
+        pytest.raises(SystemExit) as exc_info,
+    ):
+        main()
+
+    assert exc_info.value.code == 1
+    ensure_root.assert_not_called()
+    assert "container name is not specified." in capsys.readouterr().err
 
 
 def test_main_list():
@@ -238,6 +281,37 @@ def test_main_json_validation_error(arguments, error, capsys):
     assert exc_info.value.code == 1
     ensure_root.assert_not_called()
     _assert_json_error(capsys, "diff", error)
+
+
+@pytest.mark.parametrize(
+    ("arguments", "command", "error"),
+    [
+        (["ps", "--json", "--quiet"], "ps", "argument -q/--quiet: not allowed with argument --json"),
+        (["ls", "-q", "--j"], "list", "argument --json: not allowed with argument -q/--quiet"),
+        (["nf", r"--json=a\b"], "info", r"argument --json: ignored explicit argument 'a\\b'"),
+    ],
+)
+def test_main_json_parse_error(arguments, command, error, capsys):
+    with (
+        patch("sys.argv", ["chroot-distro", *arguments]),
+        patch("chroot_distro.cli._ensure_root_user") as ensure_root,
+        pytest.raises(SystemExit) as exc_info,
+    ):
+        main()
+
+    assert exc_info.value.code == 1
+    ensure_root.assert_not_called()
+    _assert_json_error(capsys, command, error)
+
+
+def test_main_json_flag_after_separator_is_not_an_option(capsys):
+    with patch("sys.argv", ["chroot-distro", "list", "--quiet=yes", "--", "--json"]), pytest.raises(SystemExit) as exc_info:
+        main()
+
+    assert exc_info.value.code == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "ignored explicit argument 'yes'" in captured.err
 
 
 def test_main_json_elevation_error(capsys):
