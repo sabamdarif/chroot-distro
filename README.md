@@ -80,7 +80,8 @@ chroot-distro remove ubuntu            # delete it
 
 ## Commands reference
 
-Every command accepts `-h` and `--help` before the first standalone `--`.
+An optional standalone `--` can appear before the command name.
+Every command accepts `-h` and `--help` before its own first standalone `--`.
 These flags show help before validating command arguments.
 Run `chroot-distro -V` or `chroot-distro --version` to print the version.
 
@@ -144,7 +145,8 @@ chroot-distro login [OPTIONS] CONTAINER [-- COMMAND ...]
 Aliases: sh
 ```
 
-Open a shell inside a container. Add `--` followed by a command to run that command instead of a shell:
+Open a shell inside a container. Put a command after `--` to run it instead.
+Bare command words before `--` are passed first. Put guest options after `--`.
 
 ```sh
 chroot-distro login ubuntu

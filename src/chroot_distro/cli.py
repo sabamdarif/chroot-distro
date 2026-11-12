@@ -41,7 +41,7 @@ from typing import Any
 from chroot_distro.constants import IS_TERMUX, PROGRAM_NAME
 from chroot_distro.exceptions import ChrootDistroError
 from chroot_distro.message import crit_error, emit_json_error, msg, set_quiet
-from chroot_distro.parser import ALIAS_TO_CANONICAL, REQUIRED_ARGS, build_parser
+from chroot_distro.parser import ALIAS_TO_CANONICAL, REQUIRED_ARGS, build_parser, strip_global_separator
 
 # "module:function" refs; imported on dispatch (tests patch in callables).
 _COMMAND_HANDLERS: dict[str, str | Callable] = {
@@ -148,7 +148,7 @@ def main() -> None:
         command_help()
         sys.exit(0)
 
-    raw_args = sys.argv[1:]
+    raw_args = strip_global_separator(sys.argv[1:])
     if _dispatch_help(raw_args):
         sys.exit(0)
 

@@ -534,13 +534,12 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
         ],
     },
     "login": {
-        "usage": "login [OPTIONS] CONTAINER [-- COMMAND]",
+        "usage": "login [OPTIONS] CONTAINER [-- COMMAND ...]",
         "aliases": ("sh",),
         "summary": (
-            "Start interactive shell configured for a given account "
-            "configured in /etc/passwd. Alternatively user can specify "
-            "a custom command to use instead of default shell after "
-            "command line separator ('--')."
+            "Start the login shell configured for the guest account. "
+            "Put a command after '--' to run it instead. Bare command words "
+            "before '--' are passed first."
             "\n\n"
             "Since chroot-distro runs real chroot processes, root permissions "
             "are required to mount directories and perform chroot."

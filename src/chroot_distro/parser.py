@@ -15,20 +15,29 @@ help page instead of argparse's usage line. Adding a command means adding to bot
 tables, or its aliases resolve to nothing and its missing arguments are not caught.
 
 The `login` and `run` sub-parsers split off guest arguments at a literal `--`
-before argparse can treat them as host arguments. The JSON sub-parsers take
-only switches and positionals, so they can recognise a request for JSON before
-argparse reports an error. `-V` defers the `importlib.metadata` lookup to use time.
+before argparse can treat them as host arguments. Bare login command words
+parsed before that separator come first in the guest command. The JSON
+sub-parsers take only switches and positionals, so they can recognise a request
+for JSON before argparse reports an error. `-V` defers the
+`importlib.metadata` lookup to use time.
 """
 
 import argparse
 import sys
 from collections.abc import Iterable
-from typing import NoReturn, TypeVar, overload
+from typing import Any, NoReturn, TypeVar, cast, overload
 
 from chroot_distro.constants import PROGRAM_NAME
 from chroot_distro.message import crit_error, emit_json_error, escape_controls, msg
 
 _NamespaceT = TypeVar("_NamespaceT")
+
+
+def strip_global_separator(argv: list[str]) -> list[str]:
+    """Drop an initial `--` before the command token."""
+    if len(argv) > 1 and argv[0] == "--" and not argv[1].startswith("-"):
+        return argv[1:]
+    return argv
 
 
 class _LazyVersionAction(argparse.Action):
@@ -64,6 +73,8 @@ class _CdArgumentParser(argparse.ArgumentParser):
         self, args: Iterable[str] | None = None, namespace: _NamespaceT | None = None
     ) -> tuple[argparse.Namespace | _NamespaceT, list[str]]:
         argv = list(sys.argv[1:] if args is None else args)
+        if self._cd_command is None:
+            argv = strip_global_separator(argv)
         sep_idx = argv.index("--") if "--" in argv else len(argv)
         split_guest = self._cd_command in ("login", "run") and sep_idx < len(argv)
         before_separator = argv[:sep_idx]
@@ -77,9 +88,26 @@ class _CdArgumentParser(argparse.ArgumentParser):
         finally:
             self._json_requested = previous_json
         if split_guest:
-            dest = "login_cmd" if self._cd_command == "login" else "run_args"
-            setattr(parsed, dest, argv[sep_idx + 1 :])
+            guest_args = argv[sep_idx + 1 :]
+            parsed_args = cast(argparse.Namespace, parsed)
+            if self._cd_command == "login":
+                parsed_args.login_cmd = parsed_args.login_cmd + guest_args
+            else:
+                parsed_args.run_args = guest_args
         return parsed, unknown
+
+    # Python 3.10 removes attached `--` values as if they were positional separators.
+    def _get_values(self, action: argparse.Action, arg_strings: list[str]) -> Any:
+        if (
+            sys.version_info < (3, 11)
+            and action.option_strings
+            and action.nargs in (None, argparse.OPTIONAL)
+            and arg_strings == ["--"]
+        ):
+            value = self._get_value(action, arg_strings[0])
+            self._check_value(action, value)
+            return value
+        return super()._get_values(action, arg_strings)
 
     def error(self, message: str) -> NoReturn:
         from chroot_distro.commands.help import HELP_COMMANDS

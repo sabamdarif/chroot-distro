@@ -46,6 +46,7 @@ def test_main_help():
         (["he", "ls"], "chroot-distro list"),
         (["help", "help"], "chroot-distro help [COMMAND]"),
         (["h", "nf"], "chroot-distro info"),
+        (["--", "help", "info"], "chroot-distro info"),
     ],
 )
 def test_main_help_topic(arguments, usage, capsys):
@@ -352,6 +353,7 @@ def test_main_json_handler_import_error(capsys):
         (["ps", "--json", "--quiet", "-h"], "ps"),
         (["find", "--limit", "--help"], "search"),
         (["nf", "--usage"], "info"),
+        (["--", "sh", "box", "--user", "--help"], "login"),
     ],
 )
 def test_main_help_precedes_validation(arguments, command, capsys):
@@ -369,10 +371,11 @@ def test_main_help_precedes_validation(arguments, command, capsys):
     assert f"chroot-distro {command}" in captured.err
 
 
-def test_main_keeps_help_tokens_in_option_values_and_guest_arguments(capsys):
+@pytest.mark.parametrize("prefix", [[], ["--"]])
+def test_main_keeps_help_tokens_in_option_values_and_guest_arguments(prefix, capsys):
     handler = MagicMock()
     with (
-        patch("sys.argv", ["chroot-distro", "run", "box", "--entrypoint=--help", "--", "--help"]),
+        patch("sys.argv", ["chroot-distro", *prefix, "run", "box", "--entrypoint=--help", "--", "--help"]),
         patch("chroot_distro.cli._ensure_root_user"),
         patch.dict("chroot_distro.cli._COMMAND_HANDLERS", {"run": handler}),
     ):
@@ -383,6 +386,20 @@ def test_main_keeps_help_tokens_in_option_values_and_guest_arguments(capsys):
     assert args.entrypoint == "--help"
     assert args.run_args == ["--help"]
     assert capsys.readouterr() == ("", "")
+
+
+@pytest.mark.parametrize("suffix", [["--help"], ["--version"], ["--", "help"]])
+def test_main_rejects_options_after_leading_global_separator(suffix, capsys):
+    with (
+        patch("sys.argv", ["chroot-distro", "--", *suffix]),
+        patch("chroot_distro.cli._ensure_root_user") as ensure_root,
+        pytest.raises(SystemExit) as exc_info,
+    ):
+        main()
+
+    assert exc_info.value.code == 1
+    ensure_root.assert_not_called()
+    assert capsys.readouterr().out == ""
 
 
 def test_main_without_json_writes_no_document(capsys):
