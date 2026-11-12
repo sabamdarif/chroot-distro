@@ -5,25 +5,32 @@
 # Install:
 #   cp chroot-distro.fish ~/.config/fish/completions/chroot-distro.fish
 
-# ---------------------------------------------------------------------------
-# Helper: resolve installed containers directory
-# ---------------------------------------------------------------------------
+# Fish before 3.5 needs a procfs lookup for the effective UID.
 function __chroot_distro_containers
-    set -l dir
-    if __chroot_distro_is_termux
-        set -l prefix
-        if set -q TERMUX__PREFIX
-            set prefix $TERMUX__PREFIX
-        else
-            set prefix /data/data/com.termux/files/usr
-        end
-        set dir "$prefix/var/lib/chroot-distro/containers"
-    else if set -q XDG_DATA_HOME
-        set dir "$XDG_DATA_HOME/chroot-distro/containers"
-    else
-        set dir "$HOME/.local/share/chroot-distro/containers"
-    end
-	for d in "$dir"/*/
+	set -l base
+	if __chroot_distro_is_termux
+		set -l prefix
+		if set -q TERMUX__PREFIX
+			set prefix $TERMUX__PREFIX
+		else
+			set prefix /data/data/com.termux/files/usr
+		end
+		set base "$prefix/var/lib"
+	else if test -n "$XDG_DATA_HOME"
+		set base "$XDG_DATA_HOME"
+	else
+		set -l euid "$EUID"
+		if not set -q EUID; and test -r /proc/self/status; and string match -rq '^Uid:\s+\d+\s+0\s' </proc/self/status
+			set euid 0
+		end
+		if test "$euid" = 0; and set -q HOME
+			set base "$HOME/.local/share"
+		else
+			set base ~root/.local/share
+			string match -q -- '/*' "$base"; or return
+		end
+	end
+	for d in "$base/chroot-distro/containers"/*/
 		if test -d "$d/rootfs"
 			string replace -rf -- '(?s)\A.*/([A-Za-z0-9][A-Za-z0-9_.-]*)/\z' '$1' "$d"
 		end
@@ -425,8 +432,7 @@ complete -c chroot-distro -f -n '__chroot_distro_seen_command build' \
     -l export          -r -d 'Export the rootfs as a directory or tarball (repeatable)' \
     -a 'type=local,dest= type=tar,dest='
 complete -c chroot-distro -f -n '__chroot_distro_seen_command build' \
-    -l install-as      -r -d 'Install image as a local container after build' \
-    -a '(__chroot_distro_containers)'
+	-l install-as      -r -d 'Install image as a local container after build'
 complete -c chroot-distro -f -n '__chroot_distro_seen_command build' \
     -l secret          -r -d 'Expose a secret to RUN --mount=type=secret (repeatable)'
 complete -c chroot-distro -f -n '__chroot_distro_seen_command build' \

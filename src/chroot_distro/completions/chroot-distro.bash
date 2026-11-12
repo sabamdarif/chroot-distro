@@ -9,14 +9,19 @@
 #   cp chroot-distro.bash ~/.local/share/bash-completion/completions/chroot-distro
 
 _chroot_distro_complete_containers() {
-	local dir d name LC_ALL=C
-	if _chroot_distro_is_termux; then
-		dir="${TERMUX__PREFIX:-/data/data/com.termux/files/usr}/var/lib/chroot-distro/containers"
-	else
-		dir="${XDG_DATA_HOME:-${HOME}/.local/share}/chroot-distro/containers"
-	fi
+	local base d name LC_ALL=C
 	COMPREPLY=()
-	for d in "${dir}"/*/; do
+	if _chroot_distro_is_termux; then
+		base="${TERMUX__PREFIX:-/data/data/com.termux/files/usr}/var/lib"
+	elif [[ -n "${XDG_DATA_HOME:-}" ]]; then
+		base="${XDG_DATA_HOME}"
+	elif ((EUID == 0)) && [[ -v HOME ]]; then
+		base="${HOME}/.local/share"
+	else
+		base=~root/.local/share
+		[[ "${base}" == /* ]] || return
+	fi
+	for d in "${base}/chroot-distro/containers"/*/; do
 		[[ -d "${d}rootfs" ]] || continue
 		name=${d%/}
 		name=${name##*/}
@@ -268,6 +273,9 @@ _chroot_distro() {
 
 	# -----------------------------------------------------------------------
 	build)
+		if [[ "${cur}" == --install-as=* || ( "${prev}" == = && "${words[cword - 2]}" == --install-as ) ]]; then
+			return
+		fi
 		case "${prev}" in
 		-f | --file)
 			_filedir
@@ -287,15 +295,11 @@ _chroot_distro() {
 			_chroot_distro_compgen_words "linux/amd64 linux/arm64 linux/arm/v7 linux/386 linux/riscv64" "${cur}"
 			return
 			;;
-		--target)
+		--target | --install-as)
 			return
 			;;
 		-o | --output)
 			_filedir
-			return
-			;;
-		--install-as)
-			_chroot_distro_complete_containers "${cur}"
 			return
 			;;
 		--progress)

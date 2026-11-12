@@ -11,18 +11,25 @@
 #   cp _chroot-distro ~/.local/share/zsh/site-functions/_chroot-distro
 #   # Add to ~/.zshrc: fpath=(~/.local/share/zsh/site-functions $fpath)
 
-# ---------------------------------------------------------------------------
-# Helper: list installed containers
-# ---------------------------------------------------------------------------
+# A named directory or scalar can shadow the root account in Zsh.
 _chroot_distro_containers() {
-	local dir d name LC_ALL=C
+	local base d name LC_ALL=C
 	if _chroot_distro_is_termux; then
-		dir="${TERMUX__PREFIX:-/data/data/com.termux/files/usr}/var/lib/chroot-distro/containers"
+		base="${TERMUX__PREFIX:-/data/data/com.termux/files/usr}/var/lib"
+	elif [[ -n "${XDG_DATA_HOME:-}" ]]; then
+		base="${XDG_DATA_HOME}"
+	elif ((EUID == 0)) && [[ -v HOME ]]; then
+		base="${HOME}/.local/share"
 	else
-		dir="${XDG_DATA_HOME:-${HOME}/.local/share}/chroot-distro/containers"
+		base=$(
+			local root
+			builtin unhash -d root 2>/dev/null || true
+			builtin print -r -- ~root/.local/share
+		) 2>/dev/null || return
+		[[ "${base}" == /* ]] || return
 	fi
 	local -a containers
-	for d in "${dir}"/*/(N); do
+	for d in "${base}/chroot-distro/containers"/*/(N); do
 		[[ -d "${d}rootfs" ]] || continue
 		name=${d:t}
 		if [[ "${name}" == [A-Za-z0-9]* && "${name}" != *[^A-Za-z0-9_.-]* ]]; then
@@ -340,7 +347,7 @@ _chroot_distro() {
 				'--target[stop after this named build stage]:stage' \
 				'*'{-o,--output}'[write OCI tarball to FILE (repeatable)]:file:_files' \
 				'*--export[export the rootfs as a directory or tarball (repeatable)]:spec:(type=local,dest= type=tar,dest=)' \
-				'--install-as[install image as a local container after build]:name:_chroot_distro_containers' \
+				'--install-as=[install image as a local container after build]:name: ' \
 				'*--secret[expose a secret to RUN --mount=type=secret (repeatable)]:spec' \
 				'*--ssh[expose an SSH agent socket to RUN --mount=type=ssh (repeatable)]::spec' \
 				'*--cache-from[import cached steps (repeatable)]:spec:(type=local,src= type=registry,ref=)' \

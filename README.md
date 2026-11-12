@@ -425,7 +425,7 @@ Build an image from a Dockerfile, like `docker build` but without Docker. `PATH`
 | `--target STAGE`                  | Stop at a named stage of a multi-stage build.                                                                                                                                          |
 | `-o`, `--output FILE`             | Also save the image as an OCI tarball (`.oci.tar`, `.oci.tar.gz`, `.oci.tar.xz`). Can be given more than once.                                                                         |
 | `--export type=...,dest=...`      | Export the rootfs itself: `type=local,dest=DIR` as a directory, `type=tar,dest=FILE` as a plain tarball. One platform, your own CPU. More than once.                                   |
-| `--install-as NAME`               | Install the built image as a container right after the build.                                                                                                                          |
+| `--install-as NAME`               | Install the built image under a new container name after the build.                                                                                                                      |
 | `--secret id=NAME[,src=PATH]`     | Give a secret to `RUN --mount=type=secret` steps. Without `src=`, the value comes from the environment variable `NAME`. Secrets never end up in the image.                             |
 | `--ssh ID[=SOCK]`                 | Give an SSH agent socket to `RUN --mount=type=ssh` steps. Default socket is `$SSH_AUTH_SOCK`.                                                                                          |
 | `--no-cache`                      | Rebuild every step from scratch instead of reusing cached steps.                                                                                                                       |
@@ -641,6 +641,11 @@ folders are usually under `/root/`. Set `XDG_DATA_HOME` and `XDG_CACHE_HOME`
 to use other base directories. If a previous sudo invocation used your home
 directory, point those variables to the previous bases, typically your
 `.local/share` and `.cache`, to reopen that store.
+
+Shell completion reads container names with your shell's permissions. On
+regular Linux, an unelevated shell uses the root account's data directory
+unless you set `XDG_DATA_HOME` to another base. If your shell cannot read the
+store, run `chroot-distro list --quiet` to see the installed names.
 
 Inside the data folder:
 
