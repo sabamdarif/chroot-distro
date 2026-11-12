@@ -72,7 +72,13 @@ from chroot_distro.helpers.docker.transport import (
     opener,
     registry_base_url,
 )
-from chroot_distro.helpers.download import _LiveResponses, retry_http
+from chroot_distro.helpers.download import (
+    MAX_METADATA_BYTES,
+    _LiveResponses,
+    declared_length,
+    require_complete_body,
+    retry_http,
+)
 from chroot_distro.message import log_error, log_info
 from chroot_distro.progress import AggregateByteProgress, fmt_size
 
@@ -218,7 +224,15 @@ def _get_manifest(repo: str, ref: str, token: str, base: str, insecure: bool = F
 
     def _attempt():
         with opener(insecure).open(req) as resp:
-            return resp.read(), resp.headers.get("Content-Type", "")
+            body = resp.read(MAX_METADATA_BYTES + 1)
+            declared = declared_length(resp)
+            content_type = resp.headers.get("Content-Type", "")
+        if len(body) > MAX_METADATA_BYTES:
+            raise RuntimeError(f"Manifest for '{repo}' is larger than {MAX_METADATA_BYTES} bytes; refusing to read it.")
+        # A body cut short of its Content-Length raises nothing on its own,
+        # and a manifest fetched by tag has no digest to catch it either.
+        require_complete_body(len(body), declared, f"Manifest for '{repo}'")
+        return body, content_type
 
     body, ct = typing.cast(tuple[bytes, str], retry_http(_attempt, what=f"Fetching manifest {ref}"))
     data: dict[str, typing.Any] = json.loads(body)
@@ -303,7 +317,16 @@ def _fetch_config_blob(
 
         def _attempt():
             with opener(insecure).open(req) as resp:
-                return resp.read()
+                data = resp.read(MAX_METADATA_BYTES + 1)
+                declared = declared_length(resp)
+            if len(data) > MAX_METADATA_BYTES:
+                raise RuntimeError(
+                    f"Image config blob is larger than {MAX_METADATA_BYTES} bytes; refusing to read it."
+                )
+            # Before any digest check: a connection that ended early is
+            # retried as what it is, not reported as the wrong bytes.
+            require_complete_body(len(data), declared, "Image config blob")
+            return data
 
         result: dict[str, typing.Any] = json.loads(
             typing.cast(bytes, retry_http(_attempt, what="Fetching image config"))

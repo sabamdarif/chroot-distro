@@ -39,6 +39,7 @@ the interrupt.
 import contextlib
 import functools
 import hashlib
+import http.client
 import json
 import logging
 import os
@@ -77,16 +78,67 @@ from chroot_distro.rate_limit import TokenBucket
 log = logging.getLogger(__name__)
 
 __all__ = (
+    "MAX_METADATA_BYTES",
+    "NETWORK_ERRORS",
+    "IncompleteResponse",
     "_LiveResponses",
     "certificate_error_msg",
+    "declared_length",
     "download_file",
     "insecure_ssl_context",
     "is_cert_verification_error",
     "is_plaintext_http_tls_error",
     "is_retryable_http_error",
+    "require_complete_body",
     "retry_http",
     "sha256_file",
 )
+
+
+# What a failed HTTP request raises, in one name. urllib wraps what it can
+# into URLError (itself an OSError), and a socket failure is an OSError
+# outright, but http.client raises its own family for a response that is
+# malformed or cut short: a chunked body whose peer disappears mid-chunk
+# raises IncompleteRead, which is not an OSError.
+NETWORK_ERRORS = (urllib.error.URLError, OSError, http.client.HTTPException)
+
+# How large a metadata response may be before it is refused. Manifests,
+# manifest indexes, image configs, token grants and search pages are all
+# small documents and none of them streams.
+MAX_METADATA_BYTES = 16 * 1024 * 1024
+
+
+class IncompleteResponse(http.client.HTTPException):
+    """A response body that ended before the length it declared.
+
+    Raised by require_complete_body(). An HTTPException so it travels with
+    the rest of them, caught by every net and retried by retry_http.
+    """
+
+
+def declared_length(resp) -> int:
+    """The body length *resp* declares, or 0 when it declares none.
+
+    A header is a string the server chose, so an unparsable length answers
+    the same way http.client itself treats it: as absent.
+    """
+    try:
+        value = int(resp.headers.get("Content-Length", 0))
+    except (TypeError, ValueError):
+        return 0
+    return value if value > 0 else 0
+
+
+def require_complete_body(received: int, declared: int, what: str = "") -> None:
+    """Raise IncompleteResponse when less arrived than *declared*.
+
+    A cut Content-Length body raises nothing on its own, so the short bytes
+    were simply what the caller got. Callers pass the length they already
+    read; one that deliberately reads part of a body must not call this.
+    """
+    if declared and received < declared:
+        prefix = f"{what}: " if what else ""
+        raise IncompleteResponse(f"{prefix}the response ended after {received} of {declared} bytes.")
 
 
 def insecure_ssl_context() -> ssl.SSLContext:
@@ -169,8 +221,6 @@ def is_retryable_http_error(exc: BaseException) -> bool:
     (5xx server errors, connection resets, timeouts, DNS failures) is treated
     as transient and retried.
     """
-    import http.client
-
     if isinstance(exc, urllib.error.HTTPError):
         return not (400 <= exc.code < 500 and exc.code not in (408, 429))
     if isinstance(exc, urllib.error.URLError):
@@ -210,7 +260,7 @@ def retry_http(
             return operation()
         except KeyboardInterrupt:
             raise
-        except (urllib.error.URLError, OSError) as exc:
+        except NETWORK_ERRORS as exc:
             if abort_event is not None and abort_event.is_set():
                 raise KeyboardInterrupt from exc
             if not is_retryable_http_error(exc) or attempt >= max_retries - 1:
@@ -857,6 +907,7 @@ def _download_single_loop(
                         last_speed_bytes = downloaded
                         last_speed_time = now
                     draw_bytes_bar(downloaded, total, noun="downloaded", speed=speed)
+                require_complete_body(downloaded, total, url)
                 fh.flush()
                 os.fsync(fh.fileno())
             clear_bar()
