@@ -711,9 +711,10 @@ def test_ensure_rootfs_exec_skips_when_suid_and_exec_present(tmp_path, monkeypat
     assert calls == []
 
 
-def test_ensure_rootfs_exec_binds_rootfs_and_release_removes_it(tmp_path, monkeypatch):
+@pytest.mark.parametrize("termux", [False, True])
+def test_ensure_rootfs_exec_binds_rootfs_and_release_removes_it(tmp_path, monkeypatch, termux):
     from chroot_distro.helpers import mount_manager
-    from chroot_distro.syscalls.mount import MS_BIND, MS_NOEXEC, MS_NOSUID, MS_RELATIME, MS_REMOUNT
+    from chroot_distro.syscalls.mount import MS_BIND, MS_NOEXEC, MS_NOSUID, MS_RELATIME, MS_REMOUNT, MS_SLAVE
 
     rootfs = tmp_path / "containers" / "c" / "rootfs"
     rootfs.mkdir(parents=True)
@@ -734,6 +735,8 @@ def test_ensure_rootfs_exec_binds_rootfs_and_release_removes_it(tmp_path, monkey
 
     monkeypatch.setattr(mount_manager, "is_mounted", lambda _target, holder=None: mounted["value"])
     monkeypatch.setattr(mount_manager, "native_mount", fake_native_mount)
+    monkeypatch.setattr(mount_manager, "IS_TERMUX", termux)
+    monkeypatch.setattr(mount_manager, "set_propagation", lambda _target, flags: calls.append(flags))
     monkeypatch.setattr(mount_manager.mount_targets, "open_rootfs_fd", fake_open_rootfs)
     monkeypatch.setattr(
         mount_manager,
@@ -746,10 +749,11 @@ def test_ensure_rootfs_exec_binds_rootfs_and_release_removes_it(tmp_path, monkey
     assert marker.exists()
     assert len(opened) == 2, "the remount must re-resolve the rootfs after the bind"
     assert calls[0] == MS_BIND
-    assert calls[1] & MS_REMOUNT
-    assert not calls[1] & MS_NOSUID
-    assert not calls[1] & MS_NOEXEC
-    assert calls[1] & MS_RELATIME
+    assert calls[1:-1] == ([MS_SLAVE] if termux else [])
+    assert calls[-1] & MS_REMOUNT
+    assert not calls[-1] & MS_NOSUID
+    assert not calls[-1] & MS_NOEXEC
+    assert calls[-1] & MS_RELATIME
 
     unmounted = []
 

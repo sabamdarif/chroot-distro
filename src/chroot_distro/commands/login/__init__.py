@@ -1208,16 +1208,14 @@ def _command_login_inner_once(container_name: str, args) -> None:
 
             with contextlib.suppress(Exception):
                 mount_manager.unmount_all(rootfs, holder=holder)
-            # Android's /data is nosuid; bind the host-mode rootfs onto itself
-            # with suid/exec. A namespace holder cloned its mounts and locks them.
-            if holder is None:
-                mount_manager.ensure_rootfs_exec(rootfs)
             # best_effort_bind_sources() entries warn+skip on failure;
             # anything else aborts. Binds under /dev (GPU nodes, binderfs)
             # wait for apply_special_mounts: the fresh tmpfs /dev it mounts
             # would shadow them.
             non_dev_binds, dev_binds = isolation.split_dev_binds(resolved_binds, rootfs)
             try:
+                if holder is None:
+                    mount_manager.ensure_rootfs_exec(rootfs)
                 isolation.apply_bind_mounts(
                     rootfs,
                     non_dev_binds,

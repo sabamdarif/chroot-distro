@@ -179,6 +179,8 @@ Set `CD_USE_NS=1` for namespace isolation while keeping the normal shared folder
 
 Every mode mounts fresh pseudo-filesystems instead of binding the host's: a minimal `/dev`, fresh `/dev/pts`, `/dev/shm` and `/proc`, and a read-only `/sys`, following Docker's defaults (`/proc/kcore` and `/proc/keys` masked, `/proc/sys` read-only). When the kernel or SELinux refuses one, the host tree is bound with a warning.
 
+Single-instance devpts kernels share the host's `/dev/pts` with the guest. When chroot-distro supplies the guest's `/dev`, it creates a legacy `/dev/ptmx` device so guest programs can allocate pseudoterminals.
+
 On Termux, Android mounts `/data` with `nosuid`, so a default login binds the container's rootfs onto itself with `suid` and `exec` enabled, letting setuid binaries like `sudo` work without touching Android's mount flags. `--shared-tmp` binds `$PREFIX/tmp` as it is; make it world-writable yourself if a non-root guest user must write there.
 
 A second `login` to a busy container joins the running session and adds whatever extra `--bind`/`--shared-*`/`--env` it asks for, so no `unmount` is needed to bring a folder in. Conflicting `--bind` destinations are ignored with a warning; `--isolated` and `CD_USE_NS` cannot be turned on for a container that is already running.

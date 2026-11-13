@@ -65,6 +65,7 @@ import sys
 from functools import partial
 from typing import TYPE_CHECKING
 
+from chroot_distro.constants import IS_TERMUX
 from chroot_distro.dirfd import _chmod_fd
 from chroot_distro.exceptions import MountError, MountRefusedError
 from chroot_distro.helpers import mount_targets
@@ -288,9 +289,8 @@ def create_dev_nodes(
 
     *nodes* is an iterable of ``(name, major, minor, mode)`` tuples. Used for
     the fresh tmpfs ``/dev`` every mode mounts, where the host ``/dev`` is
-    intentionally not bind-mounted. ``/dev/ptmx``, ``/dev/console`` and the
-    ``std*`` symlinks are provided by the devpts overmount and the login pty
-    wrapper, so they are not created here.
+    intentionally not bind-mounted. On single-instance kernels the caller
+    also requests the legacy ``/dev/ptmx`` device node.
 
     Every path is addressed through the descriptor walk in
     :mod:`chroot_distro.helpers.mount_targets`, so a symlink the image planted
@@ -409,6 +409,20 @@ def make_rslave(target: str, holder: NamespaceHolder | None = None) -> bool:
         return True
 
 
+def stop_guest_bind_propagation(rootfs: str, target: str) -> None:
+    """Make a bind of a rootfs ancestor receive mount events only."""
+    parts = mount_targets.guest_parts(rootfs, target)
+    fd = mount_targets.resolve_mount_target(rootfs, parts, want="dir", create=False)
+    if fd is None:
+        raise MountError(f"Guest bind target disappeared: {target}")
+    try:
+        set_propagation(fd_path(fd), MS_REC | MS_SLAVE)
+    except OSError as exc:
+        raise MountError(f"Could not stop mount propagation from {target}: {exc}") from exc
+    finally:
+        os.close(fd)
+
+
 # Targets that routinely EBUSY on logout (open ptys/segments, nested
 # submounts); the lazy-detach fallback handles them, so log at debug
 # instead of warning.
@@ -498,8 +512,10 @@ def ensure_rootfs_exec(rootfs: str) -> bool:
     Android mounts /data nosuid (some hosts add noexec), so a guest's setuid
     binaries and executables on the rootfs would be refused. Remounting the
     host filesystem would change flags for every mount of that superblock, so
-    the rootfs gets a bind of itself with only those two flags cleared. A marker
-    under the container's directory records it, and `unmount_all` removes both.
+    the rootfs gets a bind of itself with only those two flags cleared. On
+    Android the bind is made a slave before mounting anything beneath it,
+    since /data aliases can share its peer group. A marker under the
+    container's directory records it, and `unmount_all` removes both.
     """
     rootfs_abs = os.path.normpath(os.path.realpath(rootfs))
     if is_mounted(rootfs_abs):
@@ -539,14 +555,21 @@ def ensure_rootfs_exec(rootfs: str) -> bool:
     try:
         if remount_fd < 0:
             raise OSError("cannot reopen the rootfs after the self-bind")
+        if IS_TERMUX:
+            try:
+                set_propagation(fd_path(remount_fd), MS_SLAVE)
+            except OSError as exc:
+                raise MountError(f"Could not stop mount propagation from {rootfs_abs}: {exc}") from exc
         native_mount("", fd_path(remount_fd), None, MS_REMOUNT | MS_BIND | (flags & ~denied), None)
-    except OSError as exc:
+    except (OSError, MountError) as exc:
         if is_mounted(rootfs_abs):
             with contextlib.suppress(OSError):
                 native_umount(rootfs_abs)
         if not is_mounted(rootfs_abs):
             with contextlib.suppress(OSError):
                 os.unlink(marker)
+        if isinstance(exc, MountError):
+            raise
         log.debug("Could not enable suid/exec on the rootfs %s: %s", rootfs_abs, exc)
         return False
     finally:
@@ -814,22 +837,15 @@ def apply_special_mount(rootfs: str, sm, holder: NamespaceHolder | None = None, 
     # superblock, i.e. the host's /dev/pts, until reboot. Bind it instead.
     if sm.fstype == "devpts" and _devpts_single_instance():
         target = os.path.join(rootfs, *parts)
-        if is_mounted(target, holder=holder):
-            return True
-        if holder is None:
-            try:
-                mount_targets.bind_mount_fd("/dev/pts", rootfs, parts, want="dir")
-                return True
-            except (OSError, MountError) as e:
-                msg = f"binding host /dev/pts on {target} failed: {e}"
-                if optional:
-                    log.debug(msg)
-                    return False
-                raise RuntimeError(msg) from e
-        # No host /dev/pts to bind inside the namespace; skip rather than
-        # fail the login.
-        warn("Single-instance devpts kernel: container gets no private /dev/pts.")
-        return False
+        try:
+            safe_mount("/dev/pts", target, rootfs=rootfs, holder=holder)
+        except MountError as exc:
+            msg = f"binding host /dev/pts on {target} failed: {exc}"
+            if optional:
+                log.debug(msg)
+                return False
+            raise RuntimeError(msg) from exc
+        return True
 
     if holder is not None and is_mounted(os.path.join(rootfs, *parts), holder=holder):
         # An existing mount in the holder's namespace is this program's own

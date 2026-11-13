@@ -84,6 +84,26 @@ def test_bind_is_recursive_userns_pseudo():
     assert isolation.bind_is_recursive("/sys", "/rootfs/sys", "/rootfs/run", use_userns=False) is False
 
 
+def test_termux_parent_bind_stops_propagation_before_child_mounts(tmp_path, monkeypatch):
+    data = tmp_path / "data"
+    rootfs = data / "rootfs"
+    guest_data = rootfs / "data"
+    guest_data.mkdir(parents=True)
+    sources = [(str(data), str(guest_data)), ("/system", str(guest_data / "system"))]
+    calls = []
+    monkeypatch.setattr(isolation, "IS_TERMUX", True)
+    monkeypatch.setattr(isolation.mount_manager, "safe_mount", lambda src, dst, **kw: calls.append(("bind", dst)))
+    monkeypatch.setattr(isolation.mount_manager, "set_propagation", lambda target, flags: calls.append(("slave", flags)))
+
+    isolation.apply_bind_mounts(str(rootfs), sources)
+
+    assert calls == [
+        ("bind", str(guest_data)),
+        ("slave", isolation.mount_manager.MS_REC | isolation.mount_manager.MS_SLAVE),
+        ("bind", str(guest_data / "system")),
+    ]
+
+
 # ── split_dev_binds ────────────────────────────────────────────────────────────
 def test_split_dev_binds_routes_under_dev(tmp_path):
     rootfs = tmp_path / "rootfs"
