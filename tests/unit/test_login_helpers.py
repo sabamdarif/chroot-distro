@@ -1,7 +1,9 @@
+import errno
 import io
 import json
 import os
 import signal
+from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -21,6 +23,7 @@ from chroot_distro.commands.login.env import (
     resolve_term,
 )
 from chroot_distro.message import StdoutError
+from chroot_distro.syscalls.chroot import PtyOutputError
 
 
 @pytest.fixture
@@ -130,6 +133,60 @@ def test_command_display_preserves_live_session(command_display, monkeypatch, ca
     assert "nsenter" in capsys.readouterr().out
     login.mount_manager.unmount_all.assert_not_called()
     login.namespace.release_holder.assert_not_called()
+
+
+@pytest.mark.parametrize("command", ["login", "run"])
+@pytest.mark.parametrize("error", [errno.EPIPE, errno.EBADF, errno.ENOSPC])
+def test_cli_reports_pty_stdout_failure_after_session_teardown(command_display, monkeypatch, capsys, command, error):
+    from chroot_distro import cli, paths
+
+    login, _, data = command_display
+    manifest = paths.container_manifest("demo")
+    with open(manifest, "w") as fh:
+        json.dump({"image_config": {"config": {"Cmd": ["/bin/sh"]}}}, fh)
+    handle = Mock()
+    release_lock = Mock()
+
+    @contextmanager
+    def container_lock(*args, **kwargs):
+        try:
+            yield
+        finally:
+            assert (data / "sessions").read_text() == "0"
+            assert not (data / "mount_opts.json").exists()
+            handle.close.assert_called_once_with()
+            release_lock()
+
+    def redirect_stdout(src, dst):
+        release_lock.assert_called_once_with()
+        assert dst == 1
+
+    redirect = Mock(side_effect=redirect_stdout)
+    monkeypatch.setattr(cli, "os", SimpleNamespace(devnull=os.devnull, dup2=redirect))
+    monkeypatch.setattr("sys.__stdout__", None if error == errno.EBADF else Mock(fileno=Mock(return_value=1)))
+    monkeypatch.setattr(cli, "_ensure_root_user", Mock())
+    monkeypatch.setattr(login, "ContainerLock", container_lock)
+    login._reap_session_processes.return_value = []
+    monkeypatch.setattr(login, "register_session", Mock(return_value=handle))
+    monkeypatch.setattr(login, "chroot_and_run", Mock(side_effect=PtyOutputError(error, os.strerror(error))))
+    arguments = ["chroot-distro", command, "demo"]
+    if command == "login":
+        arguments.extend(["--", "/bin/sh"])
+    monkeypatch.setattr("sys.argv", arguments)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main()
+    assert exc.value.code == 1
+    release_lock.assert_called_once_with()
+    login.chroot_and_run.assert_called_once()
+    assert login.mount_manager.unmount_all.call_count == 2
+    stderr = capsys.readouterr().err
+    if error == errno.ENOSPC:
+        assert "could not forward guest output to stdout" in stderr
+        assert os.strerror(error) in stderr
+    else:
+        assert stderr == ""
+    assert redirect.call_count == (1 if error == errno.EPIPE else 0)
 
 
 def test_safe_hostname_valid_tokens():

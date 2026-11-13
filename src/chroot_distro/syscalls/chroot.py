@@ -9,6 +9,9 @@ its captured output, leaving the parent free to decrement the session count and
 tear the mounts down.
 `spawn_detached` forks a child meant to outlive this process.
 
+The foreground PTY relay writes guest bytes to fd 1. It restores the terminal,
+closes the master and reaps the child before reporting a stdout failure.
+
 The order of the identity change is coreutils' own and is not negotiable:
 chroot, chdir, then setgroups before setgid before setuid. Each of those can only
 be given up once, so a uid dropped early leaves the groups behind for good. A
@@ -47,6 +50,7 @@ from __future__ import annotations
 
 import contextlib
 import ctypes
+import errno
 import fcntl
 import functools
 import logging
@@ -512,6 +516,10 @@ def _signal_child(child_pid: int, signum: int) -> None:
             os.kill(child_pid, signum)
 
 
+class PtyOutputError(OSError):
+    """Writing guest PTY output to stdout failed."""
+
+
 def _pty_relay(
     master_fd: int,
     child_pid: int,
@@ -583,7 +591,7 @@ def _pty_relay(
         pass
 
     try:
-        exit_code = _pty_copy_loop(master_fd, child_pid, escalation=escalation)
+        exit_code, output_error = _pty_copy_loop(master_fd, child_pid, escalation=escalation)
     finally:
         if old_attrs is not None:
             with contextlib.suppress(termios.error, OSError):
@@ -596,13 +604,12 @@ def _pty_relay(
             with contextlib.suppress(OSError, ValueError):
                 signal.signal(s, h)
 
-    if exit_code is not None:
-        return exit_code
-
-    try:
-        return _wait_for_child(child_pid, escalation=escalation)
-    except ChildProcessError:
-        return 0
+    if exit_code is None:
+        with contextlib.suppress(ChildProcessError):
+            exit_code = _wait_for_child(child_pid, escalation=escalation)
+    if output_error is not None:
+        raise PtyOutputError(output_error.errno, output_error.strerror) from output_error
+    return 0 if exit_code is None else exit_code
 
 
 def _pty_copy_loop(
@@ -610,10 +617,11 @@ def _pty_copy_loop(
     child_pid: int,
     *,
     escalation: _StuckSignalEscalation | None = None,
-) -> int | None:
+) -> tuple[int | None, OSError | None]:
     """Bidirectional copy between stdin/stdout and a PTY master fd.
 
-    Return the exit code if this loop reaps the child, or None otherwise.
+    Return any child exit code collected here and any stdout write error.
+    A missing original stdout can leave fd 1 available for another file.
 
     Exits when the master reaches EOF *or* when the child has exited and its
     pty has gone quiet. The child check matters because a GUI session
@@ -675,10 +683,17 @@ def _pty_copy_loop(
             if not data:
                 break
             try:
-                os.write(1, data)
-            except OSError:
-                break
-    return exit_code
+                if sys.__stdout__ is None:
+                    raise OSError(errno.EBADF, "stdout is unavailable")
+                remaining = memoryview(data)
+                while remaining:
+                    written = os.write(1, remaining)
+                    if written == 0:
+                        raise OSError(errno.EIO, "stdout write made no progress")
+                    remaining = remaining[written:]
+            except OSError as exc:
+                return exit_code, exc
+    return exit_code, None
 
 
 def _wait_for_child_with_signals(

@@ -156,6 +156,10 @@ Aliases: sh
 Open a shell inside a container. Put a command after `--` to run it instead.
 Bare command words before `--` are passed first. Put guest options after `--`.
 
+When stdin is a terminal, `login` forwards guest terminal output to stdout.
+If forwarding fails, `login` closes the guest PTY and exits with status 1
+after the guest wait and session cleanup.
+
 ```sh
 chroot-distro login ubuntu
 chroot-distro login ubuntu -- uname -a
@@ -196,6 +200,8 @@ chroot-distro run [OPTIONS] CONTAINER [-- ARG ...]
 Run the start command (Entrypoint/Cmd) defined by the container's image, like `docker run`. Mainly for server images (nginx, nextcloud, databases). Only works for containers installed from Docker/OCI images.
 
 `run` is the only way into an image that ships no shell (`scratch`, distroless): `login` refuses those and points here.
+
+Foreground `run` uses the same [terminal output handling as `login`](#login).
 
 `run` accepts all `login` options above, plus:
 

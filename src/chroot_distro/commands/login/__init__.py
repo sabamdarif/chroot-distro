@@ -51,11 +51,13 @@ foreground holder that execs the command itself (entering one would hang the
 session forever), `enter_and_run_with_pty` into a parked holder, and
 `spawn_detached` for `--detach`.
 
+Foreground PTY output failures reach dispatch after session teardown and lock release.
 Command display uses a parked holder. It balances the temporary session
 under the setup lock before writing the command to stdout.
 """
 
 import contextlib
+import errno
 import logging
 import os
 import shlex
@@ -114,6 +116,7 @@ from chroot_distro.constants import (
     TERMUX_HOME,
     TERMUX_PREFIX,
 )
+from chroot_distro.exceptions import ChrootDistroError
 from chroot_distro.helpers import isolation
 from chroot_distro.helpers.android import termux_home_owner_ids
 from chroot_distro.helpers.display import (
@@ -136,10 +139,10 @@ from chroot_distro.helpers.x11 import (
     x11_auth_bind_path,
 )
 from chroot_distro.locking import ContainerLock
-from chroot_distro.message import crit_error, stdout_output, warn
+from chroot_distro.message import StdoutError, crit_error, stdout_output, warn
 from chroot_distro.names import require_valid_name
 from chroot_distro.paths import container_dir, container_log_path, container_rootfs
-from chroot_distro.syscalls.chroot import chroot_and_run, enter_chroot, spawn_detached
+from chroot_distro.syscalls.chroot import PtyOutputError, chroot_and_run, enter_chroot, spawn_detached
 from chroot_distro.syscalls.nsenter import enter_and_run_with_pty
 from chroot_distro.syscalls.unshare import ForegroundExec
 
@@ -244,9 +247,14 @@ def command_login(args) -> None:
     container_name = args.container_name
     require_valid_name(container_name)
 
-    # Non-exclusive lock: concurrent login sessions are allowed.
-    with ContainerLock(container_name, exclusive=False, command="login"):
-        _command_login_inner(container_name, args)
+    try:
+        with ContainerLock(container_name, exclusive=False, command="login"):
+            _command_login_inner(container_name, args)
+    except PtyOutputError as exc:
+        stream = sys.__stdout__
+        if exc.errno == errno.EPIPE or (exc.errno == errno.EBADF and stream is None):
+            raise StdoutError(stream) from exc
+        raise ChrootDistroError(f"could not forward guest output to stdout: {exc}") from exc
 
 
 def _detect_dist_type(rootfs: str) -> str:
