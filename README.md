@@ -104,6 +104,10 @@ Create a container. `IMAGE` can be:
 References follow Docker's own grammar, so `localhost:5000/foo` names a registry on
 this machine. Pinning an image by digest (`debian@sha256:...`) is not supported yet.
 
+OCI archives must provide matching sizes and SHA-256 digests for the manifests,
+configs and layers used during install. A verified cached layer can supply a
+layer missing from the archive.
+
 | Option                      | Description                                                                                                                                                              |
 | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `-n`, `--name NAME`         | Give the container a custom name. Default is the image name. Needed to install the same image twice. `--override-alias` is an accepted alias.                            |
