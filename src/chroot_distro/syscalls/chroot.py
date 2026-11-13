@@ -583,7 +583,7 @@ def _pty_relay(
         pass
 
     try:
-        _pty_copy_loop(master_fd, child_pid, escalation=escalation)
+        exit_code = _pty_copy_loop(master_fd, child_pid, escalation=escalation)
     finally:
         if old_attrs is not None:
             with contextlib.suppress(termios.error, OSError):
@@ -596,8 +596,9 @@ def _pty_relay(
             with contextlib.suppress(OSError, ValueError):
                 signal.signal(s, h)
 
-    # The copy loop may already have reaped the child when it detected the
-    # exit; a ChildProcessError here means exactly that, not a missing child.
+    if exit_code is not None:
+        return exit_code
+
     try:
         return _wait_for_child(child_pid, escalation=escalation)
     except ChildProcessError:
@@ -609,8 +610,10 @@ def _pty_copy_loop(
     child_pid: int,
     *,
     escalation: _StuckSignalEscalation | None = None,
-) -> None:
+) -> int | None:
     """Bidirectional copy between stdin/stdout and a PTY master fd.
+
+    Return the exit code if this loop reaps the child, or None otherwise.
 
     Exits when the master reaches EOF *or* when the child has exited and its
     pty has gone quiet. The child check matters because a GUI session
@@ -626,6 +629,7 @@ def _pty_copy_loop(
     """
     fds = [0, master_fd]
     child_dead = False
+    exit_code = None
     while fds:
         try:
             rfds, _, _ = select.select(fds, [], [], _COPY_POLL_SECS)
@@ -633,9 +637,10 @@ def _pty_copy_loop(
             break
         if not child_dead:
             try:
-                wpid, _ = os.waitpid(child_pid, os.WNOHANG)
+                wpid, status = os.waitpid(child_pid, os.WNOHANG)
                 if wpid == child_pid:
                     child_dead = True
+                    exit_code = _decode_status(status)
                     # A dead child reads nothing more; keep relaying only the
                     # pty output that is still draining.
                     if 0 in fds:
@@ -650,7 +655,7 @@ def _pty_copy_loop(
             # Child is dead and the pty produced nothing this window: the
             # writers left are orphans, not the session. Stop relaying.
             break
-        if 0 in rfds:
+        if 0 in fds and 0 in rfds:
             try:
                 data = os.read(0, 4096)
             except OSError:
@@ -673,6 +678,7 @@ def _pty_copy_loop(
                 os.write(1, data)
             except OSError:
                 break
+    return exit_code
 
 
 def _wait_for_child_with_signals(

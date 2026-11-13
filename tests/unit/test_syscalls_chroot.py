@@ -4,9 +4,11 @@ import os
 import signal
 import struct
 import subprocess
+import termios
 import threading
 import time
-from unittest.mock import MagicMock, patch
+import tty
+from unittest.mock import MagicMock, Mock, call, patch
 
 import pytest
 
@@ -314,6 +316,52 @@ def test_pty_copy_loop_relays_master_output_while_child_alive(monkeypatch):
         os.close(master)
         os.close(slave)
     assert written == [(1, b"hello")]
+
+
+@pytest.mark.parametrize("status, expected", [(23 << 8, 23), (0, 0), (signal.SIGTERM, 143), (None, 0)])
+def test_pty_relay_drains_output_after_child_exit(monkeypatch, status, expected):
+    master_fd, slave_fd = os.openpty()
+    attrs = object()
+    signals = (signal.SIGWINCH, signal.SIGTERM, signal.SIGHUP, signal.SIGINT, signal.SIGTSTP)
+    handlers = {sig: signal.getsignal(sig) for sig in signals}
+    waitpid = Mock(return_value=(4242, status), side_effect=ChildProcessError if status is None else None)
+    read = Mock(return_value=b"buffered output")
+    write = Mock(return_value=len(b"buffered output"))
+    restore = Mock()
+    monkeypatch.setattr(chroot.select, "select", Mock(side_effect=[([0, master_fd], [], []), ([], [], [])]))
+    monkeypatch.setattr(os, "waitpid", waitpid)
+    monkeypatch.setattr(os, "read", read)
+    monkeypatch.setattr(os, "write", write)
+    monkeypatch.setattr(termios, "tcgetattr", Mock(return_value=attrs))
+    monkeypatch.setattr(termios, "tcsetattr", restore)
+    monkeypatch.setattr(tty, "setraw", Mock())
+
+    try:
+        assert chroot._pty_relay(master_fd, 4242) == expected
+        read.assert_called_once_with(master_fd, 4096)
+        write.assert_called_once_with(1, b"buffered output")
+        expected_waits = [call(4242, os.WNOHANG)]
+        if status is None:
+            expected_waits.append(call(4242, os.WNOHANG))
+        assert waitpid.call_args_list == expected_waits
+        restore.assert_called_once_with(0, termios.TCSAFLUSH, attrs)
+        assert {sig: signal.getsignal(sig) for sig in signals} == handlers
+        with pytest.raises(OSError) as exc:
+            os.fstat(master_fd)
+        assert exc.value.errno == errno.EBADF
+    finally:
+        os.close(slave_fd)
+
+
+def test_pty_relay_waits_when_master_closes_before_child_is_reaped(monkeypatch):
+    master_fd, slave_fd = os.openpty()
+    os.close(slave_fd)
+    waitpid = Mock(side_effect=[(0, 0), (4242, 42 << 8)])
+    monkeypatch.setattr(chroot.select, "select", Mock(return_value=([master_fd], [], [])))
+    monkeypatch.setattr(os, "waitpid", waitpid)
+
+    assert chroot._pty_relay(master_fd, 4242) == 42
+    assert waitpid.call_args_list == [call(4242, os.WNOHANG), call(4242, os.WNOHANG)]
 
 
 # ── _close_fds_above: the pre-exec descriptor sweep ─────────────────────────────
