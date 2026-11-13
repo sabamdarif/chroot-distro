@@ -17,8 +17,9 @@ so no permission widening of the live rootfs is needed before the walk.
 
 Compression comes from the output extension unless `--compression` names one, and
 `.tar.lz`/`.tar.lz4` are refused rather than quietly written as plain tar. With no
-`--output` the archive is streamed (`w|`) to stdout, which is refused on a tty. An
-entry that cannot be read fails the whole backup rather than leaving a gap in the
+`--output` the archive is streamed (`w|`) to stdout, which is refused on a tty.
+The command reports success only after the archive closes and stdout flushes.
+An entry that cannot be read fails the whole backup rather than leaving a gap in the
 archive, and a half-written output file is removed on error and on Ctrl-C, so a
 failed backup does not sit there looking like an archive.
 """
@@ -27,6 +28,7 @@ import contextlib
 import os
 import stat
 import sys
+from typing import TextIO
 
 if sys.version_info >= (3, 14):
     import tarfile
@@ -36,7 +38,7 @@ else:
 import chroot_distro.helpers.mount_manager as mount_manager
 import chroot_distro.helpers.session as session
 from chroot_distro.locking import ContainerLock
-from chroot_distro.message import crit_error, log_error, log_info, warn
+from chroot_distro.message import StdoutError, crit_error, log_error, log_info, stdout_output, warn
 from chroot_distro.names import require_valid_name
 from chroot_distro.paths import container_manifest, container_rootfs
 from chroot_distro.progress import (
@@ -121,6 +123,31 @@ class _ReadCounter:
         return getattr(self._fh, name)
 
 
+class _ArchiveStdout:
+    """Write complete blocks for tar and mark broken pipes at the sink."""
+
+    def __init__(self, stream: TextIO) -> None:
+        self._stream = stream
+        self._buffer = stream.buffer
+        self._broken = False
+
+    def write(self, data: bytes) -> int:
+        # Tar can try to write the same block again when closing after an error.
+        if self._broken:
+            raise StdoutError(self._stream)
+        remaining = memoryview(data)
+        try:
+            while remaining:
+                written = self._buffer.write(remaining)
+                if not written:
+                    raise OSError("stdout write made no progress")
+                remaining = remaining[written:]
+        except BrokenPipeError as exc:
+            self._broken = True
+            raise StdoutError(self._stream) from exc
+        return len(data)
+
+
 def _add_path(
     tf: tarfile.TarFile,
     src: str,
@@ -183,6 +210,7 @@ def command_backup(args) -> None:
         crit_error("output file path cannot be empty.")
         sys.exit(1)
 
+    stdout = None
     if output_path:
         if os.path.isdir(output_path):
             crit_error(f"cannot write to '{output_path}' because this path is a directory.")
@@ -199,9 +227,10 @@ def command_backup(args) -> None:
                 crit_error(str(exc).lower())
                 sys.exit(1)
     else:
-        if sys.stdout.isatty():
-            crit_error("archive data cannot be printed to console. Please specify --output.")
-            sys.exit(1)
+        with stdout_output() as stdout:
+            if stdout.isatty():
+                crit_error("archive data cannot be printed to console. Please specify --output.")
+                sys.exit(1)
         compression = _COMPRESSION_ARG_MAP[compression_arg] if compression_arg is not None else ""
 
     with ContainerLock(container_name, exclusive=False, command="backup"):
@@ -222,6 +251,7 @@ def command_backup(args) -> None:
             output_path,
             compression,
             verbose,
+            stdout,
         )
 
 
@@ -232,6 +262,7 @@ def _run_backup(
     output_path,
     compression,
     verbose,
+    stdout: TextIO | None,
 ):
     log_info(f"Backing up '{container_name}'...")
 
@@ -281,14 +312,18 @@ def _run_backup(
         tar_mode = f"w:{compression}" if output_path else f"w|{compression}"
         with (
             tarfile.open(output_path, mode=tar_mode)  # type: ignore[call-overload]
-            if output_path
-            else tarfile.open(fileobj=sys.stdout.buffer, mode=tar_mode)  # type: ignore[call-overload]
+            if stdout is None
+            else tarfile.open(fileobj=_ArchiveStdout(stdout), mode=tar_mode)  # type: ignore[call-overload]
         ) as tf:
             dropped = 0
             for src, arc in entries:
                 if not _add_path(tf, src, arc, on_read=_on_read):
                     dropped += 1
                 _on_entry(arc)
+
+        if stdout is not None:
+            with stdout_output() as stream:
+                stream.flush()
 
         clear_bar()
         if dropped:
@@ -300,6 +335,9 @@ def _run_backup(
             sys.exit(1)
         log_info("Finished backing up.")
 
+    except StdoutError:
+        clear_bar()
+        raise
     except KeyboardInterrupt:
         clear_bar()
         log_error("Aborted by user.")

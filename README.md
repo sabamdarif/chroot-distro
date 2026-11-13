@@ -329,6 +329,7 @@ Aliases: bak, bkp
 ```
 
 Save a container as a TAR archive. Without `--output`, the archive goes to stdout so you can pipe it.
+If stdout is unavailable or its pipe closes during the backup, the command exits with status 1.
 
 | Option                  | Description                                                                                                                 |
 | ----------------------- | --------------------------------------------------------------------------------------------------------------------------- |
