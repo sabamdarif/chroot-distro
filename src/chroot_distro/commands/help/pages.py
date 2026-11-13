@@ -467,10 +467,10 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
             "Layers are cached locally and reused on subsequent "
             "installs of the same image."
             "\n\n"
-            "Container name is being determined from name of Docker image "
-            "or rootfs archive file. To be able install multiple instances "
-            "of same distribution, you need to override name using a command "
-            "line option."
+            "The default name comes from the image name or the archive filename "
+            "with its recognized extension removed. For a URL, the filename "
+            "comes from its path. Use --name if the URL path has no filename "
+            "or to install under a different name."
             "\n\n"
             "Private images require authentication. Set the environment "
             'variable CD_DOCKER_AUTH="user:password" before running '
@@ -486,7 +486,7 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
                 "Set a custom name for the container. Must start with "
                 "alphanumeric character and then may contain only latin "
                 "letters, numbers and special symbols dot, minus, underscore. "
-                "Default equals to image name without tag and registry prefix. --override-alias is an alias.",
+                "--override-alias is an alias.",
             ),
             (
                 "-a, --architecture [ARCH]",

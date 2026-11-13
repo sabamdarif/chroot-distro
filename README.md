@@ -108,9 +108,13 @@ OCI archives must provide matching sizes and SHA-256 digests for the manifests,
 configs and layers used during install. A verified cached layer can supply a
 layer missing from the archive.
 
+The default container name for an archive comes from its filename, with the
+recognized extension removed. For a URL, the filename comes from its path.
+Use `--name` if the URL path has no filename.
+
 | Option                      | Description                                                                                                                                                              |
 | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `-n`, `--name NAME`         | Give the container a custom name. Default is the image name. Needed to install the same image twice. `--override-alias` is an accepted alias.                            |
+| `-n`, `--name NAME`         | Give the container a custom name. Needed to install the same image twice. `--override-alias` is an accepted alias. |
 | `-a`, `--architecture ARCH` | Install for a different CPU type (`aarch64`, `x86_64`, `linux/arm64`, ...). Default is your host's CPU.                                                                  |
 | `--allow-insecure`          | Permit insecure transport when downloading: an untrusted certificate, or a redirect from HTTPS to plain HTTP. Only for sources you trust; Docker Hub is always verified. |
 | `-q`, `--quiet`             | Only show errors.                                                                                                                                                        |
