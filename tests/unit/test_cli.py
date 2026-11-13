@@ -284,6 +284,7 @@ cli.main()
     "arguments",
     [
         pytest.param(("-m", "chroot_distro", "--version"), id="version"),
+        pytest.param(("-m", "chroot_distro", "--vers"), id="version-abbreviation"),
         pytest.param(("-m", "chroot_distro", "diff", "--json"), id="validation"),
         pytest.param(("-m", "chroot_distro", "ps", "--json", "--quiet"), id="parser"),
         pytest.param(("-c", _PIPE_TEST_COMMANDS, "ps", "--json"), id="json-result"),
@@ -307,6 +308,56 @@ def test_cli_closed_stdout_pipe(arguments, unbuffered):
 
     assert result.returncode == 1, result.stderr
     assert result.stderr == b""
+
+
+def test_version_abbreviation_writes_to_stdout(capsys):
+    with patch("sys.argv", ["chroot-distro", "--vers"]), pytest.raises(SystemExit) as exc:
+        main()
+    assert exc.value.code == 0
+    out, err = capsys.readouterr()
+    assert out.startswith("chroot-distro ")
+    assert err == ""
+
+
+@pytest.mark.skipif(os.name != "posix", reason="Requires POSIX descriptors")
+@pytest.mark.parametrize(
+    ("arguments", "status"),
+    [
+        (("-m", "chroot_distro", "--version"), 1),
+        (("-m", "chroot_distro", "diff", "--json"), 1),
+        (("-c", _PIPE_TEST_COMMANDS, "list", "--quiet"), 1),
+        (("-c", _PIPE_TEST_COMMANDS, "ps", "--quiet"), 1),
+        (("-c", _PIPE_TEST_COMMANDS, "info", "--json"), 1),
+        (("-m", "chroot_distro", "--help"), 0),
+    ],
+)
+def test_cli_absent_stdout(arguments, status):
+    env = {**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[2] / "src")}
+    result = subprocess.run(
+        [sys.executable, *arguments],
+        capture_output=True,
+        env=env,
+        preexec_fn=lambda: os.close(1),
+        timeout=10,
+    )
+    assert result.returncode == status, result.stderr
+    assert result.stdout == b""
+    if status:
+        assert result.stderr == b""
+
+
+@pytest.mark.parametrize("command", ["list", "ps"])
+def test_empty_quiet_output_with_stdout_absent(command, monkeypatch):
+    from chroot_distro import message
+    from chroot_distro.commands import list_cmd, ps
+
+    monkeypatch.setattr(message, "_quiet", False)
+    monkeypatch.setattr("chroot_distro.cli._ensure_root_user", lambda: None)
+    monkeypatch.setattr(list_cmd, "_iter_container_names", lambda: ([], []))
+    monkeypatch.setattr(ps, "active_sessions", list)
+    monkeypatch.setattr(ps, "containers_with_active_pids", dict)
+    with patch("sys.stdout", None), patch("sys.argv", ["chroot-distro", command, "--quiet"]):
+        main()
 
 
 @pytest.mark.parametrize(

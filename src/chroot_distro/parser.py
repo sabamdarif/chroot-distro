@@ -28,7 +28,7 @@ from collections.abc import Iterable
 from typing import Any, NoReturn, TypeVar, cast, overload
 
 from chroot_distro.constants import PROGRAM_NAME
-from chroot_distro.message import crit_error, emit_json_error, escape_controls, msg
+from chroot_distro.message import crit_error, emit_json_error, escape_controls, msg, print_version
 
 _NamespaceT = TypeVar("_NamespaceT")
 
@@ -47,9 +47,8 @@ class _LazyVersionAction(argparse.Action):
         super().__init__(option_strings, dest, nargs=0, **kwargs)
 
     def __call__(self, parser, namespace, values, option_string=None) -> None:
-        from chroot_distro.constants import PROGRAM_VERSION
-
-        parser.exit(message=f"{PROGRAM_NAME} {PROGRAM_VERSION}\n")
+        print_version()
+        parser.exit()
 
 
 class _CdArgumentParser(argparse.ArgumentParser):

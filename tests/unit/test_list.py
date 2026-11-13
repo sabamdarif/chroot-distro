@@ -54,21 +54,13 @@ def test_command_list_with_items():
         assert any("in use (PID 99: login)" in line for line in printed)
 
 
-def test_command_list_quiet():
-    with (
-        patch("chroot_distro.commands.list_cmd._iter_container_names", return_value=(["alpine", "debian"], ["broken"])),
-        patch("builtins.print") as mock_print,
-    ):
+def test_command_list_quiet(capsys):
+    with patch("chroot_distro.commands.list_cmd._iter_container_names", return_value=(["alpine", "debian"], ["broken"])):
         args = MagicMock()
         args.quiet = True
         args.json = False
         command_list(args)
-        mock_print.assert_any_call("alpine")
-        mock_print.assert_any_call("debian")
-        # Interrupted installs are not usable containers; scripts consuming
-        # `list -q` must never see them.
-        for call in mock_print.call_args_list:
-            assert call.args[0] != "broken"
+    assert capsys.readouterr().out == "alpine\ndebian\n"
 
 
 def test_read_image_source_from_manifest(tmp_path, monkeypatch):

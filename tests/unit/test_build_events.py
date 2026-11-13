@@ -1,5 +1,9 @@
 import io
 import json
+import os
+import subprocess
+import sys
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -15,6 +19,7 @@ from chroot_distro.helpers.build_engine.events import (
     TTYReporter,
     make_reporter,
 )
+from chroot_distro.message import StdoutError
 
 
 class _Recorder:
@@ -154,6 +159,70 @@ def test_tty_cached_collapse_swallows_finish():
 
 
 # ── JSONReporter ──────────────────────────────────────────────────────────────
+@pytest.mark.parametrize("method", ["write", "flush"])
+def test_json_reporter_preserves_explicit_stream_error(monkeypatch, method):
+    from unittest.mock import Mock
+
+    error = BrokenPipeError("closed")
+    stream = Mock()
+    getattr(stream, method).side_effect = error
+    monkeypatch.setattr(sys, "stdout", stream)
+    with pytest.raises(StdoutError) as exc:
+        JSONReporter().emit(_ev("step_started"))
+    assert exc.value.stream is stream
+    with pytest.raises(BrokenPipeError) as exc:
+        JSONReporter(stream=stream).emit(_ev("step_started"))
+    assert exc.value is error
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Build uses Linux filesystem calls")
+@pytest.mark.parametrize("stdout_mode", ["open", "buffered-pipe", "unbuffered-pipe", "absent"])
+def test_raw_json_build_stdout(tmp_path, stdout_mode):
+    (tmp_path / "Dockerfile").write_text("FROM scratch\nENV A=1\n")
+    env = {
+        **os.environ,
+        "PYTHONPATH": str(Path(__file__).resolve().parents[2] / "src"),
+        "XDG_DATA_HOME": str(tmp_path),
+        "XDG_CACHE_HOME": str(tmp_path),
+    }
+    command = [sys.executable]
+    if stdout_mode == "unbuffered-pipe":
+        command.append("-u")
+    command += [
+        "-c",
+        "from chroot_distro import cli; cli._ensure_root_user = lambda: None; cli.main()",
+        "build", "--progress=rawjson", "-t", "stdout-test", str(tmp_path),
+    ]
+    options = {"stdout": subprocess.PIPE}
+    if stdout_mode == "absent":
+        options["preexec_fn"] = lambda: os.close(1)
+    elif stdout_mode.endswith("-pipe"):
+        read_fd, write_fd = os.pipe()
+        os.close(read_fd)
+        options["stdout"] = write_fd
+    try:
+        result = subprocess.run(command, stderr=subprocess.PIPE, env=env, timeout=10, **options)
+    finally:
+        if stdout_mode.endswith("-pipe"):
+            os.close(write_fd)
+
+    store = tmp_path / "chroot-distro"
+    assert not list((store / "build-tmp").iterdir())
+    manifests = store / "oci_manifests"
+    if stdout_mode == "open":
+        assert result.returncode == 0, result.stderr
+        assert [json.loads(line)["kind"] for line in result.stdout.splitlines()] == [
+            "step_started", "step_finished", "step_started", "step_finished",
+        ]
+        assert list(manifests.rglob("*.json"))
+    else:
+        assert result.returncode == 1, result.stderr
+        assert b"Broken pipe" not in result.stderr
+        assert b"unexpected error" not in result.stderr
+        assert b"Traceback" not in result.stderr
+        assert not list(manifests.rglob("*.json"))
+
+
 def test_json_reporter_emits_json_lines():
     out = io.StringIO()
     rep = JSONReporter(stream=out)

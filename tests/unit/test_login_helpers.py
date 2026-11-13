@@ -1,8 +1,11 @@
+import io
 import json
 import os
 import signal
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
+
+import pytest
 
 from chroot_distro.commands.login import (
     _can_fall_back_to_old_isolated,
@@ -17,6 +20,116 @@ from chroot_distro.commands.login.env import (
     resolve_override,
     resolve_term,
 )
+from chroot_distro.message import StdoutError
+
+
+@pytest.fixture
+def command_display(tmp_path, monkeypatch):
+    from chroot_distro import paths
+    from chroot_distro.commands import login
+    from chroot_distro.parser import build_parser
+
+    rootfs = tmp_path / "containers" / "demo" / "rootfs"
+    (rootfs / "bin").mkdir(parents=True)
+    (rootfs / "bin" / "sh").touch()
+    monkeypatch.setattr(paths, "CONTAINERS_DIR", str(rootfs.parent.parent))
+    monkeypatch.setattr(login.session, "RUNTIME_DIR", str(tmp_path))
+    monkeypatch.setattr(login.namespace, "RUNTIME_DIR", str(tmp_path))
+    monkeypatch.setattr(login.namespace, "check_isolation_conflicts", Mock())
+    monkeypatch.setattr(login.namespace, "should_use_namespaces", Mock(return_value=False))
+    monkeypatch.setattr(
+        login.isolation, "probe_isolation", Mock(return_value=SimpleNamespace(missing_mandatory=False, has_userns=False))
+    )
+    monkeypatch.setattr(login.isolation, "apply_bind_mounts", Mock())
+    monkeypatch.setattr(login.isolation, "apply_special_mounts", Mock())
+    monkeypatch.setattr(login.mount_manager, "get_active_mounts", Mock(return_value=[]))
+    monkeypatch.setattr(login.mount_manager, "ensure_rootfs_exec", Mock())
+    monkeypatch.setattr(login.mount_manager, "make_rslave", Mock())
+    monkeypatch.setattr(login.mount_manager, "unmount_all", Mock())
+    monkeypatch.setattr(login.session, "get_active_chroot_pids", Mock(return_value=[]))
+    monkeypatch.setattr(login, "_ensure_guest_arch_runnable", Mock())
+    monkeypatch.setattr(login, "_reap_session_processes", Mock())
+    args, unknown = build_parser().parse_known_args(["login", "demo", "--get-chroot-cmd", "--", "/bin/sh"])
+    assert not unknown
+    return login, args, tmp_path / "data" / "demo"
+
+
+@pytest.mark.parametrize("failure", ["format", "write", "absent"])
+def test_command_display_cleans_up_before_output(command_display, monkeypatch, failure):
+    login, args, data = command_display
+
+    class BrokenOutput(io.StringIO):
+        def write(self, text):
+            assert (data / "sessions").read_text() == "0"
+            assert not (data / "mount_opts.json").exists()
+            raise BrokenPipeError
+
+    if failure == "format":
+        monkeypatch.setattr(login, "format_get_chroot_cmd", Mock(side_effect=ValueError("format failed")))
+    stream = None if failure == "absent" else BrokenOutput()
+    with patch("sys.stdout", stream), pytest.raises(ValueError if failure == "format" else StdoutError):
+        login._command_login_inner_once("demo", args)
+    assert (data / "sessions").read_text() == "0"
+    assert not (data / "mount_opts.json").exists()
+    assert not (data / "isolation.mode").exists()
+    assert login.mount_manager.unmount_all.call_count == 2
+    login._reap_session_processes.assert_not_called()
+
+
+@pytest.mark.parametrize("namespaced", [False, True])
+def test_command_display_unmount_failure(command_display, monkeypatch, namespaced):
+    from chroot_distro.exceptions import MountError
+
+    login, args, data = command_display
+    args._run_inner = ["/bin/sh"]
+    holder = SimpleNamespace(pid=1234, nsenter_flags=["--mount"])
+    acquire = Mock(return_value=holder)
+    release = Mock()
+    monkeypatch.setattr(login.namespace, "acquire_holder", acquire)
+    monkeypatch.setattr(login.namespace, "release_holder", release)
+    def finalize(*_args, **_kwargs):
+        login.namespace.write_isolation_mode("demo", login.namespace.ISOLATION_MODE_NAMESPACE)
+
+    monkeypatch.setattr(login.isolation, "finalize_holder", finalize)
+    login.namespace.should_use_namespaces.return_value = namespaced
+    error = MountError("unmount failed")
+    login.mount_manager.unmount_all.side_effect = [None, error]
+    with (
+        patch.object(login.os, "pipe", side_effect=AssertionError("foreground pipe")),
+        patch.object(login.os, "openpty", side_effect=AssertionError("foreground PTY")),
+        pytest.raises(MountError) as exc,
+    ):
+        login._command_login_inner_once("demo", args)
+    assert exc.value is error
+    assert (data / "sessions").read_text() == "0"
+    if namespaced:
+        acquire.assert_called_once_with("demo", rootfs=None)
+        release.assert_called_once_with("demo")
+        assert not (data / "isolation.mode").exists()
+    else:
+        acquire.assert_not_called()
+        release.assert_not_called()
+        assert (data / "isolation.mode").read_text() == login.namespace.ISOLATION_MODE_HOST
+
+
+def test_command_display_preserves_live_session(command_display, monkeypatch, capsys):
+    login, args, data = command_display
+    data.mkdir(parents=True)
+    (data / "sessions").write_text("1")
+    login.session.get_active_chroot_pids.return_value = [1234]
+    login.namespace.should_use_namespaces.return_value = True
+    monkeypatch.setattr(
+        login.namespace, "get_live_holder", Mock(return_value=SimpleNamespace(pid=1234, nsenter_flags=["--mount"]))
+    )
+    monkeypatch.setattr(login.namespace, "release_holder", Mock())
+    with pytest.raises(SystemExit) as exc:
+        login._command_login_inner_once("demo", args)
+    assert exc.value.code == 0
+    assert (data / "sessions").read_text() == "1"
+    assert (data / "mount_opts.json").exists()
+    assert "nsenter" in capsys.readouterr().out
+    login.mount_manager.unmount_all.assert_not_called()
+    login.namespace.release_holder.assert_not_called()
 
 
 def test_safe_hostname_valid_tokens():

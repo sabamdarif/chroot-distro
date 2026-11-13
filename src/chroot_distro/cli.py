@@ -29,7 +29,7 @@ After parsing, argument validation and dispatch report failures on stderr and
 also emit an error document when the command accepted `--json`. Dispatch keeps
 the messages of expected failures and unsupported operations. Other dispatch
 exceptions get an "unexpected error" prefix. The entry point flushes buffered
-stdout and handles pipe closure after command cleanup.
+stdout and handles missing stdout or pipe closure after command cleanup.
 """
 
 import importlib
@@ -40,14 +40,15 @@ from collections.abc import Callable
 from contextlib import suppress
 from typing import Any
 
-from chroot_distro.constants import IS_TERMUX, PROGRAM_NAME
+from chroot_distro.constants import IS_TERMUX
 from chroot_distro.exceptions import ChrootDistroError
 from chroot_distro.message import (
-    StdoutBrokenPipeError,
+    StdoutError,
     crit_error,
     emit_json_error,
     escape_controls,
     msg,
+    print_version,
     set_quiet,
     stdout_output,
 )
@@ -136,12 +137,12 @@ def _reject_unknown_command(raw_args: list[str]) -> None:
 
 def _flush_stdout() -> None:
     if sys.stdout is not None:
-        with stdout_output():
-            sys.stdout.flush()
+        with stdout_output() as stream:
+            stream.flush()
 
 
 def main() -> None:
-    """Run the CLI and redirect a broken pipe before Python's shutdown flush."""
+    """Run the CLI and handle stdout failures before Python's shutdown flush."""
     try:
         try:
             _run()
@@ -149,12 +150,13 @@ def main() -> None:
             _flush_stdout()
             raise
         _flush_stdout()
-    except StdoutBrokenPipeError:
-        try:
-            with open(os.devnull, "wb") as sink:
-                os.dup2(sink.fileno(), sys.stdout.fileno())
-        except OSError:
-            os._exit(1)
+    except StdoutError as exc:
+        if exc.stream is not None:
+            try:
+                with open(os.devnull, "wb") as sink:
+                    os.dup2(sink.fileno(), exc.stream.fileno())
+            except OSError:
+                os._exit(1)
         raise SystemExit(1) from None
 
 
@@ -167,11 +169,7 @@ def _run() -> None:
     signal.signal(signal.SIGQUIT, _sigquit_to_keyboard_interrupt)
 
     if len(sys.argv) >= 2 and sys.argv[1] in ("--version", "-V"):
-        from chroot_distro.constants import PROGRAM_VERSION
-
-        version_line = f"{PROGRAM_NAME} {PROGRAM_VERSION}"
-        with stdout_output():
-            print(version_line)
+        print_version()
         sys.exit(0)
 
     if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help"):
@@ -263,12 +261,12 @@ def _run() -> None:
         if handler is None:
             raise ChrootDistroError(f"unknown command {command!a}.")
         handler(args)
-    except StdoutBrokenPipeError:
+    except StdoutError:
         raise
     except (ChrootDistroError, NotImplementedError) as exc:
         report_error(str(exc))
     except KeyboardInterrupt:
-        with suppress(StdoutBrokenPipeError):
+        with suppress(StdoutError):
             report_error("Aborted by user.")
             msg()
             _flush_stdout()

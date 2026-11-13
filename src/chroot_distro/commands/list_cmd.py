@@ -265,9 +265,10 @@ def command_list(args) -> None:
     entries, incomplete = _iter_container_names()
 
     if quiet:
-        with stdout_output():
-            for name in entries:
-                print(name)
+        if entries:
+            with stdout_output() as stream:
+                for name in entries:
+                    print(name, file=stream)
         return
 
     if json_mode:

@@ -626,9 +626,10 @@ controls the diagnostic and exit status. In that case stdout may be empty.
 Failures handled by chroot-distro, including failure to launch the elevation
 tool, use the JSON error document.
 
-The stderr diagnostic escapes control characters. If the stdout pipe closes
-while writing a JSON document, the `--version` line, or quiet `list` or `ps`
-output, chroot-distro exits with status 1.
+The stderr diagnostic escapes control characters. If stdout is unavailable or
+its pipe closes while writing a JSON document, the version line, quiet `list`
+or `ps` output, `--get-chroot-cmd` output, or raw JSON build events,
+chroot-distro exits with status 1.
 
 `schema` is bumped only when a key is renamed, removed or changes type, so a consumer can ignore keys it does not know and keep working. Field rules: a byte count is an integer named `*_bytes` with its formatted twin beside it, a duration is `*_seconds`, a path is absolute, a flag is a real `true`/`false`, an unknown value is `null`, and a list is always present even when empty.
 

@@ -25,8 +25,8 @@ first, since `progress.py` leaves the cursor mid-line.
 `quote_path` is the escaping boundary for text this program did not choose, and
 its own docstring says what it defends against. Pass the untrusted name through
 it, never the assembled message: the colour codes above are control characters by
-definition. `stdout_output` marks pipe errors at stdout so dispatch can distinguish
-them from failures elsewhere in a command.
+definition. `stdout_output` marks missing stdout and closed stdout pipes so
+dispatch can distinguish them from failures elsewhere in a command.
 """
 
 import json
@@ -34,7 +34,7 @@ import os
 import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import Any
+from typing import Any, TextIO
 
 termios: Any
 try:
@@ -150,17 +150,32 @@ Adding a key is not a bump: a consumer ignores keys it does not know.
 """
 
 
-class StdoutBrokenPipeError(BrokenPipeError):
-    """A write or flush failed because stdout's pipe closed."""
+class StdoutError(Exception):
+    """Stdout was missing or its pipe closed during a write or flush."""
+
+    def __init__(self, stream: TextIO | None) -> None:
+        self.stream = stream
+        super().__init__("stdout is unavailable" if stream is None else "stdout pipe closed")
 
 
 @contextmanager
-def stdout_output() -> Iterator[None]:
-    """Mark a broken pipe from a stdout write or flush."""
+def stdout_output() -> Iterator[TextIO]:
+    """Yield stdout and mark failures from writing or flushing it."""
+    stream = sys.stdout
+    if stream is None:
+        raise StdoutError(None)
     try:
-        yield
+        yield stream
     except BrokenPipeError as exc:
-        raise StdoutBrokenPipeError(*exc.args) from exc
+        raise StdoutError(stream) from exc
+
+
+def print_version() -> None:
+    """Write the version without loading package metadata before it is needed."""
+    from chroot_distro.constants import PROGRAM_NAME, PROGRAM_VERSION
+
+    with stdout_output() as stream:
+        print(f"{PROGRAM_NAME} {PROGRAM_VERSION}", file=stream)
 
 
 def emit_json(command: str, payload: dict) -> None:
@@ -171,9 +186,9 @@ def emit_json(command: str, payload: dict) -> None:
     """
     document = {"schema": JSON_SCHEMA_VERSION, "command": command, **payload}
     line = json.dumps(document, sort_keys=True) + "\n"
-    with stdout_output():
-        sys.stdout.write(line)
-        sys.stdout.flush()
+    with stdout_output() as stream:
+        stream.write(line)
+        stream.flush()
 
 
 def emit_json_error(command: str, text: str) -> None:

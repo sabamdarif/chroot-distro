@@ -81,11 +81,12 @@ def command_ps(args) -> None:
             )
 
     if quiet:
-        with stdout_output():
-            for sess in sessions:
-                print(sess.get("pid", ""))
-            for pid_str in all_untracked_pids:
-                print(pid_str)
+        if sessions or all_untracked_pids:
+            with stdout_output() as stream:
+                for sess in sessions:
+                    print(sess.get("pid", ""), file=stream)
+                for pid_str in all_untracked_pids:
+                    print(pid_str, file=stream)
         return
 
     if getattr(args, "json", False):

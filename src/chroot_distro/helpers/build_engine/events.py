@@ -18,8 +18,9 @@ import dataclasses
 import json
 import sys
 import typing
+from contextlib import nullcontext
 
-from chroot_distro.message import C, log_info, msg
+from chroot_distro.message import C, log_info, msg, stdout_output
 
 # Event kinds: step_started | step_finished | cache_hit | log_line | error.
 
@@ -144,12 +145,14 @@ class JSONReporter:
     """--progress=rawjson: one JSON object per line on stdout."""
 
     def __init__(self, stream: typing.TextIO | None = None) -> None:
-        self._stream = stream if stream is not None else sys.stdout
+        self._stream = stream
 
     def emit(self, ev: BuildEvent) -> None:
         """Write *ev* as one JSON object line."""
-        self._stream.write(json.dumps(dataclasses.asdict(ev), sort_keys=True) + "\n")
-        self._stream.flush()
+        line = json.dumps(dataclasses.asdict(ev), sort_keys=True) + "\n"
+        with stdout_output() if self._stream is None else nullcontext(self._stream) as stream:
+            stream.write(line)
+            stream.flush()
 
 
 class PlatformReporter:

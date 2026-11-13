@@ -50,6 +50,9 @@ Entering has four forms: `chroot_and_run` when there is no holder, waiting on a
 foreground holder that execs the command itself (entering one would hang the
 session forever), `enter_and_run_with_pty` into a parked holder, and
 `spawn_detached` for `--detach`.
+
+Command display uses a parked holder. It balances the temporary session
+under the setup lock before writing the command to stdout.
 """
 
 import contextlib
@@ -133,7 +136,7 @@ from chroot_distro.helpers.x11 import (
     x11_auth_bind_path,
 )
 from chroot_distro.locking import ContainerLock
-from chroot_distro.message import crit_error, warn
+from chroot_distro.message import crit_error, stdout_output, warn
 from chroot_distro.names import require_valid_name
 from chroot_distro.paths import container_dir, container_log_path, container_rootfs
 from chroot_distro.syscalls.chroot import chroot_and_run, enter_chroot, spawn_detached
@@ -599,6 +602,8 @@ def _translate_host_path_to_guest(host_path: str, rootfs: str, resolved_binds: l
 
 
 def _command_login_inner_once(container_name: str, args) -> None:
+    display_command = getattr(args, "get_chroot_cmd", False)
+    command_line: str | None = None
     rootfs = container_rootfs(container_name)
     if not os.path.isdir(rootfs):
         crit_error(f"container '{container_name}' is not installed.")
@@ -1141,7 +1146,7 @@ def _command_login_inner_once(container_name: str, args) -> None:
                     # enter_chroot) before execing, so the command is PID 1 and
                     # the chroot /proc/1/root escape stays closed.
                     _detach_run = getattr(args, "detach", False) and run_inner is not None
-                    if run_inner is not None and not _detach_run:
+                    if run_inner is not None and not _detach_run and not display_command:
                         from chroot_distro.syscalls.chroot import _copy_terminal_size
 
                         pipe_r, pipe_w = os.pipe()
@@ -1393,18 +1398,31 @@ def _command_login_inner_once(container_name: str, args) -> None:
             # The union is what a third session inherits.
             session.save_mount_options(container_name, current_opts)
 
-    if getattr(args, "get_chroot_cmd", False):
-        ns_prefix = ["nsenter", "--target", str(holder.pid), *holder.nsenter_flags] if holder is not None else None
-        print(format_get_chroot_cmd(child_env, chroot_display_argv(chroot_config, ns_prefix)))
-
-        with session.lock(container_name) as lock_fh:
-            sess_count = session.decrement(container_name, lock_fh=lock_fh)
-            if sess_count == 0:
-                mount_manager.unmount_all(rootfs, holder=holder)
-                session.clear_mount_options(container_name)
-                if holder is not None:
-                    namespace.release_holder(container_name)
+        if display_command:
+            try:
+                ns_prefix = (
+                    ["nsenter", "--target", str(holder.pid), *holder.nsenter_flags] if holder is not None else None
+                )
+                command_line = format_get_chroot_cmd(child_env, chroot_display_argv(chroot_config, ns_prefix))
+            finally:
+                if session.decrement(container_name, lock_fh=lock_fh) == 0:
+                    try:
+                        mount_manager.unmount_all(rootfs, holder=holder)
+                    except BaseException:
+                        if holder is not None:
+                            with contextlib.suppress(Exception):
+                                namespace.release_holder(container_name)
+                                session.clear_mount_options(container_name)
+                                namespace.clear_isolation_mode(container_name)
+                        raise
+                    if holder is not None:
+                        namespace.release_holder(container_name)
+                    session.clear_mount_options(container_name)
                     namespace.clear_isolation_mode(container_name)
+
+    if command_line is not None:
+        with stdout_output() as stream:
+            print(command_line, file=stream)
         sys.exit(0)
 
     # Record this session for `ps`; the handle's flock tracks liveness, so
