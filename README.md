@@ -438,7 +438,7 @@ Build an image from a Dockerfile, like `docker build` but without Docker. `PATH`
 | `--secret id=NAME[,src=PATH]`     | Give a secret to `RUN --mount=type=secret` steps. Without `src=`, the value comes from the environment variable `NAME`. Secrets never end up in the image.                             |
 | `--ssh ID[=SOCK]`                 | Give an SSH agent socket to `RUN --mount=type=ssh` steps. Default socket is `$SSH_AUTH_SOCK`.                                                                                          |
 | `--no-cache`                      | Rebuild every step from scratch instead of reusing cached steps.                                                                                                                       |
-| `--allow-insecure`                | Allow untrusted certificates and plain HTTP when importing or exporting registry build cache.                                                                                          |
+| `--allow-insecure`                | Allow untrusted certificates and plain HTTP when importing or exporting registry build cache. Docker Hub always uses verified HTTPS. |
 | `--cache-from type=local,src=DIR` | Reuse the cached steps a `--cache-to` saved in `DIR`. `type=registry,ref=REF` reads a registry instead. Can be given more than once.                                                   |
 | `--cache-to type=local,dest=DIR`  | Save this build's cached steps into `DIR`. `type=registry,ref=REF` pushes them to a registry. Can be given more than once.                                                             |
 | `--progress MODE`                 | Output style: `auto`, `plain`, `tty`, or `rawjson`.                                                                                                                                    |
@@ -540,7 +540,7 @@ chroot-distro build -t myapp:1.0 \
     --cache-to type=registry,ref=ghcr.io/me/myapp-cache:latest .
 ```
 
-Both backends hold the same document: a `build-cache.json` listing the steps plus one blob per layer. `type=local` keeps it as a plain folder (`src=`/`dest=`); `type=registry` stores it as a single OCI artifact at `ref=` (a private registry wants `CD_DOCKER_AUTH` for it). Both can be given more than once, and the two are interchangeable.
+Both backends hold the same document with a `build-cache.json` listing the steps and one blob per layer. `type=local` keeps it in a folder (`src=` or `dest=`). `type=registry` stores it as a single OCI artifact at `ref=`. Use a tag reference such as `ghcr.io/me/cache:latest`. Omitting the tag selects `latest`. Set `CD_DOCKER_AUTH` for a private registry. You can repeat either backend and import what the other exported.
 
 - Only the steps this build ran are exported, and an export only adds to what the target already holds; delete the target to start over.
 - A folder that is not there yet imports nothing (no error); one that is there and is not a cache folder stops the build.

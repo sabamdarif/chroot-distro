@@ -162,6 +162,7 @@ def test_a_registry_reference_pulls_and_pushes(run, monkeypatch):
         "type=local,dest=/dir",
         "type=registry",
         "type=registry,ref=",
+        "type=registry,ref=cache?query=wrong",
         "type=registry,src=/dir",
     ],
 )

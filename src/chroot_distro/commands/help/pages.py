@@ -162,12 +162,13 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
             ("--no-cache", "Disable build-step caching. Each instruction is executed fresh."),
             (
                 "--allow-insecure",
-                "Allow untrusted certificates and plain HTTP when importing or exporting registry build cache.",
+                "Allow untrusted certificates and plain HTTP for registry build caches. "
+                "Docker Hub always uses verified HTTPS.",
             ),
             (
                 "--cache-from [type=local,src=DIR | type=registry,ref=REF]",
                 "Import cached steps before building, from a directory "
-                "(type=local) or a registry artifact (type=registry). A "
+                "(type=local) or a tagged registry artifact (type=registry). A "
                 "directory that is not there yet imports nothing and is not an "
                 "error; one that is there and is not a cache directory ends the "
                 "build. Every layer is verified against its own digest and "
@@ -176,7 +177,7 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
             (
                 "--cache-to [type=local,dest=DIR | type=registry,ref=REF]",
                 "Export the steps this build dispatched, to a directory "
-                "(type=local) or a registry artifact (type=registry), so another "
+                "(type=local) or a tagged registry artifact (type=registry), so another "
                 "machine can serve them with --cache-from. Only this build's "
                 "steps, added to whatever the target already holds. Repeatable.",
             ),
@@ -935,7 +936,7 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
         "options": [
             ("-h, --help", "Show this help."),
             ("-l, --limit [N]", "Maximum number of results to show (default: 25, max: 100)."),
-            ("-q, --quiet", "Reserved for future use."),
+            ("-q, --quiet", "Only show errors."),
         ],
         "examples": [
             f"{PROGRAM_NAME} search nextcloud",
