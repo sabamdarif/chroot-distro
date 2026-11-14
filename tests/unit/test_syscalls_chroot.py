@@ -419,8 +419,9 @@ from chroot_distro.syscalls.chroot import PtyOutputError, _pty_relay, _setup_chi
 
 mode, path = sys.argv[1:]
 if mode in ('absent', 'silent'):
-    assert sys.__stdout__ is None
-    assert os.open(path, os.O_WRONLY) == 1
+    sys.stdout = sys.__stdout__ = None
+    with open(path, 'r+b') as reused:
+        os.dup2(reused.fileno(), 1)
 attrs = termios.tcgetattr(0)
 master, slave = os.openpty()
 pid = os.fork()
@@ -453,18 +454,15 @@ def test_pty_relay_real_stdout_sinks(tmp_path, mode):
     reused.write_bytes(b"host file")
     stdin_master, stdin_slave = os.openpty()
     output = subprocess.PIPE
-    preexec = None
     if mode == "pipe":
         reader, output = os.pipe()
         os.close(reader)
     elif mode == "full":
         output = os.open("/dev/full", os.O_WRONLY)
-    else:
-        preexec = lambda: os.close(1)
     try:
         result = subprocess.run(
             [sys.executable, "-c", _PTY_STDOUT_PROBE, mode, str(reused)],
-            stdin=stdin_slave, stdout=output, stderr=subprocess.PIPE, preexec_fn=preexec, timeout=10,
+            stdin=stdin_slave, stdout=output, stderr=subprocess.PIPE, timeout=10,
         )
     finally:
         if output != subprocess.PIPE:
