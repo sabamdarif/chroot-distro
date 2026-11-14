@@ -2,10 +2,8 @@
 # Copyright (C) 2025-2026 Md Arif
 """`chroot-distro list`: what is installed, how big it is, whether it is in use.
 
-No lock is taken. `list` runs unelevated on Termux, and `container_busy_status` reads
-a lock file's holder line instead of trying for the lock, so a busy container is
-reported without making anyone wait. The picture is a moment's snapshot, which is all
-a listing can be.
+`list` runs unelevated on Termux. It reads advisory holder details without
+acquiring any container locks.
 
 A directory carrying the `.install-incomplete` marker is not a container: it is
 listed separately, with the two commands that resolve it, rather than being offered

@@ -18,6 +18,7 @@ from unittest.mock import patch
 
 import pytest
 
+from chroot_distro import locking, paths
 from chroot_distro.commands import backup
 from chroot_distro.commands.backup import command_backup
 from chroot_distro.commands.restore import command_restore
@@ -32,6 +33,30 @@ def _make_container(containers_dir, name):
     (cont_dir / "manifest.json").write_text(json.dumps({"image": "alpine:latest"}))
     (rootfs_dir / "hello").write_text("hi")
     return cont_dir
+
+
+def test_restore_refuses_a_planted_lock_before_creating_the_container(tmp_path, monkeypatch, capsys):
+    locks = tmp_path / "locks"
+    locks.mkdir()
+    monkeypatch.setattr(locking, "RUNTIME_DIR", str(tmp_path))
+    monkeypatch.setattr(locking, "LOCKS_DIR", str(locks))
+    monkeypatch.setattr(paths, "CONTAINERS_DIR", str(tmp_path / "containers"))
+    victim = tmp_path / "victim"
+    victim.write_text("KEEP")
+    (locks / "box.lock").symlink_to(victim)
+
+    archive = tmp_path / "backup.tar"
+    with tarfile.open(archive, "w") as tf:
+        entry = tarfile.TarInfo("box/rootfs")
+        entry.type = tarfile.DIRTYPE
+        tf.addfile(entry)
+
+    with pytest.raises(SystemExit) as exc:
+        command_restore(SimpleNamespace(archive=str(archive)))
+    assert exc.value.code == 1
+    assert "unexpected entry" in capsys.readouterr().err
+    assert victim.read_text() == "KEEP"
+    assert not (tmp_path / "containers" / "box").exists()
 
 
 _BACKUP_CLI = """

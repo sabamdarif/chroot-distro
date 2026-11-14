@@ -685,7 +685,9 @@ Inside the data folder:
 | `locks/`                          | Lock files preventing conflicting commands |
 
 Container lock files remain after `remove` and are reused if you reinstall
-with the same name.
+with the same name. Separate `.info` files provide advisory holder details.
+If a command reports an unexpected lock entry, stop other `chroot-distro`
+commands and inspect the entry before removing it.
 
 Inside the cache folder:
 

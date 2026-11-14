@@ -326,9 +326,8 @@ def command_restore(args) -> None:
                     restore_name = container_name
                     lock = ContainerLock(container_name, exclusive=True, command="restore")
                     if not lock.acquire():
-                        hint = lock.holder_hint()
                         clear_bar()
-                        log_error(f"Cannot restore: container '{container_name}' is busy{hint}.")
+                        log_error(f"Cannot restore: {lock.conflict_error()}")
                         sys.exit(1)
                     # Refuse to overwrite an installed container, the way
                     # install does: restore clears the rootfs it finds, so a
