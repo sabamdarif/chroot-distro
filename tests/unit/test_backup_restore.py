@@ -111,6 +111,24 @@ def test_backup_stdout_gzip(backup_cli):
         assert tf.extractfile("testcont/rootfs/hello").read() == b"hi"
 
 
+@pytest.mark.skipif(os.name != "posix", reason="Requires POSIX filenames")
+def test_backup_escapes_displayed_paths_and_preserves_tar_names(backup_cli, tmp_path):
+    container, run = backup_cli
+    name = "bad\\file\x1b[2J\x9b\u202e\nnext"
+    escaped = rb"bad\\file\e[2J\x9b\u202e\nnext"
+    (container / "rootfs" / name).write_bytes(b"payload")
+    archive = tmp_path / f"{name}.tar"
+
+    result = run("-v", "-o", str(archive), stdout=subprocess.PIPE)
+    assert result.returncode == 0, result.stderr
+    assert not result.stdout
+    assert escaped + b".tar'" in result.stderr
+    assert b"Adding: 'testcont/rootfs/" + escaped + b"'" in result.stderr
+    assert all(control not in result.stderr for control in (b"\x1b[2J", b"\xc2\x9b", b"\xe2\x80\xae", b"\nnext"))
+    with tarfile.open(archive) as tf:
+        assert tf.extractfile(f"testcont/rootfs/{name}").read() == b"payload"
+
+
 def test_archive_stdout_retries_only_unwritten_bytes_and_stops_after_epipe():
     writes = []
 
@@ -131,17 +149,20 @@ def test_archive_stdout_retries_only_unwritten_bytes_and_stops_after_epipe():
 
 def test_backup_source_broken_pipe_is_a_source_failure(tmp_path, monkeypatch, capsys):
     container = _make_container(tmp_path, "testcont")
-    source = container / "rootfs" / "hello"
+    source = container / "rootfs" / "demo\nfile"
+    (source.parent / "hello").rename(source)
 
     def open_source(*args, **kwargs):
-        raise BrokenPipeError("source read failed")
+        raise BrokenPipeError("source read failed\x1b[2J")
 
     monkeypatch.setattr(backup, "open", open_source, raising=False)
     stdout = SimpleNamespace(buffer=io.BytesIO(), flush=lambda: None)
     with patch("sys.stdout", stdout), pytest.raises(SystemExit) as exc:
         backup._run_backup("testcont", str(source.parent), str(container / "missing"), None, "", False, stdout)
     assert exc.value.code == 1
-    assert "Failed to backup file" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert f"Failed to backup file {source.parent}/demo\\nfile: source read failed\\e[2J" in err
+    assert "\x1b[2J" not in err
 
 
 @patch("chroot_distro.commands.backup.session.get_active_chroot_pids", return_value=[])

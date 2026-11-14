@@ -635,6 +635,11 @@ controls the diagnostic and exit status. In that case stdout may be empty.
 Failures handled by chroot-distro, including failure to launch the elevation
 tool, use the JSON error document.
 
+Human `list` and `ps` tables, backup messages, and plain and TTY build events
+escape control characters in names and other values they display. Displayed
+container names and filesystem paths also escape literal backslashes.
+JSON output and tar archives preserve the original values.
+
 The stderr diagnostic escapes control characters. If stdout is unavailable or
 its pipe closes while writing a JSON document, the version line, quiet `list`
 or `ps` output, `--get-chroot-cmd` output, or raw JSON build events,

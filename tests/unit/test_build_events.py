@@ -19,7 +19,7 @@ from chroot_distro.helpers.build_engine.events import (
     TTYReporter,
     make_reporter,
 )
-from chroot_distro.message import StdoutError
+from chroot_distro.message import C, StdoutError
 
 
 class _Recorder:
@@ -156,6 +156,48 @@ def test_tty_cached_collapse_swallows_finish():
     text = out.getvalue()
     assert "CACHED" in text
     assert "done" not in text
+
+
+@pytest.mark.parametrize(("reporter", "limit"), [(PlainReporter, 120), (TTYReporter, 80)])
+def test_build_reporters_escape_human_events(reporter, limit, monkeypatch, capsys):
+    bad = "bad\x1b[2J\x9b\u202e\nnext"
+    escaped = r"bad\e[2J\x9b\u202e\nnext"
+    text = f"RUN\t{bad} " + "x" * 200
+    step = _ev("step_started", platform=bad, stage_name=bad, instruction=bad, text=text)
+    monkeypatch.setitem(C, "YELLOW", "\x1b[33m")
+    monkeypatch.setitem(C, "CYAN", "\x1b[36m")
+    monkeypatch.setitem(C, "RST", "\x1b[0m")
+
+    renderer = reporter()
+    renderer.emit(step)
+    out, err = capsys.readouterr()
+    assert not out
+    assert f"[{escaped} {escaped}]" in err
+    assert all(control not in err for control in ("\x1b[2J", "\x9b", "\u202e", "\nnext"))
+    if reporter is PlainReporter:
+        assert "\x1b[33mRUN\x1b[0m " in err
+        preview = "RUN " + err.split("\x1b[33mRUN\x1b[0m ", 1)[1].removesuffix("\x1b[0m\n")
+    else:
+        assert err.startswith("\r\x1b[K\x1b[36m")
+        assert f"] {escaped}\x1b[0m " in err
+        preview = err.split("\x1b[0m ", 1)[1]
+    assert len(preview) == limit
+    assert escaped in preview
+    assert preview.endswith("...")
+
+    for kind in ("log_line", "error"):
+        renderer.emit(_ev(kind, text=bad))
+        out, err = capsys.readouterr()
+        assert not out
+        assert escaped in err
+        assert all(control not in err for control in ("\x1b[2J", "\x9b", "\u202e", "\nnext"))
+
+    JSONReporter().emit(step)
+    out, err = capsys.readouterr()
+    assert not err
+    event = json.loads(out)
+    assert event["text"] == text
+    assert event["stage_name"] == event["platform"] == event["instruction"] == bad
 
 
 # ── JSONReporter ──────────────────────────────────────────────────────────────

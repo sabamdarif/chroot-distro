@@ -1,4 +1,9 @@
+import json
+import os
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 from chroot_distro.commands.list_cmd import (
     _ContainerRow,
@@ -113,6 +118,61 @@ def test_format_table_aligns_columns():
     assert "ghcr.io/org/image:tag" in lines[2]
 
 
+@pytest.mark.skipif(os.name != "posix", reason="Requires POSIX filenames")
+def test_list_escapes_human_output_and_preserves_json(tmp_path, monkeypatch, capsys):
+    bad = "bad\x1b[2J\x9b\u202e\nnext"
+    escaped = r"bad\e[2J\x9b\u202e\nnext"
+    name = "box\\" + bad
+    shown_name = "box\\\\" + escaped
+    incomplete = "partial-" + bad
+    _make_container(tmp_path, name)
+    _make_container(tmp_path, "safe")
+    _make_container(tmp_path, incomplete, incomplete=True)
+    manifest = {
+        "image_ref": bad,
+        "image_config": {
+            "config": {
+                "Labels": {"org.opencontainers.image.source": bad, "IMAGE_TYPE": 123},
+                "User": bad,
+                "WorkingDir": "/" + name,
+                "ExposedPorts": {bad: {}},
+            },
+        },
+    }
+    (tmp_path / name / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    monkeypatch.setattr("chroot_distro.commands.list_cmd.CONTAINERS_DIR", str(tmp_path))
+    monkeypatch.setattr("chroot_distro.paths.CONTAINERS_DIR", str(tmp_path))
+    monkeypatch.setattr("chroot_distro.commands.list_cmd.container_busy_status", lambda _: f"in use ({bad})")
+
+    command_list(SimpleNamespace(verbose=True))
+    out, err = capsys.readouterr()
+    assert not out
+    assert all(control not in err for control in ("\x1b[2J", "\x9b", "\u202e", "\nnext"))
+    assert f"Scanning {shown_name} (1/2)" in err
+    assert f"Source:  {escaped}" in err
+    assert "Type:    123" in err
+    assert f"User:    {escaped}" in err
+    assert f"WorkDir: /{shown_name}" in err
+    assert f"Ports:   {escaped}" in err
+    assert f"Interrupted install(s) (not usable): partial-{escaped}" in err
+    table = [line for line in err.splitlines() if "in use (" in line]
+    assert len(table) == 2
+    assert table[0].index("in use (") == table[1].index("in use (")
+
+    command_list(SimpleNamespace(json=True))
+    out, err = capsys.readouterr()
+    assert not err
+    document = json.loads(out)
+    row = document["containers"][0]
+    assert row["name"] == name
+    assert row["source"] == row["source_url"] == row["user"] == bad
+    assert row["status"] == f"in use ({bad})"
+    assert row["workdir"] == "/" + name
+    assert row["ports"] == [bad]
+    assert row["image_type"] == 123
+    assert document["incomplete"] == [incomplete]
+
+
 def test_iter_container_names_permission_denied(monkeypatch):
     import errno
 
@@ -199,8 +259,6 @@ def test_installed_containers_excludes_incomplete(tmp_path, monkeypatch):
 
 
 def test_command_list_json_carries_numbers_and_booleans(capsys):
-    import json
-
     from chroot_distro.commands.list_cmd import _ManifestInfo
 
     row = _ContainerRow(
@@ -241,8 +299,6 @@ def test_command_list_json_carries_numbers_and_booleans(capsys):
 
 
 def test_command_list_json_leaves_absent_fields_null(capsys):
-    import json
-
     row = _ContainerRow("plain", "1 B", "local archive", "idle", size_bytes=1)
     with (
         patch("chroot_distro.commands.list_cmd._iter_container_names", return_value=(["plain"], [])),

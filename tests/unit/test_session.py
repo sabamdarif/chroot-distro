@@ -266,6 +266,36 @@ def test_command_ps_table_contains_fields(capsys):
         fd.close()
 
 
+def test_command_ps_escapes_cells_and_preserves_json(monkeypatch, capsys):
+    bad = "bad\x1b[2J\x9b\u202e\nnext"
+    escaped = r"bad\e[2J\x9b\u202e\nnext"
+    orphan = f"orphan-{bad}"
+    monkeypatch.setattr(ps_mod, "containers_with_active_pids", lambda: {orphan: [434343]})
+    monkeypatch.setattr(ps_mod, "has_tracked_ancestor", lambda *_: False)
+    monkeypatch.setattr(ps_mod, "_table_width", lambda: 200)
+    with _make_live(424242, bad, kind=bad, user=bad, command=["echo", bad]):
+        command_ps(SimpleNamespace())
+        out, err = capsys.readouterr()
+        assert not out
+        assert all(control not in err for control in ("\x1b[2J", "\x9b", "\u202e", "\nnext"))
+        assert f"echo '{escaped}'" in err
+        assert f"orphan-{escaped}" in err
+        assert err.count(escaped) == 5
+
+        monkeypatch.setattr(ps_mod, "_table_width", lambda: 1)
+        command_ps(SimpleNamespace())
+        assert "echo '…" in capsys.readouterr().err
+
+        command_ps(SimpleNamespace(json=True))
+        out, err = capsys.readouterr()
+        assert not err
+        document = json.loads(out)
+        session = document["sessions"][0]
+        assert session["command"] == ["echo", bad]
+        assert session["container"] == session["kind"] == session["user"] == bad
+        assert document["untracked"] == [{"container": orphan, "pids": [434343]}]
+
+
 def test_command_ps_table_empty(capsys):
     command_ps(SimpleNamespace(quiet=False))
     assert "No active sessions" in capsys.readouterr().err

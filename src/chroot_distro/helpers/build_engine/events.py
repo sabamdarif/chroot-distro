@@ -6,7 +6,8 @@ The engine emits :class:`BuildEvent` records; a reporter renders them.
 Three renderers: plain one-line-per-event (today's format), a minimal
 TTY renderer that collapses finished steps, and JSON-lines for tooling.
 Selected via ``--progress {auto,plain,tty,rawjson}``; ``--quiet`` maps
-to the no-op reporter.
+to the no-op reporter. The human reporters escape controls in event text,
+and JSON lines carry the original event fields.
 
 A build solving several platforms sends every solve's events to one of those
 renderers, so `PlatformReporter` wraps it and names the platform each event came
@@ -20,7 +21,7 @@ import sys
 import typing
 from contextlib import nullcontext
 
-from chroot_distro.message import C, log_info, msg, stdout_output
+from chroot_distro.message import C, escape_controls, log_info, msg, stdout_output
 
 # Event kinds: step_started | step_finished | cache_hit | log_line | error.
 
@@ -50,17 +51,24 @@ class Reporter(typing.Protocol):
 
 def _label(ev: BuildEvent) -> str:
     """The bracketed `[platform stage]` part, empty when the event has neither."""
-    inner = " ".join(part for part in (ev.platform, ev.stage_name) if part)
+    inner = " ".join(escape_controls(part) for part in (ev.platform, ev.stage_name) if part)
     return f" [{inner}]" if inner else ""
 
 
 def _head(ev: BuildEvent) -> str:
-    """`#N [platform stage] INSTR` prefix shared by the renderers."""
-    return f"#{ev.step_no}{_label(ev)} {ev.instruction}"
+    """`#N [platform stage] INSTR` prefix for the TTY reporter."""
+    return f"#{ev.step_no}{_label(ev)} {escape_controls(ev.instruction)}"
 
 
-def _truncate(text: str, limit: int = 120) -> str:
-    return text if len(text) <= limit else text[: limit - 3] + "..."
+def _step_preview(text: str, limit: int, *, normalize_separator: bool = False) -> str:
+    """Escape a bounded prefix before applying the display limit."""
+    prefix = text[: limit + 1]
+    if normalize_separator:
+        prefix = " ".join(prefix.split(None, 1))
+    preview = escape_controls(prefix)
+    if len(text) > limit or len(preview) > limit:
+        return preview[: limit - 3] + "..."
+    return preview
 
 
 class NullReporter:
@@ -76,8 +84,8 @@ class PlainReporter:
     def emit(self, ev: BuildEvent) -> None:
         """Print one log_info line for *ev* in the `Step N/M: …` format."""
         if ev.kind == "step_started":
-            raw = _truncate(ev.text)
-            parts = raw.split(None, 1)
+            preview = _step_preview(ev.text, 120, normalize_separator=True)
+            parts = preview.split(" ", 1) if preview else []
             if len(parts) == 2:
                 rendered = f"{C['YELLOW']}{parts[0]}{C['RST']} {parts[1]}"
             elif parts:
@@ -93,7 +101,7 @@ class PlainReporter:
             if ev.duration is not None and ev.duration >= 0.1:
                 log_info(f"--> done ({ev.duration:.1f}s)")
         elif ev.kind in ("log_line", "error"):
-            log_info(ev.text)
+            log_info(escape_controls(ev.text))
 
 
 class TTYReporter:
@@ -117,7 +125,7 @@ class TTYReporter:
         """Redraw the in-flight step for *ev* on the last terminal line."""
         if ev.kind == "step_started":
             self._cached = False
-            self._inflight = f"{C['CYAN']}{_head(ev)}{C['RST']} {_truncate(ev.text, 80)}"
+            self._inflight = f"{C['CYAN']}{_head(ev)}{C['RST']} {_step_preview(ev.text, 80)}"
             self._clear()
             self._stream.write(self._inflight)
             self._stream.flush()
@@ -134,7 +142,7 @@ class TTYReporter:
             # Print above the in-flight line, then restore it.
             inflight = self._inflight
             self._clear()
-            msg(ev.text)
+            msg(escape_controls(ev.text))
             if inflight:
                 self._stream.write(inflight)
                 self._stream.flush()

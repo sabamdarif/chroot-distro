@@ -15,6 +15,7 @@ table goes to stderr, like every other human-facing output here. `--json` is the
 third form: one document on stdout, built from the registry records themselves
 rather than from the table cells, so uptime stays a number of seconds and
 `detached` stays a boolean instead of the `*` the table appends.
+The table escapes controls before measuring and truncating cells.
 """
 
 from __future__ import annotations
@@ -26,7 +27,7 @@ import time
 from chroot_distro.constants import PROGRAM_NAME
 from chroot_distro.helpers.session import has_tracked_ancestor
 from chroot_distro.helpers.session_registry import active_sessions, containers_with_active_pids
-from chroot_distro.message import C, emit_json, msg, stdout_output
+from chroot_distro.message import C, emit_json, escape_controls, msg, quote_path, stdout_output
 
 # Fixed columns (everything except the trailing, space-filling COMMAND).
 _HEADERS = ("PID", "CONTAINER", "TYPE", "USER", "UPTIME", "COMMAND")
@@ -72,7 +73,7 @@ def command_ps(args) -> None:
             untracked_rows.append(
                 (
                     pid_label,
-                    cname,
+                    quote_path(cname),
                     "untracked",
                     "?",
                     "?",
@@ -122,12 +123,12 @@ def command_ps(args) -> None:
             has_detached = True
         rows.append(
             (
-                str(sess.get("pid", "?")),
-                str(sess.get("container", "?")),
-                kind,
-                str(sess.get("user", "?")),
+                escape_controls(str(sess.get("pid", "?"))),
+                quote_path(str(sess.get("container", "?"))),
+                escape_controls(kind),
+                escape_controls(str(sess.get("user", "?"))),
                 _fmt_uptime(now - sess.get("start_time", now)),
-                _fmt_command(sess.get("command")),
+                escape_controls(_fmt_command(sess.get("command"))),
             )
         )
 
