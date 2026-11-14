@@ -5,12 +5,11 @@
 Three namespaces, one class each: `ContainerLock` per container name,
 `BuildLock` per (image_ref, arch) pair hashed to a short key, `RunCacheLock` per
 build-cache key. Their files live under `locks/`, `locks/build/` and
-`locks/run-cache/` below RUNTIME_DIR. The first line of a lock file is
-`PID command`, which is what lets a conflict name the process holding it; it is
-written only once the flock is actually ours, since the file is opened O_CREAT
-without O_TRUNC and truncating earlier would wipe the holder's own line before
-the attempt that fails. Exclusive locks are re-entrant within one process, keyed
-by lock path in `_held_exclusive`.
+`locks/run-cache/` below RUNTIME_DIR. Container lock files survive `remove`
+so the next command can still flock the same inode. The first line of a lock
+file is `PID command`. It is written after acquisition so a failed attempt
+cannot overwrite the holder's line. Exclusive locks are re-entrant within
+one process, keyed by lock path in `_held_exclusive`.
 
 `locks/` is guest-writable on Termux (RUNTIME_DIR sits under the prefix bound
 read-write into every non-isolated container) and every name in it is
@@ -25,7 +24,8 @@ Failing open or failing closed is decided per caller, and the difference is the
 point of having both `_open_lock_file` and `open_lock_file_at`. An ordinary
 refusal (read-only filesystem, no permission, a filesystem that ignores flock)
 means "carry on without a lock", so a missing lock never stops the program from
-running at all. A planted name that cannot be cleared is different: for a
+running at all. A lock filename rejected as too long stops acquisition. A
+planted name that cannot be cleared also stops acquisition: for a
 container or build lock it raises `_HostileLockError` and `acquire()` returns
 False, because passing it off as the ordinary case would leave every later
 command unsynchronised. `open_lock_file_at` is the same opening rules with the
@@ -33,10 +33,8 @@ opposite policy, for the build-cache index's own lock, where losing the race
 costs a concurrent `record()`'s entry rather than a torn file, since the index is
 published through `atomic_write`.
 
-Everything a caller sees about a holder (`busy_locks`, `holder_hint`) is a
-cosmetic snapshot taken with a shared non-blocking probe. It is never consulted
-to decide whether a lock is granted: `acquire()` alone decides that, and never
-from a guess.
+Holder hints read the recorded PID and command. `busy_locks` uses a shared
+non-blocking probe to find exclusive locks. Only `acquire()` grants a lock.
 """
 
 import contextlib
@@ -70,8 +68,11 @@ _held_exclusive: set[str] = set()
 
 
 def container_lock_path(name: str) -> str:
-    """Return the lock-file path for the container named *name*."""
-    return os.path.join(LOCKS_DIR, f"{name}.lock")
+    """Use a leading `~` for hashed names, outside the valid container name grammar."""
+    basename = f"{name}.lock"
+    if len(os.fsencode(basename)) > dirfd.NAME_MAX:
+        basename = f"~{hashlib.sha256(os.fsencode(name)).hexdigest()}.lock"
+    return os.path.join(LOCKS_DIR, basename)
 
 
 def _build_lock_path(image_ref: str, arch: str) -> str:
@@ -95,7 +96,7 @@ def _build_lock_path(image_ref: str, arch: str) -> str:
 
 def container_busy_status(name: str) -> str:
     """Return a short container status for display (``idle`` or ``in use …``)."""
-    hint = _hint_for(_CONTAINER_PARTS, f"{name}.lock")
+    hint = _hint_for(_CONTAINER_PARTS, os.path.basename(container_lock_path(name)))
     if hint:
         return f"in use{hint}"
     return "idle"
@@ -235,6 +236,10 @@ def open_lock_file_at(dir_fd: int, name: str, path: str) -> int | None:
         return _open_lock_file(dir_fd, name, path)
     except _HostileLockError:
         return None
+    except OSError as exc:
+        if exc.errno != errno.ENAMETOOLONG:
+            raise
+        return None
 
 
 def _open_lock_file(dir_fd: int, name: str, path: str) -> int | None:
@@ -251,13 +256,16 @@ def _open_lock_file(dir_fd: int, name: str, path: str) -> int | None:
     unsynchronised.
 
     None is that ordinary case (a read-only filesystem, no permission), which has
-    always meant "carry on without a lock" and still does.
+    always meant "carry on without a lock" and still does. ENAMETOOLONG is
+    passed to the caller so an invalid lock filename fails acquisition.
     """
     flags = os.O_RDWR | os.O_CREAT
     try:
         fd, _st = dirfd.open_regular_at(dir_fd, name, flags, 0o644)
         return fd
     except OSError as exc:
+        if exc.errno == errno.ENAMETOOLONG:
+            raise
         if not _is_planted(exc):
             return None
     if not _drop_planted(dir_fd, name):
@@ -266,6 +274,8 @@ def _open_lock_file(dir_fd: int, name: str, path: str) -> int | None:
         fd, _st = dirfd.open_regular_at(dir_fd, name, flags, 0o644)
         return fd
     except OSError as exc:
+        if exc.errno == errno.ENAMETOOLONG:
+            raise
         if _is_planted(exc):
             raise _HostileLockError(path) from None
         return None
@@ -449,6 +459,11 @@ class _FlockBase:
                 os.close(dir_fd)
         except _HostileLockError as exc:
             self._hostile = str(exc)
+            return False
+        except OSError as exc:
+            if exc.errno != errno.ENAMETOOLONG:
+                raise
+            log.warning("Cannot acquire lock '%s': filename is too long for the filesystem.", self._lock_path)
             return False
         if raw_fd is None:
             log.warning("Could not open/create lock file '%s'. Proceeding unlocked.", self._lock_path)

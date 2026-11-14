@@ -684,6 +684,9 @@ Inside the data folder:
 | `sessions/`                       | Active session records used by `ps`        |
 | `locks/`                          | Lock files preventing conflicting commands |
 
+Container lock files remain after `remove` and are reused if you reinstall
+with the same name.
+
 Inside the cache folder:
 
 | Path             | Contents                   |

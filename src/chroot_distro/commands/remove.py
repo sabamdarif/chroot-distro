@@ -2,10 +2,9 @@
 # Copyright (C) 2025-2026 Md Arif
 """`chroot-distro remove`: stop the container, unmount it, delete both its trees.
 
-Two trees go, not one: `containers/<name>/` and the per-container runtime state
-under `data/<name>/`. The lock file is unlinked only after the `ContainerLock`
-context has exited, since dropping it while the flock is still held would leave the
-next caller locking a file no one else can reach.
+Remove `containers/<name>/` and the per-container runtime state under
+`data/<name>/`. Keep the lock file because another command may already
+have it open when `remove` releases its flock.
 
 Sessions end the way `unmount` ends them, SIGTERM and then SIGKILL after a grace
 period, and a container with a process or a mount still standing afterwards is
@@ -29,7 +28,7 @@ import chroot_distro.helpers.mount_manager as mount_manager
 import chroot_distro.helpers.namespace as namespace
 import chroot_distro.helpers.session as session
 from chroot_distro.constants import RUNTIME_DIR
-from chroot_distro.locking import ContainerLock, container_lock_path
+from chroot_distro.locking import ContainerLock
 from chroot_distro.message import crit_error, log_error, log_info
 from chroot_distro.names import require_valid_name
 from chroot_distro.paths import container_dir, container_rootfs
@@ -216,10 +215,5 @@ def _remove_one(container_name: str, verbose: bool) -> None:
         finally:
             if show_progress:
                 clear_bar()
-
-    # The ContainerLock context has now exited and the flock is released;
-    # it is safe to delete the lock file itself.
-    with contextlib.suppress(OSError):
-        os.unlink(container_lock_path(container_name))
 
     log_info("Finished removing the container.")

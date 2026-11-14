@@ -1,8 +1,13 @@
+import fcntl
+import os
 import signal
+from types import SimpleNamespace
 from unittest.mock import ANY, MagicMock, call, patch
 
 import pytest
 
+from chroot_distro import locking
+from chroot_distro.commands import remove
 from chroot_distro.commands.remove import command_remove
 from chroot_distro.parser import build_parser
 
@@ -37,6 +42,42 @@ def test_remove_container_not_installed(mock_crit_error, mock_isdir, mock_rootfs
 
     assert exc_info.value.code == 1
     mock_crit_error.assert_called_once_with("container 'alpine' is not installed.")
+
+
+def test_remove_preserves_lock_taken_by_another_opener(tmp_path, monkeypatch):
+    container = tmp_path / "containers" / "alpine"
+    rootfs = container / "rootfs"
+    rootfs.mkdir(parents=True)
+    locks = tmp_path / "locks"
+    monkeypatch.setattr(locking, "RUNTIME_DIR", str(tmp_path))
+    monkeypatch.setattr(locking, "LOCKS_DIR", str(locks))
+    monkeypatch.setattr(remove, "RUNTIME_DIR", str(tmp_path))
+    monkeypatch.setattr(remove, "container_dir", lambda _: str(container))
+    monkeypatch.setattr(remove, "container_rootfs", lambda _: str(rootfs))
+    monkeypatch.setattr(remove.session, "get_active_chroot_pids", lambda _: [])
+    monkeypatch.setattr(remove.session, "reset", lambda _: None)
+    monkeypatch.setattr(remove.session, "clear_mount_options", lambda _: None)
+    monkeypatch.setattr(remove.namespace, "get_live_holder", lambda _: None)
+    monkeypatch.setattr(remove.mount_manager, "unmount_all", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(remove.mount_manager, "get_active_mounts", lambda _: [])
+
+    with locking.ContainerLock("alpine", exclusive=True, command="install") as lock:
+        lock_path = lock.lock_path
+
+    with open(lock_path, "r+") as peer:
+
+        class RemovalLock(locking.ContainerLock):
+            def release(self):
+                super().release()
+                fcntl.flock(peer.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+        monkeypatch.setattr(remove, "ContainerLock", RemovalLock)
+        command_remove(SimpleNamespace(container_name="alpine", verbose=False))
+
+        assert not container.exists()
+        assert os.path.samestat(os.stat(lock_path), os.fstat(peer.fileno()))
+        contender = locking.ContainerLock("alpine", exclusive=True, command="install")
+        assert not contender.acquire()
 
 
 @patch("chroot_distro.commands.remove.namespace.get_live_holder", return_value=None)

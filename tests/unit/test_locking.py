@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import pytest
 
-from chroot_distro import locking
+from chroot_distro import dirfd, locking
 from chroot_distro.exceptions import LockConflictError
 from chroot_distro.locking import (
     BuildLock,
@@ -50,6 +50,49 @@ def _write_lock(lock_tree, name, text):
 
 def test_container_lock_path():
     assert container_lock_path("alpine").endswith("locks/alpine.lock")
+
+
+@pytest.mark.parametrize("length", [250, 251, 255])
+def test_container_lock_at_name_limit(lock_tree, length):
+    name = "x" * length
+    with ContainerLock(name, exclusive=True, command="install") as holder:
+        basename = os.path.basename(holder.lock_path)
+        assert len(os.fsencode(basename)) <= dirfd.NAME_MAX
+        if length == 250:
+            assert basename == f"{name}.lock"
+        assert os.path.isfile(holder.lock_path)
+        assert locking.container_busy_status(name) == f"in use (PID {os.getpid()}: install)"
+        assert [path for path, _ in locking.busy_locks()] == [holder.lock_path]
+
+        with patch.object(locking, "_held_exclusive", set()):
+            contender = ContainerLock(name, exclusive=True, command="remove")
+            assert not contender.acquire()
+            assert contender.holder_hint() == f" (PID {os.getpid()}: install)"
+            if length > 250:
+                with ContainerLock(name[:-1] + "y", exclusive=True, command="install") as other:
+                    assert other.lock_path != holder.lock_path
+                    assert os.path.isfile(other.lock_path)
+
+
+@pytest.mark.parametrize("retry", [False, True])
+def test_overlong_lock_filename_fails_acquisition(lock_tree, caplog, retry):
+    lock_tree.mkdir()
+    lock = ContainerLock("box", exclusive=True, command="install")
+    too_long = OSError(errno.ENAMETOOLONG, "File name too long")
+    errors = [OSError(errno.ELOOP, "Symbolic link"), too_long] if retry else [too_long]
+    with patch.object(dirfd, "open_regular_at", side_effect=errors) as open_lock:
+        assert not lock.acquire()
+        assert open_lock.call_count == len(errors)
+    assert "filename is too long for the filesystem" in caplog.text
+    assert "Proceeding unlocked" not in caplog.text
+
+    fd = dirfd.opendir(str(lock_tree))
+    try:
+        with patch.object(dirfd, "open_regular_at", side_effect=errors) as open_lock:
+            assert locking.open_lock_file_at(fd, "box.lock", lock.lock_path) is None
+            assert open_lock.call_count == len(errors)
+    finally:
+        os.close(fd)
 
 
 def test_lock_info_dead_pid(lock_tree):
