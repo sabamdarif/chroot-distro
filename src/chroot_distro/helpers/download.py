@@ -357,6 +357,7 @@ def http_opener(
     *,
     insecure: bool = False,
     redirect: urllib.request.HTTPRedirectHandler | None = None,
+    opener_class: type[_Opener] = _Opener,
 ) -> urllib.request.OpenerDirector:
     """Return an opener for HTTP(S) requests with a default timeout.
 
@@ -374,7 +375,7 @@ def http_opener(
     if redirect is None:
         redirect = RedirectPolicyHandler(allow_plaintext=insecure)
     context = insecure_ssl_context() if insecure else None
-    opener = _Opener()
+    opener = opener_class()
     for handler in (
         urllib.request.ProxyHandler(),
         urllib.request.UnknownHandler(),
@@ -862,6 +863,7 @@ def _download_segment(
     bucket: "TokenBucket | None" = None,
     live_responses: "_LiveResponses | None" = None,
     insecure: bool = False,
+    opener_factory: typing.Callable[[], urllib.request.OpenerDirector] | None = None,
 ) -> None:
     """Download one byte-range segment to *seg.tmp_path*.
 
@@ -887,7 +889,8 @@ def _download_segment(
 
     # Each thread gets its own opener to avoid urllib's internal
     # connection serialisation when sharing the default global opener.
-    opener = http_opener(insecure=insecure)
+    make_opener = opener_factory or functools.partial(http_opener, insecure=insecure)
+    opener = make_opener()
 
     reconnections = 0
     while reconnections <= _MAX_RECONNECTIONS:
@@ -977,7 +980,7 @@ def _download_segment(
                 reconnections += 1
                 if reconnections > _MAX_RECONNECTIONS:
                     raise
-                opener = http_opener(insecure=insecure)
+                opener = make_opener()
                 break  # re-enter the reconnection loop
 
     raise RuntimeError(

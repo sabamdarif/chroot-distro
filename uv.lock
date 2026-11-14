@@ -369,7 +369,6 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
-    { name = "backports-zstd" },
     { name = "build" },
     { name = "mypy" },
     { name = "pre-commit", version = "4.6.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
@@ -386,7 +385,6 @@ requires-dist = [{ name = "backports-zstd", marker = "python_full_version < '3.1
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "backports-zstd" },
     { name = "build", specifier = ">=1.5.0" },
     { name = "mypy", specifier = ">=1.10" },
     { name = "pre-commit", specifier = ">=3.0" },

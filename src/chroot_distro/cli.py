@@ -3,14 +3,14 @@
 """The entry point: validate, decide whether root is needed, then dispatch.
 
 `main()` does the argument work argparse cannot, because users are shown the
-hand-written pages in `commands/help/` and never argparse's own text. So `-h` is
-intercepted before parsing, an unknown first word is rejected with the help page
-rather than a usage line, and `REQUIRED_ARGS` positionals are checked here (the check
-uses `not`, which also catches the empty list an `nargs="*"` positional produces).
-Unknown-argument detection reparses up to a `--` for `login` and `run`, since
-everything after it belongs to the guest command.
+hand-written pages in `commands/help/` and never argparse's own text. Exact
+`-h` and `--help` flags before the command's `--` take precedence over parsing.
+An unknown first word gets the front page, and `REQUIRED_ARGS` positionals are
+checked here (including empty lists from `nargs="*"`).
+For `login` and `run`, the sub-parser hands the guest arguments straight to the
+handler and checks only the host arguments.
 
-Root policy is decided here and nowhere else. `help` and `search` never elevate.
+`help` and `search` never elevate.
 On Termux `list` and `ps` read only /proc and container metadata so they stay
 unprivileged.
 Everything else elevates, `info` included: its kernel answers come from probes that
@@ -25,9 +25,11 @@ Adding a top-level import here costs every invocation, including tab completion.
 Termux drops `LD_PRELOAD` and `LD_LIBRARY_PATH` from the environment first: the Termux
 shell sets a loader shim that must not follow this process into a chroot.
 
-Everything below is expected to fail by raising a `ChrootDistroError`, which becomes a
-one-line message and exit code 1. A bare `Exception` gets the same treatment with an
-"unexpected error" prefix, so no traceback ever reaches a user.
+After parsing, argument validation and dispatch report failures on stderr and
+also emit an error document when the command accepted `--json`. Dispatch keeps
+the messages of expected failures and unsupported operations. Other dispatch
+exceptions get an "unexpected error" prefix. The entry point flushes buffered
+stdout and handles missing stdout or pipe closure after command cleanup.
 """
 
 import importlib
@@ -35,17 +37,22 @@ import os
 import signal
 import sys
 from collections.abc import Callable
+from contextlib import suppress
 from typing import Any
 
-from chroot_distro.constants import IS_TERMUX, PROGRAM_NAME
-from chroot_distro.exceptions import ChrootDistroError, RootRequiredError
-from chroot_distro.message import crit_error, emit_json_error, msg, set_quiet
-from chroot_distro.parser import (
-    ALIAS_TO_CANONICAL,
-    REQUIRED_ARGS,
-    build_parser,
-    parse_cli_args,
+from chroot_distro.constants import IS_TERMUX
+from chroot_distro.exceptions import ChrootDistroError
+from chroot_distro.message import (
+    StdoutError,
+    crit_error,
+    emit_json_error,
+    escape_controls,
+    msg,
+    print_version,
+    set_quiet,
+    stdout_output,
 )
+from chroot_distro.parser import ALIAS_TO_CANONICAL, REQUIRED_ARGS, build_parser, strip_global_separator
 
 # "module:function" refs; imported on dispatch (tests patch in callables).
 _COMMAND_HANDLERS: dict[str, str | Callable] = {
@@ -87,23 +94,23 @@ def _sigquit_to_keyboard_interrupt(_signum: int, _frame: Any) -> None:
 
 
 def _ensure_root_user() -> None:
-    """Ensure that we are running as root, elevating if necessary/possible.
+    """Elevate when needed and keep the legacy credential reader out of the root path."""
+    from chroot_distro.elevate import elevate_or_die, is_root
 
-    Unlike proot-distro (which is rootless), chroot-distro uses the host's
-    native chroot and mount mechanisms, requiring root privileges.
-    """
-    if os.getuid() == 0:
-        return
-
-    from chroot_distro.elevate import elevate_or_die
-
-    elevate_or_die()
+    if not is_root():
+        elevate_or_die()
 
 
 def _dispatch_help(raw_args: list[str]) -> bool:
-    """Render per-command help when -h/--help/--usage is given."""
-    if len(raw_args) < 2 or raw_args[1] not in ("-h", "--help", "--usage"):
+    """Render command help before parsing host arguments."""
+    for index, arg in enumerate(raw_args[1:]):
+        if arg == "--":
+            return False
+        if arg in ("-h", "--help") or (index == 0 and arg == "--usage"):
+            break
+    else:
         return False
+
     from chroot_distro.commands.help import HELP_COMMANDS
 
     cmd = ALIAS_TO_CANONICAL.get(raw_args[0], raw_args[0])
@@ -122,59 +129,74 @@ def _reject_unknown_command(raw_args: list[str]) -> None:
         from chroot_distro.commands.help import command_help
 
         msg()
-        crit_error(f"unknown command '{first}'.")
+        crit_error(f"unknown command {first!a}.")
         command_help()
         msg()
         sys.exit(1)
 
 
-def main() -> None:
-    """CLI entry point.
+def _flush_stdout() -> None:
+    if sys.stdout is not None:
+        with stdout_output() as stream:
+            stream.flush()
 
-    Validates the runtime environment, parses arguments, and dispatches
-    to the chosen command's handler.
-    """
+
+def main() -> None:
+    """Run the CLI and handle stdout failures before Python's shutdown flush."""
+    try:
+        try:
+            _run()
+        except SystemExit:
+            _flush_stdout()
+            raise
+        _flush_stdout()
+    except StdoutError as exc:
+        if exc.stream is not None:
+            try:
+                with open(os.devnull, "wb") as sink:
+                    os.dup2(sink.fileno(), exc.stream.fileno())
+            except OSError:
+                os._exit(1)
+        raise SystemExit(1) from None
+
+
+def _run() -> None:
+    """Validate arguments, elevate when needed, and dispatch the command."""
     if IS_TERMUX:
         os.environ.pop("LD_PRELOAD", None)
         os.environ.pop("LD_LIBRARY_PATH", None)
 
     signal.signal(signal.SIGQUIT, _sigquit_to_keyboard_interrupt)
 
-    if len(sys.argv) >= 2:
-        ALIAS_TO_CANONICAL.get(sys.argv[1], sys.argv[1])
-
     if len(sys.argv) >= 2 and sys.argv[1] in ("--version", "-V"):
-        from chroot_distro.constants import PROGRAM_VERSION
-
-        print(f"{PROGRAM_NAME} {PROGRAM_VERSION}")
+        print_version()
         sys.exit(0)
 
-    if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help", "help", "hel", "he", "h"):
+    if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help"):
         from chroot_distro.commands.help import command_help
 
         command_help()
         sys.exit(0)
 
-    raw_args = sys.argv[1:]
+    raw_args = strip_global_separator(sys.argv[1:])
     if _dispatch_help(raw_args):
         sys.exit(0)
 
     _reject_unknown_command(raw_args)
 
     parser = build_parser()
-    args, unknown = parse_cli_args(parser, raw_args)
+    args, unknown = parser.parse_known_args(raw_args)
 
     command = args.command
     if command is None:
         from chroot_distro.commands.help import command_help
 
         msg()
-        crit_error(f"unknown command '{raw_args[0]}'.")
+        crit_error(f"unknown command {raw_args[0]!a}.")
         command_help()
         msg()
         sys.exit(1)
 
-    assert command is not None
     canonical: str = ALIAS_TO_CANONICAL.get(command) or command
 
     if getattr(args, "help", False):
@@ -186,17 +208,20 @@ def main() -> None:
             command_help()
         sys.exit(0)
 
-    check_unknown = unknown
-    if canonical in ("login", "run") and "--" in raw_args:
-        sep_idx = raw_args.index("--")
-        _, check_unknown = parse_cli_args(parser, raw_args[:sep_idx])
-    if check_unknown:
+    json_mode = getattr(args, "json", False)
+
+    def report_error(text: str) -> None:
+        if json_mode:
+            emit_json_error(canonical, text)
+        msg()
+        crit_error(escape_controls(text))
+
+    if unknown:
         from chroot_distro.commands.help import HELP_COMMANDS
 
-        bad = check_unknown[0]
+        bad = unknown[0]
         kind = "unrecognized option" if bad.startswith("-") else "unexpected argument"
-        msg()
-        crit_error(f"{kind}: '{bad}'.")
+        report_error(f"{kind}: {bad!a}.")
         if canonical in HELP_COMMANDS:
             HELP_COMMANDS[canonical]()
         msg()
@@ -208,8 +233,7 @@ def main() -> None:
         if not getattr(args, arg_name, None):
             from chroot_distro.commands.help import HELP_COMMANDS
 
-            msg()
-            crit_error(error_msg)
+            report_error(error_msg)
             if canonical in HELP_COMMANDS:
                 HELP_COMMANDS[canonical]()
             sys.exit(1)
@@ -230,56 +254,31 @@ def main() -> None:
     else:
         requires_root = True
 
-    if requires_root:
-        try:
-            _ensure_root_user()
-        except RootRequiredError as e:
-            msg()
-            crit_error(str(e))
-            msg()
-            sys.exit(1)
-
-    handler = _resolve_handler(canonical)
-    if handler is None:
-        crit_error(f"unknown command '{command}'.")
-        sys.exit(1)
-
-    # A --json caller gets its failure as a document too, so one parse handles
-    # both outcomes. The stderr line stays, which is what a human reads.
-    json_mode = getattr(args, "json", False)
-
-    def _emit_json_error(text: str) -> None:
-        if json_mode:
-            emit_json_error(canonical, text)
-
     try:
+        if requires_root:
+            _ensure_root_user()
+        handler = _resolve_handler(canonical)
+        if handler is None:
+            raise ChrootDistroError(f"unknown command {command!a}.")
         handler(args)
-    except ChrootDistroError as e:
-        _emit_json_error(str(e))
-        msg()
-        crit_error(str(e))
-        msg()
-        sys.exit(1)
+    except StdoutError:
+        raise
+    except (ChrootDistroError, NotImplementedError) as exc:
+        report_error(str(exc))
     except KeyboardInterrupt:
-        _emit_json_error("Aborted by user.")
-        msg()
-        crit_error("Aborted by user.")
-        msg()
-        sys.stdout.flush()
+        with suppress(StdoutError):
+            report_error("Aborted by user.")
+            msg()
+            _flush_stdout()
         sys.stderr.flush()
         os._exit(1)
-    except NotImplementedError as e:
-        _emit_json_error(str(e))
-        msg()
-        crit_error(str(e))
-        msg()
-        sys.exit(1)
-    except Exception as e:
-        _emit_json_error(f"unexpected error: {e}")
-        msg()
-        crit_error(f"unexpected error: {e}")
-        msg()
-        sys.exit(1)
+    except Exception as exc:
+        report_error(f"unexpected error: {exc}")
+    else:
+        return
+
+    msg()
+    sys.exit(1)
 
 
 if __name__ == "__main__":

@@ -189,7 +189,7 @@ def test_data_mount_flags_reports_nosuid_without_warning():
 
 def test_gather_capabilities_reports_no_escalation_tool():
     with (
-        patch("os.getuid", return_value=1000),
+        patch("os.geteuid", return_value=1000),
         patch("chroot_distro.elevate.is_root_available", return_value=False),
         patch.object(info, "_detect_escalation_tool", return_value=""),
         patch.object(info, "IS_TERMUX", False),
@@ -271,7 +271,7 @@ def test_userns_enabled_states():
 def test_gather_capabilities_privilege_states():
     # 1. Running as root
     with (
-        patch("os.getuid", return_value=0),
+        patch("os.geteuid", return_value=0),
         patch("chroot_distro.commands.info.IS_TERMUX", False),
         patch("chroot_distro.commands.info._binfmt_qemu_status", return_value=("", "info")),
         patch("chroot_distro.commands.info._namespace_status", return_value=("", "info")),
@@ -287,7 +287,7 @@ def test_gather_capabilities_privilege_states():
 
     # 2. Termux, not root, but root is available
     with (
-        patch("os.getuid", return_value=1000),
+        patch("os.geteuid", return_value=1000),
         patch("chroot_distro.commands.info.IS_TERMUX", True),
         patch("chroot_distro.elevate.is_root_available", return_value=True),
         patch("chroot_distro.commands.info._data_mount_flags", return_value=("", "info")),
@@ -304,7 +304,7 @@ def test_gather_capabilities_privilege_states():
 
     # 3. Termux, not root, root is not available
     with (
-        patch("os.getuid", return_value=1000),
+        patch("os.geteuid", return_value=1000),
         patch("chroot_distro.commands.info.IS_TERMUX", True),
         patch("chroot_distro.elevate.is_root_available", return_value=False),
         patch("chroot_distro.commands.info._data_mount_flags", return_value=("", "info")),
@@ -319,12 +319,11 @@ def test_gather_capabilities_privilege_states():
         assert priv.level == "bad"
         assert "root is not available (su not found)" in priv.value
 
-    # 4. Linux, not root, elevation comes from file capabilities
+    # 4. Linux, not root, sudo is available
     with (
-        patch("os.getuid", return_value=1000),
+        patch("os.geteuid", return_value=1000),
         patch("chroot_distro.commands.info.IS_TERMUX", False),
-        patch("chroot_distro.elevate.is_root_available", return_value=True),
-        patch("chroot_distro.commands.info._detect_escalation_tool", return_value=""),
+        patch("chroot_distro.commands.info._detect_escalation_tool", return_value="sudo"),
         patch("chroot_distro.commands.info._binfmt_qemu_status", return_value=("", "info")),
         patch("chroot_distro.commands.info._namespace_status", return_value=("", "info")),
         patch("chroot_distro.commands.info._lsm_status", return_value=None),
@@ -335,7 +334,7 @@ def test_gather_capabilities_privilege_states():
         caps = info._gather_capabilities(images=[], host_arch="x86_64")
         priv = next(c for c in caps if c.label == "Privileges")
         assert priv.level == "info"
-        assert "has the required file capabilities" in priv.value
+        assert "can elevate via sudo" in priv.value
 
 
 def test_command_info_json_has_every_section(capsys):

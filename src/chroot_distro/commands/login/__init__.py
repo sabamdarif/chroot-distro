@@ -50,9 +50,14 @@ Entering has four forms: `chroot_and_run` when there is no holder, waiting on a
 foreground holder that execs the command itself (entering one would hang the
 session forever), `enter_and_run_with_pty` into a parked holder, and
 `spawn_detached` for `--detach`.
+
+Foreground PTY output failures reach dispatch after session teardown and lock release.
+Command display uses a parked holder. It balances the temporary session
+under the setup lock before writing the command to stdout.
 """
 
 import contextlib
+import errno
 import logging
 import os
 import shlex
@@ -111,6 +116,7 @@ from chroot_distro.constants import (
     TERMUX_HOME,
     TERMUX_PREFIX,
 )
+from chroot_distro.exceptions import ChrootDistroError
 from chroot_distro.helpers import isolation
 from chroot_distro.helpers.android import termux_home_owner_ids
 from chroot_distro.helpers.display import (
@@ -133,10 +139,10 @@ from chroot_distro.helpers.x11 import (
     x11_auth_bind_path,
 )
 from chroot_distro.locking import ContainerLock
-from chroot_distro.message import crit_error, warn
+from chroot_distro.message import StdoutError, crit_error, stdout_output, warn
 from chroot_distro.names import require_valid_name
 from chroot_distro.paths import container_dir, container_log_path, container_rootfs
-from chroot_distro.syscalls.chroot import chroot_and_run, enter_chroot, spawn_detached
+from chroot_distro.syscalls.chroot import PtyOutputError, chroot_and_run, enter_chroot, spawn_detached
 from chroot_distro.syscalls.nsenter import enter_and_run_with_pty
 from chroot_distro.syscalls.unshare import ForegroundExec
 
@@ -241,9 +247,14 @@ def command_login(args) -> None:
     container_name = args.container_name
     require_valid_name(container_name)
 
-    # Non-exclusive lock: concurrent login sessions are allowed.
-    with ContainerLock(container_name, exclusive=False, command="login"):
-        _command_login_inner(container_name, args)
+    try:
+        with ContainerLock(container_name, exclusive=False, command="login"):
+            _command_login_inner(container_name, args)
+    except PtyOutputError as exc:
+        stream = sys.__stdout__
+        if exc.errno == errno.EPIPE or (exc.errno == errno.EBADF and stream is None):
+            raise StdoutError(stream) from exc
+        raise ChrootDistroError(f"could not forward guest output to stdout: {exc}") from exc
 
 
 def _detect_dist_type(rootfs: str) -> str:
@@ -599,6 +610,8 @@ def _translate_host_path_to_guest(host_path: str, rootfs: str, resolved_binds: l
 
 
 def _command_login_inner_once(container_name: str, args) -> None:
+    display_command = getattr(args, "get_chroot_cmd", False)
+    command_line: str | None = None
     rootfs = container_rootfs(container_name)
     if not os.path.isdir(rootfs):
         crit_error(f"container '{container_name}' is not installed.")
@@ -1141,7 +1154,7 @@ def _command_login_inner_once(container_name: str, args) -> None:
                     # enter_chroot) before execing, so the command is PID 1 and
                     # the chroot /proc/1/root escape stays closed.
                     _detach_run = getattr(args, "detach", False) and run_inner is not None
-                    if run_inner is not None and not _detach_run:
+                    if run_inner is not None and not _detach_run and not display_command:
                         from chroot_distro.syscalls.chroot import _copy_terminal_size
 
                         pipe_r, pipe_w = os.pipe()
@@ -1203,16 +1216,14 @@ def _command_login_inner_once(container_name: str, args) -> None:
 
             with contextlib.suppress(Exception):
                 mount_manager.unmount_all(rootfs, holder=holder)
-            # Android's /data is nosuid; bind the host-mode rootfs onto itself
-            # with suid/exec. A namespace holder cloned its mounts and locks them.
-            if holder is None:
-                mount_manager.ensure_rootfs_exec(rootfs)
             # best_effort_bind_sources() entries warn+skip on failure;
             # anything else aborts. Binds under /dev (GPU nodes, binderfs)
             # wait for apply_special_mounts: the fresh tmpfs /dev it mounts
             # would shadow them.
             non_dev_binds, dev_binds = isolation.split_dev_binds(resolved_binds, rootfs)
             try:
+                if holder is None:
+                    mount_manager.ensure_rootfs_exec(rootfs)
                 isolation.apply_bind_mounts(
                     rootfs,
                     non_dev_binds,
@@ -1393,18 +1404,31 @@ def _command_login_inner_once(container_name: str, args) -> None:
             # The union is what a third session inherits.
             session.save_mount_options(container_name, current_opts)
 
-    if getattr(args, "get_chroot_cmd", False):
-        ns_prefix = ["nsenter", "--target", str(holder.pid), *holder.nsenter_flags] if holder is not None else None
-        print(format_get_chroot_cmd(child_env, chroot_display_argv(chroot_config, ns_prefix)))
-
-        with session.lock(container_name) as lock_fh:
-            sess_count = session.decrement(container_name, lock_fh=lock_fh)
-            if sess_count == 0:
-                mount_manager.unmount_all(rootfs, holder=holder)
-                session.clear_mount_options(container_name)
-                if holder is not None:
-                    namespace.release_holder(container_name)
+        if display_command:
+            try:
+                ns_prefix = (
+                    ["nsenter", "--target", str(holder.pid), *holder.nsenter_flags] if holder is not None else None
+                )
+                command_line = format_get_chroot_cmd(child_env, chroot_display_argv(chroot_config, ns_prefix))
+            finally:
+                if session.decrement(container_name, lock_fh=lock_fh) == 0:
+                    try:
+                        mount_manager.unmount_all(rootfs, holder=holder)
+                    except BaseException:
+                        if holder is not None:
+                            with contextlib.suppress(Exception):
+                                namespace.release_holder(container_name)
+                                session.clear_mount_options(container_name)
+                                namespace.clear_isolation_mode(container_name)
+                        raise
+                    if holder is not None:
+                        namespace.release_holder(container_name)
+                    session.clear_mount_options(container_name)
                     namespace.clear_isolation_mode(container_name)
+
+    if command_line is not None:
+        with stdout_output() as stream:
+            print(command_line, file=stream)
         sys.exit(0)
 
     # Record this session for `ps`; the handle's flock tracks liveness, so

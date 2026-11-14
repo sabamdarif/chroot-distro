@@ -7,8 +7,10 @@ The format is decided by streaming the first 500 members and looking for `oci-la
 so a plain tarball is never indexed in full. A plain tarball's leading components are
 stripped by a vote (`detect_strip_count` scores each depth by how many entries put a
 known rootfs directory first), because tarballs are published both with and without a
-wrapper directory. An OCI archive is walked index to manifest to config, its layers
-cached under their digests and then applied in order.
+wrapper directory. An OCI archive is walked from index to manifest to config.
+Addressed documents are checked against their descriptors before parsing, and
+layers before cache publication. Extraction uses the same open file it verified,
+so a cache entry replaced by name cannot redirect the read.
 
 A chroot-distro backup is a plain tar whose members are `<name>/manifest.json` (always
 the first entry) and `<name>/rootfs/...`. It is recognised by that shape and its
@@ -17,33 +19,33 @@ and `run` works; the rootfs is unpacked by the plain-tarball path with a fixed s
 2 (dropping `<name>/rootfs`, and the shorter manifest member falls outside that tree),
 since the voted strip ties toward 0 for a container name that is itself a rootfs dir.
 
-Every member read out of the outer archive must be a *regular* file, and that check is
-the point of this module: `tarfile.extractfile` follows hardlinks and symlinks within
-the archive, so a crafted outer tar could otherwise redirect `index.json` to a layer
-blob, or swap one image's layer for another's where no digest check would see it.
+Every member read out of the outer archive must be a regular file, since
+`tarfile.extractfile` follows hardlinks and symlinks within the archive.
 
 The rootfs is a descriptor throughout, for the reason `commands/install.py` explains.
 A plain tarball returns None, since it carries no image metadata to record.
 """
 
+import hashlib
 import json
 import os
-import shutil
+import re
 import sys
+from typing import IO, Any, BinaryIO, NamedTuple
 
 if sys.version_info >= (3, 14):
     import tarfile
 else:
     from backports.zstd import tarfile
 
+from chroot_distro import dirfd
 from chroot_distro.atomic import atomic_write
+from chroot_distro.constants import BASE_CACHE_DIR, IS_TERMUX, RUNTIME_DIR
 from chroot_distro.helpers.docker import (
     ARCH_TO_DOCKER,
-    apply_layer,
     layer_cache_path,
-    validate_digest,
 )
-from chroot_distro.helpers.tar_extract import extract_tar_to_rootfs
+from chroot_distro.helpers.tar_extract import extract_tar_stream, extract_tar_to_rootfs
 from chroot_distro.message import log_info, warn
 from chroot_distro.progress import clear_bar, fmt_size, progress_active
 
@@ -100,29 +102,69 @@ def extract_plain_tar(archive_path: str, strip: int, rootfs_fd: int) -> None:
     extract_tar_to_rootfs(archive_path, rootfs_fd, strip=strip)
 
 
-def _oci_blob_path(digest: str) -> str:
-    validate_digest(digest)
-    algo, hex_val = digest.split(":", 1)
-    return f"blobs/{algo}/{hex_val}"
+class _Blob(NamedTuple):
+    digest: str
+    size: int
+
+    @property
+    def path(self) -> str:
+        return "blobs/" + self.digest.replace(":", "/")
 
 
-def _oci_read_json(tf, member_map, path):
-    """Extract a member from the outer archive and parse it as JSON."""
+def _oci_blob(descriptor: object, label: str) -> _Blob:
+    if not isinstance(descriptor, dict):
+        raise RuntimeError(f"OCI {label} descriptor must be an object.")
+    digest = descriptor.get("digest")
+    if not isinstance(digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+        raise RuntimeError(f"OCI {label} descriptor must have a lowercase SHA-256 digest.")
+    size = descriptor.get("size")
+    if type(size) is not int or not 0 <= size < 2**63:
+        raise RuntimeError(f"OCI {label} descriptor has an invalid size.")
+    return _Blob(digest, size)
+
+
+def _oci_open_member(
+    tf: tarfile.TarFile, member_map: dict[str, tarfile.TarInfo], path: str, size: int | None = None
+) -> IO[bytes]:
     member = member_map.get(path)
     if member is None:
         raise RuntimeError(f"OCI archive is missing required file: {path}")
     if not member.isreg():
-        # Reject hardlinks and symlinks: Python's extractfile() follows them
-        # within the archive, letting a crafted outer tar redirect a JSON read
-        # to an unrelated member (e.g. a layer blob used as index.json).
         raise RuntimeError(f"OCI archive entry is not a regular file: {path}")
-    fobj = tf.extractfile(member)
+    if size is not None and member.size != size:
+        raise RuntimeError(f"OCI archive entry size mismatch: {path}")
+    fobj: IO[bytes] | None = tf.extractfile(member)
     if fobj is None:
         raise RuntimeError(f"OCI archive entry is not a regular file: {path}")
+    return fobj
+
+
+def _oci_read_json(tf, member_map, path: str, blob: _Blob | None = None) -> dict[str, Any]:
+    """Verify addressed metadata on the wire before decoding its JSON."""
+    with _oci_open_member(tf, member_map, path, None if blob is None else blob.size) as source:
+        data = source.read()
+    if blob is not None:
+        if len(data) != blob.size:
+            raise RuntimeError(f"OCI archive entry size mismatch: {path}")
+        if "sha256:" + hashlib.sha256(data).hexdigest() != blob.digest:
+            raise RuntimeError(f"OCI blob digest mismatch: {blob.digest}")
     try:
-        return json.loads(fobj.read())
-    finally:
-        fobj.close()
+        document = json.loads(data)
+    except (ValueError, RecursionError) as exc:
+        raise RuntimeError(f"OCI archive entry is not valid JSON: {path}") from exc
+    if not isinstance(document, dict):
+        raise RuntimeError(f"OCI archive entry must be a JSON object: {path}")
+    return document
+
+
+def _oci_read_config(tf, member_map, manifest) -> dict[str, Any]:
+    blob = _oci_blob(manifest.get("config"), "config")
+    config = _oci_read_json(tf, member_map, blob.path, blob)
+    if "architecture" in config and not isinstance(config["architecture"], str):
+        raise RuntimeError("OCI image config architecture must be a string.")
+    if config.get("config") is not None and not isinstance(config["config"], dict):
+        raise RuntimeError("OCI image config field 'config' must be an object or null.")
+    return config
 
 
 def _oci_find_manifest_entry(tf, member_map, index_manifests, dist_arch):
@@ -135,89 +177,118 @@ def _oci_find_manifest_entry(tf, member_map, index_manifests, dist_arch):
     if platform_entries:
         for entry in platform_entries:
             p = entry["platform"]
+            if not isinstance(p, dict) or any(
+                key in p and not isinstance(p[key], str) for key in ("architecture", "os")
+            ):
+                raise RuntimeError("OCI index platform must be an object with string architecture and OS.")
             if p.get("architecture") == docker_arch and p.get("os") == "linux":
                 return entry
         raise RuntimeError(f"No manifest found for architecture '{dist_arch}' in OCI index (tried {docker_arch}).")
 
-    # Slow path: read each manifest → config to detect architecture.
     for entry in index_manifests:
-        manifest = _oci_read_json(tf, member_map, _oci_blob_path(entry["digest"]))
-        config_digest = manifest.get("config", {}).get("digest", "")
-        if not config_digest:
-            continue
-        config = _oci_read_json(tf, member_map, _oci_blob_path(config_digest))
+        blob = _oci_blob(entry, "manifest")
+        manifest = _oci_read_json(tf, member_map, blob.path, blob)
+        config = _oci_read_config(tf, member_map, manifest)
         if config.get("architecture") == docker_arch:
             return entry
 
     raise RuntimeError(f"No manifest found for architecture '{dist_arch}' in OCI image (tried {docker_arch}).")
 
 
-def _oci_cache_layer(tf, member_map, digest):
-    """Extract a layer blob from the outer archive into LAYER_CACHE_DIR."""
-    blob_path = _oci_blob_path(digest)
-    member = member_map.get(blob_path)
-    if member is None:
-        raise RuntimeError(f"OCI archive is missing layer blob: {blob_path}")
-    if not member.isreg():
-        # Reject hardlinks and symlinks: Python's extractfile() follows them
-        # within the archive, letting a crafted outer tar swap one image's
-        # layer for another's without any digest check catching the swap.
-        raise RuntimeError(f"OCI layer blob is not a regular file: {blob_path}")
-    fobj = tf.extractfile(member)
-    if fobj is None:
-        raise RuntimeError(f"OCI layer blob is not a regular file: {blob_path}")
-    cache_path = layer_cache_path(digest)
+def _verify_layer(source: IO[bytes], blob: _Blob, output: IO[bytes] | None = None) -> None:
+    hasher = hashlib.sha256()
+    count = 0
+    while chunk := source.read(min(1 << 18, blob.size - count + 1)):
+        count += len(chunk)
+        if count > blob.size:
+            break
+        hasher.update(chunk)
+        if output is not None:
+            output.write(chunk)
+    if count != blob.size:
+        raise RuntimeError(f"OCI layer size mismatch: {blob.digest}")
+    if "sha256:" + hasher.hexdigest() != blob.digest:
+        raise RuntimeError(f"OCI layer digest mismatch: {blob.digest}")
+
+
+def _oci_cache_layer(tf, member_map, blob: _Blob, cache_path: str) -> None:
+    """Publish only a layer whose streamed bytes match its descriptor."""
+    with (
+        _oci_open_member(tf, member_map, blob.path, blob.size) as source,
+        atomic_write(cache_path, binary_mode=True) as out,
+    ):
+        _verify_layer(source, blob, out)
+
+
+def _open_cached_layer(cache_path: str, blob: _Blob) -> BinaryIO:
+    """Return a verified open layer at offset zero. The caller closes it."""
+    cache_root = RUNTIME_DIR if IS_TERMUX else BASE_CACHE_DIR
+    parent_parts = os.path.relpath(os.path.dirname(cache_path), cache_root).split(os.sep)
+    root_fd = dirfd.opendir(cache_root)
     try:
-        with atomic_write(cache_path, binary_mode=True) as out:
-            shutil.copyfileobj(fobj, out)
+        parent_fd = dirfd.descend_at(root_fd, parent_parts)
+        try:
+            fd, st = dirfd.open_regular_at(parent_fd, os.path.basename(cache_path), os.O_RDONLY)
+        finally:
+            os.close(parent_fd)
     finally:
-        fobj.close()
-    return cache_path
+        os.close(root_fd)
+    source = os.fdopen(fd, "rb")
+    try:
+        if st.st_size != blob.size:
+            raise RuntimeError(f"Cached OCI layer size mismatch: {blob.digest}")
+        _verify_layer(source, blob)
+        source.seek(0)
+        return source
+    except BaseException:
+        source.close()
+        raise
 
 
 def _extract_oci(tf, member_map, rootfs_fd, dist_arch) -> dict[str, object]:
     index = _oci_read_json(tf, member_map, "index.json")
-    index_manifests = index.get("manifests", [])
-    if not index_manifests:
-        raise RuntimeError("OCI index.json contains no manifests.")
+    index_manifests = index.get("manifests")
+    if not isinstance(index_manifests, list) or not index_manifests or not all(
+        isinstance(entry, dict) for entry in index_manifests
+    ):
+        raise RuntimeError("OCI index.json must contain a nonempty list of manifest descriptors.")
 
     manifest_entry = _oci_find_manifest_entry(tf, member_map, index_manifests, dist_arch)
 
-    manifest = _oci_read_json(tf, member_map, _oci_blob_path(manifest_entry["digest"]))
-
-    config_digest = manifest.get("config", {}).get("digest", "")
-    if not config_digest:
-        raise RuntimeError("OCI image manifest has no config digest.")
-    image_config = _oci_read_json(tf, member_map, _oci_blob_path(config_digest))
+    manifest_blob = _oci_blob(manifest_entry, "manifest")
+    manifest = _oci_read_json(tf, member_map, manifest_blob.path, manifest_blob)
+    image_config = _oci_read_config(tf, member_map, manifest)
 
     docker_arch = image_config.get("architecture", "")
     actual_arch = _DOCKER_TO_ARCH.get(docker_arch, dist_arch)
 
-    layers = manifest.get("layers", [])
-    if not layers:
-        raise RuntimeError("OCI image manifest contains no layers.")
-
-    n_layers = len(layers)
-    for i, layer in enumerate(layers):
-        digest = layer["digest"]
-        short_id = digest[:19]
-        size = layer.get("size", 0)
-        size_str = f" ({fmt_size(size)})" if size else ""
-        cache_path = layer_cache_path(digest)
-
-        if os.path.isfile(cache_path):
-            log_info(f"{short_id}: Layer {i + 1}/{n_layers} already cached, skipping.")
-        else:
-            log_info(f"{short_id}: Caching layer {i + 1}/{n_layers}{size_str}...")
-            _oci_cache_layer(tf, member_map, digest)
-
-        log_info(f"{short_id}: Applying layer {i + 1}/{n_layers}...")
-        apply_layer(cache_path, rootfs_fd)
+    layers = manifest.get("layers")
+    if not isinstance(layers, list) or not layers:
+        raise RuntimeError("OCI image manifest must contain a nonempty list of layers.")
+    blobs = [_oci_blob(layer, "layer") for layer in layers]
 
     annotations = manifest_entry.get("annotations", {})
-    image_ref = (
-        annotations.get("io.containerd.image.name") or annotations.get("org.opencontainers.image.ref.name") or ""
-    )
+    ref_keys = ("io.containerd.image.name", "org.opencontainers.image.ref.name")
+    if not isinstance(annotations, dict) or any(
+        key in annotations and not isinstance(annotations[key], str) for key in ref_keys
+    ):
+        raise RuntimeError("OCI manifest annotations must be an object with string image references.")
+    image_ref = next((annotations[key] for key in ref_keys if annotations.get(key)), "")
+
+    n_layers = len(blobs)
+    for i, blob in enumerate(blobs):
+        short_id = blob.digest[:19]
+        size_str = f" ({fmt_size(blob.size)})" if blob.size else ""
+        cache_path = layer_cache_path(blob.digest)
+        try:
+            source = _open_cached_layer(cache_path, blob)
+        except (OSError, RuntimeError):
+            log_info(f"{short_id}: Caching layer {i + 1}/{n_layers}{size_str}...")
+            _oci_cache_layer(tf, member_map, blob, cache_path)
+            source = _open_cached_layer(cache_path, blob)
+        with source:
+            log_info(f"{short_id}: Applying layer {i + 1}/{n_layers}...")
+            extract_tar_stream(source, blob.size, rootfs_fd, handle_whiteouts=True)
 
     return {
         "manifest": manifest,

@@ -8,19 +8,27 @@
 #   mkdir -p ~/.local/share/bash-completion/completions
 #   cp chroot-distro.bash ~/.local/share/bash-completion/completions/chroot-distro
 
-_chroot_distro_get_containers() {
-	local dir
+_chroot_distro_complete_containers() {
+	local base d name LC_ALL=C
+	COMPREPLY=()
 	if _chroot_distro_is_termux; then
-		dir="${TERMUX__PREFIX:-/data/data/com.termux/files/usr}/var/lib/chroot-distro/containers"
+		base="${TERMUX__PREFIX:-/data/data/com.termux/files/usr}/var/lib"
+	elif [[ -n "${XDG_DATA_HOME:-}" ]]; then
+		base="${XDG_DATA_HOME}"
+	elif ((EUID == 0)) && [[ -v HOME ]]; then
+		base="${HOME}/.local/share"
 	else
-		dir="${XDG_DATA_HOME:-${HOME}/.local/share}/chroot-distro/containers"
+		base=~root/.local/share
+		[[ "${base}" == /* ]] || return
 	fi
-	if [[ -d "${dir}" ]]; then
-		local d
-		for d in "${dir}"/*/; do
-			[[ -d "${d}rootfs" ]] && printf '%s\n' "${d%/}" | sed 's|.*/||'
-		done
-	fi
+	for d in "${base}/chroot-distro/containers"/*/; do
+		[[ -d "${d}rootfs" ]] || continue
+		name=${d%/}
+		name=${name##*/}
+		if [[ "${name}" == [A-Za-z0-9]* && "${name}" != *[!A-Za-z0-9_.-]* && "${name}" == "$1"* ]]; then
+			COMPREPLY+=("${name}")
+		fi
+	done
 }
 
 # Returns 0 (true) when running on Termux/Android: at least two of three
@@ -34,7 +42,7 @@ _chroot_distro_is_termux() {
 	[[ ${score} -ge 2 ]]
 }
 
-# Populate COMPREPLY from compgen -W without word-splitting (shellcheck SC2207).
+# Bash expands this word list as shell input, so pass only static words.
 _chroot_distro_compgen_words() {
 	mapfile -t COMPREPLY < <(compgen -W "$1" -- "$2")
 }
@@ -51,7 +59,7 @@ _chroot_distro() {
 	# Complete the subcommand itself
 	if [[ ${cword} -eq 1 ]]; then
 		if [[ "${cur}" == -* ]]; then
-			_chroot_distro_compgen_words "-h --help --json" "${cur}"
+			_chroot_distro_compgen_words "-h --help -V --version" "${cur}"
 		else
 			_chroot_distro_compgen_words "${_all_commands}" "${cur}"
 		fi
@@ -90,7 +98,7 @@ _chroot_distro() {
 			;;
 		esac
 		if [[ "${cur}" == -* ]]; then
-			_chroot_distro_compgen_words "-n --name --override-alias -a --architecture -q --quiet -h --help" "${cur}"
+			_chroot_distro_compgen_words "-n --name --override-alias -a --architecture --allow-insecure -q --quiet -h --help" "${cur}"
 		elif [[ "${cur}" == /* || "${cur}" == ./* || "${cur}" == ../* ]]; then
 			_filedir
 		fi
@@ -101,7 +109,7 @@ _chroot_distro() {
 		if [[ "${cur}" == -* ]]; then
 			_chroot_distro_compgen_words "-v --verbose -q --quiet -h --help" "${cur}"
 		else
-			_chroot_distro_compgen_words "$(_chroot_distro_get_containers)" "${cur}"
+			_chroot_distro_complete_containers "${cur}"
 		fi
 		;;
 
@@ -110,7 +118,7 @@ _chroot_distro() {
 		if [[ "${cur}" == -* ]]; then
 			_chroot_distro_compgen_words "-q --quiet -h --help" "${cur}"
 		else
-			_chroot_distro_compgen_words "$(_chroot_distro_get_containers)" "${cur}"
+			_chroot_distro_complete_containers "${cur}"
 		fi
 		;;
 
@@ -119,7 +127,7 @@ _chroot_distro() {
 		if [[ "${cur}" == -* ]]; then
 			_chroot_distro_compgen_words "-q --quiet -h --help" "${cur}"
 		else
-			_chroot_distro_compgen_words "$(_chroot_distro_get_containers)" "${cur}"
+			_chroot_distro_complete_containers "${cur}"
 		fi
 		;;
 
@@ -146,11 +154,11 @@ _chroot_distro() {
 		-e | --env) return ;;
 		esac
 		if [[ "${cur}" == -* ]]; then
-			local opts="-u --user --isolated --minimal --no-new-privs --shared-home --shared-tmp --shared-display --shared-x11
+			local opts="-u --user --isolated --isolate --minimal --no-new-privs --shared-home --shared-tmp --shared-display --shared-x11
                     -b --bind -w --work-dir -e --env --get-chroot-cmd -h --help"
 			_chroot_distro_compgen_words "${opts}" "${cur}"
 		else
-			_chroot_distro_compgen_words "$(_chroot_distro_get_containers)" "${cur}"
+			_chroot_distro_complete_containers "${cur}"
 		fi
 		;;
 
@@ -174,7 +182,7 @@ _chroot_distro() {
 		if [[ "${cur}" == -* ]]; then
 			_chroot_distro_compgen_words "-o --output -c --compress -v --verbose -q --quiet -h --help" "${cur}"
 		else
-			_chroot_distro_compgen_words "$(_chroot_distro_get_containers)" "${cur}"
+			_chroot_distro_complete_containers "${cur}"
 		fi
 		;;
 
@@ -202,13 +210,8 @@ _chroot_distro() {
 			if [[ "${cur}" == *:* ]]; then
 				_filedir
 			else
-				local containers
-				containers=$(_chroot_distro_get_containers)
-				_chroot_distro_compgen_words "${containers}" "${cur}"
-				# Also allow plain host paths
-				local -a files
+				_chroot_distro_complete_containers "${cur}"
 				_filedir
-				COMPREPLY+=("${files[@]}")
 			fi
 		fi
 		;;
@@ -221,12 +224,8 @@ _chroot_distro() {
 			if [[ "${cur}" == *:* ]]; then
 				_filedir
 			else
-				local containers
-				containers=$(_chroot_distro_get_containers)
-				_chroot_distro_compgen_words "${containers}" "${cur}"
-				local -a files
+				_chroot_distro_complete_containers "${cur}"
 				_filedir
-				COMPREPLY+=("${files[@]}")
 			fi
 		fi
 		;;
@@ -255,25 +254,28 @@ _chroot_distro() {
 		--entrypoint) return ;;
 		esac
 		if [[ "${cur}" == -* ]]; then
-			local opts="-u --user --isolated --minimal --no-new-privs --shared-home --shared-tmp --shared-display --shared-x11
+			local opts="-u --user --isolated --isolate --minimal --no-new-privs --shared-home --shared-tmp --shared-display --shared-x11
                     -b --bind -w --work-dir -e --env --entrypoint -d --detach --get-chroot-cmd -h --help"
 			_chroot_distro_compgen_words "${opts}" "${cur}"
 		else
-			_chroot_distro_compgen_words "$(_chroot_distro_get_containers)" "${cur}"
+			_chroot_distro_complete_containers "${cur}"
 		fi
 		;;
 
 	# -----------------------------------------------------------------------
 	unmount)
 		if [[ "${cur}" == -* ]]; then
-			_chroot_distro_compgen_words "-h --help --json" "${cur}"
+			_chroot_distro_compgen_words "-h --help" "${cur}"
 		else
-			_chroot_distro_compgen_words "$(_chroot_distro_get_containers)" "${cur}"
+			_chroot_distro_complete_containers "${cur}"
 		fi
 		;;
 
 	# -----------------------------------------------------------------------
 	build)
+		if [[ "${cur}" == --install-as=* || ( "${prev}" == = && "${words[cword - 2]}" == --install-as ) ]]; then
+			return
+		fi
 		case "${prev}" in
 		-f | --file)
 			_filedir
@@ -293,15 +295,11 @@ _chroot_distro() {
 			_chroot_distro_compgen_words "linux/amd64 linux/arm64 linux/arm/v7 linux/386 linux/riscv64" "${cur}"
 			return
 			;;
-		--target)
+		--target | --install-as)
 			return
 			;;
 		-o | --output)
 			_filedir
-			return
-			;;
-		--install-as)
-			_chroot_distro_compgen_words "$(_chroot_distro_get_containers)" "${cur}"
 			return
 			;;
 		--progress)
@@ -327,7 +325,7 @@ _chroot_distro() {
 		if [[ "${cur}" == -* ]]; then
 			_chroot_distro_compgen_words "-f --file -t --tag --build-arg --build-context -a --architecture
                     --platform --target -o --output --export --install-as --secret --ssh
-                    --cache-from --cache-to --no-cache --progress -v --verbose
+					--cache-from --cache-to --allow-insecure --no-cache --progress -v --verbose
                     -q --quiet -h --help" "${cur}"
 		else
 			_filedir -d
@@ -343,16 +341,16 @@ _chroot_distro() {
 			;;
 		esac
 		if [[ "${cur}" == -* ]]; then
-			_chroot_distro_compgen_words "-a --architecture -q --quiet -h --help" "${cur}"
+			_chroot_distro_compgen_words "-a --architecture --allow-insecure -q --quiet -h --help" "${cur}"
 		fi
 		;;
 
 	# -----------------------------------------------------------------------
 	kill)
 		if [[ "${cur}" == -* ]]; then
-			_chroot_distro_compgen_words "-h --help --json" "${cur}"
+			_chroot_distro_compgen_words "-h --help" "${cur}"
 		else
-			_chroot_distro_compgen_words "$(_chroot_distro_get_containers)" "${cur}"
+			_chroot_distro_complete_containers "${cur}"
 		fi
 		;;
 
@@ -366,7 +364,7 @@ _chroot_distro() {
 		if [[ "${cur}" == -* ]]; then
 			_chroot_distro_compgen_words "-h --help --json" "${cur}"
 		else
-			_chroot_distro_compgen_words "$(_chroot_distro_get_containers)" "${cur}"
+			_chroot_distro_complete_containers "${cur}"
 		fi
 		;;
 
@@ -389,9 +387,7 @@ _chroot_distro() {
 
 	# -----------------------------------------------------------------------
 	help)
-		local topics="install remove rename reset login list backup restore clear-cache copy sync run build push
-                    kill ps diff search info unmount"
-		_chroot_distro_compgen_words "${topics}" "${cur}"
+		_chroot_distro_compgen_words "${_all_commands} -h --help" "${cur}"
 		;;
 
 	esac

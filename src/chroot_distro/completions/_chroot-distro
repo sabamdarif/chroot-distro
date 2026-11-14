@@ -11,23 +11,31 @@
 #   cp _chroot-distro ~/.local/share/zsh/site-functions/_chroot-distro
 #   # Add to ~/.zshrc: fpath=(~/.local/share/zsh/site-functions $fpath)
 
-# ---------------------------------------------------------------------------
-# Helper: list installed containers
-# ---------------------------------------------------------------------------
+# A named directory or scalar can shadow the root account in Zsh.
 _chroot_distro_containers() {
-	local dir
+	local base d name LC_ALL=C
 	if _chroot_distro_is_termux; then
-		dir="${TERMUX__PREFIX:-/data/data/com.termux/files/usr}/var/lib/chroot-distro/containers"
+		base="${TERMUX__PREFIX:-/data/data/com.termux/files/usr}/var/lib"
+	elif [[ -n "${XDG_DATA_HOME:-}" ]]; then
+		base="${XDG_DATA_HOME}"
+	elif ((EUID == 0)) && [[ -v HOME ]]; then
+		base="${HOME}/.local/share"
 	else
-		dir="${XDG_DATA_HOME:-${HOME}/.local/share}/chroot-distro/containers"
+		base=$(
+			local root
+			builtin unhash -d root 2>/dev/null || true
+			builtin print -r -- ~root/.local/share
+		) 2>/dev/null || return
+		[[ "${base}" == /* ]] || return
 	fi
 	local -a containers
-	if [[ -d "${dir}" ]]; then
-		local d
-		for d in "${dir}"/*/; do
-			[[ -d "${d}rootfs" ]] && containers+=("${d:t}")
-		done
-	fi
+	for d in "${base}/chroot-distro/containers"/*/(N); do
+		[[ -d "${d}rootfs" ]] || continue
+		name=${d:t}
+		if [[ "${name}" == [A-Za-z0-9]* && "${name}" != *[^A-Za-z0-9_.-]* ]]; then
+			containers+=("${name}")
+		fi
+	done
 	_describe 'container' containers
 }
 
@@ -72,6 +80,7 @@ _chroot_distro() {
 
 	_arguments -C \
 		'(-h --help)'{-h,--help}'[show help]' \
+		'(-V --version)'{-V,--version}'[print the version]' \
 		'1:command:->command' \
 		'*:: :->args'
 
@@ -142,6 +151,7 @@ _chroot_distro() {
 				'(-n --name --override-alias)'{-n,--name}'[install under a custom container name]:alias' \
 				'(-n --name --override-alias)'--override-alias'[install under a custom container name]:alias' \
 				'(-a --architecture)'{-a,--architecture}'[target CPU architecture]:arch:(aarch64 arm i686 riscv64 x86_64)' \
+				'--allow-insecure[allow insecure transport when downloading]' \
 				'(-q --quiet)'{-q,--quiet}'[suppress non-error output]' \
 				'1:docker image or local archive:_files'
 			;;
@@ -187,8 +197,8 @@ _chroot_distro() {
 				'(-w --work-dir)'{-w,--work-dir}'[initial working directory]:path:_directories'
 				'*'{-e,--env}'[set environment variable]:VAR=VALUE'
 				'--get-chroot-cmd[print the chroot command line and exit]'
-				'(isolated minimal)--isolated[fewer host binds + mount/PID/UTS/IPC namespaces]'
-				'(isolated minimal)--minimal[bare /dev, /proc, /sys only]'
+				'(--isolated --isolate --minimal)'{--isolated,--isolate}'[fewer host binds + mount/PID/UTS/IPC namespaces]'
+				'(--isolated --isolate --minimal)--minimal[bare /dev, /proc, /sys only]'
 				'1:container:_chroot_distro_containers'
 				'*:inner command:_command_names -e'
 			)
@@ -277,8 +287,8 @@ _chroot_distro() {
 				'--entrypoint[replace the image entrypoint for this run]:executable:_command_names -e'
 				'(-d --detach)'{-d,--detach}'[run the command in the background and return immediately]'
 				'--get-chroot-cmd[print the chroot command line and exit]'
-				'(isolated minimal)--isolated[fewer host binds + mount/PID/UTS/IPC namespaces]'
-				'(isolated minimal)--minimal[bare /dev, /proc, /sys only]'
+				'(--isolated --isolate --minimal)'{--isolated,--isolate}'[fewer host binds + mount/PID/UTS/IPC namespaces]'
+				'(--isolated --isolate --minimal)--minimal[bare /dev, /proc, /sys only]'
 				'1:container:_chroot_distro_containers'
 				'*:arguments'
 			)
@@ -337,11 +347,12 @@ _chroot_distro() {
 				'--target[stop after this named build stage]:stage' \
 				'*'{-o,--output}'[write OCI tarball to FILE (repeatable)]:file:_files' \
 				'*--export[export the rootfs as a directory or tarball (repeatable)]:spec:(type=local,dest= type=tar,dest=)' \
-				'--install-as[install image as a local container after build]:name:_chroot_distro_containers' \
+				'--install-as=[install image as a local container after build]:name: ' \
 				'*--secret[expose a secret to RUN --mount=type=secret (repeatable)]:spec' \
 				'*--ssh[expose an SSH agent socket to RUN --mount=type=ssh (repeatable)]::spec' \
 				'*--cache-from[import cached steps (repeatable)]:spec:(type=local,src= type=registry,ref=)' \
 				'*--cache-to[export the cached steps of this build (repeatable)]:spec:(type=local,dest= type=registry,ref=)' \
+				'--allow-insecure[allow insecure transport for registry build cache]' \
 				'--no-cache[disable per-instruction build cache]' \
 				'--progress[build output style]:mode:(auto plain tty rawjson)' \
 				'(-v --verbose -q --quiet)'{-v,--verbose}'[echo each instruction and stream RUN output]' \
@@ -355,6 +366,7 @@ _chroot_distro() {
 				'(-h --help)'{-h,--help}'[show help]' \
 				'(-q --quiet)'{-q,--quiet}'[suppress non-error output]' \
 				'(-a --architecture)'{-a,--architecture}'[target CPU architecture]:arch:(aarch64 arm i686 riscv64 x86_64)' \
+				'--allow-insecure[allow insecure transport for the target registry]' \
 				'1:image reference'
 			;;
 
@@ -369,11 +381,12 @@ _chroot_distro() {
 		help)
 			local -a topics
 			topics=(
-				install remove rename reset login list
-				backup restore clear-cache copy sync run
-				build push unmount kill ps diff search info
+				install add i in ins remove rm rename reset login sh list li ls
+				backup bak bkp restore clear-cache clear cl copy cp sync run build push
+				unmount umount um kill k stop ps diff search find se info version-info nf
+				help h he hel
 			)
-			_describe 'topic' topics
+			_arguments '(-h --help)'{-h,--help}'[show help]' "1:topic:(${(j: :)topics})"
 			;;
 
 		esac

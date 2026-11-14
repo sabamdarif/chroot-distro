@@ -15,6 +15,7 @@ whatever the rootfs holds while it runs.
 
 Every failure raises a `ChrootDistroError` rather than exiting here, so `cli.main`
 turns it into both the stderr line and, under `--json`, the error document.
+Human output escapes paths from the guest. JSON preserves the original paths.
 """
 
 import json
@@ -29,7 +30,7 @@ from chroot_distro.helpers.layer_diff import (
     snapshot,
 )
 from chroot_distro.locking import ContainerLock
-from chroot_distro.message import C, emit_json, msg
+from chroot_distro.message import C, emit_json, msg, quote_path
 from chroot_distro.names import require_valid_name
 from chroot_distro.paths import container_dir, container_manifest, container_rootfs
 from chroot_distro.progress import loading_line
@@ -136,7 +137,7 @@ def command_diff(args) -> None:
 
     rows.sort(key=lambda r: r[2])
     for marker, color, path in rows:
-        msg(f"{color}{marker} /{path}{C['RST']}")
+        msg(f"{color}{marker} /{quote_path(path)}{C['RST']}")
 
 
 __all__ = ("command_diff",)

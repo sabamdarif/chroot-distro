@@ -72,3 +72,67 @@ def test_with_retry_gives_up_after_max():
     with patch.object(push, "_push_max_retries", return_value=2), patch("time.sleep"), pytest.raises(TimeoutError):
         push._with_retry(op, "thing")
     assert calls["n"] == 3  # initial + 2 retries
+
+
+def test_upload_locations_follow_effective_response_and_keep_opaque_query(tmp_path, monkeypatch):
+    base = "https://reg.example"
+    sent = []
+    blob = tmp_path / "blob"
+    blob.write_bytes(b"abcd")
+    signed = "sig=%2F+%20&x=1&x=2"
+
+    class Response:
+        status = 202
+
+        def __init__(self, url, headers):
+            self.url = url
+            self.headers = headers
+
+        def geturl(self):
+            return self.url
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    class Opener:
+        def open(self, req, **_kwargs):
+            sent.append((req.get_method(), req.full_url, req.get_header("Authorization")))
+            if req.get_method() == "POST":
+                return Response(base + "/effective/uploads/", {"Location": "session"})
+            if req.get_header("Content-range") == "0-1":
+                return Response("https://storage.example/session", {"Location": f"?{signed}", "Range": "0-1"})
+            return Response(req.full_url, {"Range": "0-3"})
+
+    monkeypatch.setattr(push, "auth_opener", Opener)
+    monkeypatch.setattr(push, "_push_chunk_size", lambda: 2)
+    push._upload_blob_chunked(base, "repo", "sha256:test", str(blob), {"Authorization": "Basic fixture"}, 4, "blob")
+
+    assert sent == [
+        ("POST", base + "/v2/repo/blobs/uploads/", "Basic fixture"),
+        ("PATCH", base + "/effective/uploads/session", "Basic fixture"),
+        ("PATCH", f"https://storage.example/session?{signed}", None),
+        ("PUT", f"https://storage.example/session?{signed}&digest=sha256%3Atest", None),
+    ]
+
+
+def test_upload_location_refuses_plaintext_and_redacts_signed_urls():
+    from chroot_distro.helpers.download import RedirectRefused
+
+    base = "https://reg.example"
+    target = "http://storage.example/upload?sig=fixture"
+    with pytest.raises(RedirectRefused) as caught:
+        push._resolve_upload_url(base, base + "/old?sig=previous", target, insecure=False)
+    assert caught.value.plaintext
+    assert "sig=" not in str(caught.value)
+    assert push._resolve_upload_url(base, base, target, insecure=True) == target
+    assert "Authorization" not in push._headers_for({"Authorization": "Basic fixture"}, base, target)
+
+
+def test_explicit_empty_upload_query_replaces_previous_query():
+    base = "https://reg.example"
+    url = push._resolve_upload_url(base, base + "/upload?sig=previous", "?", insecure=False)
+    assert url == base + "/upload?"
+    assert push._with_digest(url, "sha256:test") == base + "/upload?digest=sha256%3Atest"

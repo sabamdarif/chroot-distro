@@ -14,20 +14,30 @@ argument reaches `cli.py` as an empty list and can be reported with the command'
 help page instead of argparse's usage line. Adding a command means adding to both
 tables, or its aliases resolve to nothing and its missing arguments are not caught.
 
-`login` and `run` take a guest command after a literal `--`. argparse cannot express
-that, so `_apply_post_separators` slices the tail into `login_cmd`/`run_args` and the
-`--` is trimmed out of the unknown-argument list, or `cli.py` would report the guest's
-own flags as unrecognised. `-V` defers the `importlib.metadata` lookup to use time, for
-the same startup-cost reason `cli.py` keeps its imports lazy.
+The `login` and `run` sub-parsers split off guest arguments at a literal `--`
+before argparse can treat them as host arguments. Bare login command words
+parsed before that separator come first in the guest command. The JSON
+sub-parsers take only switches and positionals, so they can recognise a request
+for JSON before argparse reports an error. `-V` defers the
+`importlib.metadata` lookup to use time.
 """
 
 import argparse
 import sys
-from collections.abc import Sequence
-from typing import NoReturn
+from collections.abc import Iterable
+from typing import Any, NoReturn, TypeVar, cast, overload
 
 from chroot_distro.constants import PROGRAM_NAME
-from chroot_distro.message import crit_error, msg
+from chroot_distro.message import crit_error, emit_json_error, escape_controls, msg, print_version
+
+_NamespaceT = TypeVar("_NamespaceT")
+
+
+def strip_global_separator(argv: list[str]) -> list[str]:
+    """Drop an initial `--` before the command token."""
+    if len(argv) > 1 and argv[0] == "--" and not argv[1].startswith("-"):
+        return argv[1:]
+    return argv
 
 
 class _LazyVersionAction(argparse.Action):
@@ -37,20 +47,73 @@ class _LazyVersionAction(argparse.Action):
         super().__init__(option_strings, dest, nargs=0, **kwargs)
 
     def __call__(self, parser, namespace, values, option_string=None) -> None:
-        from chroot_distro.constants import PROGRAM_VERSION
-
-        parser.exit(message=f"{PROGRAM_NAME} {PROGRAM_VERSION}\n")
+        print_version()
+        parser.exit()
 
 
 class _CdArgumentParser(argparse.ArgumentParser):
-    """Argparse subclass that defers errors to the CLI dispatcher."""
+    """Parse host arguments and render errors with the command's help page."""
 
     _cd_command: str | None = None
+    _json_requested = False
+
+    @overload
+    def parse_known_args(
+        self, args: Iterable[str] | None = None, namespace: None = None
+    ) -> tuple[argparse.Namespace, list[str]]: ...
+
+    @overload
+    def parse_known_args(self, args: Iterable[str] | None, namespace: _NamespaceT) -> tuple[_NamespaceT, list[str]]: ...
+
+    @overload
+    def parse_known_args(self, *, namespace: _NamespaceT) -> tuple[_NamespaceT, list[str]]: ...
+
+    def parse_known_args(
+        self, args: Iterable[str] | None = None, namespace: _NamespaceT | None = None
+    ) -> tuple[argparse.Namespace | _NamespaceT, list[str]]:
+        argv = list(sys.argv[1:] if args is None else args)
+        if self._cd_command is None:
+            argv = strip_global_separator(argv)
+        sep_idx = argv.index("--") if "--" in argv else len(argv)
+        split_guest = self._cd_command in ("login", "run") and sep_idx < len(argv)
+        before_separator = argv[:sep_idx]
+        previous_json = self._json_requested
+        self._json_requested = self.get_default("json") is not None and any(
+            token.partition("=")[0] in ("--j", "--js", "--jso", "--json") for token in before_separator
+        )
+        try:
+            parse_namespace = argparse.Namespace() if namespace is None else namespace
+            parsed, unknown = super().parse_known_args(before_separator if split_guest else argv, parse_namespace)
+        finally:
+            self._json_requested = previous_json
+        if split_guest:
+            guest_args = argv[sep_idx + 1 :]
+            parsed_args = cast(argparse.Namespace, parsed)
+            if self._cd_command == "login":
+                parsed_args.login_cmd = parsed_args.login_cmd + guest_args
+            else:
+                parsed_args.run_args = guest_args
+        return parsed, unknown
+
+    # Python 3.10 removes attached `--` values as if they were positional separators.
+    def _get_values(self, action: argparse.Action, arg_strings: list[str]) -> Any:
+        if (
+            sys.version_info < (3, 11)
+            and action.option_strings
+            and action.nargs in (None, argparse.OPTIONAL)
+            and arg_strings == ["--"]
+        ):
+            value = self._get_value(action, arg_strings[0])
+            self._check_value(action, value)
+            return value
+        return super()._get_values(action, arg_strings)
 
     def error(self, message: str) -> NoReturn:
-        # Late import to avoid import cycle
         from chroot_distro.commands.help import HELP_COMMANDS
 
+        message = escape_controls(message)
+        if self._json_requested and self._cd_command:
+            emit_json_error(self._cd_command, message)
         msg()
         crit_error(message)
         if self._cd_command and self._cd_command in HELP_COMMANDS:
@@ -110,37 +173,6 @@ ALIAS_TO_CANONICAL = {
 }
 
 
-def _apply_post_separators(canonical: str, raw_args: list[str], args: argparse.Namespace) -> None:
-    """Set login_cmd / run_args from tokens after a literal '--'."""
-    if "--" not in raw_args:
-        return
-    sep_idx = raw_args.index("--")
-    tail = raw_args[sep_idx + 1 :]
-    if canonical == "login":
-        args.login_cmd = tail
-    elif canonical == "run":
-        args.run_args = tail
-
-
-def parse_cli_args(
-    parser: _CdArgumentParser,
-    raw_args: Sequence[str],
-    namespace: argparse.Namespace | None = None,
-) -> tuple[argparse.Namespace, list[str]]:
-    """Parse argv and apply login/run ``--`` post-processing."""
-    argv = list(raw_args)
-    ns, unknown = argparse.ArgumentParser.parse_known_args(parser, argv, namespace)
-    assert ns is not None
-    command = getattr(ns, "command", None)
-    if command:
-        canonical = ALIAS_TO_CANONICAL.get(command, command)
-        if canonical in ("login", "run"):
-            _apply_post_separators(canonical, argv, ns)
-            if "--" in argv and "--" in unknown:
-                unknown = unknown[: unknown.index("--")]
-    return ns, unknown
-
-
 def _add_login_or_run_common(p):
     """Options shared by both `login` and `run`."""
     p.add_argument("-u", "--user", default=None)
@@ -178,8 +210,7 @@ def build_parser() -> _CdArgumentParser:
     parser.add_argument("-V", "--version", action=_LazyVersionAction)
     sub = parser.add_subparsers(dest="command")
 
-    sub.add_parser("help", aliases=["hel", "he", "h"], add_help=False)
-
+    _help(sub)
     _install(sub)
     _remove(sub)
     _rename(sub)
@@ -202,6 +233,13 @@ def build_parser() -> _CdArgumentParser:
     _info(sub)
 
     return parser
+
+
+def _help(sub):
+    p = sub.add_parser("help", aliases=["hel", "he", "h"], add_help=False)
+    p._cd_command = "help"
+    p.add_argument("help_topic", nargs="?", metavar="COMMAND")
+    p.add_argument("-h", "--help", action="store_true")
 
 
 def _install(sub):

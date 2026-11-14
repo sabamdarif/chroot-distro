@@ -88,26 +88,38 @@ def extract_tar_to_rootfs(
     blob alike.
     """
     total_size = os.path.getsize(archive_path)
+    with open(archive_path, "rb") as archive:
+        extract_tar_stream(archive, total_size, rootfs_fd, strip=strip, handle_whiteouts=handle_whiteouts)
+
+
+def extract_tar_stream(
+    archive: typing.BinaryIO,
+    total_size: int,
+    rootfs_fd: int,
+    *,
+    strip: int = 0,
+    handle_whiteouts: bool = False,
+) -> None:
+    """Extract from an open archive at its start. The caller owns both descriptors."""
     deferred_links: list = []  # (dest parts, src parts, uid, gid)
     deferred_dirs: list = []  # (parts, mtime), stamped after all writes
     parents = _Parents(rootfs_fd)
 
     try:
-        with open(archive_path, "rb") as raw_fh:
-            counter = ByteCounter(raw_fh)
-            with tarfile.open(fileobj=typing.cast(typing.Any, counter), mode="r|*") as tf:
-                for member in tf:
-                    _process_member(
-                        member,
-                        tf,
-                        rootfs_fd,
-                        parents,
-                        strip=strip,
-                        handle_whiteouts=handle_whiteouts,
-                        deferred_links=deferred_links,
-                        deferred_dirs=deferred_dirs,
-                    )
-                    draw_bytes_bar(counter.count, total_size)
+        counter = ByteCounter(archive)
+        with tarfile.open(fileobj=typing.cast(typing.Any, counter), mode="r|*") as tf:
+            for member in tf:
+                _process_member(
+                    member,
+                    tf,
+                    rootfs_fd,
+                    parents,
+                    strip=strip,
+                    handle_whiteouts=handle_whiteouts,
+                    deferred_links=deferred_links,
+                    deferred_dirs=deferred_dirs,
+                )
+                draw_bytes_bar(counter.count, total_size)
 
         # Both endpoints are re-resolved here rather than at defer time, so a
         # symlink planted by a later member cannot redirect the read source or

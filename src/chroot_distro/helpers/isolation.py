@@ -149,9 +149,10 @@ def apply_bind_mounts(
     *bind_options* maps realpath(resolved_target) -> mount option string.
     """
     opts_map = bind_options or {}
-    run_root = os.path.realpath(os.path.join(rootfs, "run"))
-    dev_root = os.path.realpath(os.path.join(rootfs, "dev"))
-    sys_root = os.path.realpath(os.path.join(rootfs, "sys"))
+    rootfs_real = os.path.realpath(rootfs)
+    run_root = os.path.realpath(os.path.join(rootfs_real, "run"))
+    dev_root = os.path.realpath(os.path.join(rootfs_real, "dev"))
+    sys_root = os.path.realpath(os.path.join(rootfs_real, "sys"))
     for src, dst in resolved_binds:
         dst_real = os.path.realpath(dst)
         try:
@@ -171,8 +172,11 @@ def apply_bind_mounts(
                 warn(f"Skipping optional bind {src} -> {dst}: {exc}")
                 continue
             raise
-        # Stop send-propagation: mounts made under /dev or /sys next
-        # (/dev/pts, the path masks) propagate copies back onto the host.
+        if IS_TERMUX and holder is None:
+            source_real = os.path.realpath(src)
+            if os.path.commonpath((source_real, rootfs_real)) == source_real:
+                mount_manager.stop_guest_bind_propagation(rootfs, dst)
+        # Mounts under /dev or /sys can propagate back onto the host.
         if holder is None and dst_real in (dev_root, sys_root):
             mount_manager.make_rslave(dst)
 
@@ -192,17 +196,17 @@ def finalize_holder(holder: NamespaceHolder, container_key: str, *, hostname: st
     namespace.set_namespace_hostname(holder, safe_hostname(hostname))
 
 
-def _ensure_ptmx_symlink(rootfs: str, holder: NamespaceHolder | None) -> None:
-    """Point ``/dev/ptmx`` at the private ``pts/ptmx`` multiplexer, verified.
+def _ensure_ptmx(rootfs: str, holder: NamespaceHolder | None, *, use_userns: bool) -> None:
+    """Provide the multiplexer for the guest's devpts.
 
-    The devpts multiplexer is char 5:2; anything else standing at
-    ``dev/pts/ptmx`` (an image's stand-in) is refused the link rather than
-    pointed at. Under maximum isolation ``/dev`` is a fresh tmpfs, so ``ptmx``
-    must point at the ``newinstance`` devpts multiplexer. Runs inside the
-    holder's namespaces when given, else directly on the host view of the
-    rootfs.
+    Single-instance kernels use the legacy character device outside devpts.
+    Private instances use a relative link to their verified pts/ptmx node.
     """
     from chroot_distro.helpers import mount_targets
+
+    if mount_manager._devpts_single_instance():
+        mount_manager.create_dev_nodes(rootfs, (("ptmx", 5, 2, 0o666),), holder=holder, use_userns=use_userns)
+        return
 
     def _open_rootfs() -> int:
         return mount_targets.open_rootfs_fd(rootfs)
@@ -416,16 +420,13 @@ def apply_special_mounts(
             try:
                 mount_manager.apply_special_mount(rootfs, sm, holder=holder)
             except (OSError, RuntimeError):
-                # Single-instance devpts (< 4.7) over a fresh tmpfs /dev has
-                # no instance to reuse; the host's /dev/pts bind supplies
-                # ptys. PTYs are required, so a failed bind still raises.
                 warn("Could not mount a fresh devpts; falling back to the host /dev/pts bind.")
                 mount_manager.safe_mount("/dev/pts", _guest_dir(rootfs, "/dev/pts"), rootfs=rootfs, holder=holder)
             continue
         mount_manager.apply_special_mount(rootfs, sm, holder=holder)
 
     if fresh_dev or max_isolation:
-        _ensure_ptmx_symlink(rootfs, holder)
+        _ensure_ptmx(rootfs, holder, use_userns=use_userns)
         _ensure_dev_symlinks(rootfs, holder)
 
     _apply_masked_paths(rootfs, holder, masked=bindings.masked_paths(), readonly=bindings.READONLY_PATHS)

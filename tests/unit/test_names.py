@@ -1,7 +1,7 @@
 import pytest
 
 from chroot_distro.exceptions import InvalidNameError
-from chroot_distro.names import is_valid_name, require_valid_name
+from chroot_distro.names import NAME_RULE_HINT, is_valid_name, require_valid_name
 
 
 def test_is_valid_name():
@@ -41,3 +41,12 @@ def test_require_valid_name():
 
 def test_trailing_newline_should_be_rejected():
     assert is_valid_name("foo\n") is False
+
+
+def test_require_valid_name_escapes_rejected_name():
+    with pytest.raises(InvalidNameError) as exc_info:
+        require_valid_name("box\x1b[2J\n\x9b\u202e\udc80")
+
+    assert str(exc_info.value) == (
+        r"container name 'box\x1b[2J\n\x9b\u202e\udc80' is not valid. " + NAME_RULE_HINT
+    )

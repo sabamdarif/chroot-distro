@@ -5,9 +5,9 @@
 The three source kinds are told apart by the reference's shape alone: a leading `/`,
 `./`, `../` or `~` is a local file, an `http://` or `https://` prefix a URL, anything
 else a registry reference, which is then held to Docker's grammar before a name is
-derived from it or a lock taken. The container name is derived from whichever kind it is
-unless `--name` gave one, and a name that cannot be derived is an error asking for
-`--name` rather than a guess.
+derived from it or a lock taken. Archive names come from the filename or URL path
+with the longest recognized suffix stripped. A source without an inferable name
+requires `--name`.
 
 Two things here are about surviving a crash and a hostile archive. The
 `incomplete` marker is created and fsynced *before* the rootfs directory exists and
@@ -30,6 +30,7 @@ import os
 import re
 import shutil
 import sys
+from urllib.parse import urlsplit
 
 if sys.version_info >= (3, 14):
     import tarfile
@@ -60,7 +61,7 @@ from chroot_distro.helpers.rootfs import (
     write_resolv_conf,
 )
 from chroot_distro.locking import ContainerLock
-from chroot_distro.message import C, crit_error, log_error, log_info, msg, quote_path
+from chroot_distro.message import C, crit_error, escape_controls, log_error, log_info, msg, quote_path
 from chroot_distro.names import is_valid_name, require_valid_name
 from chroot_distro.paths import (
     container_dir,
@@ -71,19 +72,26 @@ from chroot_distro.paths import (
 )
 from chroot_distro.progress import clear_bar
 
-# Archive extensions stripped when deriving a container name from a filename.
+# Compound OCI extensions must precede their plain tar suffixes.
 _ARCHIVE_EXTS = (
+    ".oci.tar.zstd",
+    ".oci.tar.bz2",
+    ".oci.tar.lzma",
+    ".oci.tar.zst",
+    ".oci.tar.xz",
+    ".oci.tar.gz",
+    ".oci.tar",
+    ".tar.zstd",
+    ".tar.zst",
     ".tar.gz",
     ".tgz",
     ".tar.bz2",
     ".tbz2",
     ".tar.xz",
     ".txz",
-    ".oci.tar.xz",
-    ".oci.tar.gz",
-    ".oci.tar",
     ".tar.lzma",
     ".tlzma",
+    ".tzst",
     ".tar",
 )
 
@@ -142,7 +150,7 @@ def _install_one(image_ref: str, args, custom_container_name) -> None:
         dist_arch = normalize_arch(raw_arch)
         if dist_arch is None:
             crit_error(
-                f"unknown architecture '{raw_arch}'. "
+                f"unknown architecture '{quote_path(raw_arch)}'. "
                 f"Valid values: aarch64, arm, i686, riscv64, x86_64 "
                 f"(or Docker format: linux/arm64, linux/amd64, "
                 f"linux/arm/v7, linux/386, linux/riscv64)."
@@ -187,7 +195,7 @@ def _resolve_install_name(image_ref, local_path, url, custom_container_name):
     """Decide the on-disk container name. Exits on unresolvable cases."""
     if local_path is not None:
         if not os.path.isfile(local_path):
-            crit_error(f"local file '{local_path}' does not exist or is not a regular file.")
+            crit_error(f"local file '{quote_path(local_path)}' does not exist or is not a regular file.")
             sys.exit(1)
         if custom_container_name:
             return custom_container_name
@@ -195,19 +203,27 @@ def _resolve_install_name(image_ref, local_path, url, custom_container_name):
         if not derived or not is_valid_name(derived):
             crit_error(
                 f"cannot determine a valid container name from "
-                f"'{os.path.basename(local_path)}'. "
+                f"'{quote_path(os.path.basename(local_path))}'. "
                 f"Specify the name with '--name NAME'."
             )
             sys.exit(1)
         return derived
 
     if url is not None:
+        try:
+            source = urlsplit(url)
+            host = source.hostname
+            _ = source.port
+            if not host or not host.isprintable() or any(char.isspace() for char in host):
+                raise ValueError
+        except ValueError:
+            crit_error("invalid archive URL. Specify an HTTP or HTTPS URL with a valid host and port.")
+            sys.exit(1)
         if custom_container_name:
             return custom_container_name
-        url_path = url.split("?")[0].split("#")[0]
-        derived = _derive_local_name(url_path)
+        derived = _derive_local_name(source.path)
         if not derived or not is_valid_name(derived):
-            crit_error(f"cannot determine a valid container name from '{url}'. Specify the name with '--name NAME'.")
+            crit_error("cannot determine a valid container name from the URL path. Specify the name with '--name NAME'.")
             sys.exit(1)
         return derived
 
@@ -276,7 +292,7 @@ def _run_install(
             except OSError as exc:
                 crit_error(
                     f"cannot remove leftover data of the interrupted install at "
-                    f"'{container_path}': {exc}. Remove it manually, then retry."
+                        f"'{quote_path(container_path)}': {escape_controls(str(exc))}. Remove it manually, then retry."
                 )
                 sys.exit(1)
         else:
@@ -290,9 +306,9 @@ def _run_install(
             sys.exit(1)
 
     if local_path is not None:
-        log_info(f"Installing from '{os.path.basename(local_path)}' as '{install_name}'...")
+        log_info(f"Installing from '{quote_path(os.path.basename(local_path))}' as '{install_name}'...")
     elif url is not None:
-        log_info(f"Installing from URL '{url}' as '{install_name}'...")
+        log_info(f"Installing archive from URL as '{install_name}'...")
     else:
         last_component = image_ref.rsplit("/", maxsplit=1)[-1]
         display_ref = image_ref if ":" in last_component else f"{image_ref}:latest"
@@ -313,7 +329,7 @@ def _run_install(
     try:
         rootfs_fd = open_container_rootfs(install_name, create=True)
     except OSError as exc:
-        crit_error(f"could not create the rootfs of container '{install_name}': {exc}")
+        crit_error(f"could not create the rootfs of container '{install_name}': {escape_controls(str(exc))}")
         sys.exit(1)
 
     def _cleanup() -> None:
@@ -334,7 +350,13 @@ def _run_install(
             )
             os.close(fd)
             log_info("Downloading archive...")
-            download_file(url, tmp_archive, insecure=insecure)
+            try:
+                download_file(url, tmp_archive, insecure=insecure)
+            except (OSError, RuntimeError) as exc:
+                source = urlsplit(url)
+                if source.username is not None or source.query or source.fragment:
+                    raise RuntimeError("could not download the archive from the supplied URL.") from exc
+                raise
             log_info("Extracting rootfs from archive...")
             metadata = install_from_local_file(tmp_archive, rootfs_fd, dist_arch)
         else:
@@ -352,7 +374,7 @@ def _run_install(
                 with atomic_write(container_manifest(install_name), mode=0o644) as fh:
                     json.dump(manifest_data, fh, indent=2)
             except OSError as exc:
-                crit_error(f"could not write manifest.json for '{install_name}': {exc}")
+                crit_error(f"could not write manifest.json for '{install_name}': {escape_controls(str(exc))}")
                 sys.exit(1)
 
         if os.path.isdir(os.path.join(rootfs_dir, "etc")):
@@ -383,7 +405,7 @@ def _run_install(
         os._exit(1)
     except (EOFError, OSError, tarfile.TarError, RuntimeError) as exc:
         clear_bar()
-        log_error(f"Failed to install: {exc}")
+        log_error(f"Failed to install: {escape_controls(str(exc))}")
         _cleanup()
         sys.exit(1)
     except Exception:

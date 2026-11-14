@@ -53,7 +53,8 @@ sudo apt install python3-pip   # Debian/Ubuntu example
 sudo pip install chroot-distro --break-system-packages --root-user-action=ignore
 ```
 
-Every command elevates itself with `sudo`, `doas`, `pkexec` or `su` as it runs.
+Commands that need root use the first available tool in this order: `sudo`,
+`doas`, `pkexec`, `su`. Help, version and `search` run without elevation.
 
 ### Install on Termux (Android)
 
@@ -79,7 +80,10 @@ chroot-distro remove ubuntu            # delete it
 
 ## Commands reference
 
-Every command accepts `-h` / `--help`. Run `chroot-distro -V` to print the version.
+An optional standalone `--` can appear before the command name.
+Every command accepts `-h` and `--help` before its own first standalone `--`.
+These flags show help before validating command arguments.
+Run `chroot-distro -V` or `chroot-distro --version` to print the version.
 
 ### install
 
@@ -100,9 +104,17 @@ Create a container. `IMAGE` can be:
 References follow Docker's own grammar, so `localhost:5000/foo` names a registry on
 this machine. Pinning an image by digest (`debian@sha256:...`) is not supported yet.
 
+OCI archives must provide matching sizes and SHA-256 digests for the manifests,
+configs and layers used during install. A verified cached layer can supply a
+layer missing from the archive.
+
+The default container name for an archive comes from its filename, with the
+recognized extension removed. For a URL, the filename comes from its path.
+Use `--name` if the URL path has no filename.
+
 | Option                      | Description                                                                                                                                                              |
 | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `-n`, `--name NAME`         | Give the container a custom name. Default is the image name. Needed to install the same image twice. `--override-alias` is an accepted alias.                            |
+| `-n`, `--name NAME`         | Give the container a custom name. Needed to install the same image twice. `--override-alias` is an accepted alias. |
 | `-a`, `--architecture ARCH` | Install for a different CPU type (`aarch64`, `x86_64`, `linux/arm64`, ...). Default is your host's CPU.                                                                  |
 | `--allow-insecure`          | Permit insecure transport when downloading: an untrusted certificate, or a redirect from HTTPS to plain HTTP. Only for sources you trust; Docker Hub is always verified. |
 | `-q`, `--quiet`             | Only show errors.                                                                                                                                                        |
@@ -141,7 +153,13 @@ chroot-distro login [OPTIONS] CONTAINER [-- COMMAND ...]
 Aliases: sh
 ```
 
-Open a shell inside a container. Add `--` followed by a command to run that command instead of a shell:
+Open a shell inside a container. Put a command after `--` to run it instead.
+Bare command words before `--` are passed first. Put guest options after `--`.
+
+When stdin is a terminal, `login` forwards guest terminal output to stdout.
+If forwarding fails, `login` closes the guest PTY and exits with status 1
+after the guest wait and session cleanup. The relay keeps handling SIGTERM,
+SIGINT and SIGHUP while waiting for the guest after closing the PTY.
 
 ```sh
 chroot-distro login ubuntu
@@ -153,6 +171,7 @@ chroot-distro login ubuntu -- uname -a
 | `-u`, `--user USER`                 | Log in as this user instead of root. Accepts a name, `name:group`, a numeric `uid`, or `uid:gid`.                                                                                                                                               |
 | `--isolated`                        | Maximum isolation: own mount, PID, UTS and IPC namespaces, and no host path shared except `/sys`. `--shared-*` and `--bind` are ignored. `--isolate` is an alias.                                                                               |
 | `--minimal`                         | Bare minimum mode: fresh `/dev`, `/proc`, `/sys` and `/dev/shm` and a stripped environment, nothing else. Cannot be combined with `--isolated`.                                                                                                 |
+| `--no-new-privs`                    | Prevent guest programs from gaining privileges through setuid binaries or file capabilities.                                                                                                                                                    |
 | `--shared-home`                     | Make your host home folder available inside the container.                                                                                                                                                                                      |
 | `--shared-tmp`                      | Share the host `/tmp` with the container. By default the container gets its own empty `/tmp`.                                                                                                                                                   |
 | `--shared-display`                  | Share the host screen (X11/Wayland), audio, and D-Bus, so GUI apps work. `--shared-x11` is an accepted alias.                                                                                                                                   |
@@ -164,6 +183,8 @@ chroot-distro login ubuntu -- uname -a
 Set `CD_USE_NS=1` for namespace isolation while keeping the normal shared folders, instead of `--isolated`.
 
 Every mode mounts fresh pseudo-filesystems instead of binding the host's: a minimal `/dev`, fresh `/dev/pts`, `/dev/shm` and `/proc`, and a read-only `/sys`, following Docker's defaults (`/proc/kcore` and `/proc/keys` masked, `/proc/sys` read-only). When the kernel or SELinux refuses one, the host tree is bound with a warning.
+
+Single-instance devpts kernels share the host's `/dev/pts` with the guest. When chroot-distro supplies the guest's `/dev`, it creates a legacy `/dev/ptmx` device so guest programs can allocate pseudoterminals.
 
 On Termux, Android mounts `/data` with `nosuid`, so a default login binds the container's rootfs onto itself with `suid` and `exec` enabled, letting setuid binaries like `sudo` work without touching Android's mount flags. `--shared-tmp` binds `$PREFIX/tmp` as it is; make it world-writable yourself if a non-root guest user must write there.
 
@@ -180,6 +201,8 @@ chroot-distro run [OPTIONS] CONTAINER [-- ARG ...]
 Run the start command (Entrypoint/Cmd) defined by the container's image, like `docker run`. Mainly for server images (nginx, nextcloud, databases). Only works for containers installed from Docker/OCI images.
 
 `run` is the only way into an image that ships no shell (`scratch`, distroless): `login` refuses those and points here.
+
+Foreground `run` uses the same [terminal output handling as `login`](#login).
 
 `run` accepts all `login` options above, plus:
 
@@ -315,6 +338,7 @@ Aliases: bak, bkp
 ```
 
 Save a container as a TAR archive. Without `--output`, the archive goes to stdout so you can pipe it.
+If stdout is unavailable or its pipe closes during the backup, the command exits with status 1.
 
 | Option                  | Description                                                                                                                 |
 | ----------------------- | --------------------------------------------------------------------------------------------------------------------------- |
@@ -355,6 +379,7 @@ chroot-distro diff [OPTIONS] CONTAINER
 ```
 
 Show what changed inside a container compared to its original image, like `docker diff`. `A` means added, `C` changed, `D` deleted. Needs the image layers to still be in the cache, so avoid `clear-cache` if you want `diff` to keep working.
+The text output escapes backslashes and nonprintable characters in paths. The JSON document preserves the original paths.
 
 | Option   | Description                                                                                                           |
 | -------- | --------------------------------------------------------------------------------------------------------------------- |
@@ -396,7 +421,8 @@ chroot-distro help [COMMAND]
 Aliases: h, he, hel
 ```
 
-Show detailed help for a command, or general usage when no command is given.
+Show detailed help for a command or alias, or general usage when no command is given.
+For example, `chroot-distro help info` shows the same page as `chroot-distro info --help`.
 
 ### build
 
@@ -417,10 +443,11 @@ Build an image from a Dockerfile, like `docker build` but without Docker. `PATH`
 | `--target STAGE`                  | Stop at a named stage of a multi-stage build.                                                                                                                                          |
 | `-o`, `--output FILE`             | Also save the image as an OCI tarball (`.oci.tar`, `.oci.tar.gz`, `.oci.tar.xz`). Can be given more than once.                                                                         |
 | `--export type=...,dest=...`      | Export the rootfs itself: `type=local,dest=DIR` as a directory, `type=tar,dest=FILE` as a plain tarball. One platform, your own CPU. More than once.                                   |
-| `--install-as NAME`               | Install the built image as a container right after the build.                                                                                                                          |
+| `--install-as NAME`               | Install the built image under a new container name after the build.                                                                                                                      |
 | `--secret id=NAME[,src=PATH]`     | Give a secret to `RUN --mount=type=secret` steps. Without `src=`, the value comes from the environment variable `NAME`. Secrets never end up in the image.                             |
 | `--ssh ID[=SOCK]`                 | Give an SSH agent socket to `RUN --mount=type=ssh` steps. Default socket is `$SSH_AUTH_SOCK`.                                                                                          |
 | `--no-cache`                      | Rebuild every step from scratch instead of reusing cached steps.                                                                                                                       |
+| `--allow-insecure`                | Allow untrusted certificates and plain HTTP when importing or exporting registry build cache. Docker Hub always uses verified HTTPS. |
 | `--cache-from type=local,src=DIR` | Reuse the cached steps a `--cache-to` saved in `DIR`. `type=registry,ref=REF` reads a registry instead. Can be given more than once.                                                   |
 | `--cache-to type=local,dest=DIR`  | Save this build's cached steps into `DIR`. `type=registry,ref=REF` pushes them to a registry. Can be given more than once.                                                             |
 | `--progress MODE`                 | Output style: `auto`, `plain`, `tty`, or `rawjson`.                                                                                                                                    |
@@ -522,7 +549,7 @@ chroot-distro build -t myapp:1.0 \
     --cache-to type=registry,ref=ghcr.io/me/myapp-cache:latest .
 ```
 
-Both backends hold the same document: a `build-cache.json` listing the steps plus one blob per layer. `type=local` keeps it as a plain folder (`src=`/`dest=`); `type=registry` stores it as a single OCI artifact at `ref=` (a private registry wants `CD_DOCKER_AUTH` for it). Both can be given more than once, and the two are interchangeable.
+Both backends hold the same document with a `build-cache.json` listing the steps and one blob per layer. `type=local` keeps it in a folder (`src=` or `dest=`). `type=registry` stores it as a single OCI artifact at `ref=`. Use a tag reference such as `ghcr.io/me/cache:latest`. Omitting the tag selects `latest`. Set `CD_DOCKER_AUTH` for a private registry. You can repeat either backend and import what the other exported.
 
 - Only the steps this build ran are exported, and an export only adds to what the target already holds; delete the target to start over.
 - A folder that is not there yet imports nothing (no error); one that is there and is not a cache folder stops the build.
@@ -600,9 +627,24 @@ Every document, success or failure, is an object carrying the schema version and
 ```jsonc
 {"schema": 1, "command": "list", "containers": [ ... ], "incomplete": []}
 
-// on failure, still exit code 1, and the same message is on stderr
+// on failure, exit code 1
 {"schema": 1, "command": "diff", "error": "container 'nope' is not installed."}
 ```
+
+If an elevation tool fails before starting chroot-distro as root, that tool
+controls the diagnostic and exit status. In that case stdout may be empty.
+Failures handled by chroot-distro, including failure to launch the elevation
+tool, use the JSON error document.
+
+Human `list` and `ps` tables, backup messages, and plain and TTY build events
+escape control characters in names and other values they display. Displayed
+container names and filesystem paths also escape literal backslashes.
+JSON output and tar archives preserve the original values.
+
+The stderr diagnostic escapes control characters. If stdout is unavailable or
+its pipe closes while writing a JSON document, the version line, quiet `list`
+or `ps` output, `--get-chroot-cmd` output, or raw JSON build events,
+chroot-distro exits with status 1.
 
 `schema` is bumped only when a key is renamed, removed or changes type, so a consumer can ignore keys it does not know and keep working. Field rules: a byte count is an integer named `*_bytes` with its formatted twin beside it, a duration is `*_seconds`, a path is absolute, a flag is a real `true`/`false`, an unknown value is `null`, and a list is always present even when empty.
 
@@ -622,7 +664,16 @@ and nested inside the data folder on Termux:
 | Termux        | `$PREFIX/var/lib/chroot-distro/` | `$PREFIX/var/lib/chroot-distro/cache/` |
 | Regular Linux | `~/.local/share/chroot-distro/`  | `~/.cache/chroot-distro/`              |
 
-On regular Linux, commands run as root, so the folders are usually under `/root/` unless you set `XDG_DATA_HOME` / `XDG_CACHE_HOME`.
+On regular Linux, commands that access the store run as root. The default
+folders are usually under `/root/`. Set `XDG_DATA_HOME` and `XDG_CACHE_HOME`
+to use other base directories. If a previous sudo invocation used your home
+directory, point those variables to the previous bases, typically your
+`.local/share` and `.cache`, to reopen that store.
+
+Shell completion reads container names with your shell's permissions. On
+regular Linux, an unelevated shell uses the root account's data directory
+unless you set `XDG_DATA_HOME` to another base. If your shell cannot read the
+store, run `chroot-distro list --quiet` to see the installed names.
 
 Inside the data folder:
 

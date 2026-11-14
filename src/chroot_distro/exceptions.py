@@ -2,10 +2,10 @@
 # Copyright (C) 2025-2026 Md Arif
 """The exception tree, whose only job is to mark a failure as expected.
 
-`cli.main` catches `ChrootDistroError` and turns it into one line plus exit code 1, so
-raising a subclass is how a command reports a condition a user can act on. Anything
-else escapes as an "unexpected error", which is the traceback path. Each class carries
-no state: the message is the whole payload.
+During dispatch, `cli.main` reports a `ChrootDistroError` with its message and
+exits with status 1. A command that accepted `--json` also gets an error
+document. Other dispatch exceptions get an "unexpected error" prefix, with
+dedicated handling for unsupported operations and interrupts.
 """
 
 
@@ -31,7 +31,7 @@ class MountRefusedError(MountError):
 
 
 class LockConflictError(ChrootDistroError):
-    """Raised when a file/container lock is already held by another process."""
+    """Raised when a command cannot acquire a lock."""
 
 
 class InvalidNameError(ChrootDistroError):
@@ -39,7 +39,7 @@ class InvalidNameError(ChrootDistroError):
 
 
 class RootRequiredError(ChrootDistroError):
-    """Raised when an operation requires root privileges but run by unprivileged user."""
+    """Raised when required privileges cannot be obtained."""
 
 
 class BuildError(ChrootDistroError):

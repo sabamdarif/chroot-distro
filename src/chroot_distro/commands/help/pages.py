@@ -2,10 +2,9 @@
 # Copyright (C) 2025-2026 Md Arif
 """The text of every help page, written by hand because argparse's is never shown.
 
-`cli.main` intercepts `--help` and an unknown command before argparse gets to
-print anything, so the sub-parsers in `parser.py` carry no user-visible help and
-this file is the only description of a flag a user will read. Adding a flag there
-without adding it here ships it undocumented.
+`cli.main` intercepts exact help flags before parsing host arguments.
+The sub-parsers in `parser.py` carry no user-visible help. Update these pages
+when adding or changing a command option.
 
 `HELP_PAGES` is keyed by canonical command name, the same keys
 `parser.ALIAS_TO_CANONICAL` resolves to, and every value is data for
@@ -43,7 +42,7 @@ _ISOLATED_OPT = (
     "(--shared-home, --shared-tmp, --shared-display, --bind) are ignored and a "
     "warning is printed, since they would expose a host path. "
     "Use CD_USE_NS=1 instead if you want namespace isolation but keep the "
-    "default mounts. Not a full container runtime (no network namespace).",
+    "default mounts. --isolate is an alias. There is no network namespace.",
 )
 _MINIMAL_OPT = (
     "--minimal",
@@ -60,6 +59,13 @@ _NO_NEW_PRIVS_OPT = (
 )
 
 HELP_PAGES: dict[str, dict[str, typing.Any]] = {
+    "help": {
+        "usage": "help [COMMAND]",
+        "aliases": ("h", "he", "hel"),
+        "summary": "Show detailed help for a command or alias, or general usage when no command is given.",
+        "options": [("-h, --help", "Show this help.")],
+        "examples": [f"{PROGRAM_NAME} help", f"{PROGRAM_NAME} help info"],
+    },
     "build": {
         "usage": "build [OPTIONS] [PATH]",
         "summary": (
@@ -156,14 +162,13 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
             ("--no-cache", "Disable build-step caching. Each instruction is executed fresh."),
             (
                 "--allow-insecure",
-                "Allow plain-HTTP registries for --cache-from/--cache-to "
-                "type=registry. TLS is enforced by default; this is for a "
-                "local registry you trust.",
+                "Allow untrusted certificates and plain HTTP for registry build caches. "
+                "Docker Hub always uses verified HTTPS.",
             ),
             (
                 "--cache-from [type=local,src=DIR | type=registry,ref=REF]",
                 "Import cached steps before building, from a directory "
-                "(type=local) or a registry artifact (type=registry). A "
+                "(type=local) or a tagged registry artifact (type=registry). A "
                 "directory that is not there yet imports nothing and is not an "
                 "error; one that is there and is not a cache directory ends the "
                 "build. Every layer is verified against its own digest and "
@@ -172,7 +177,7 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
             (
                 "--cache-to [type=local,dest=DIR | type=registry,ref=REF]",
                 "Export the steps this build dispatched, to a directory "
-                "(type=local) or a registry artifact (type=registry), so another "
+                "(type=local) or a tagged registry artifact (type=registry), so another "
                 "machine can serve them with --cache-from. Only this build's "
                 "steps, added to whatever the target already holds. Repeatable.",
             ),
@@ -286,6 +291,11 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
                 "riscv64, x86_64) or Docker platform strings "
                 "(linux/arm64, linux/amd64, ...). Default: host "
                 "architecture.",
+            ),
+            (
+                "--allow-insecure",
+                "Allow untrusted certificates and plain HTTP for a registry you trust. "
+                "Docker Hub always uses verified HTTPS.",
             ),
             ("-q, --quiet", "Suppress non-error output."),
         ],
@@ -458,10 +468,10 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
             "Layers are cached locally and reused on subsequent "
             "installs of the same image."
             "\n\n"
-            "Container name is being determined from name of Docker image "
-            "or rootfs archive file. To be able install multiple instances "
-            "of same distribution, you need to override name using a command "
-            "line option."
+            "The default name comes from the image name or the archive filename "
+            "with its recognized extension removed. For a URL, the filename "
+            "comes from its path. Use --name if the URL path has no filename "
+            "or to install under a different name."
             "\n\n"
             "Private images require authentication. Set the environment "
             'variable CD_DOCKER_AUTH="user:password" before running '
@@ -477,7 +487,7 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
                 "Set a custom name for the container. Must start with "
                 "alphanumeric character and then may contain only latin "
                 "letters, numbers and special symbols dot, minus, underscore. "
-                "Default equals to image name without tag and registry prefix.",
+                "--override-alias is an alias.",
             ),
             (
                 "-a, --architecture [ARCH]",
@@ -487,6 +497,11 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
                 "linux/386, linux/riscv64). A foreign architecture needs "
                 "QEMU's user-mode emulator installed on the host; login "
                 "registers it with binfmt_misc on first entry.",
+            ),
+            (
+                "--allow-insecure",
+                "Allow untrusted certificates or redirects from HTTPS to plain HTTP when downloading. "
+                "Docker Hub always uses verified HTTPS.",
             ),
             ("-q, --quiet", "Suppress non-error output."),
         ],
@@ -520,13 +535,12 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
         ],
     },
     "login": {
-        "usage": "login [OPTIONS] CONTAINER [-- COMMAND]",
+        "usage": "login [OPTIONS] CONTAINER [-- COMMAND ...]",
         "aliases": ("sh",),
         "summary": (
-            "Start interactive shell configured for a given account "
-            "configured in /etc/passwd. Alternatively user can specify "
-            "a custom command to use instead of default shell after "
-            "command line separator ('--')."
+            "Start the login shell configured for the guest account. "
+            "Put a command after '--' to run it instead. Bare command words "
+            "before '--' are passed first."
             "\n\n"
             "Since chroot-distro runs real chroot processes, root permissions "
             "are required to mount directories and perform chroot."
@@ -810,6 +824,10 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
             ("-w, --work-dir [PATH]", "Set the initial working directory."),
             ("-e, --env VAR=VALUE", "Set an environment variable. Can be specified multiple times."),
             (
+                "--entrypoint EXECUTABLE",
+                "Replace the image Entrypoint and clear the image Cmd. Pass arguments for the executable after '--'.",
+            ),
+            (
                 "-d, --detach",
                 "Run the command in the background and return immediately. "
                 "Output is written to a per-container log file (its path is "
@@ -918,7 +936,7 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
         "options": [
             ("-h, --help", "Show this help."),
             ("-l, --limit [N]", "Maximum number of results to show (default: 25, max: 100)."),
-            ("-q, --quiet", "Reserved for future use."),
+            ("-q, --quiet", "Only show errors."),
         ],
         "examples": [
             f"{PROGRAM_NAME} search nextcloud",
@@ -1035,7 +1053,7 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
 
 
 TOP_COMMANDS = [
-    ("help", "Show this help."),
+    ("help", "Show general or command-specific help."),
     ("install", "Install distribution from OCI image or rootfs archive."),
     ("list", "List created containers."),
     ("login", "Start interactive shell inside a container."),
