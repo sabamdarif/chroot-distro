@@ -9,8 +9,9 @@ its captured output, leaving the parent free to decrement the session count and
 tear the mounts down.
 `spawn_detached` forks a child meant to outlive this process.
 
-The foreground PTY relay writes guest bytes to fd 1. It restores the terminal,
-closes the master and reaps the child before reporting a stdout failure.
+The foreground PTY relay writes guest bytes to fd 1. It restores the terminal
+and closes the master before the final wait, and relays termination signals
+until it reaps the child. It reports stdout failures after cleanup.
 
 The order of the identity change is coreutils' own and is not negotiable:
 chroot, chdir, then setgroups before setgid before setuid. Each of those can only
@@ -542,86 +543,96 @@ def _pty_relay(
     import termios
     import tty
 
-    prev_winch: signal._HANDLER = signal.SIG_DFL
-
-    def _on_winsize(_signum: int, _frame: object) -> None:
-        _copy_terminal_size(0, master_fd)
-        with contextlib.suppress(ProcessLookupError):
-            os.kill(child_pid, signal.SIGWINCH)
-
-    with contextlib.suppress(OSError, ValueError):
-        prev_winch = signal.signal(signal.SIGWINCH, _on_winsize)
-
-    prev_handlers: dict[signal.Signals, signal._HANDLER] = {}
+    exit_code: int | None = None
+    waiting = False
+    deferred_signals: list[int] = []
+    terminal_active = True
     signal_times: list[float] = []
     escalation = _StuckSignalEscalation(signal_times, escalate) if escalate is not None else None
 
+    def _on_winsize(_signum: int, _frame: object) -> None:
+        if terminal_active:
+            _copy_terminal_size(0, master_fd)
+
     def _relay_sig(signum: int, _frame: object) -> None:
-        # Signal the child's whole process group, not just the child: a GUI
-        # session (dbus-launch startxfce4) leaves xfce4-session as the child's
-        # foreground child in the same group, and signalling the child alone
-        # leaves the session running while the child waits on it, hanging the
-        # exit. The child is a session leader, so its pid is its group id.
-        signal_times.append(time.monotonic())
-        with contextlib.suppress(ProcessLookupError):
-            os.killpg(child_pid, signum)
+        if waiting:
+            deferred_signals.append(signum)
+        elif signum == signal.SIGTSTP:
+            if terminal_active:
+                if exit_code is None:
+                    with contextlib.suppress(ProcessLookupError):
+                        os.kill(child_pid, signum)
+                signal.signal(signal.SIGTSTP, signal.SIG_DFL)
+                os.kill(os.getpid(), signum)
+        elif exit_code is None:
+            signal_times.append(time.monotonic())
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(child_pid, signum)
 
-    def _on_tstp(_signum: int, _frame: object) -> None:
-        # Suspend the child and stop ourselves, so Ctrl-Z works even in raw
-        # mode (where the terminal never generates SIGTSTP for us). The
-        # foreground process group of the child's pty gets the stop; we then
-        # stop too, and the real shell's SIGCONT resumes us.
-        with contextlib.suppress(ProcessLookupError):
-            os.kill(child_pid, signal.SIGTSTP)
-        signal.signal(signal.SIGTSTP, signal.SIG_DFL)
-        os.kill(os.getpid(), signal.SIGTSTP)
+    # A Python signal handler can run after waitpid reaps but before we record it.
+    def _poll_child() -> bool:
+        nonlocal waiting, exit_code, deferred_signals
+        waiting = True
+        try:
+            wpid, status = os.waitpid(child_pid, os.WNOHANG)
+        except ChildProcessError:
+            exit_code = 0
+        else:
+            if wpid == child_pid:
+                exit_code = _decode_status(status)
+        waiting = False
+        pending, deferred_signals = deferred_signals, []
+        for signum in pending:
+            _relay_sig(signum, None)
+        if exit_code is None and escalation is not None:
+            escalation.check()
+        return exit_code is not None
 
-    for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
-        with contextlib.suppress(OSError, ValueError):
-            prev_handlers[sig] = signal.signal(sig, _relay_sig)
-    # SIGTSTP is handled, not relayed, so the suspend actually reaches us.
-    with contextlib.suppress(OSError, ValueError):
-        prev_handlers[signal.SIGTSTP] = signal.signal(signal.SIGTSTP, _on_tstp)
-
+    prev_handlers: dict[signal.Signals, signal._HANDLER] = {}
     old_attrs: list[int | list[bytes | int]] | None = None
     try:
-        old_attrs = termios.tcgetattr(0)
-        tty.setraw(0)
-    except (termios.error, OSError):
-        pass
-
-    try:
-        exit_code, output_error = _pty_copy_loop(master_fd, child_pid, escalation=escalation)
-    finally:
-        if old_attrs is not None:
+        try:
+            for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT, signal.SIGTSTP, signal.SIGWINCH):
+                handler = _on_winsize if sig == signal.SIGWINCH else _relay_sig
+                with contextlib.suppress(OSError, ValueError):
+                    prev_handlers[sig] = signal.signal(sig, handler)
             with contextlib.suppress(termios.error, OSError):
-                termios.tcsetattr(0, termios.TCSAFLUSH, old_attrs)
-        with contextlib.suppress(OSError):
-            os.close(master_fd)
-        with contextlib.suppress(OSError, ValueError):
-            signal.signal(signal.SIGWINCH, prev_winch)
+                old_attrs = termios.tcgetattr(0)
+                tty.setraw(0)
+            output_error = _pty_copy_loop(master_fd, _poll_child)
+        finally:
+            terminal_active = False
+            if old_attrs is not None:
+                with contextlib.suppress(termios.error, OSError):
+                    termios.tcsetattr(0, termios.TCSAFLUSH, old_attrs)
+            for sig in (signal.SIGWINCH, signal.SIGTSTP):
+                if sig in prev_handlers:
+                    with contextlib.suppress(OSError, ValueError):
+                        signal.signal(sig, prev_handlers.pop(sig))
+            with contextlib.suppress(OSError):
+                os.close(master_fd)
+
+        while exit_code is None:
+            if not _poll_child():
+                time.sleep(0.05)
+    finally:
         for s, h in prev_handlers.items():
             with contextlib.suppress(OSError, ValueError):
                 signal.signal(s, h)
 
-    if exit_code is None:
-        with contextlib.suppress(ChildProcessError):
-            exit_code = _wait_for_child(child_pid, escalation=escalation)
     if output_error is not None:
         raise PtyOutputError(output_error.errno, output_error.strerror) from output_error
-    return 0 if exit_code is None else exit_code
+    return exit_code
 
 
 def _pty_copy_loop(
     master_fd: int,
-    child_pid: int,
-    *,
-    escalation: _StuckSignalEscalation | None = None,
-) -> tuple[int | None, OSError | None]:
+    poll_child: typing.Callable[[], bool],
+) -> OSError | None:
     """Bidirectional copy between stdin/stdout and a PTY master fd.
 
-    Return any child exit code collected here and any stdout write error.
-    A missing original stdout can leave fd 1 available for another file.
+    Return any stdout write error. A missing original stdout can leave fd 1
+    available for another file.
 
     Exits when the master reaches EOF *or* when the child has exited and its
     pty has gone quiet. The child check matters because a GUI session
@@ -637,32 +648,19 @@ def _pty_copy_loop(
     """
     fds = [0, master_fd]
     child_dead = False
-    exit_code = None
     while fds:
         try:
             rfds, _, _ = select.select(fds, [], [], _COPY_POLL_SECS)
         except (OSError, ValueError, InterruptedError):
             break
-        if not child_dead:
-            try:
-                wpid, status = os.waitpid(child_pid, os.WNOHANG)
-                if wpid == child_pid:
-                    child_dead = True
-                    exit_code = _decode_status(status)
-                    # A dead child reads nothing more; keep relaying only the
-                    # pty output that is still draining.
-                    if 0 in fds:
-                        fds.remove(0)
-            except ChildProcessError:
-                child_dead = True
-                if 0 in fds:
-                    fds.remove(0)
-            if escalation is not None:
-                escalation.check()
-        elif not rfds:
+        if child_dead and not rfds:
             # Child is dead and the pty produced nothing this window: the
             # writers left are orphans, not the session. Stop relaying.
             break
+        if not child_dead:
+            child_dead = poll_child()
+            if child_dead and 0 in fds:
+                fds.remove(0)
         if 0 in fds and 0 in rfds:
             try:
                 data = os.read(0, 4096)
@@ -692,8 +690,8 @@ def _pty_copy_loop(
                         raise OSError(errno.EIO, "stdout write made no progress")
                     remaining = remaining[written:]
             except OSError as exc:
-                return exit_code, exc
-    return exit_code, None
+                return exc
+    return None
 
 
 def _wait_for_child_with_signals(

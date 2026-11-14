@@ -158,7 +158,8 @@ Bare command words before `--` are passed first. Put guest options after `--`.
 
 When stdin is a terminal, `login` forwards guest terminal output to stdout.
 If forwarding fails, `login` closes the guest PTY and exits with status 1
-after the guest wait and session cleanup.
+after the guest wait and session cleanup. The relay keeps handling SIGTERM,
+SIGINT and SIGHUP while waiting for the guest after closing the PTY.
 
 ```sh
 chroot-distro login ubuntu
