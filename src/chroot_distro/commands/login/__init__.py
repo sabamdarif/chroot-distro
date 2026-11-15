@@ -53,6 +53,10 @@ foreground holder that execs the command itself (entering one would hang the
 session forever), `enter_and_run_with_pty` into a parked holder, and
 `spawn_detached` for `--detach`.
 
+Detached output uses a validated append descriptor under pinned runtime storage.
+Startup failures close resources before the shared teardown; after a successful
+fork, parent cleanup and diagnostics must leave the child's session standing.
+
 Foreground PTY output failures reach dispatch after session teardown and lock release.
 Command display uses a parked holder. It balances the temporary session
 under the setup lock before writing the command to stdout.
@@ -141,9 +145,15 @@ from chroot_distro.helpers.x11 import (
     x11_auth_bind_path,
 )
 from chroot_distro.locking import ContainerLock
-from chroot_distro.message import StdoutError, crit_error, stdout_output, warn
+from chroot_distro.message import StdoutError, crit_error, quote_path, stdout_output, warn
 from chroot_distro.names import require_valid_name
-from chroot_distro.paths import container_dir, container_is_installed, container_log_path, container_rootfs
+from chroot_distro.paths import (
+    container_dir,
+    container_is_installed,
+    container_log_path,
+    container_rootfs,
+    open_container_log,
+)
 from chroot_distro.syscalls.chroot import PtyOutputError, chroot_and_run, enter_chroot, spawn_detached
 from chroot_distro.syscalls.nsenter import enter_and_run_with_pty
 from chroot_distro.syscalls.unshare import ForegroundExec
@@ -1534,100 +1544,63 @@ def _run_detached(
     """Launch the resolved command in the background and return immediately.
 
     Runs in a new session with output appended to the container's run log.
-    The session counter is intentionally NOT decremented: the container stays
-    mounted while the detached process runs, and 'kill'/'unmount' tear it
-    down like any other session.
+    Successful starts retain the session counter and mounts until kill/unmount.
+    Before a child exists, failures use the foreground teardown gates.
     """
-    log_path = container_log_path(container_name)
+    started = False
     try:
-        log_fh = open(log_path, "ab")  # noqa: SIM115
-    except OSError as exc:
-        with session.lock(container_name) as state_fd:
-            sess_count = session.decrement(container_name, state_fd=state_fd)
-            if sess_count == 0:
-                mount_manager.unmount_all(container_rootfs(container_name), holder=holder)
-                if holder is not None:
-                    namespace.release_holder(container_name)
-                    namespace.clear_isolation_mode(container_name)
-        crit_error(f"cannot open run log '{log_path}': {exc}")
-        sys.exit(1)
+        with contextlib.ExitStack() as stack:
+            if session_handle is not None:
+                stack.callback(session_handle.close)
+            log_path = container_log_path(container_name)
+            log_fd = open_container_log(container_name)
+            stack.callback(os.close, log_fd)
+            devnull = stack.enter_context(open(os.devnull, "rb"))
 
-    try:
-        devnull = open(os.devnull, "rb")  # noqa: SIM115
-    except OSError as exc:
-        log_fh.close()
-        crit_error(f"cannot open {os.devnull}: {exc}")
-        sys.exit(1)
+            extra_fds = (session_handle.fileno(),) if session_handle is not None else ()
+            ns_flags = holder._live_ns_flags() if holder is not None else 0
+            holder_pid = holder.pid if holder is not None else -1
+            from chroot_distro.syscalls._constants import CLONE_NEWUSER
 
-    # Pass the session flock fd to the child so it inherits the liveness
-    # signal; the parent closes its copy once the child has forked.
-    extra_fds: tuple[int, ...] = ()
-    if session_handle is not None:
-        extra_fds = (session_handle.fileno(),)
+            drop_caps = not bool(ns_flags & CLONE_NEWUSER)
 
-    ns_flags = holder._live_ns_flags() if holder is not None else 0
-    holder_pid = holder.pid if holder is not None else -1
-    # A user namespace scopes capabilities, so the drop is only for the
-    # namespace-less case, same as the foreground and pty paths.
-    from chroot_distro.syscalls._constants import CLONE_NEWUSER
+            def _become_guest() -> None:
+                if holder_pid > 0:
+                    from chroot_distro.syscalls.nsenter import enter_namespaces
 
-    has_userns = bool(ns_flags & CLONE_NEWUSER)
-    drop_caps = not has_userns
+                    enter_namespaces(holder_pid, ns_flags, regain_ids=False)
+                enter_chroot(
+                    chroot_config.rootfs,
+                    uid=chroot_config.uid,
+                    gid=chroot_config.gid,
+                    groups=chroot_config.groups,
+                    workdir=chroot_config.workdir,
+                    drop_caps=drop_caps,
+                    no_new_privs=no_new_privs,
+                    regain_ids=holder_pid > 0,
+                )
 
-    def _become_guest() -> None:
-        if holder_pid > 0:
-            from chroot_distro.syscalls.nsenter import enter_namespaces
-
-            # The regain is enter_chroot's: the mapped id cannot necessarily
-            # traverse the rootfs path, and setresuid(2) needs CAP_SETUID.
-            enter_namespaces(holder_pid, ns_flags, regain_ids=False)
-        enter_chroot(
-            chroot_config.rootfs,
-            uid=chroot_config.uid,
-            gid=chroot_config.gid,
-            groups=chroot_config.groups,
-            workdir=chroot_config.workdir,
-            drop_caps=drop_caps,
-            no_new_privs=no_new_privs,
-            regain_ids=holder_pid > 0,
-        )
-
-    try:
-        child_pid = spawn_detached(
-            chroot_config.command,
-            env=child_env,
-            stdin_fd=devnull.fileno(),
-            stdout_fd=log_fh.fileno(),
-            stderr_fd=log_fh.fileno(),
-            keep_fds=extra_fds,
-            setup=_become_guest,
-        )
-    except OSError as exc:
-        log_fh.close()
-        devnull.close()
-        if session_handle is not None:
-            session_handle.close()
-        with session.lock(container_name) as state_fd:
-            sess_count = session.decrement(container_name, state_fd=state_fd)
-            if sess_count == 0:
-                mount_manager.unmount_all(container_rootfs(container_name), holder=holder)
-                session.clear_mount_options(container_name, state_fd=state_fd)
-                if holder is not None:
-                    namespace.release_holder(container_name)
-                    namespace.clear_isolation_mode(container_name)
-        crit_error(f"failed to start detached command for '{container_name}': {exc}")
-        sys.exit(1)
-    finally:
-        # The child holds its own copies of these descriptors.
-        log_fh.close()
-        devnull.close()
-        if session_handle is not None:
-            session_handle.close()
+            child_pid = spawn_detached(
+                chroot_config.command,
+                env=child_env,
+                stdin_fd=devnull.fileno(),
+                stdout_fd=log_fd,
+                stderr_fd=log_fd,
+                keep_fds=extra_fds,
+                setup=_become_guest,
+            )
+            started = True
+    except BaseException as exc:
+        if not started:
+            _exit_teardown(container_name, container_rootfs(container_name), holder, None)
+        if isinstance(exc, OSError):
+            raise ChrootDistroError(f"detached command for '{container_name}': {exc}") from exc
+        raise
 
     from chroot_distro.message import log_info
 
     log_info(f"Container '{container_name}' started in background (PID {child_pid}).")
-    log_info(f"Output is being written to: {log_path}")
+    log_info(f"Output is being written to: {quote_path(log_path)}")
     log_info(f"Stop it with: {PROGRAM_NAME} kill {container_name}")
 
 

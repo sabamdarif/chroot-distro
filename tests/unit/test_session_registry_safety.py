@@ -16,6 +16,7 @@ from unittest.mock import Mock
 import pytest
 
 from chroot_distro import atomic, dirfd, paths
+from chroot_distro.exceptions import ChrootDistroError
 from chroot_distro.helpers import session_registry as registry
 
 
@@ -263,14 +264,14 @@ def test_session_lock_survives_exec_and_parent_handle_close(sessions):
             child.wait(timeout=5)
 
 
-def test_detached_spawn_failure_preserves_error_after_repeated_close(sessions, monkeypatch, capsys):
+def test_detached_spawn_failure_releases_session_record(sessions, monkeypatch):
     from chroot_distro.commands import login
 
     handle = register()
     assert handle is not None
     unmount = Mock()
-    monkeypatch.setattr(login, "container_log_path", lambda name: str(sessions.parent / "run.log"))
     monkeypatch.setattr(login, "container_rootfs", lambda name: "rootfs")
+    monkeypatch.setattr(login, "_reap_session_processes", Mock(return_value=[]))
     monkeypatch.setattr(login, "spawn_detached", Mock(side_effect=OSError("fork failed")))
     monkeypatch.setattr(
         login,
@@ -283,12 +284,10 @@ def test_detached_spawn_failure_preserves_error_after_repeated_close(sessions, m
     )
     monkeypatch.setattr(login, "mount_manager", SimpleNamespace(unmount_all=unmount))
     try:
-        with pytest.raises(SystemExit) as exc:
+        with pytest.raises(ChrootDistroError, match="fork failed"):
             login._run_detached(
                 "box", chroot_config=SimpleNamespace(command=["sh"]), child_env={}, holder=None, session_handle=handle
             )
-        assert exc.value.code == 1
-        assert "fork failed" in capsys.readouterr().err
         unmount.assert_called_once_with("rootfs", holder=None)
         assert registry.active_sessions() == []
     finally:

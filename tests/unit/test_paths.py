@@ -32,8 +32,6 @@ def test_container_log_path(tmp_path):
     with patch("chroot_distro.paths.RUNTIME_DIR", str(tmp_path)):
         log_path = container_log_path("debian")
     assert log_path.endswith("data/debian/run.log")
-    # The parent data dir is created on demand.
-    assert (tmp_path / "data" / "debian").is_dir()
 
 
 def test_container_from_spec():

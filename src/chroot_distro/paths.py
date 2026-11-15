@@ -5,8 +5,8 @@
 Two unrelated jobs live here. The composition half (`container_dir`,
 `container_rootfs`, `container_manifest`, `container_log_path`,
 `installed_containers`) is the only place that knows how a container's files are
-laid out under CONTAINERS_DIR: nothing else may build those paths by hand. The
-resolution half is a trust boundary, and it is where the care goes.
+laid out under CONTAINERS_DIR or RUNTIME_DIR: nothing else may build those paths
+by hand. The resolution half is a trust boundary, and it is where the care goes.
 
 A `name:path` spec is user input naming an entry inside a rootfs a guest can
 write. `resolve_container_path` walks it with the guest's own semantics, *root*
@@ -31,9 +31,13 @@ Android. Rootfs and installed-state checks use that same walk. Any entry at the
 incomplete-marker name makes a container unavailable for execution, without opening it.
 FileNotFoundError is ordinary missing storage; other refusals become
 `_unusable_storage` at the installed-state boundary.
+
+`open_container_log` retains that runtime pin while checking the log's type,
+link count and inode identity. It returns only the append descriptor.
 """
 
 import contextlib
+import errno
 import logging
 import os
 import stat
@@ -64,9 +68,53 @@ def container_log_path(name: str) -> str:
     persists for the lifetime of the container's mounts and is not part of the
     rootfs itself.
     """
-    data_dir = os.path.join(RUNTIME_DIR, "data", name)
-    os.makedirs(data_dir, exist_ok=True)
-    return os.path.join(data_dir, "run.log")
+    return os.path.join(RUNTIME_DIR, "data", name, "run.log")
+
+
+def open_container_log(name: str) -> int:
+    """Open a singly linked regular log for append under a pinned runtime directory.
+
+    Check links before opening too: unlinking a planted hardlink after open
+    can leave the host inode with one link. Refused entries are never modified.
+    The caller owns the returned descriptor. Checks detect substitution, not
+    links or renames made after the last check.
+    """
+    parent_fd = open_container_data_dir(name, create=True)
+    fd = None
+    try:
+        leaf = os.path.basename(container_log_path(name))
+        for attempt in range(2):
+            try:
+                before = dirfd.lstat_at(parent_fd, leaf)
+            except FileNotFoundError:
+                before = None
+            if before is not None and (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1):
+                raise OSError(errno.EINVAL, "run log must be a singly linked regular file", leaf)
+            flags = os.O_WRONLY | os.O_APPEND
+            if before is None:
+                flags |= os.O_CREAT | os.O_EXCL
+            try:
+                fd, opened = dirfd.open_regular_at(parent_fd, leaf, flags, 0o600)
+            except FileExistsError:
+                if before is None and attempt == 0:
+                    continue
+                raise
+            current = dirfd.lstat_at(parent_fd, leaf)
+            if (
+                opened.st_nlink != 1
+                or (before is not None and not os.path.samestat(before, opened))
+                or not stat.S_ISREG(current.st_mode)
+                or current.st_nlink != 1
+                or not os.path.samestat(opened, current)
+            ):
+                raise OSError(errno.ESTALE, "run log was replaced or linked during open", leaf)
+            result, fd = fd, None
+            return result
+        raise FileExistsError(errno.EEXIST, "run log appeared during creation", leaf)
+    finally:
+        if fd is not None:
+            os.close(fd)
+        os.close(parent_fd)
 
 
 def container_rootfs(name: str) -> str:

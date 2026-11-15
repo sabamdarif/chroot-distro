@@ -225,6 +225,10 @@ Foreground `run` uses the same [terminal output handling as `login`](#login).
 | `--entrypoint EXECUTABLE` | Run this program instead of the image's Entrypoint. Arguments after `--` become its arguments.                                          |
 | `-d`, `--detach`          | Run in the background and return immediately. Output goes to a log file (path is printed). Stop it with `chroot-distro kill CONTAINER`. |
 
+Detached runs append to the container's existing log. New logs have owner-only
+permissions. A linked or non-regular log, or a symlink below the storage anchor,
+stops startup. Inspect the reported entry before retrying.
+
 ```sh
 chroot-distro run nextcloud
 chroot-distro run -d nextcloud
