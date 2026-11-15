@@ -462,7 +462,7 @@ def test_failed_install_can_be_removed(store, monkeypatch):
 
     rootfs = marked_tree(store)
     (rootfs / "partial").touch()
-    monkeypatch.setattr(remove, "RUNTIME_DIR", str(store.parent))
+    monkeypatch.setattr(paths, "RUNTIME_DIR", str(store.parent))
     monkeypatch.setattr(remove.session, "get_active_chroot_pids", lambda _: [])
     monkeypatch.setattr(remove.session, "reset", Mock())
     monkeypatch.setattr(remove.session, "clear_mount_options", Mock())

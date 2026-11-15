@@ -25,7 +25,7 @@ works from the `(dir_fd, leaf)` a `PinnedPath` carries. That re-walk both detect
 the swap and pins the inode it validated. Handing the resolved string back to the
 kernel is the bug this file exists to prevent.
 
-`open_container_dir`, `open_container_data_dir` and `open_sessions_dir` walk from
+Storage openers, including the deletion-parent pins, walk from
 the configured XDG data base or Termux prefix, including parents a guest can replace on
 Android. Rootfs and installed-state checks use that same walk. Any entry at the
 incomplete-marker name makes a container unavailable for execution, without opening it.
@@ -68,7 +68,12 @@ def container_log_path(name: str) -> str:
     persists for the lifetime of the container's mounts and is not part of the
     rootfs itself.
     """
-    return os.path.join(RUNTIME_DIR, "data", name, "run.log")
+    return os.path.join(container_data_dir(name), "run.log")
+
+
+def container_data_dir(name: str) -> str:
+    """Return the path of a container's runtime state directory."""
+    return os.path.join(RUNTIME_DIR, "data", name)
 
 
 def open_container_log(name: str) -> int:
@@ -278,6 +283,18 @@ def _walk_spec(rootfs: str, rel_path: str, spec: str, deref_leaf: bool) -> str:
 _O_DIR = (getattr(os, "O_PATH", 0) or os.O_RDONLY) | os.O_DIRECTORY
 
 
+def open_containers_dir() -> int:
+    """Pin the container parent for deletion; the caller closes the fd."""
+    anchor = TERMUX_PREFIX if IS_TERMUX else os.path.dirname(os.path.dirname(CONTAINERS_DIR))
+    return _open_storage_dir(CONTAINERS_DIR, anchor, create=False)
+
+
+def open_runtime_data_dir() -> int:
+    """Pin the runtime data parent for deletion; the caller closes the fd."""
+    anchor = TERMUX_PREFIX if IS_TERMUX else os.path.dirname(RUNTIME_DIR)
+    return _open_storage_dir(os.path.join(RUNTIME_DIR, "data"), anchor, create=False)
+
+
 def open_container_dir(name: str, *, create: bool = False) -> int:
     """Pin a container below its platform anchor; the caller closes the fd.
 
@@ -295,7 +312,7 @@ def open_container_data_dir(name: str, *, create: bool = False) -> int:
     if not is_valid_name(name):
         raise InvalidNameError(f"invalid container name '{name}'.")
     anchor = TERMUX_PREFIX if IS_TERMUX else os.path.dirname(RUNTIME_DIR)
-    return _open_storage_dir(os.path.join(RUNTIME_DIR, "data", name), anchor, create=create)
+    return _open_storage_dir(container_data_dir(name), anchor, create=create)
 
 
 def open_sessions_dir(*, create: bool = False) -> int:

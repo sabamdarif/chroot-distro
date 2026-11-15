@@ -637,6 +637,11 @@ Aliases: rm
 
 Delete a container and all its data. There is no confirmation and no undo. Active sessions are unmounted first.
 
+Removal refuses symlinks in storage below the configured Linux data directory
+or Termux prefix. Runtime data is deleted before the container tree. If runtime
+cleanup fails, the container is kept so you can correct the error and retry.
+An error during container deletion can leave a partially removed tree.
+
 | Option            | Description             |
 | ----------------- | ----------------------- |
 | `-v`, `--verbose` | Show each deleted file. |
