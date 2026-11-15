@@ -192,6 +192,8 @@ chroot-distro login ubuntu -- uname -a
 
 Set `CD_USE_NS=1` for namespace isolation while keeping the normal shared folders, instead of `--isolated`.
 
+With `--shared-display`, an X11 cookie copied for a guest user must come from the invoking user's home or `/run/user/<uid>`. The copy contains the selected display's entries and has owner-only permissions.
+
 Every mode mounts fresh pseudo-filesystems instead of binding the host's: a minimal `/dev`, fresh `/dev/pts`, `/dev/shm` and `/proc`, and a read-only `/sys`, following Docker's defaults (`/proc/kcore` and `/proc/keys` masked, `/proc/sys` read-only). When the kernel or SELinux refuses one, the host tree is bound with a warning.
 
 Single-instance devpts kernels share the host's `/dev/pts` with the guest. When chroot-distro supplies the guest's `/dev`, it creates a legacy `/dev/ptmx` device so guest programs can allocate pseudoterminals.
@@ -201,6 +203,8 @@ On Termux, Android mounts `/data` with `nosuid`, so a default login binds the co
 A second `login` to a busy container joins the running session and adds whatever extra `--bind`/`--shared-*`/`--env` it asks for, so no `unmount` is needed to bring a folder in. Conflicting `--bind` destinations are ignored with a warning; `--isolated` and `CD_USE_NS` cannot be turned on for a container that is already running.
 
 GPU acceleration needs no flag on regular Linux: AMD/Intel render nodes (`/dev/dri/*`) and a host NVIDIA driver's devices, libraries and tools are bound in automatically. On Termux `login` binds no GPU nodes.
+
+On WSL, missing guest loader configuration for `/usr/lib/wsl/lib` is created automatically. Existing configuration is kept.
 
 ### run
 

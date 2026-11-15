@@ -2,10 +2,8 @@
 # Copyright (C) 2025-2026 Md Arif
 """The `.Xauthority` format, so X11 cookie handling needs no `xauth` binary.
 
-This exists for the pure-Python requirement: `x11.provision_guest_xauthority`
-needs the `xauth -f <src> extract <dst> <display>` behaviour, which is
-`extract_entries` here, and libXau's on-disk format is the whole of what that
-takes.
+X11 setup selects entries from the host file here and writes a copy owned by
+the guest. LibXau's on-disk format is all that takes.
 
 Per entry, all multi-byte integers big-endian:
 
@@ -23,8 +21,9 @@ A cookie file is written by the compositor or the X server, not by this program,
 so a short read ends the parse rather than producing an entry: `_read_entry`
 answers `None` on any truncation and `read_xauthority` keeps the valid entries
 that preceded it. A cookie is a secret, so `write_xauthority` creates the file
-0600 and renames it into place, never widening an existing file or leaving a
-half-written one.
+0600 through an exclusive atomic temporary. A caller writing into a guest pins
+the destination parent and supplies its descriptor; ownership is set on the
+temporary before publication. Failures before publication preserve any old file.
 
 `match_display` follows libXau: a `FAMILY_WILD` entry matches anything, a
 `FAMILY_LOCAL` one matches on hostname (or an empty address, which some systems
@@ -33,13 +32,15 @@ write) plus display number, and the screen after the dot is ignored.
 
 from __future__ import annotations
 
-import contextlib
 import dataclasses
 import logging
 import os
 import socket
 import struct
-from typing import BinaryIO
+from typing import BinaryIO, cast
+
+from chroot_distro import dirfd
+from chroot_distro.atomic import atomic_write
 
 log = logging.getLogger(__name__)
 
@@ -143,12 +144,13 @@ def _write_entry(fp: BinaryIO, entry: XauthEntry) -> None:
     fp.write(entry.data)
 
 
-def read_xauthority(path: str) -> list[XauthEntry]:
+def read_xauthority(path: str | int) -> list[XauthEntry]:
     """Read all entries from an ``.Xauthority`` file at *path*.
 
     Returns an empty list when the file does not exist, is empty, or
     contains only corrupt/truncated data.  Valid entries preceding a
-    truncated tail are still returned.
+    truncated tail are still returned. An integer is an already-open file
+    descriptor; this function takes ownership and closes it after reading.
     """
     entries: list[XauthEntry] = []
     try:
@@ -164,24 +166,33 @@ def read_xauthority(path: str) -> list[XauthEntry]:
     return entries
 
 
-def write_xauthority(path: str, entries: list[XauthEntry]) -> None:
+def write_xauthority(
+    path: str,
+    entries: list[XauthEntry],
+    *,
+    dir_fd: int | None = None,
+    owner: tuple[int, int] | None = None,
+) -> None:
     """Write *entries* to an ``.Xauthority`` file at *path*.
 
     The file is created with mode ``0o600`` (owner-only read/write).
-    An existing file is replaced atomically via write-to-temp + rename
-    to avoid leaving a half-written file on disk.
+    With *dir_fd*, path is a filename under the caller's pinned parent.
+    Otherwise the named parent is opened once. An existing file is replaced
+    atomically, with *owner* set through the temporary's descriptor first.
     """
-    tmp_path = path + ".tmp"
-    fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    own_fd = None
     try:
-        with os.fdopen(fd, "wb") as fp:
+        if dir_fd is None:
+            own_fd = dir_fd = dirfd.opendir(os.path.dirname(path) or ".")
+            path = os.path.basename(path)
+        with atomic_write(path, binary_mode=True, mode=0o600, dir_fd=dir_fd) as fp:
+            if owner is not None:
+                os.fchown(fp.fileno(), *owner)
             for entry in entries:
-                _write_entry(fp, entry)
-        os.rename(tmp_path, path)
-    except BaseException:
-        with contextlib.suppress(OSError):
-            os.unlink(tmp_path)
-        raise
+                _write_entry(cast(BinaryIO, fp), entry)
+    finally:
+        if own_fd is not None:
+            os.close(own_fd)
 
 
 def _parse_display(display: str) -> tuple[int, bytes]:

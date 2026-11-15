@@ -17,6 +17,10 @@ layout puts it in the directory name the same way: Debian keeps both in
 the second supported shape, where the libraries live under `/usr/lib/wsl` and
 that whole directory is bound instead.
 
+WSL loader configuration resolves guest parent symlinks inside a pinned rootfs
+and publishes through the opened parent. An existing entry is never replaced,
+including one created while the new configuration is being written.
+
 Three exclusions are the load-bearing part, and each one is a guest that broke:
 
 * the vendor-neutral GLVND and GBM dispatch names (`_GLVND_NEUTRAL_BASENAMES`)
@@ -41,6 +45,7 @@ non-fatal: an image without one simply keeps whatever cache it had.
 
 from __future__ import annotations
 
+import contextlib
 import fnmatch
 import glob
 import logging
@@ -48,6 +53,9 @@ import os
 import re
 from collections.abc import Iterator
 
+from chroot_distro import dirfd
+from chroot_distro.atomic import atomic_write
+from chroot_distro.helpers.tar_extract import safe_resolve_parts_at
 from chroot_distro.syscalls.chroot import chroot_and_run
 
 log = logging.getLogger(__name__)
@@ -461,17 +469,22 @@ def setup_ldconfig_for_wsl(rootfs: str) -> None:
     if it doesn't already exist, so that ``ldconfig`` picks up the
     WSL GPU libraries.
     """
-    conf_dir = os.path.join(rootfs, "etc", "ld.so.conf.d")
-    conf_file = os.path.join(conf_dir, "wsl-nvidia.conf")
-
-    if os.path.exists(conf_file):
-        return
-
     try:
-        os.makedirs(conf_dir, exist_ok=True)
-        with open(conf_file, "w") as f:
-            f.write("/usr/lib/wsl/lib\n")
-        log.debug("Created %s for WSL NVIDIA ldconfig", conf_file)
+        with contextlib.ExitStack() as stack:
+            root_fd = dirfd.opendir(rootfs)
+            stack.callback(os.close, root_fd)
+            parts = safe_resolve_parts_at(root_fd, ("etc", "ld.so.conf.d"))
+            if parts is None:
+                return
+            parent_fd = dirfd.descend_at(root_fd, parts, create=True)
+            stack.callback(os.close, parent_fd)
+            if dirfd.exists_at(parent_fd, "wsl-nvidia.conf"):
+                return
+            with atomic_write("wsl-nvidia.conf", dir_fd=parent_fd, mode=0o644, replace=False) as f:
+                f.write("/usr/lib/wsl/lib\n")
+        log.debug("Created guest WSL NVIDIA ldconfig configuration")
+    except FileExistsError:
+        pass
     except OSError as e:
         log.debug("Failed to create WSL ldconfig config: %s", e)
 

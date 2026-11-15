@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-only
 # Copyright (C) 2025-2026 Md Arif
-"""Write a file by staging a sibling temporary and renaming it into place.
+"""Write a file by staging a sibling temporary and publishing it atomically.
 
 Every cache, manifest, layer and state-file writer here goes through this, so one
 place resolves the destination directory, mints a process-unique temporary name
@@ -35,6 +35,9 @@ inode before and after publication. Modes are applied through the live file
 descriptor. These checks detect substitution, not changes after the last check.
 `atomic_replace` retains the older path-returning contract: its caller opens the
 temporary itself, so it does not provide those inode checks.
+
+`atomic_write(replace=False)` publishes with a hard link, so an entry that
+appears under the destination name is preserved and raises FileExistsError.
 """
 
 import contextlib
@@ -124,7 +127,7 @@ def publish_file(src_path: str, dest_path: str) -> None:
 
 
 @contextlib.contextmanager
-def _staged(path: str, suffix: str, mode: int | None) -> Iterator[tuple[int, str]]:
+def _staged(path: str, suffix: str, mode: int | None, replace: bool = True) -> Iterator[tuple[int, str]]:
     """Yield (descriptor, path) for a temporary beside *path*, published on success.
 
     The descriptor is the caller's to close; the temporary is this function's to
@@ -144,7 +147,11 @@ def _staged(path: str, suffix: str, mode: int | None) -> Iterator[tuple[int, str
         if mode is not None:
             # The caller picks the destination's mode; the temp file was 0o600.
             os.chmod(src, mode, dir_fd=dir_fd)  # lgtm[py/overly-permissive-file]
-        os.replace(src, dst, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+        if replace:
+            os.replace(src, dst, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+        else:
+            os.link(src, dst, src_dir_fd=dir_fd, dst_dir_fd=dir_fd, follow_symlinks=False)
+            os.unlink(src, dir_fd=dir_fd)
         if dir_fd is None:
             _fsync_directory(dest_dir)
         else:
@@ -182,7 +189,7 @@ def atomic_replace(path: str, *, suffix: str = ".tmp", mode: int | None = None) 
 
 @contextlib.contextmanager
 def _write_at(
-    name: str, parent_fd: int, binary_mode: bool, suffix: str, mode: int | None
+    name: str, parent_fd: int, binary_mode: bool, suffix: str, mode: int | None, replace: bool
 ) -> Iterator[typing.IO[typing.Any]]:
     if not name or name in (os.curdir, os.pardir) or os.sep in name or "\0" in name:
         raise ValueError("descriptor-relative destination must be a single filename")
@@ -208,9 +215,15 @@ def _write_at(
             os.fsync(fd)
         if not os.path.samestat(original, dirfd.lstat_at(parent_fd, tmp)):
             raise OSError(errno.ESTALE, "atomic staging file was replaced", name)
-        os.replace(tmp, name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+        if replace:
+            os.replace(tmp, name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+        else:
+            os.link(tmp, name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd, follow_symlinks=False)
         if not os.path.samestat(original, dirfd.lstat_at(parent_fd, name)):
             raise OSError(errno.ESTALE, "atomic destination was replaced", name)
+        if not replace:
+            os.unlink(tmp, dir_fd=parent_fd)
+            tmp = None
         os.fsync(parent_fd)
     finally:
         if fd is not None:
@@ -228,19 +241,22 @@ def atomic_write(
     suffix: str = ".tmp",
     mode: int | None = None,
     dir_fd: int | None = None,
+    replace: bool = True,
 ) -> Iterator[typing.IO[typing.Any]]:
-    """Open a temp file for writing; flush, fsync, and rename on success.
+    """Open a temporary for writing; flush, fsync, and publish on success.
 
     Yields an open file handle (text or binary depending on *binary_mode*).
     On successful exit the data is flushed and fsynced before the temp file
-    is renamed into *path*. With *dir_fd*, path must be a single filename and
+    is renamed into *path* by default. With *dir_fd*, path must be a single filename and
     the caller's descriptor stays open; publication checks the staged inode.
+    With *replace=False*, an existing destination raises FileExistsError,
+    including one created while the temporary is being written.
     """
     if dir_fd is not None:
-        with _write_at(path, dir_fd, binary_mode, suffix, mode) as fh:
+        with _write_at(path, dir_fd, binary_mode, suffix, mode, replace) as fh:
             yield fh
         return
-    with _staged(path, suffix, mode) as (fd, _tmp):
+    with _staged(path, suffix, mode, replace) as (fd, _tmp):
         try:
             with open(fd, "wb" if binary_mode else "w", closefd=True) as fh:
                 yield fh

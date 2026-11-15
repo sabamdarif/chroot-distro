@@ -64,8 +64,8 @@ def test_a_temporary_swapped_for_a_symlink_is_not_written_through(tmp_path, monk
     staged = atomic._staged
 
     @contextlib.contextmanager
-    def swapping(path, suffix, mode):
-        with staged(path, suffix, mode) as (fd, tmp):
+    def swapping(path, suffix, mode, replace=True):
+        with staged(path, suffix, mode, replace) as (fd, tmp):
             os.unlink(tmp)
             os.symlink(decoy, tmp)
             yield fd, tmp

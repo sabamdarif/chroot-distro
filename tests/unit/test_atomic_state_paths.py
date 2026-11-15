@@ -216,3 +216,90 @@ def test_descriptor_write_follows_original_parent_after_rename(state_root, tmp_p
         os.close(fd)
     assert (original / "manifest.json").read_text() == "{}"
     assert list(state_root.iterdir()) == []
+
+
+@pytest.mark.parametrize("descriptor", [False, True])
+@pytest.mark.parametrize("entry", ["absent", "file", "symlink", "hardlink", "racing"])
+def test_no_replace_preserves_existing_entries(tmp_path, descriptor, entry):
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    victim = tmp_path / "victim"
+    victim.write_text("KEEP")
+    dest = parent / "result"
+    if entry == "file":
+        dest.write_text("KEEP")
+    elif entry == "symlink":
+        dest.symlink_to(victim)
+    elif entry == "hardlink":
+        dest.hardlink_to(victim)
+    fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY) if descriptor else None
+    try:
+        def publish():
+            with atomic.atomic_write("result" if descriptor else str(dest), dir_fd=fd, replace=False, mode=0o640) as fh:
+                fh.write("new")
+                if entry == "racing":
+                    dest.write_text("KEEP")
+
+        if entry == "absent":
+            publish()
+            assert dest.read_text() == "new"
+            assert stat.S_IMODE(dest.stat().st_mode) == 0o640
+            assert dest.stat().st_nlink == 1
+        else:
+            with pytest.raises(FileExistsError):
+                publish()
+            assert dest.read_text() == "KEEP"
+        if fd is not None:
+            os.fstat(fd)
+    finally:
+        if fd is not None:
+            os.close(fd)
+    assert victim.read_text() == "KEEP"
+    assert [p.name for p in parent.iterdir()] == ["result"]
+
+
+@pytest.mark.parametrize("descriptor", [False, True])
+def test_no_replace_interrupt_leaves_no_file(tmp_path, descriptor):
+    fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY) if descriptor else None
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            with atomic.atomic_write("result" if descriptor else str(tmp_path / "result"), dir_fd=fd, replace=False) as fh:
+                fh.write("partial")
+                raise KeyboardInterrupt
+    finally:
+        if fd is not None:
+            os.close(fd)
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("timing", ["before", "during"])
+def test_no_replace_detects_substituted_staging_inode(tmp_path, monkeypatch, timing):
+    real_link = os.link
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    victim = tmp_path / "victim"
+    victim.write_text("KEEP")
+    fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY)
+
+    def substitute(src):
+        path = parent / src
+        path.unlink()
+        real_link(victim, path)
+
+    def link(src, dst, **kwargs):
+        if timing == "during":
+            substitute(src)
+        real_link(src, dst, **kwargs)
+
+    monkeypatch.setattr(os, "link", link)
+    try:
+        with pytest.raises(OSError) as exc:
+            with atomic.atomic_write("result", dir_fd=fd, replace=False, mode=0o644) as fh:
+                fh.write("new")
+                if timing == "before":
+                    staging, = parent.iterdir()
+                    substitute(staging.name)
+        assert exc.value.errno == errno.ESTALE
+    finally:
+        os.close(fd)
+    assert victim.read_text() == "KEEP"
