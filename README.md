@@ -699,6 +699,11 @@ Session counters and saved mount options use guarded directory opens and
 atomic file replacement. A symlink or non-regular file at the session lock
 stops the command. Stop other commands and inspect that entry before removing it.
 
+Session records use the same guarded directory walk for publication and stale
+record removal. Recording failures do not stop a guest from starting. `ps` skips
+unreadable records, invalid JSON and records over 1 MiB; on Termux the records
+remain readable without elevation.
+
 Inside the cache folder:
 
 | Path             | Contents                   |

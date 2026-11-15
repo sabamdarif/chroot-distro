@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 import pytest
 
-from chroot_distro import constants
+from chroot_distro import constants, paths
 from chroot_distro.commands import ps as ps_mod
 from chroot_distro.commands.ps import _fmt_command, _fmt_uptime, command_ps
 from chroot_distro.helpers import session_registry
@@ -23,17 +23,11 @@ def _session_path(pid):
 
 @pytest.fixture(autouse=True)
 def mock_sessions_dir(tmp_path, monkeypatch):
-    # Set the constants and registry module variables to use tmp_path
-    monkeypatch.setattr("chroot_distro.constants.SESSIONS_DIR", str(tmp_path))
-    monkeypatch.setattr("chroot_distro.helpers.session_registry.SESSIONS_DIR", str(tmp_path))
-
-    # Redefine _session_path to use the new tmp_path
-    global _session_path
-
-    def new_session_path(pid):
-        return os.path.join(str(tmp_path), f"{pid}.json")
-
-    _session_path = new_session_path
+    runtime = tmp_path / "chroot-distro"
+    monkeypatch.setattr(paths, "IS_TERMUX", False)
+    monkeypatch.setattr(paths, "RUNTIME_DIR", str(runtime))
+    monkeypatch.setattr(paths, "SESSIONS_DIR", str(runtime / "sessions"))
+    monkeypatch.setattr(constants, "SESSIONS_DIR", str(runtime / "sessions"))
 
 
 def _make_live(pid, container, kind="run", command=None, user="root", start_time=1.0, detached=False):
@@ -185,7 +179,7 @@ def test_live_and_dead_mixed():
 
 
 def test_active_sessions_missing_dir_returns_empty(monkeypatch):
-    monkeypatch.setattr(session_registry, "SESSIONS_DIR", "/does/not/exist/at/all/path")
+    monkeypatch.setattr(paths, "SESSIONS_DIR", os.path.join(paths.RUNTIME_DIR, "missing"))
     assert session_registry.active_sessions() == []
 
 
@@ -364,15 +358,15 @@ def test_command_ps_untracked_shown_when_container_not_tracked(capsys):
     assert "debian" in err
 
 
-def test_register_session_makedirs_fails():
-    def mock_makedirs(*args, **kwargs):
+def test_register_session_directory_open_fails():
+    def mock_open(*args, **kwargs):
         raise OSError("Permission denied")
 
-    with patch("os.makedirs", mock_makedirs), patch("logging.Logger.warning") as mock_warn:
+    with patch.object(session_registry, "open_sessions_dir", mock_open), patch("logging.Logger.warning") as mock_warn:
         res = session_registry.register_session(container="ubuntu", kind="login", command_argv=["bash"], user="root")
         assert res is None
         mock_warn.assert_called_once()
-        assert "Failed to create sessions directory" in mock_warn.call_args[0][0]
+        assert "Failed to register session" in mock_warn.call_args[0][0]
 
 
 def test_register_session_open_fails():
@@ -380,14 +374,13 @@ def test_register_session_open_fails():
         raise OSError("Permission denied")
 
     with (
-        patch("os.makedirs", lambda *a, **k: None),
-        patch("builtins.open", mock_open),
+        patch.object(session_registry, "atomic_write", mock_open),
         patch("logging.Logger.warning") as mock_warn,
     ):
         res = session_registry.register_session(container="ubuntu", kind="login", command_argv=["bash"], user="root")
         assert res is None
         mock_warn.assert_called_once()
-        assert "Failed to create temporary session file" in mock_warn.call_args[0][0]
+        assert "Failed to register session" in mock_warn.call_args[0][0]
 
 
 def test_register_session_flock_fails(tmp_path):
@@ -398,7 +391,7 @@ def test_register_session_flock_fails(tmp_path):
         res = session_registry.register_session(container="ubuntu", kind="login", command_argv=["bash"], user="root")
         assert res is None
         mock_warn.assert_called_once()
-        assert "Failed to flock session file" in mock_warn.call_args[0][0]
+        assert "Failed to register session" in mock_warn.call_args[0][0]
 
 
 def test_command_ps_json_carries_raw_values(capsys):

@@ -25,8 +25,8 @@ works from the `(dir_fd, leaf)` a `PinnedPath` carries. That re-walk both detect
 the swap and pins the inode it validated. Handing the resolved string back to the
 kernel is the bug this file exists to prevent.
 
-`open_container_dir` and `open_container_data_dir` walk from the configured XDG
-data base or Termux prefix, including runtime parents a guest can replace on
+`open_container_dir`, `open_container_data_dir` and `open_sessions_dir` walk from
+the configured XDG data base or Termux prefix, including parents a guest can replace on
 Android. Rootfs and installed-state checks use that same walk. Any entry at the
 incomplete-marker name makes a container unavailable for execution, without opening it.
 FileNotFoundError is ordinary missing storage; other refusals become
@@ -41,7 +41,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 
 from chroot_distro import dirfd
-from chroot_distro.constants import CONTAINERS_DIR, IS_TERMUX, RUNTIME_DIR, TERMUX_PREFIX
+from chroot_distro.constants import CONTAINERS_DIR, IS_TERMUX, RUNTIME_DIR, SESSIONS_DIR, TERMUX_PREFIX
 from chroot_distro.exceptions import (
     ChrootDistroError,
     ContainerNotFoundError,
@@ -248,6 +248,12 @@ def open_container_data_dir(name: str, *, create: bool = False) -> int:
         raise InvalidNameError(f"invalid container name '{name}'.")
     anchor = TERMUX_PREFIX if IS_TERMUX else os.path.dirname(RUNTIME_DIR)
     return _open_storage_dir(os.path.join(RUNTIME_DIR, "data", name), anchor, create=create)
+
+
+def open_sessions_dir(*, create: bool = False) -> int:
+    """Pin the session registry below its platform anchor; the caller closes it."""
+    anchor = TERMUX_PREFIX if IS_TERMUX else os.path.dirname(RUNTIME_DIR)
+    return _open_storage_dir(SESSIONS_DIR, anchor, create=create)
 
 
 def _open_storage_dir(path: str, anchor: str, *, create: bool) -> int:
