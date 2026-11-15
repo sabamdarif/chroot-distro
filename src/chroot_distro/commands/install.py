@@ -9,12 +9,13 @@ derived from it or a lock taken. Archive names come from the filename or URL pat
 with the longest recognized suffix stripped. A source without an inferable name
 requires `--name`.
 
-Two things here are about surviving a crash and a hostile archive. The
-`incomplete` marker is created and fsynced *before* the rootfs directory exists and
-removed only after the last install step, so the next run recognises an interrupted
-install and clears it instead of finding a half tree that looks finished. And the rootfs
-is opened once as a descriptor and handed down to every extractor, so nothing between
-that check and the last member written resolves `containers/<name>/rootfs` a second time.
+The container and rootfs are pinned for marker, metadata, extraction and DNS
+writes. The marker is atomically published and synced before creating a rootfs
+or clearing a retry. Failures retain marked data; retry clears only children of
+the pinned rootfs. Completion verifies storage identities and syncs marker
+removal, attempting restoration if finalization fails. These checks do not
+prevent an active writer from changing names after the final check. Android
+account fixups still have a separate path-based contract.
 
 Ctrl+C ends in `os._exit` on purpose: `sys.exit` would run the `concurrent.futures`
 atexit hook, which joins download workers that may each be blocked in a socket read for
@@ -25,10 +26,10 @@ the CLI parser hands it a list.
 """
 
 import contextlib
+import errno
 import json
 import os
 import re
-import shutil
 import sys
 from urllib.parse import urlsplit
 
@@ -38,6 +39,7 @@ else:
     from backports.zstd import tarfile
 import tempfile
 
+from chroot_distro import dirfd
 from chroot_distro.arch import get_device_cpu_arch, normalize_arch, platform_from_arch
 from chroot_distro.atomic import atomic_write
 from chroot_distro.commands.install_local import install_from_local_file
@@ -68,7 +70,7 @@ from chroot_distro.paths import (
     container_incomplete_marker,
     container_manifest,
     container_rootfs,
-    open_container_rootfs,
+    open_container_dir,
 )
 from chroot_distro.progress import clear_bar
 
@@ -234,18 +236,40 @@ def _resolve_install_name(image_ref, local_path, url, custom_container_name):
     return derived
 
 
-def _write_incomplete_marker(marker_path: str) -> None:
-    """Create and fsync the install-in-progress marker.
+def _write_incomplete_marker(marker: str, *, dir_fd: int) -> None:
+    """Publish the marker without a gap when replacing an earlier one."""
+    with atomic_write(marker, mode=0o644, dir_fd=dir_fd):
+        pass
 
-    Ordering matters: the marker must exist on disk before the rootfs does,
-    so no crash window can leave a rootfs without the marker. fsync so a
-    power loss can't reorder the two creations.
-    """
-    marker_fd = os.open(marker_path, os.O_CREAT | os.O_WRONLY, 0o644)
+
+def _check_install_identity(name: str, container_fd: int, rootfs_fd: int) -> None:
+    current_fd = open_container_dir(name)
     try:
-        os.fsync(marker_fd)
+        current_rootfs = dirfd.opendir_at(current_fd, os.path.basename(container_rootfs(name)))
+        try:
+            if not (
+                os.path.samestat(os.fstat(current_fd), os.fstat(container_fd))
+                and os.path.samestat(os.fstat(current_rootfs), os.fstat(rootfs_fd))
+            ):
+                raise OSError(errno.ESTALE, "container storage was replaced")
+        finally:
+            os.close(current_rootfs)
     finally:
-        os.close(marker_fd)
+        os.close(current_fd)
+
+
+def _finish_install(name: str, container_fd: int, rootfs_fd: int, marker: str) -> None:
+    try:
+        _check_install_identity(name, container_fd, rootfs_fd)
+        os.unlink(marker, dir_fd=container_fd)
+        os.fsync(container_fd)
+        _check_install_identity(name, container_fd, rootfs_fd)
+    except BaseException:
+        try:
+            _write_incomplete_marker(marker, dir_fd=container_fd)
+        except OSError as exc:
+            log_error(f"Could not restore the incomplete install marker: {escape_controls(str(exc))}")
+        raise
 
 
 _HINT_WIDTH = len("Run entrypoint:")
@@ -281,21 +305,25 @@ def _run_install(
     rootfs_dir = container_rootfs(install_name)
     incomplete_marker = container_incomplete_marker(install_name)
 
-    if os.path.isdir(rootfs_dir):
-        if os.path.isfile(incomplete_marker):
-            # Leftover from an install that never finished (Ctrl+C, SIGKILL,
-            # power loss): the marker is created before any rootfs data is
-            # written and removed only after the install fully succeeds.
-            log_info(f"Found remnants of an interrupted install of '{install_name}'; removing and reinstalling...")
-            try:
-                shutil.rmtree(container_path)
-            except OSError as exc:
-                crit_error(
-                    f"cannot remove leftover data of the interrupted install at "
-                        f"'{quote_path(container_path)}': {escape_controls(str(exc))}. Remove it manually, then retry."
-                )
-                sys.exit(1)
+    marker = os.path.basename(incomplete_marker)
+    rootfs_leaf = os.path.basename(rootfs_dir)
+    manifest_leaf = os.path.basename(container_manifest(install_name))
+    container_fd = None
+    rootfs_fd = None
+    tmp_archive = None
+    interrupted = False
+    try:
+        container_fd = open_container_dir(install_name, create=True)
+        try:
+            dirfd.lstat_at(container_fd, marker)
+        except FileNotFoundError:
+            incomplete = False
         else:
+            incomplete = True
+        with contextlib.suppress(FileNotFoundError):
+            rootfs_fd = dirfd.opendir_at(container_fd, rootfs_leaf)
+
+        if rootfs_fd is not None and not incomplete:
             msg()
             crit_error(f"container '{install_name}' already exists. Specify a different name with '--name NAME'.")
             msg()
@@ -305,39 +333,28 @@ def _run_install(
             msg()
             sys.exit(1)
 
-    if local_path is not None:
-        log_info(f"Installing from '{quote_path(os.path.basename(local_path))}' as '{install_name}'...")
-    elif url is not None:
-        log_info(f"Installing archive from URL as '{install_name}'...")
-    else:
-        last_component = image_ref.rsplit("/", maxsplit=1)[-1]
-        display_ref = image_ref if ":" in last_component else f"{image_ref}:latest"
-        log_info(f"Installing '{display_ref}' as '{install_name}'...")
-        workers = layer_download_workers()
-        if workers != DEFAULT_LAYER_DOWNLOAD_WORKERS:
-            log_info(f"Parallel download workers: {workers}")
+        if local_path is not None:
+            log_info(f"Installing from '{quote_path(os.path.basename(local_path))}' as '{install_name}'...")
+        elif url is not None:
+            log_info(f"Installing archive from URL as '{install_name}'...")
+        else:
+            last_component = image_ref.rsplit("/", maxsplit=1)[-1]
+            display_ref = image_ref if ":" in last_component else f"{image_ref}:latest"
+            log_info(f"Installing '{display_ref}' as '{install_name}'...")
+            workers = layer_download_workers()
+            if workers != DEFAULT_LAYER_DOWNLOAD_WORKERS:
+                log_info(f"Parallel download workers: {workers}")
 
-    # Marker first, rootfs second: see _write_incomplete_marker.
-    os.makedirs(container_path, exist_ok=True)
-    _write_incomplete_marker(incomplete_marker)
-    # Made level by level off the descriptor of the level above, for the same
-    # reason it is checked that way, and *kept*: the extraction writes every
-    # member as (dir_fd, name) beneath this descriptor, so nothing between the
-    # check and the last byte written resolves containers/<name>/rootfs a second
-    # time. Handing the path down instead lets a guest re-point the name
-    # mid-unpack and land the image in a host directory of its choosing.
-    try:
-        rootfs_fd = open_container_rootfs(install_name, create=True)
-    except OSError as exc:
-        crit_error(f"could not create the rootfs of container '{install_name}': {escape_controls(str(exc))}")
-        sys.exit(1)
+        _write_incomplete_marker(marker, dir_fd=container_fd)
+        if rootfs_fd is None:
+            rootfs_fd = dirfd.descend_at(container_fd, (rootfs_leaf,), create=True)
+        elif incomplete:
+            log_info(f"Found remnants of an interrupted install of '{install_name}'; removing and reinstalling...")
+            for child in dirfd.listdir_at(rootfs_fd):
+                dirfd.rmtree_at(rootfs_fd, child, force=True)
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(manifest_leaf, dir_fd=container_fd)
 
-    def _cleanup() -> None:
-        with contextlib.suppress(OSError):
-            shutil.rmtree(container_path)
-
-    tmp_archive = None
-    try:
         if local_path is not None:
             log_info("Extracting rootfs from archive...")
             metadata = install_from_local_file(local_path, rootfs_fd, dist_arch)
@@ -371,55 +388,53 @@ def _run_install(
                 "image_config": metadata.get("image_config", {}),
             }
             try:
-                with atomic_write(container_manifest(install_name), mode=0o644) as fh:
+                with atomic_write(manifest_leaf, mode=0o644, dir_fd=container_fd) as fh:
                     json.dump(manifest_data, fh, indent=2)
             except OSError as exc:
                 crit_error(f"could not write manifest.json for '{install_name}': {escape_controls(str(exc))}")
                 sys.exit(1)
 
-        if os.path.isdir(os.path.join(rootfs_dir, "etc")):
+        try:
+            etc_fd = dirfd.opendir_at(rootfs_fd, "etc")
+        except OSError:
+            etc_fd = None
+        if etc_fd is not None:
+            os.close(etc_fd)
             log_info("Updating '/etc/resolv.conf'...")
-            write_resolv_conf(rootfs_dir)
+            write_resolv_conf(rootfs_dir, root_fd=rootfs_fd)
 
             log_info("Updating '/etc/hosts'...")
-            write_hosts(rootfs_dir)
+            write_hosts(rootfs_dir, root_fd=rootfs_fd)
 
             if IS_TERMUX and os.path.isfile(guest_etc_path(rootfs_dir, "/etc/passwd")):
                 log_info("Registering Android-specific UIDs and GIDs...")
                 register_android_ids(rootfs_dir)
                 configure_android_rootfs(rootfs_dir)
 
+        _finish_install(install_name, container_fd, rootfs_fd, marker)
     except KeyboardInterrupt:
         clear_bar()
         log_error("Aborted by user.")
-        _cleanup()
-        if tmp_archive is not None:
-            with contextlib.suppress(OSError):
-                os.remove(tmp_archive)
-        # sys.exit() would run the concurrent.futures atexit hook, which
-        # joins every download worker thread, each possibly blocked in
-        # connect()/read() for up to the 30s socket timeout. The user asked
-        # to stop *now*; cleanup is done, so exit without joining them.
-        sys.stdout.flush()
-        sys.stderr.flush()
-        os._exit(1)
+        interrupted = True
     except (EOFError, OSError, tarfile.TarError, RuntimeError) as exc:
         clear_bar()
         log_error(f"Failed to install: {escape_controls(str(exc))}")
-        _cleanup()
         sys.exit(1)
-    except Exception:
-        _cleanup()
-        raise
     finally:
-        os.close(rootfs_fd)
+        if rootfs_fd is not None:
+            os.close(rootfs_fd)
+        if container_fd is not None:
+            os.close(container_fd)
         if tmp_archive is not None:
             with contextlib.suppress(OSError):
                 os.remove(tmp_archive)
 
-    # Success: clear the incomplete marker as the very last install step.
-    with contextlib.suppress(OSError):
-        os.remove(incomplete_marker)
+    if interrupted:
+        for stream in (sys.stdout, sys.stderr):
+            if stream is not None:
+                with contextlib.suppress(OSError, ValueError):
+                    stream.flush()
+        os._exit(1)
 
     log_info("Finished installation.")
     msg()

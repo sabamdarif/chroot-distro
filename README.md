@@ -108,6 +108,12 @@ OCI archives must provide matching sizes and SHA-256 digests for the manifests,
 configs and layers used during install. A verified cached layer can supply a
 layer missing from the archive.
 
+Failed or interrupted installs retain marked partial data. `list` reports these
+as incomplete, and `login` and `run` refuse them. Repeat the install command to
+clear the partial rootfs and stale image metadata before trying again, or use
+`remove NAME` to discard an incomplete container with a rootfs. An install only
+reports success after removing and syncing its incomplete marker.
+
 The default container name for an archive comes from its filename, with the
 recognized extension removed. For a URL, the filename comes from its path.
 Use `--name` if the URL path has no filename.

@@ -141,3 +141,78 @@ def test_the_state_root_itself_is_not_a_destination(state_root, tmp_path):
     root, parts = atomic._state_location(str(state_root))
 
     assert (root, parts) == (None, ())
+
+
+@pytest.mark.parametrize("name", ["", ".", "..", "/escape", "a/b", "a\0b"])
+def test_descriptor_write_rejects_nonleaf_destinations(state_root, name):
+    fd = os.open(state_root, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        with pytest.raises(ValueError), atomic.atomic_write(name, dir_fd=fd):
+            pytest.fail("invalid destination accepted")
+        os.fstat(fd)
+    finally:
+        os.close(fd)
+
+
+@pytest.mark.parametrize("binary", [False, True])
+def test_descriptor_write_retains_parent_and_file_mode(state_root, binary):
+    fd = os.open(state_root, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        with atomic.atomic_write("result", dir_fd=fd, mode=0o640, binary_mode=binary) as fh:
+            fh.write(b"content" if binary else "content")
+        os.fstat(fd)
+    finally:
+        os.close(fd)
+    assert (state_root / "result").read_bytes() == b"content"
+    assert stat.S_IMODE((state_root / "result").stat().st_mode) == 0o640
+
+
+@pytest.mark.parametrize("kind", ["symlink", "hardlink"])
+@pytest.mark.parametrize("timing", ["before", "during"])
+def test_descriptor_publication_detects_staging_substitution(state_root, tmp_path, monkeypatch, kind, timing):
+    victim = tmp_path / "outside"
+    victim.write_text("KEEP")
+    victim.chmod(0o600)
+    real_replace = os.replace
+
+    def substitute(tmp):
+        tmp.unlink()
+        if kind == "symlink":
+            tmp.symlink_to(victim)
+        else:
+            os.link(victim, tmp)
+
+    def replace(src, dst, **kwargs):
+        if timing == "during":
+            substitute(state_root / src)
+        real_replace(src, dst, **kwargs)
+
+    monkeypatch.setattr(os, "replace", replace)
+    fd = os.open(state_root, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        with pytest.raises(OSError) as exc:
+            with atomic.atomic_write("manifest.json", dir_fd=fd, mode=0o644) as fh:
+                fh.write("{}")
+                if timing == "before":
+                    staging, = state_root.iterdir()
+                    substitute(staging)
+        assert exc.value.errno == errno.ESTALE
+        os.fstat(fd)
+    finally:
+        os.close(fd)
+    assert victim.read_text() == "KEEP"
+    assert stat.S_IMODE(victim.stat().st_mode) == 0o600
+
+
+def test_descriptor_write_follows_original_parent_after_rename(state_root, tmp_path):
+    fd = os.open(state_root, os.O_RDONLY | os.O_DIRECTORY)
+    original = tmp_path / "moved"
+    try:
+        with atomic.atomic_write("manifest.json", dir_fd=fd) as fh:
+            state_root.rename(original)
+            state_root.mkdir()
+            fh.write("{}")
+    finally:
+        os.close(fd)
+    assert (original / "manifest.json").read_text() == "{}"
+    assert list(state_root.iterdir()) == []

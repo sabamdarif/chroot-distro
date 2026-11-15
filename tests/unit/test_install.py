@@ -1,59 +1,25 @@
-import io
 import json
-import os
-from unittest.mock import patch
+from unittest.mock import Mock
+
+import pytest
 
 from chroot_distro.commands.install import _print_start_hints, _run_install
 
 
-def _spare_fd(*args, **kwargs):
-    """A closable descriptor standing in for the rootfs install writes into."""
-    return os.open(os.devnull, os.O_RDONLY)
+@pytest.mark.parametrize("workers", [4, 6])
+def test_run_install_workers_log(tmp_path, monkeypatch, workers):
+    from chroot_distro.commands import install
 
-
-def _spare_atomic_write(*args, **kwargs):
-    """A context manager standing in for the staged manifest write."""
-    return io.StringIO()
-
-
-@patch(
-    "chroot_distro.commands.install.pull_image",
-    return_value={
-        "image_ref": "alpine:latest",
-        "arch": "x86_64",
-        "manifest": {},
-        "image_config": {},
-    },
-)
-@patch("chroot_distro.commands.install.atomic_write", side_effect=_spare_atomic_write)
-@patch("chroot_distro.commands.install.open_container_rootfs", side_effect=_spare_fd)
-@patch("chroot_distro.commands.install._write_incomplete_marker")
-@patch("chroot_distro.commands.install.os.makedirs")
-@patch("chroot_distro.commands.install.os.path.isdir", return_value=False)
-@patch("chroot_distro.commands.install.ContainerLock")
-@patch("chroot_distro.commands.install.log_info")
-def test_run_install_workers_log(
-    mock_log, mock_lock, mock_isdir, mock_makedirs, mock_marker, mock_rootfs_fd, mock_atomic, mock_pull_image
-):
-    # Case 1: Workers is default (4), should not print workers info
-    with patch("chroot_distro.commands.install.layer_download_workers", return_value=4):
-        _run_install("my-container", "alpine", None, None, "x86_64")
-
-        # Verify it printed the standard installing message
-        mock_log.assert_any_call("Installing 'alpine:latest' as 'my-container'...")
-        # Verify it did not print "Parallel download workers: ..."
-        for call_args in mock_log.call_args_list:
-            assert "Parallel download workers" not in call_args[0][0]
-
-    # Case 2: Workers is non-default (6), should print workers info
-    mock_log.reset_mock()
-    with patch("chroot_distro.commands.install.layer_download_workers", return_value=6):
-        _run_install("my-container", "alpine", None, None, "x86_64")
-
-        # Verify it printed the standard installing message
-        mock_log.assert_any_call("Installing 'alpine:latest' as 'my-container'...")
-        # Verify it printed "Parallel download workers: 6"
-        mock_log.assert_any_call("Parallel download workers: 6")
+    monkeypatch.setattr("chroot_distro.paths.CONTAINERS_DIR", str(tmp_path / "containers"))
+    monkeypatch.setattr(install, "BASE_CACHE_DIR", str(tmp_path / "cache"))
+    monkeypatch.setattr(install, "pull_image", Mock(return_value=None))
+    monkeypatch.setattr(install, "layer_download_workers", lambda: workers)
+    log = Mock()
+    monkeypatch.setattr(install, "log_info", log)
+    _run_install("my-container", "alpine", None, None, "x86_64")
+    log.assert_any_call("Installing 'alpine:latest' as 'my-container'...")
+    worker_lines = [call.args[0] for call in log.call_args_list if "Parallel download workers" in call.args[0]]
+    assert worker_lines == ([] if workers == 4 else ["Parallel download workers: 6"])
 
 
 def _installed_tree(tmp_path, *, shell: bool, entrypoint=None, cmd=None):

@@ -122,9 +122,9 @@ def test_format_table_aligns_columns():
 def test_list_escapes_human_output_and_preserves_json(tmp_path, monkeypatch, capsys):
     bad = "bad\x1b[2J\x9b\u202e\nnext"
     escaped = r"bad\e[2J\x9b\u202e\nnext"
-    name = "box\\" + bad
-    shown_name = "box\\\\" + escaped
-    incomplete = "partial-" + bad
+    name = "box"
+    shown_name = name
+    incomplete = "partial"
     _make_container(tmp_path, name)
     _make_container(tmp_path, "safe")
     _make_container(tmp_path, incomplete, incomplete=True)
@@ -154,7 +154,7 @@ def test_list_escapes_human_output_and_preserves_json(tmp_path, monkeypatch, cap
     assert f"User:    {escaped}" in err
     assert f"WorkDir: /{shown_name}" in err
     assert f"Ports:   {escaped}" in err
-    assert f"Interrupted install(s) (not usable): partial-{escaped}" in err
+    assert "Interrupted install(s) (not usable): partial" in err
     table = [line for line in err.splitlines() if "in use (" in line]
     assert len(table) == 2
     assert table[0].index("in use (") == table[1].index("in use (")

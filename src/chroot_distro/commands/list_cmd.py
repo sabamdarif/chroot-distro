@@ -5,15 +5,15 @@
 `list` runs unelevated on Termux. It reads advisory holder details without
 acquiring any container locks.
 
-A directory carrying the `.install-incomplete` marker is not a container: it is
-listed separately, with the two commands that resolve it, rather than being offered
-as usable.
+Any entry at `.install-incomplete` makes a directory unavailable for execution.
+It is listed separately even if no rootfs was created. Invalid container names
+and storage that fails the guarded walk are excluded.
 
 `_rootfs_size_bytes` is `du -sb -x` in Python, apparent sizes from lstat and pruning
 at a filesystem boundary, so a mount under the rootfs is not counted into the
 container's own size. `_ensure_manifest_readable` widens a manifest a rooted install
 left mode 0600, because the unelevated Termux run cannot otherwise read the image
-reference out of it, and nothing in that file is secret.
+reference out of it. Installed metadata is therefore readable outside the guest.
 
 `_read_manifest_info` opens the manifest once and both the table row and the
 `--json` document read that one record, so the SOURCE column and the JSON `source`
@@ -29,9 +29,11 @@ import typing
 from dataclasses import dataclass
 
 from chroot_distro.constants import CONTAINERS_DIR, PROGRAM_NAME
+from chroot_distro.exceptions import ChrootDistroError
 from chroot_distro.locking import container_busy_status
 from chroot_distro.message import C, emit_json, escape_controls, msg, quote_path, stdout_output, warn
-from chroot_distro.paths import container_manifest, container_rootfs, is_install_incomplete
+from chroot_distro.names import is_valid_name
+from chroot_distro.paths import container_is_installed, container_manifest, container_rootfs, is_install_incomplete
 from chroot_distro.progress import fmt_size, loading_line
 
 
@@ -73,15 +75,22 @@ def _iter_container_names() -> tuple[list[str], list[str]]:
     separately so `list` can mention it without presenting it as usable.
     """
     try:
-        entries = sorted(e for e in os.listdir(CONTAINERS_DIR) if os.path.isdir(container_rootfs(e)))
+        entries = sorted(e for e in os.listdir(CONTAINERS_DIR) if is_valid_name(e))
     except OSError as exc:
         if exc.errno in (errno.EACCES, errno.EPERM):
             warn(f"Permission denied: cannot read containers directory '{quote_path(CONTAINERS_DIR)}'")
         elif exc.errno != errno.ENOENT:
             warn(f"Failed to list containers directory '{quote_path(CONTAINERS_DIR)}': {escape_controls(str(exc))}")
         return [], []
-    installed = [e for e in entries if not is_install_incomplete(e)]
-    incomplete = [e for e in entries if is_install_incomplete(e)]
+    installed, incomplete = [], []
+    for name in entries:
+        try:
+            if is_install_incomplete(name):
+                incomplete.append(name)
+            elif container_is_installed(name):
+                installed.append(name)
+        except (ChrootDistroError, OSError) as exc:
+            warn(f"Cannot inspect container '{quote_path(name)}': {escape_controls(str(exc))}")
     return installed, incomplete
 
 

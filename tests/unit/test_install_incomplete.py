@@ -90,12 +90,13 @@ def test_completed_container_still_refuses_reinstall(mock_log, mock_pull, contai
 @patch("chroot_distro.commands.install.pull_image", side_effect=RuntimeError("network died"))
 @patch("chroot_distro.commands.install.log_info")
 @patch("chroot_distro.commands.install.log_error")
-def test_failed_install_cleanup_removes_marker_too(mock_err, mock_log, mock_pull, containers):
-    """A failure that IS handled removes the whole container dir, marker included."""
+def test_failed_install_retains_marked_payload(mock_err, mock_log, mock_pull, containers):
+    """Handled failures retain the marker for automatic retry."""
     cdir, rootfs, marker = _paths(containers, "debian")
     with pytest.raises(SystemExit):
         _run_install("debian", "debian", None, None, "x86_64")
-    assert not cdir.exists()
+    assert rootfs.is_dir()
+    assert marker.is_file()
 
 
 def test_container_incomplete_marker_path():

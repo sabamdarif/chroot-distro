@@ -5,7 +5,8 @@
 `commands/run.py` re-enters this file through `args._run_inner`, so this is the
 body of `run` as well, and `run_inner is not None` is the test throughout for "not
 an interactive login". Only a shared `ContainerLock` is taken, since concurrent
-sessions of one container are allowed.
+sessions of one container are allowed. The guarded installed-state check rejects
+incomplete installs under that lock before guest detection or setup.
 
 Order matters. Who and where is settled first (user, home, workdir, env, with
 precedence CLI flag > `CD_*` env > the image manifest), because the mount set
@@ -141,7 +142,7 @@ from chroot_distro.helpers.x11 import (
 from chroot_distro.locking import ContainerLock
 from chroot_distro.message import StdoutError, crit_error, stdout_output, warn
 from chroot_distro.names import require_valid_name
-from chroot_distro.paths import container_dir, container_log_path, container_rootfs
+from chroot_distro.paths import container_dir, container_is_installed, container_log_path, container_rootfs
 from chroot_distro.syscalls.chroot import PtyOutputError, chroot_and_run, enter_chroot, spawn_detached
 from chroot_distro.syscalls.nsenter import enter_and_run_with_pty
 from chroot_distro.syscalls.unshare import ForegroundExec
@@ -613,7 +614,7 @@ def _command_login_inner_once(container_name: str, args) -> None:
     display_command = getattr(args, "get_chroot_cmd", False)
     command_line: str | None = None
     rootfs = container_rootfs(container_name)
-    if not os.path.isdir(rootfs):
+    if not container_is_installed(container_name):
         crit_error(f"container '{container_name}' is not installed.")
         sys.exit(1)
 
