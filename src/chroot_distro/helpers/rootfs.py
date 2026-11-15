@@ -10,8 +10,8 @@ with nothing usable found, the two public defaults from `constants` stand in.
 `ensure_hosts_entry` adds the running hostname at login, which `sudo` and
 anything else that reverse-resolves needs and which install time could not know.
 
-Everything below the rootfs is image content, including `etc` itself, so both
-writers go through `_open_etc` plus `_replace_at`: the directory is opened
+Everything below the rootfs is image content, including `etc` itself, so the
+install-time writers use `_open_etc` plus `_replace_at`: the directory is opened
 `O_NOFOLLOW` off a pinned rootfs descriptor, an `etc` that is a symlink is
 refused rather than followed (it would aim the write at a host directory, since
 this runs outside the chroot), the old entry is unlinked instead of truncated so
@@ -26,6 +26,8 @@ parents are re-walked without following links, and regular files with one link
 are read before fresh atomic replacement. Public accounts use mode 0644,
 shadow files use 0600, and configuration files retain their permissions and
 ownership. Missing parents and unsafe entries never fall back to host paths.
+Login hostname insertion uses the same editor, retaining existing hosts content
+and ordinary permissions while refusing shared inodes and special files.
 """
 
 import contextlib
@@ -219,27 +221,28 @@ def ensure_hosts_entry(rootfs: str, *hostnames: str) -> None:
     /etc/hosts was written at install time, so patch it here. Idempotent:
     a name already present on any line is left untouched. Best-effort.
     """
-    path = os.path.join(rootfs, "etc", "hosts")
     try:
-        with open(path) as fh:
-            existing = fh.read()
-    except OSError:
+        with contextlib.ExitStack() as stack:
+            root_fd = dirfd.opendir(rootfs)
+            stack.callback(os.close, root_fd)
+            with edit_guest_file(root_fd, "/etc/hosts") as fh:
+                existing = fh.getvalue()
+                present = set()
+                for line in existing.splitlines():
+                    stripped = line.strip()
+                    if not stripped or stripped.startswith("#"):
+                        continue
+                    present.update(stripped.split()[1:])
+
+                to_add = [h for h in dict.fromkeys(hostnames) if h and h not in present]
+                if not to_add:
+                    return
+
+                if existing and not existing.endswith("\n"):
+                    fh.write("\n")
+                fh.write("".join(f"127.0.0.1   {h}\n" for h in to_add))
+    except (OSError, UnicodeError):
         return
-
-    present = set()
-    for line in existing.splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        present.update(stripped.split()[1:])
-
-    to_add = [h for h in dict.fromkeys(hostnames) if h and h not in present]
-    if not to_add:
-        return
-
-    suffix = ("" if existing.endswith("\n") or not existing else "\n") + "".join(f"127.0.0.1   {h}\n" for h in to_add)
-    with contextlib.suppress(OSError), open(path, "a") as fh:
-        fh.write(suffix)
 
 
 @contextlib.contextmanager

@@ -83,6 +83,38 @@ def test_command_display_reuses_session_directory_pin(command_display, monkeypat
     assert len({fd for _, fd in calls}) == 1
 
 
+@pytest.mark.parametrize("is_run", [False, True])
+def test_login_setup_does_not_write_through_profile_or_hosts_links(command_display, tmp_path, monkeypatch, is_run):
+    from chroot_distro.paths import container_rootfs
+
+    login, args, _ = command_display
+    monkeypatch.setattr(os, "fchown", lambda fd, uid, gid: None)
+    root = container_rootfs("demo")
+    profile = os.path.join(root, "etc/profile.d")
+    os.makedirs(profile)
+    targets = []
+    for name, dest in (
+        ("host-profile", os.path.join(profile, "chroot-profile.sh")),
+        ("host-hosts", os.path.join(root, "etc/hosts")),
+    ):
+        target = tmp_path / name
+        target.write_text("KEEP\n")
+        os.symlink(target, dest)
+        targets.append(target)
+    args.env = ["FOO=value"]
+    if is_run:
+        args._run_inner = ["/bin/sh"]
+
+    with pytest.raises(SystemExit) as exc:
+        login._command_login_inner_once("demo", args)
+
+    assert exc.value.code == 0
+    assert [target.read_text() for target in targets] == ["KEEP\n", "KEEP\n"]
+    if not is_run:
+        with open(os.path.join(profile, "chroot-profile.sh")) as fh:
+            assert fh.read() == "export FOO='value'\n"
+
+
 @pytest.mark.parametrize("failure", ["format", "write", "absent"])
 def test_command_display_cleans_up_before_output(command_display, monkeypatch, failure):
     login, args, data = command_display

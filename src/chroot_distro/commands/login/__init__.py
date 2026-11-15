@@ -933,10 +933,6 @@ def _command_login_inner_once(container_name: str, args) -> None:
         components.append(termux_bin)
         child_env["PATH"] = ":".join(components)
 
-    # A login shell sources the guest's /etc/profile, which pins PATH (and
-    # whatever else the distro sets) over the env handed to exec; re-export
-    # the caller's own values from profile.d, which runs last. A `run` writes
-    # nothing there, so its --env cannot leak into later logins.
     session_profile = IS_TERMUX and dist_type == "normal" and not skip_extra_mounts and not minimal
     if session_profile or run_inner is None:
         force_keys = user_keys if run_inner is None else set()

@@ -166,6 +166,12 @@ Aliases: sh
 Open a shell inside a container. Put a command after `--` to run it instead.
 Bare command words before `--` are passed first. Put guest options after `--`.
 
+Login setup updates an existing guest `/etc/hosts` and writes environment
+overrides when the guest has `etc/profile.d`. Guest links in those paths
+resolve within the opened rootfs. The profile snippet replaces its final
+entry with a mode 0600 file; hostname updates skip hardlinked or non-regular
+files. Missing directories are left alone.
+
 When stdin is a terminal, `login` forwards guest terminal output to stdout.
 If forwarding fails, `login` closes the guest PTY and exits with status 1
 after the guest wait and session cleanup. The relay keeps handling SIGTERM,
