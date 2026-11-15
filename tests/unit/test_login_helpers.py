@@ -36,7 +36,8 @@ def command_display(tmp_path, monkeypatch):
     (rootfs / "bin").mkdir(parents=True)
     (rootfs / "bin" / "sh").touch()
     monkeypatch.setattr(paths, "CONTAINERS_DIR", str(rootfs.parent.parent))
-    monkeypatch.setattr(login.session, "RUNTIME_DIR", str(tmp_path))
+    monkeypatch.setattr(paths, "RUNTIME_DIR", str(tmp_path))
+    monkeypatch.setattr(paths, "IS_TERMUX", False)
     monkeypatch.setattr(login.namespace, "RUNTIME_DIR", str(tmp_path))
     monkeypatch.setattr(login.namespace, "check_isolation_conflicts", Mock())
     monkeypatch.setattr(login.namespace, "should_use_namespaces", Mock(return_value=False))
@@ -55,6 +56,31 @@ def command_display(tmp_path, monkeypatch):
     args, unknown = build_parser().parse_known_args(["login", "demo", "--get-chroot-cmd", "--", "/bin/sh"])
     assert not unknown
     return login, args, tmp_path / "data" / "demo"
+
+
+def test_command_display_reuses_session_directory_pin(command_display, monkeypatch):
+    login, args, data = command_display
+    calls = []
+
+    def guard(operation):
+        original = getattr(login.session, operation)
+
+        def checked(*args, **kwargs):
+            fd = kwargs.get("state_fd")
+            assert fd is not None
+            assert os.path.samestat(os.fstat(fd), data.stat())
+            calls.append((operation, fd))
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(login.session, operation, checked)
+
+    for operation in ("increment", "decrement", "save_mount_options", "clear_mount_options"):
+        guard(operation)
+    with pytest.raises(SystemExit) as exc:
+        login._command_login_inner_once("demo", args)
+    assert exc.value.code == 0
+    assert [operation for operation, _ in calls] == ["increment", "save_mount_options", "decrement", "clear_mount_options"]
+    assert len({fd for _, fd in calls}) == 1
 
 
 @pytest.mark.parametrize("failure", ["format", "write", "absent"])

@@ -25,10 +25,10 @@ works from the `(dir_fd, leaf)` a `PinnedPath` carries. That re-walk both detect
 the swap and pins the inode it validated. Handing the resolved string back to the
 kernel is the bug this file exists to prevent.
 
-`open_container_dir` walks from the configured XDG data base or Termux prefix,
-including the runtime parents that a guest can replace on Android. Rootfs and
-installed-state checks use that same walk. Any entry at the incomplete-marker
-name makes a container unavailable for execution, without opening that entry.
+`open_container_dir` and `open_container_data_dir` walk from the configured XDG
+data base or Termux prefix, including runtime parents a guest can replace on
+Android. Rootfs and installed-state checks use that same walk. Any entry at the
+incomplete-marker name makes a container unavailable for execution, without opening it.
 FileNotFoundError is ordinary missing storage; other refusals become
 `_unusable_storage` at the installed-state boundary.
 """
@@ -239,13 +239,25 @@ def open_container_dir(name: str, *, create: bool = False) -> int:
     if not is_valid_name(name):
         raise InvalidNameError(f"invalid container name '{name}'.")
     anchor = TERMUX_PREFIX if IS_TERMUX else os.path.dirname(os.path.dirname(CONTAINERS_DIR))
+    return _open_storage_dir(container_dir(name), anchor, create=create)
+
+
+def open_container_data_dir(name: str, *, create: bool = False) -> int:
+    """Pin a container's runtime data directory; the caller closes the fd."""
+    if not is_valid_name(name):
+        raise InvalidNameError(f"invalid container name '{name}'.")
+    anchor = TERMUX_PREFIX if IS_TERMUX else os.path.dirname(RUNTIME_DIR)
+    return _open_storage_dir(os.path.join(RUNTIME_DIR, "data", name), anchor, create=create)
+
+
+def _open_storage_dir(path: str, anchor: str, *, create: bool) -> int:
     if create:
         os.makedirs(anchor, exist_ok=True)
     fd = dirfd.opendir(anchor)
     try:
-        parts = os.path.relpath(container_dir(name), anchor).split(os.sep)
+        parts = os.path.relpath(path, anchor).split(os.sep)
         if os.pardir in parts:
-            raise ValueError("container storage is outside its platform anchor")
+            raise ValueError("storage is outside its platform anchor")
         for part in parts:
             try:
                 nxt = dirfd.opendir_at(fd, part)

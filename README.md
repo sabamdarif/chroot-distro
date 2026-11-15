@@ -695,6 +695,10 @@ with the same name. Separate `.info` files provide advisory holder details.
 If a command reports an unexpected lock entry, stop other `chroot-distro`
 commands and inspect the entry before removing it.
 
+Session counters and saved mount options use guarded directory opens and
+atomic file replacement. A symlink or non-regular file at the session lock
+stops the command. Stop other commands and inspect that entry before removing it.
+
 Inside the cache folder:
 
 | Path             | Contents                   |
