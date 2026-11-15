@@ -122,6 +122,7 @@ def test_register_android_ids_basic(tmp_path):
         raise KeyError()
 
     with (
+        patch("chroot_distro.helpers.rootfs.IS_TERMUX", True),
         patch("os.getuid", return_value=10123),
         patch("os.getgid", return_value=10123),
         patch("pwd.getpwuid", return_value=mock_pw),
@@ -161,6 +162,7 @@ def test_register_android_ids_basic(tmp_path):
 def test_register_android_ids_idempotent(tmp_path):
     etc_dir = tmp_path / "etc"
     etc_dir.mkdir(parents=True)
+    (etc_dir / "passwd").touch()
 
     group_path = etc_dir / "group"
     group_path.write_text("root:x:0:\naid_inet:x:3003:\n")
@@ -172,6 +174,7 @@ def test_register_android_ids_idempotent(tmp_path):
     mock_gr1.gr_name = "u0_a123"
 
     with (
+        patch("chroot_distro.helpers.rootfs.IS_TERMUX", True),
         patch("os.getuid", return_value=10123),
         patch("os.getgid", return_value=10123),
         patch("pwd.getpwuid", return_value=mock_pw),

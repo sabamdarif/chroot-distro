@@ -114,6 +114,10 @@ clear the partial rootfs and stale image metadata before trying again, or use
 `remove NAME` to discard an incomplete container with a rootfs. An install only
 reports success after removing and syncing its incomplete marker.
 
+On Termux, install adds Android account and network groups inside the guest.
+Shadow files remain private (mode 0600). Account and configuration fixups skip
+unsafe files, and apt ownership changes skip symlinks and multiply linked files.
+
 The default container name for an archive comes from its filename, with the
 recognized extension removed. For a URL, the filename comes from its path.
 Use `--name` if the URL path has no filename.

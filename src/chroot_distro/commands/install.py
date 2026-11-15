@@ -9,13 +9,12 @@ derived from it or a lock taken. Archive names come from the filename or URL pat
 with the longest recognized suffix stripped. A source without an inferable name
 requires `--name`.
 
-The container and rootfs are pinned for marker, metadata, extraction and DNS
-writes. The marker is atomically published and synced before creating a rootfs
-or clearing a retry. Failures retain marked data; retry clears only children of
-the pinned rootfs. Completion verifies storage identities and syncs marker
+The container and rootfs are pinned for marker, metadata, extraction and guest
+configuration writes. The marker is atomically published and synced before
+creating a rootfs or clearing a retry. Failures retain marked data; retry clears
+only children of the pinned rootfs. Completion verifies storage identities and syncs marker
 removal, attempting restoration if finalization fails. These checks do not
-prevent an active writer from changing names after the final check. Android
-account fixups still have a separate path-based contract.
+prevent an active writer from changing names after the final check.
 
 Ctrl+C ends in `os._exit` on purpose: `sys.exit` would run the `concurrent.futures`
 atexit hook, which joins download workers that may each be blocked in a socket read for
@@ -57,7 +56,6 @@ from chroot_distro.helpers.android import configure_android_rootfs
 from chroot_distro.helpers.docker import InvalidReferenceError, derive_alias, parse_reference, pull_image
 from chroot_distro.helpers.download import download_file
 from chroot_distro.helpers.rootfs import (
-    guest_etc_path,
     register_android_ids,
     write_hosts,
     write_resolv_conf,
@@ -406,10 +404,10 @@ def _run_install(
             log_info("Updating '/etc/hosts'...")
             write_hosts(rootfs_dir, root_fd=rootfs_fd)
 
-            if IS_TERMUX and os.path.isfile(guest_etc_path(rootfs_dir, "/etc/passwd")):
-                log_info("Registering Android-specific UIDs and GIDs...")
-                register_android_ids(rootfs_dir)
-                configure_android_rootfs(rootfs_dir)
+        if IS_TERMUX:
+            log_info("Registering Android-specific UIDs and GIDs...")
+            register_android_ids(rootfs_dir, root_fd=rootfs_fd)
+            configure_android_rootfs(rootfs_dir, root_fd=rootfs_fd)
 
         _finish_install(install_name, container_fd, rootfs_fd, marker)
     except KeyboardInterrupt:

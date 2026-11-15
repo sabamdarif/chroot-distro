@@ -76,6 +76,21 @@ def test_platform_anchor_alias_is_allowed(tmp_path, monkeypatch, store):
     assert (actual / "var/lib/chroot-distro/containers/box/rootfs").is_dir()
 
 
+def test_termux_fixups_receive_the_pinned_rootfs(store, monkeypatch):
+    seen = []
+    monkeypatch.setattr(install, "IS_TERMUX", True)
+
+    def fixup(path, *, root_fd):
+        assert os.path.samestat(os.stat(path), os.fstat(root_fd))
+        seen.append(root_fd)
+
+    monkeypatch.setattr(install, "register_android_ids", fixup)
+    monkeypatch.setattr(install, "configure_android_rootfs", fixup)
+    run_install()
+    assert len(seen) == 2
+    assert seen[0] == seen[1]
+
+
 @pytest.mark.parametrize("part", ["container", "store", "rootfs"])
 @pytest.mark.parametrize("failure", [False, True])
 def test_replaced_storage_is_preserved(store, monkeypatch, part, failure):
