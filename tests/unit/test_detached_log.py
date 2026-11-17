@@ -125,8 +125,9 @@ def test_replaced_log_is_never_handed_off(state, tmp_path, monkeypatch, when, ki
     real_open = paths.dirfd.open_regular_at
     opened_fds = []
 
+    # Keep the original inode allocated so its number cannot be reused.
     def replace():
-        entry.unlink()
+        entry.rename(state / "old.log")
         if kind == "symlink":
             entry.symlink_to(victim)
         elif kind == "hardlink":
