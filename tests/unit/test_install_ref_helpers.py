@@ -16,10 +16,22 @@ from chroot_distro.commands import install
         ("~/home.tar", True),
         ("ubuntu:22.04", False),
         ("http://x/y.tar", False),
+        ("oracle-sqldeveloper.tar.xz", True),
+        ("rootfs.tar.gz", True),
     ],
 )
 def test_is_local_path(ref, expected):
     assert install._is_local_path(ref) is expected
+
+
+def test_normalize_local_path_recovers_leading_dot_before_absolute_path(tmp_path):
+    target = tmp_path / "archive.tar.xz"
+    target.write_text("archive")
+    bogus = f"./{target}"
+    assert install._normalize_local_path(bogus) == str(target)
+    assert install._normalize_local_path(str(target)) == str(target)
+    missing = "./nonexistent.tar.xz"
+    assert install._normalize_local_path(missing) == missing
 
 
 @pytest.mark.parametrize(

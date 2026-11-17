@@ -227,6 +227,11 @@ def command_restore(args) -> None:
     verbose = getattr(args, "verbose", False)
 
     if archive:
+        archive = os.path.expanduser(archive)
+        if not os.path.exists(archive) and archive.startswith("./"):
+            cleaned = "/" + archive.lstrip("./")
+            if os.path.exists(cleaned):
+                archive = cleaned
         if not os.path.exists(archive):
             crit_error(f"file '{archive}' does not exist.")
             sys.exit(1)

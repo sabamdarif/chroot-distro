@@ -98,7 +98,22 @@ _ARCHIVE_EXTS = (
 
 def _is_local_path(ref: str) -> bool:
     """Return True if ref should be treated as a local file path."""
-    return ref.startswith(("/", "./", "../", "~"))
+    if _is_url(ref):
+        return False
+    if ref.startswith(("/", "./", "../", "~")):
+        return True
+    low = ref.lower()
+    return any(low.endswith(ext) for ext in _ARCHIVE_EXTS)
+
+
+def _normalize_local_path(path: str) -> str:
+    """Expand user and recover from accidental leading dots before absolute paths."""
+    expanded = os.path.expanduser(path)
+    if not os.path.isfile(expanded) and expanded.startswith("./"):
+        cleaned = "/" + expanded.lstrip("./")
+        if os.path.isfile(cleaned):
+            return cleaned
+    return expanded
 
 
 def _is_url(ref: str) -> bool:
@@ -159,7 +174,7 @@ def _install_one(image_ref: str, args, custom_container_name) -> None:
     else:
         dist_arch = device_arch
 
-    local_path = os.path.expanduser(image_ref) if _is_local_path(image_ref) else None
+    local_path = _normalize_local_path(image_ref) if _is_local_path(image_ref) else None
     url = image_ref if _is_url(image_ref) else None
 
     # Anything else is an image reference, and one Docker would refuse is refused

@@ -99,7 +99,7 @@ _chroot_distro() {
 		esac
 		if [[ "${cur}" == -* ]]; then
 			_chroot_distro_compgen_words "-n --name --override-alias -a --architecture --allow-insecure -q --quiet -h --help" "${cur}"
-		elif [[ "${cur}" == /* || "${cur}" == ./* || "${cur}" == ../* ]]; then
+		else
 			_filedir
 		fi
 		;;

@@ -446,3 +446,12 @@ def test_restore_failure_returns_exit_code_1(
 
     assert exc.value.code == 1
     assert "could not be restored" in capsys.readouterr().err
+
+
+def test_restore_recovers_leading_dot_before_absolute_path(tmp_path, capsys):
+    archive = tmp_path / "valid.tar"
+    archive.write_text("data")
+    with pytest.raises(SystemExit) as exc:
+        command_restore(SimpleNamespace(archive=f"./{archive}", verbose=False))
+    assert exc.value.code == 1
+    assert "Failed to restore container" in capsys.readouterr().err
