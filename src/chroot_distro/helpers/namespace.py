@@ -28,11 +28,16 @@ B applies to the chrooted sleeping holder only; A is kept where host binds
 must stay usable.
 
 Holder state lives in `data/<name>/`. The pid file carries the process start time
-next to the PID, because a PID is reused and a recycled one would otherwise be
-joined as though it were the holder; a mismatch drops the state rather than
-trusting it. The flags file is a hex bitmask, and a file written before 2.9 holds
+next to the PID, because a PID is reused; a mismatch makes lookup ignore the
+record. The flags file is a hex bitmask, and a file written before 2.9 holds
 unshare(1)-style strings instead, which is why the reverse maps in
 `syscalls/_constants.py` still exist.
+
+State operations borrow the session directory pin or open it through the guarded
+platform-anchor walk. Reads accept bounded, singly linked regular files; writes
+replace entries atomically, and cleanup stays under the same pin. Lookup never
+deletes stale records. These guards do not authenticate ordinary records or
+serialize concurrent holder generations in the same directory.
 
 Work in the holder's view goes through `holder.call` and the `do_*` methods: a
 fork, setns(2), and then ordinary stdlib calls. Nothing execs a tool inside the
@@ -44,16 +49,20 @@ guest, and nothing sets up a mount from the host's view of the tree.
 from __future__ import annotations
 
 import contextlib
+import errno
 import functools
 import logging
 import os
 import signal
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 
-from chroot_distro.constants import PROGRAM_NAME, RUNTIME_DIR
+from chroot_distro import dirfd
+from chroot_distro.atomic import atomic_write
+from chroot_distro.constants import PROGRAM_NAME
 from chroot_distro.exceptions import ChrootDistroError, MountError
+from chroot_distro.paths import open_container_data_dir
 from chroot_distro.syscalls._constants import (
     CLONE_NEWCGROUP,
     CLONE_NEWIPC,
@@ -192,31 +201,71 @@ class NamespaceError(ChrootDistroError):
     """Raised when namespace setup or execution fails."""
 
 
-def _container_data_dir(container_name: str) -> str:
-    data_dir = os.path.join(RUNTIME_DIR, "data", container_name)
-    os.makedirs(data_dir, exist_ok=True)
-    return data_dir
+_STATE_LIMIT = 4096
 
 
-def _holder_pid_file(container_name: str) -> str:
-    return os.path.join(_container_data_dir(container_name), "holder.pid")
+@contextlib.contextmanager
+def _state_dir(container_name: str, *, state_fd: int | None = None, create: bool = False) -> Iterator[int]:
+    owned = state_fd is None
+    try:
+        if state_fd is None:
+            state_fd = open_container_data_dir(container_name, create=create)
+    except FileNotFoundError:
+        if not create:
+            raise
+        raise ChrootDistroError(f"cannot create namespace state for '{container_name}'.") from None
+    except OSError as exc:
+        raise ChrootDistroError(f"cannot open namespace state for '{container_name}': {exc}") from exc
+    try:
+        yield state_fd
+    finally:
+        if owned:
+            os.close(state_fd)
 
 
-def _holder_flags_file(container_name: str) -> str:
-    return os.path.join(_container_data_dir(container_name), "holder.flags")
+def _read_state(state_fd: int, name: str) -> str | None:
+    try:
+        fd, st = dirfd.open_regular_at(state_fd, name, os.O_RDONLY)
+        with os.fdopen(fd, "rb") as fh:
+            if st.st_nlink != 1:
+                raise OSError(errno.EINVAL, "namespace state has multiple links", name)
+            data = fh.read(_STATE_LIMIT + 1)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise ChrootDistroError(f"cannot read namespace state '{name}': {exc}") from exc
+    if len(data) > _STATE_LIMIT:
+        return None
+    try:
+        return data.decode("utf-8")
+    except UnicodeError:
+        return None
 
 
-def _isolation_mode_file(container_name: str) -> str:
-    return os.path.join(_container_data_dir(container_name), "isolation.mode")
+def _write_state(state_fd: int, name: str, value: str) -> None:
+    try:
+        with atomic_write(name, dir_fd=state_fd) as fh:
+            fh.write(value)
+    except OSError as exc:
+        raise ChrootDistroError(f"cannot write namespace state '{name}': {exc}") from exc
 
 
-def _holder_maxiso_file(container_name: str) -> str:
-    return os.path.join(_container_data_dir(container_name), "holder.maxiso")
+def _unlink_state(state_fd: int, name: str) -> None:
+    try:
+        os.unlink(name, dir_fd=state_fd)
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        raise ChrootDistroError(f"cannot remove namespace state '{name}': {exc}") from exc
 
 
-def holder_is_max_isolation(container_name: str) -> bool:
-    """Return True if the live holder was created chrooted (max isolation)."""
-    return os.path.isfile(_holder_maxiso_file(container_name))
+def holder_is_max_isolation(container_name: str, *, state_fd: int | None = None) -> bool:
+    """Return whether the holder has a readable maximum-isolation marker."""
+    try:
+        with _state_dir(container_name, state_fd=state_fd) as fd:
+            return _read_state(fd, "holder.maxiso") is not None
+    except FileNotFoundError:
+        return False
 
 
 @dataclass
@@ -433,29 +482,25 @@ def probe_unshare_flags() -> int:
     return supported
 
 
-def read_isolation_mode(container_name: str) -> str | None:
-    """The stored isolation mode for *container_name*, or None when unset or unreadable."""
-    path = _isolation_mode_file(container_name)
-    if not os.path.isfile(path):
-        return None
+def read_isolation_mode(container_name: str, *, state_fd: int | None = None) -> str | None:
+    """Return the stored isolation mode, or None when absent or malformed."""
     try:
-        with open(path) as fh:
-            mode = fh.read().strip()
-    except OSError:
+        with _state_dir(container_name, state_fd=state_fd) as fd:
+            return (_read_state(fd, "isolation.mode") or "").strip() or None
+    except FileNotFoundError:
         return None
-    return mode or None
 
 
-def write_isolation_mode(container_name: str, mode: str) -> None:
-    """Persist *mode* as *container_name*'s isolation mode."""
-    with open(_isolation_mode_file(container_name), "w") as fh:
-        fh.write(mode)
+def write_isolation_mode(container_name: str, mode: str, *, state_fd: int | None = None) -> None:
+    """Persist the isolation mode through the pinned state directory."""
+    with _state_dir(container_name, state_fd=state_fd, create=True) as fd:
+        _write_state(fd, "isolation.mode", mode)
 
 
-def clear_isolation_mode(container_name: str) -> None:
-    """Drop *container_name*'s stored isolation mode if set."""
-    with contextlib.suppress(OSError):
-        os.remove(_isolation_mode_file(container_name))
+def clear_isolation_mode(container_name: str, *, state_fd: int | None = None) -> None:
+    """Drop the isolation mode without following a replaced parent."""
+    with contextlib.suppress(FileNotFoundError), _state_dir(container_name, state_fd=state_fd) as fd:
+        _unlink_state(fd, "isolation.mode")
 
 
 def _pid_alive(pid: int) -> bool:
@@ -473,89 +518,71 @@ def _get_process_start_time(pid: int) -> float | None:
         return None
 
 
-def _read_holder_pid(container_name: str) -> int | None:
-    path = _holder_pid_file(container_name)
-    if not os.path.isfile(path):
+def _read_holder_pid(container_name: str, *, state_fd: int | None = None) -> int | None:
+    try:
+        with _state_dir(container_name, state_fd=state_fd) as fd:
+            raw = _read_state(fd, "holder.pid")
+    except FileNotFoundError:
+        return None
+    if not raw:
         return None
 
     pid: int | None = None
     start_time: float | None = None
     is_custom = False
     try:
-        with open(path) as fh:
-            lines = fh.read().splitlines()
-            if lines:
-                pid = int(lines[0].strip())
-                if len(lines) > 1 and lines[1].strip():
-                    start_time = float(lines[1].strip())
-                if len(lines) > 2 and lines[2].strip() == "custom":
-                    is_custom = True
-    except (OSError, ValueError):
-        _remove_holder_state(container_name)
+        lines = raw.splitlines()
+        if lines:
+            pid = int(lines[0].strip())
+            if len(lines) > 1 and lines[1].strip():
+                start_time = float(lines[1].strip())
+            if len(lines) > 2 and lines[2].strip() == "custom":
+                is_custom = True
+    except ValueError:
         return None
 
-    if pid is None:
-        _remove_holder_state(container_name)
+    if pid is None or not _pid_alive(pid):
         return None
-
-    is_valid = True
-    if not _pid_alive(pid):
-        is_valid = False
-    elif start_time is not None:
+    if start_time is not None:
         curr_start_time = _get_process_start_time(pid)
         if curr_start_time is None or abs(curr_start_time - start_time) > 0.1:
-            is_valid = False
+            return None
     elif not is_custom and not _is_legacy_sleep_holder(pid):
-        is_valid = False
-
-    if not is_valid:
-        _remove_holder_state(container_name)
         return None
-
     return pid
 
 
-def _read_holder_flags(container_name: str) -> int:
-    """Read the holder's namespace flags as a bitmask.
-
-    A state file written before 2.9 holds CLI-style strings
-    (``--mount --pid ...``) instead of a hex bitmask (``0x2c020000``).
-    """
-    path = _holder_flags_file(container_name)
-    if not os.path.isfile(path):
-        return CLONE_NEWNS
+def _read_holder_flags(container_name: str, *, state_fd: int | None = None) -> int:
+    """Read hex flags or the CLI-style strings written before 2.9."""
     try:
-        with open(path) as fh:
-            raw = fh.read().strip()
-    except OSError:
+        with _state_dir(container_name, state_fd=state_fd) as fd:
+            raw = (_read_state(fd, "holder.flags") or "").strip()
+    except FileNotFoundError:
         return CLONE_NEWNS
-
-    if not raw:
-        return CLONE_NEWNS
-
     if raw.startswith("0x"):
         try:
             return int(raw, 16)
         except ValueError:
             return CLONE_NEWNS
-
     return cli_flags_to_bitmask(raw.split()) or CLONE_NEWNS
 
 
-def _write_holder_flags(container_name: str, flags: int) -> None:
+def _write_holder_flags(container_name: str, flags: int, *, state_fd: int | None = None) -> None:
     """Write holder flags as a hex bitmask."""
-    with open(_holder_flags_file(container_name), "w") as fh:
-        fh.write(f"0x{flags:08x}")
+    with _state_dir(container_name, state_fd=state_fd, create=True) as fd:
+        _write_state(fd, "holder.flags", f"0x{flags:08x}")
 
 
-def _remove_holder_state(container_name: str) -> None:
-    for path in (
-        _holder_pid_file(container_name),
-        _holder_flags_file(container_name),
-        _holder_maxiso_file(container_name),
-    ):
-        with contextlib.suppress(OSError):
-            os.remove(path)
+def _remove_holder_state(container_name: str, *, state_fd: int | None = None) -> None:
+    with contextlib.suppress(FileNotFoundError), _state_dir(container_name, state_fd=state_fd) as fd:
+        failure = None
+        for name in ("holder.pid", "holder.flags", "holder.maxiso"):
+            try:
+                _unlink_state(fd, name)
+            except ChrootDistroError as exc:
+                failure = failure or exc
+        if failure is not None:
+            raise failure
 
 
 def _proc_comm(pid: int) -> str:
@@ -796,22 +823,21 @@ class NamespaceHolder:
             raise OSError(f"set_propagation({target}, {propagation:#x}) failed in namespace")
 
 
-def get_live_holder(container_name: str) -> NamespaceHolder | None:
-    """Return an active holder for the container, or None."""
-    pid = _read_holder_pid(container_name)
-    if pid is None:
+def get_live_holder(container_name: str, *, state_fd: int | None = None) -> NamespaceHolder | None:
+    """Return an active holder without deleting stale records during lookup."""
+    try:
+        with _state_dir(container_name, state_fd=state_fd) as fd:
+            pid = _read_holder_pid(container_name, state_fd=fd)
+            if pid is None:
+                return None
+            flags = _read_holder_flags(container_name, state_fd=fd)
+            flags = filter_accessible_namespaces(pid, flags)
+            if not (flags & CLONE_NEWNS):
+                log.debug("Holder %d has no accessible mount namespace; treating as dead", pid)
+                return None
+            return NamespaceHolder(pid=pid, ns_flags=flags, container_name=container_name)
+    except FileNotFoundError:
         return None
-    flags = _read_holder_flags(container_name)
-    flags = filter_accessible_namespaces(pid, flags)
-    if not (flags & CLONE_NEWNS):
-        log.debug("Holder %d has no accessible mount namespace; treating as dead", pid)
-        _remove_holder_state(container_name)
-        return None
-    return NamespaceHolder(
-        pid=pid,
-        ns_flags=flags,
-        container_name=container_name,
-    )
 
 
 def _create_holder(
@@ -820,6 +846,8 @@ def _create_holder(
     foreground: ForegroundExec | None = None,
     rootfs: str | None = None,
     id_map: tuple[str, str] | None = None,
+    *,
+    state_fd: int | None = None,
 ) -> NamespaceHolder:
     """Create a new namespace holder process.
 
@@ -832,107 +860,109 @@ def _create_holder(
     *id_map* is the ``(uid_map, gid_map)`` to write when *flags* include
     ``CLONE_NEWUSER``; when omitted it defaults to this host's tier map.
     """
-    pid_file = _holder_pid_file(container_name)
-    _remove_holder_state(container_name)
+    with _state_dir(container_name, state_fd=state_fd, create=True) as fd:
+        _remove_holder_state(container_name, state_fd=fd)
 
-    self_chroot_holder = bool(rootfs) or foreground is not None
+        self_chroot_holder = bool(rootfs) or foreground is not None
 
-    idmap_tree_fd = -1
-    if id_map is None and (flags & CLONE_NEWUSER):
-        use_remap = _TIER_B_ROOTFS_IDMAP_READY and _idmapped_mounts_supported() and rootfs is not None
-        tier = ISOLATION_TIER_REMAP if use_remap else ISOLATION_TIER_USERNS
-        id_map = resolve_userns_map(tier)
-        if use_remap and rootfs is not None:
-            idmap_tree_fd = _open_rootfs_clone(rootfs)
-            if idmap_tree_fd < 0:
-                # No clone, no idmapped rootfs; the subordinate map without
-                # it would show the rootfs as nobody-owned.
-                id_map = resolve_userns_map(ISOLATION_TIER_USERNS)
+        idmap_tree_fd = -1
+        if id_map is None and (flags & CLONE_NEWUSER):
+            use_remap = _TIER_B_ROOTFS_IDMAP_READY and _idmapped_mounts_supported() and rootfs is not None
+            tier = ISOLATION_TIER_REMAP if use_remap else ISOLATION_TIER_USERNS
+            id_map = resolve_userns_map(tier)
+            if use_remap and rootfs is not None:
+                idmap_tree_fd = _open_rootfs_clone(rootfs)
+                if idmap_tree_fd < 0:
+                    # No clone, no idmapped rootfs; the subordinate map without
+                    # it would show the rootfs as nobody-owned.
+                    id_map = resolve_userns_map(ISOLATION_TIER_USERNS)
 
-    from chroot_distro.syscalls.unshare import HolderIdmapError
+        from chroot_distro.syscalls.unshare import HolderIdmapError
 
-    try:
-        holder_pid, launcher_pid = _spawn_holder(
-            container_name,
-            flags,
-            rootfs=rootfs,
-            id_map=id_map,
-            foreground=foreground,
-            idmap_tree_fd=idmap_tree_fd,
-        )
-    except HolderIdmapError as exc:
-        # The clone is still ours to close; the holder never stacked it.
-        if idmap_tree_fd >= 0:
-            with contextlib.suppress(OSError):
-                os.close(idmap_tree_fd)
-            idmap_tree_fd = -1
-        log.warning(
-            "idmapped rootfs unavailable (%s); falling back to the identity user namespace map (Tier A).",
-            exc,
-        )
         try:
             holder_pid, launcher_pid = _spawn_holder(
                 container_name,
                 flags,
                 rootfs=rootfs,
-                id_map=resolve_userns_map(ISOLATION_TIER_USERNS),
+                id_map=id_map,
                 foreground=foreground,
-                idmap_tree_fd=-1,
+                idmap_tree_fd=idmap_tree_fd,
             )
-        except (OSError, RuntimeError) as exc2:
+        except HolderIdmapError as exc:
+            # The clone is still ours to close; the holder never stacked it.
+            if idmap_tree_fd >= 0:
+                with contextlib.suppress(OSError):
+                    os.close(idmap_tree_fd)
+                idmap_tree_fd = -1
+            log.warning(
+                "idmapped rootfs unavailable (%s); falling back to the identity user namespace map (Tier A).",
+                exc,
+            )
+            try:
+                holder_pid, launcher_pid = _spawn_holder(
+                    container_name,
+                    flags,
+                    rootfs=rootfs,
+                    id_map=resolve_userns_map(ISOLATION_TIER_USERNS),
+                    foreground=foreground,
+                    idmap_tree_fd=-1,
+                )
+            except (OSError, RuntimeError) as exc2:
+                raise NamespaceError(
+                    "Failed to create the isolation namespace holder. "
+                    f"Error: {exc2}. "
+                    "Isolation requires root with CAP_SYS_ADMIN and kernel "
+                    "support for the mount/PID/UTS/IPC namespaces; some Android "
+                    "kernels restrict this."
+                ) from exc2
+        except (OSError, RuntimeError) as exc:
             raise NamespaceError(
                 "Failed to create the isolation namespace holder. "
-                f"Error: {exc2}. "
-                "Isolation requires root with CAP_SYS_ADMIN and kernel "
-                "support for the mount/PID/UTS/IPC namespaces; some Android "
-                "kernels restrict this."
-            ) from exc2
-    except (OSError, RuntimeError) as exc:
-        raise NamespaceError(
-            "Failed to create the isolation namespace holder. "
-            f"Error: {exc}. "
-            "Isolation requires root with CAP_SYS_ADMIN and kernel support "
-            "for the mount/PID/UTS/IPC namespaces; some Android kernels "
-            "restrict this."
-        ) from exc
+                f"Error: {exc}. "
+                "Isolation requires root with CAP_SYS_ADMIN and kernel support "
+                "for the mount/PID/UTS/IPC namespaces; some Android kernels "
+                "restrict this."
+            ) from exc
 
-    if not _pid_alive(holder_pid):
-        _remove_holder_state(container_name)
-        raise NamespaceError("Namespace holder process exited immediately after creation.")
+        try:
+            if not _pid_alive(holder_pid):
+                raise NamespaceError("Namespace holder process exited immediately after creation.")
 
-    flags = filter_accessible_namespaces(holder_pid, flags)
-    if not (flags & CLONE_NEWNS):
-        with contextlib.suppress(OSError):
-            os.kill(holder_pid, signal.SIGKILL)
-        _remove_holder_state(container_name)
-        raise NamespaceError(
-            f"Namespace holder PID {holder_pid} exposes no mount namespace "
-            "(/proc/<pid>/ns/mnt missing); isolation cannot proceed."
-        )
+            flags = filter_accessible_namespaces(holder_pid, flags)
+            if not (flags & CLONE_NEWNS):
+                raise NamespaceError(
+                    f"Namespace holder PID {holder_pid} exposes no mount namespace "
+                    "(/proc/<pid>/ns/mnt missing); isolation cannot proceed."
+                )
 
-    start_time = _get_process_start_time(holder_pid)
-    with open(pid_file, "w") as fh:
-        if start_time is not None:
-            fh.write(f"{holder_pid}\n{start_time}\n")
-        else:
-            fh.write(f"{holder_pid}\n")
-        if self_chroot_holder:
-            fh.write("custom\n")
+            start_time = _get_process_start_time(holder_pid)
+            payload = f"{holder_pid}\n"
+            if start_time is not None:
+                payload += f"{start_time}\n"
+            if self_chroot_holder:
+                payload += "custom\n"
+            _write_state(fd, "holder.pid", payload)
+            _write_holder_flags(container_name, flags, state_fd=fd)
+            if rootfs:
+                _write_state(fd, "holder.maxiso", "1")
 
-    _write_holder_flags(container_name, flags)
+            return NamespaceHolder(
+                pid=holder_pid,
+                ns_flags=flags,
+                container_name=container_name,
+                launcher_pid=launcher_pid,
+                master_fd=foreground.stdio_master_fd if foreground is not None else -1,
+                is_foreground=foreground is not None,
+            )
 
-    if rootfs:
-        with open(_holder_maxiso_file(container_name), "w") as fh:
-            fh.write("1")
-
-    return NamespaceHolder(
-        pid=holder_pid,
-        ns_flags=flags,
-        container_name=container_name,
-        launcher_pid=launcher_pid,
-        master_fd=foreground.stdio_master_fd if foreground is not None else -1,
-        is_foreground=foreground is not None,
-    )
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.kill(holder_pid, signal.SIGKILL)
+            with contextlib.suppress(OSError):
+                os.waitpid(launcher_pid, 0)
+            with contextlib.suppress(Exception):
+                _remove_holder_state(container_name, state_fd=fd)
+            raise
 
 
 def _open_rootfs_clone(rootfs: str) -> int:
@@ -984,31 +1014,42 @@ def acquire_holder(
     foreground: ForegroundExec | None = None,
     rootfs: str | None = None,
     id_map: tuple[str, str] | None = None,
+    *,
+    state_fd: int | None = None,
 ) -> NamespaceHolder:
-    """Reuse or create a namespace holder for the container."""
-    existing = get_live_holder(container_name)
-    if existing is not None:
-        return existing
-    flags = probe_unshare_flags()
-    return _create_holder(container_name, flags, foreground=foreground, rootfs=rootfs, id_map=id_map)
+    """Reuse or create a holder under the same state-directory pin."""
+    with _state_dir(container_name, state_fd=state_fd, create=True) as fd:
+        existing = get_live_holder(container_name, state_fd=fd)
+        if existing is not None:
+            return existing
+        flags = probe_unshare_flags()
+        return _create_holder(container_name, flags, foreground=foreground, rootfs=rootfs, id_map=id_map, state_fd=fd)
 
 
-def release_holder(container_name: str) -> None:
-    """Kill the namespace holder and remove state files."""
+def release_holder(container_name: str, *, state_fd: int | None = None) -> None:
+    """Kill the namespace holder and remove state under the same directory pin."""
     try:
-        pid = _read_holder_pid(container_name)
-        if pid is not None:
-            with contextlib.suppress(OSError):
-                os.kill(pid, signal.SIGTERM)
-            for _ in range(10):
-                if not _pid_alive(pid):
-                    break
-                time.sleep(0.05)
-            if _pid_alive(pid):
-                with contextlib.suppress(OSError):
-                    os.kill(pid, signal.SIGKILL)
-    finally:
-        _remove_holder_state(container_name)
+        with _state_dir(container_name, state_fd=state_fd) as fd:
+            try:
+                pid = _read_holder_pid(container_name, state_fd=fd)
+                if pid is not None:
+                    with contextlib.suppress(OSError):
+                        os.kill(pid, signal.SIGTERM)
+                    for _ in range(10):
+                        if not _pid_alive(pid):
+                            break
+                        time.sleep(0.05)
+                    if _pid_alive(pid):
+                        with contextlib.suppress(OSError):
+                            os.kill(pid, signal.SIGKILL)
+            except BaseException:
+                with contextlib.suppress(Exception):
+                    _remove_holder_state(container_name, state_fd=fd)
+                raise
+            else:
+                _remove_holder_state(container_name, state_fd=fd)
+    except FileNotFoundError:
+        return
 
 
 def make_mount_private(holder: NamespaceHolder) -> bool:
@@ -1034,7 +1075,7 @@ def set_namespace_hostname(holder: NamespaceHolder, hostname: str) -> bool:
     """
     if not hostname:
         return False
-    flags = _read_holder_flags(holder.container_name)
+    flags = holder.ns_flags
     if not (flags & CLONE_NEWUTS):
         log.debug("UTS namespace not held; skipping sethostname for %s", hostname)
         return False

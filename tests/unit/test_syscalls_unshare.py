@@ -1,12 +1,101 @@
 import os
+import select
 import signal
+import sys
 import time
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 
 from chroot_distro.syscalls import unshare
 from chroot_distro.syscalls._constants import CLONE_NEWNS
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux descriptor sweep")
+@pytest.mark.parametrize("proc_fallback", [False, True])
+def test_parked_holder_closes_host_descriptors_before_chroot(tmp_path, monkeypatch, proc_fallback):
+    import fcntl
+
+    from chroot_distro.syscalls import chroot
+
+    directory_fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        try:
+            high_fd = fcntl.fcntl(directory_fd, fcntl.F_DUPFD, 2048)
+        except OSError:
+            pytest.skip("descriptor limit does not permit a high descriptor")
+    finally:
+        os.close(directory_fd)
+    ready_r, ready_w = os.pipe()
+    steps = []
+    monkeypatch.setattr(unshare, "libc_mount", lambda *args: None)
+    monkeypatch.setattr(unshare, "_stack_idmapped_rootfs", lambda *args: steps.append("idmap"))
+    if proc_fallback:
+        monkeypatch.setattr(chroot, "_close_range_available", lambda: False)
+
+    def enter(root):
+        assert steps == ["idmap"]
+        with pytest.raises(OSError):
+            os.fstat(high_fd)
+        steps.append("chroot")
+
+    monkeypatch.setattr(unshare.os, "chroot", enter)
+    monkeypatch.setattr(unshare.os, "chdir", lambda path: steps.append("chdir"))
+    monkeypatch.setattr(unshare.time, "sleep", lambda seconds: os._exit(0 if steps == ["idmap", "chroot", "chdir"] else 2))
+    pid = os.fork()
+    if pid == 0:
+        try:
+            unshare._run_holder(ready_w, "/guest", idmap_r=100, idmap_tree_fd=101)
+        except BaseException:
+            os._exit(3)
+    os.close(ready_w)
+    reaped = False
+    try:
+        assert select.select([ready_r], [], [], 3)[0]
+        assert os.read(ready_r, 1) == b"K"
+        _, status = os.waitpid(pid, 0)
+        reaped = True
+        assert os.waitstatus_to_exitcode(status) == 0
+    finally:
+        os.close(ready_r)
+        os.close(high_fd)
+        if not reaped:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            try:
+                os.waitpid(pid, 0)
+            except ChildProcessError:
+                pass
+
+
+def test_foreground_holder_keeps_descriptors_until_foreground_setup(tmp_path, monkeypatch):
+    from chroot_distro.syscalls import chroot
+
+    directory_fd = os.open(tmp_path, os.O_RDONLY)
+    ready_r, ready_w = os.pipe()
+    sweep = Mock()
+    monkeypatch.setattr(chroot, "_close_fds_above", sweep)
+    monkeypatch.setattr(unshare, "libc_mount", lambda *args: None)
+    foreground = object()
+    error = RuntimeError("stop before exec")
+
+    def execute(fg):
+        assert fg is foreground
+        os.fstat(directory_fd)
+        raise error
+
+    monkeypatch.setattr(unshare, "_exec_foreground", execute)
+    try:
+        with pytest.raises(RuntimeError) as exc:
+            unshare._run_holder(ready_w, None, foreground=foreground)
+        assert exc.value is error
+        assert os.read(ready_r, 1) == b"K"
+        sweep.assert_not_called()
+    finally:
+        os.close(ready_r)
+        os.close(directory_fd)
 
 
 # ── probe_namespace_support: aggregates supported bits from child exit codes ──────

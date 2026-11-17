@@ -393,8 +393,8 @@ def test_startup_failures_close_resources_before_shared_teardown(detached, state
     detached.sweep.assert_called_once_with("box", exclude_pid=123)
     detached.unmount.assert_called_once_with("rootfs", holder=detached.holder)
     detached.clear.assert_called_once_with("box", state_fd=77)
-    detached.release.assert_called_once_with("box")
-    detached.mode.assert_called_once_with("box")
+    detached.release.assert_called_once_with("box", state_fd=77)
+    detached.mode.assert_called_once_with("box", state_fd=77)
 
 
 @pytest.mark.parametrize("gate", ["peer", "survivor"])

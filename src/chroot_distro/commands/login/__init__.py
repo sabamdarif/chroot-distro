@@ -17,7 +17,9 @@ so nothing here decides what a mount is.
 The session counter is the coordination mechanism. The first session writes
 resolv.conf, acquires the holder and applies every mount; a later one joins what
 is already there. Setup and teardown pass the directory pin from `session.lock`
-to counter and mount-option operations. Every exit path decrements under that lock, and reaching
+to counter, mount-option and namespace-state operations. Storage failures stop
+setup after cleanup rather than triggering an isolation fallback. Every exit
+path decrements under that lock, and reaching
 zero sweeps the container's leftover processes (a GUI session outlives its
 shell), unmounts, releases the holder and clears the isolation mode; processes
 the sweep cannot stop leave everything mounted for `kill` rather than unmounting
@@ -250,8 +252,8 @@ def _exit_teardown(container_name: str, rootfs: str, holder, sess_handle) -> Non
         mount_manager.unmount_all(rootfs, holder=holder)
         session.clear_mount_options(container_name, state_fd=state_fd)
         if holder is not None:
-            namespace.release_holder(container_name)
-        namespace.clear_isolation_mode(container_name)
+            namespace.release_holder(container_name, state_fd=state_fd)
+        namespace.clear_isolation_mode(container_name, state_fd=state_fd)
 
 
 def command_login(args) -> None:
@@ -1152,8 +1154,8 @@ def _command_login_inner_once(container_name: str, args) -> None:
             from chroot_distro.helpers.rootfs import write_resolv_conf
 
             write_resolv_conf(rootfs)
-            if use_namespaces:
-                try:
+            try:
+                if use_namespaces:
                     # A detached run must use the plain holder + nsenter: the
                     # synchronized foreground holder execs the command itself,
                     # so it can't be backgrounded. A foreground run uses the
@@ -1173,6 +1175,7 @@ def _command_login_inner_once(container_name: str, args) -> None:
                         try:
                             holder = namespace.acquire_holder(
                                 container_name,
+                                state_fd=state_fd,
                                 foreground=ForegroundExec(
                                     go_fd=pipe_r,
                                     rootfs=chroot_config.rootfs,
@@ -1202,25 +1205,28 @@ def _command_login_inner_once(container_name: str, args) -> None:
                         holder = namespace.acquire_holder(
                             container_name,
                             rootfs=rootfs if (max_isolation and use_namespaces) else None,
+                            state_fd=state_fd,
                         )
-                    isolation.finalize_holder(holder, container_name, hostname=hostname_arg)
-                except NamespaceError as exc:
-                    _abandon_holder_fds()
+                    isolation.finalize_holder(holder, container_name, hostname=hostname_arg, state_fd=state_fd)
+                else:
+                    namespace.write_isolation_mode(container_name, namespace.ISOLATION_MODE_HOST, state_fd=state_fd)
+            except BaseException as exc:
+                _abandon_holder_fds()
+                with contextlib.suppress(Exception):
+                    mount_manager.unmount_all(rootfs, holder=holder)
+                if holder is not None:
                     with contextlib.suppress(Exception):
-                        mount_manager.unmount_all(rootfs, holder=holder)
-                    if holder is not None:
-                        with contextlib.suppress(Exception):
-                            namespace.release_holder(container_name)
-                        namespace.clear_isolation_mode(container_name)
+                        namespace.release_holder(container_name, state_fd=state_fd)
+                with contextlib.suppress(Exception):
+                    namespace.clear_isolation_mode(container_name, state_fd=state_fd)
+                with contextlib.suppress(Exception):
                     session.decrement(container_name, state_fd=state_fd)
-                    # The chrooted holder can die immediately on Android
-                    # (SELinux); degrade to the old isolated mode.
-                    if _can_fall_back_to_old_isolated(max_isolation, args):
-                        raise _MaxIsolationFallback(str(exc)) from exc
-                    crit_error(str(exc))
-                    sys.exit(1)
-            else:
-                namespace.write_isolation_mode(container_name, namespace.ISOLATION_MODE_HOST)
+                if not isinstance(exc, NamespaceError):
+                    raise
+                if _can_fall_back_to_old_isolated(max_isolation, args):
+                    raise _MaxIsolationFallback(str(exc)) from exc
+                crit_error(str(exc))
+                sys.exit(1)
 
             with contextlib.suppress(Exception):
                 mount_manager.unmount_all(rootfs, holder=holder)
@@ -1242,11 +1248,15 @@ def _command_login_inner_once(container_name: str, args) -> None:
                 )
             except Exception as e:
                 _abandon_holder_fds()
-                mount_manager.unmount_all(rootfs, holder=holder)
+                with contextlib.suppress(Exception):
+                    mount_manager.unmount_all(rootfs, holder=holder)
                 if holder is not None:
-                    namespace.release_holder(container_name)
-                    namespace.clear_isolation_mode(container_name)
-                session.decrement(container_name, state_fd=state_fd)
+                    with contextlib.suppress(Exception):
+                        namespace.release_holder(container_name, state_fd=state_fd)
+                with contextlib.suppress(Exception):
+                    namespace.clear_isolation_mode(container_name, state_fd=state_fd)
+                with contextlib.suppress(Exception):
+                    session.decrement(container_name, state_fd=state_fd)
                 crit_error(f"Failed to mount bindings: {e}")
                 sys.exit(1)
 
@@ -1292,11 +1302,15 @@ def _command_login_inner_once(container_name: str, args) -> None:
                     )
             except Exception as e:
                 _abandon_holder_fds()
-                mount_manager.unmount_all(rootfs, holder=holder)
+                with contextlib.suppress(Exception):
+                    mount_manager.unmount_all(rootfs, holder=holder)
                 if holder is not None:
-                    namespace.release_holder(container_name)
-                    namespace.clear_isolation_mode(container_name)
-                session.decrement(container_name, state_fd=state_fd)
+                    with contextlib.suppress(Exception):
+                        namespace.release_holder(container_name, state_fd=state_fd)
+                with contextlib.suppress(Exception):
+                    namespace.clear_isolation_mode(container_name, state_fd=state_fd)
+                with contextlib.suppress(Exception):
+                    session.decrement(container_name, state_fd=state_fd)
                 # Android SELinux often denies the fresh pseudo-filesystems;
                 # degrade once to the old isolated mode instead of aborting.
                 if _can_fall_back_to_old_isolated(max_isolation, args):
@@ -1358,25 +1372,31 @@ def _command_login_inner_once(container_name: str, args) -> None:
                         f"namespace mode differs and will be ignored."
                     )
             if use_namespaces:
-                holder = namespace.get_live_holder(container_name)
-                if holder is None:
-                    session.decrement(container_name, state_fd=state_fd)
-                    crit_error(
-                        f"Namespace holder for '{container_name}' is not running. "
-                        f"Run '{PROGRAM_NAME} unmount {container_name}' and try again."
-                    )
-                    sys.exit(1)
-                # Never reuse a non-chrooted holder under max isolation: it
-                # would re-open the `chroot /proc/1/root` escape.
-                if max_isolation and not namespace.holder_is_max_isolation(container_name):
-                    session.decrement(container_name, state_fd=state_fd)
-                    crit_error(
-                        f"Container '{container_name}' already has an active, "
-                        f"non-isolated session/holder. Run "
-                        f"'{PROGRAM_NAME} unmount {container_name}' first, then "
-                        f"log in again with --isolated."
-                    )
-                    sys.exit(1)
+                try:
+                    holder = namespace.get_live_holder(container_name, state_fd=state_fd)
+                    if holder is None:
+                        session.decrement(container_name, state_fd=state_fd)
+                        crit_error(
+                            f"Namespace holder for '{container_name}' is not running. "
+                            f"Run '{PROGRAM_NAME} unmount {container_name}' and try again."
+                        )
+                        sys.exit(1)
+                    # Never reuse a non-chrooted holder under max isolation: it
+                    # would re-open the `chroot /proc/1/root` escape.
+                    if max_isolation and not namespace.holder_is_max_isolation(container_name, state_fd=state_fd):
+                        session.decrement(container_name, state_fd=state_fd)
+                        crit_error(
+                            f"Container '{container_name}' already has an active, "
+                            f"non-isolated session/holder. Run "
+                            f"'{PROGRAM_NAME} unmount {container_name}' first, then "
+                            f"log in again with --isolated."
+                        )
+                        sys.exit(1)
+
+                except ChrootDistroError:
+                    with contextlib.suppress(Exception):
+                        session.decrement(container_name, state_fd=state_fd)
+                    raise
 
             # Mount what this session asked for and the container does not have
             # yet. Only the missing targets are passed: safe_mount is idempotent
@@ -1425,14 +1445,16 @@ def _command_login_inner_once(container_name: str, args) -> None:
                     except BaseException:
                         if holder is not None:
                             with contextlib.suppress(Exception):
-                                namespace.release_holder(container_name)
+                                namespace.release_holder(container_name, state_fd=state_fd)
+                            with contextlib.suppress(Exception):
                                 session.clear_mount_options(container_name, state_fd=state_fd)
-                                namespace.clear_isolation_mode(container_name)
+                            with contextlib.suppress(Exception):
+                                namespace.clear_isolation_mode(container_name, state_fd=state_fd)
                         raise
                     if holder is not None:
-                        namespace.release_holder(container_name)
+                        namespace.release_holder(container_name, state_fd=state_fd)
                     session.clear_mount_options(container_name, state_fd=state_fd)
-                    namespace.clear_isolation_mode(container_name)
+                    namespace.clear_isolation_mode(container_name, state_fd=state_fd)
 
     if command_line is not None:
         with stdout_output() as stream:

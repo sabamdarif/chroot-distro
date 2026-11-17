@@ -1,5 +1,5 @@
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 import pytest
 
@@ -8,6 +8,14 @@ from chroot_distro.commands.build import _resolve_build_isolation_mode
 from chroot_distro.helpers import isolation
 from chroot_distro.helpers.build_engine import run_step
 from chroot_distro.helpers.namespace import NamespaceError
+
+
+@pytest.fixture(autouse=True)
+def runtime_state(tmp_path, monkeypatch):
+    from chroot_distro import paths
+
+    monkeypatch.setattr(paths, "RUNTIME_DIR", str(tmp_path / "runtime"))
+    monkeypatch.setattr(paths, "IS_TERMUX", False)
 
 
 # ── env resolution ────────────────────────────────────────────────────────────
@@ -192,7 +200,7 @@ def test_namespace_session_holder_not_chrooted_and_default_binds(tmp_path):
         with isolation.namespace_session("key", str(tmp_path)) as h:
             assert h is holder
         # Not chrooted: acquire_holder called without rootfs=.
-        assert acquire.call_args == (("key",),)
+        acquire.assert_called_once_with("key", state_fd=ANY)
         # Default mount set: isolated/max_isolation off, namespaces on.
         gb_kwargs = gb.call_args.kwargs
         assert gb_kwargs["isolated"] is False
@@ -201,7 +209,7 @@ def test_namespace_session_holder_not_chrooted_and_default_binds(tmp_path):
         sp_kwargs = special.call_args.kwargs
         assert sp_kwargs["max_isolation"] is False
         safe_mount.assert_called_once()
-        teardown.assert_called_once_with("key", str(tmp_path), holder)
+        teardown.assert_called_once_with("key", str(tmp_path), holder, state_fd=ANY)
 
 
 def test_namespace_session_teardown_on_namespace_error(tmp_path):
@@ -215,7 +223,7 @@ def test_namespace_session_teardown_on_namespace_error(tmp_path):
     ):
         with isolation.namespace_session("key", str(tmp_path)) as h:
             assert h is None
-        teardown.assert_called_once_with("key", str(tmp_path), holder)
+        teardown.assert_called_once_with("key", str(tmp_path), holder, state_fd=ANY)
 
 
 def test_max_isolation_session_still_chroots_holder(tmp_path):

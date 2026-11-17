@@ -5,7 +5,7 @@ import os
 import signal
 from contextlib import contextmanager
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import ANY, Mock, patch
 
 import pytest
 
@@ -38,7 +38,6 @@ def command_display(tmp_path, monkeypatch):
     monkeypatch.setattr(paths, "CONTAINERS_DIR", str(rootfs.parent.parent))
     monkeypatch.setattr(paths, "RUNTIME_DIR", str(tmp_path))
     monkeypatch.setattr(paths, "IS_TERMUX", False)
-    monkeypatch.setattr(login.namespace, "RUNTIME_DIR", str(tmp_path))
     monkeypatch.setattr(login.namespace, "check_isolation_conflicts", Mock())
     monkeypatch.setattr(login.namespace, "should_use_namespaces", Mock(return_value=False))
     monkeypatch.setattr(
@@ -164,8 +163,8 @@ def test_command_display_unmount_failure(command_display, monkeypatch, namespace
     assert exc.value is error
     assert (data / "sessions").read_text() == "0"
     if namespaced:
-        acquire.assert_called_once_with("demo", rootfs=None)
-        release.assert_called_once_with("demo")
+        acquire.assert_called_once_with("demo", rootfs=None, state_fd=ANY)
+        release.assert_called_once_with("demo", state_fd=ANY)
         assert not (data / "isolation.mode").exists()
     else:
         acquire.assert_not_called()
@@ -191,6 +190,58 @@ def test_command_display_preserves_live_session(command_display, monkeypatch, ca
     assert "nsenter" in capsys.readouterr().out
     login.mount_manager.unmount_all.assert_not_called()
     login.namespace.release_holder.assert_not_called()
+
+
+@pytest.mark.parametrize("namespaced", [False, True])
+@pytest.mark.parametrize("interrupted", [False, True])
+def test_state_publication_failure_cleans_session_without_fallback(
+    command_display, monkeypatch, namespaced, interrupted
+):
+    from chroot_distro.exceptions import ChrootDistroError
+
+    login, args, data = command_display
+    error = KeyboardInterrupt() if interrupted else ChrootDistroError("unsafe state")
+    login.namespace.should_use_namespaces.return_value = namespaced
+    holder = SimpleNamespace(pid=1234)
+    acquire = Mock(return_value=holder)
+    release = Mock(side_effect=ChrootDistroError("cleanup refused"))
+    clear = Mock(side_effect=ChrootDistroError("clear refused"))
+    fallback = Mock(return_value=True)
+    monkeypatch.setattr(login.namespace, "acquire_holder", acquire)
+    monkeypatch.setattr(login.namespace, "release_holder", release)
+    monkeypatch.setattr(login.namespace, "clear_isolation_mode", clear)
+    monkeypatch.setattr(login, "_can_fall_back_to_old_isolated", fallback)
+    if namespaced:
+        monkeypatch.setattr(login.isolation, "finalize_holder", Mock(side_effect=error))
+    else:
+        monkeypatch.setattr(login.namespace, "write_isolation_mode", Mock(side_effect=error))
+    with pytest.raises(type(error)) as exc:
+        login._command_login_inner_once("demo", args)
+    assert exc.value is error
+    assert (data / "sessions").read_text() == "0"
+    clear.assert_called_once_with("demo", state_fd=ANY)
+    if namespaced:
+        release.assert_called_once_with("demo", state_fd=ANY)
+    else:
+        release.assert_not_called()
+    fallback.assert_not_called()
+
+
+def test_unsafe_holder_join_undoes_only_new_session(command_display, monkeypatch):
+    from chroot_distro.exceptions import ChrootDistroError
+
+    login, args, data = command_display
+    data.mkdir(parents=True)
+    (data / "sessions").write_text("1")
+    login.session.get_active_chroot_pids.return_value = [1234]
+    login.namespace.should_use_namespaces.return_value = True
+    error = ChrootDistroError("unsafe holder flags")
+    monkeypatch.setattr(login.namespace, "get_live_holder", Mock(side_effect=error))
+    with pytest.raises(ChrootDistroError) as exc:
+        login._command_login_inner_once("demo", args)
+    assert exc.value is error
+    assert (data / "sessions").read_text() == "1"
+    login.mount_manager.unmount_all.assert_not_called()
 
 
 @pytest.mark.parametrize("command", ["login", "run"])

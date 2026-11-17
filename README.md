@@ -722,6 +722,10 @@ Session counters and saved mount options use guarded directory opens and
 atomic file replacement. A symlink or non-regular file at the session lock
 stops the command. Stop other commands and inspect that entry before removing it.
 
+Namespace holder and isolation state use the same guarded directory opens and
+atomic replacement. Reads reject symlinks, multiply linked files and non-regular
+files. Unsafe state stops setup instead of causing a fallback without isolation.
+
 Session records use the same guarded directory walk for publication and stale
 record removal. Recording failures do not stop a guest from starting. `ps` skips
 unreadable records, invalid JSON and records over 1 MiB; on Termux the records
