@@ -89,7 +89,9 @@ def test_termux_parent_bind_stops_propagation_before_child_mounts(tmp_path, monk
     rootfs = data / "rootfs"
     guest_data = rootfs / "data"
     guest_data.mkdir(parents=True)
-    sources = [(str(data), str(guest_data)), ("/system", str(guest_data / "system"))]
+    guest_system = rootfs / "system"
+    guest_system.mkdir()
+    sources = [(str(data), str(guest_data)), ("/system", str(guest_system))]
     calls = []
     monkeypatch.setattr(isolation, "IS_TERMUX", True)
     monkeypatch.setattr(isolation.mount_manager, "safe_mount", lambda src, dst, **kw: calls.append(("bind", dst)))
@@ -100,7 +102,8 @@ def test_termux_parent_bind_stops_propagation_before_child_mounts(tmp_path, monk
     assert calls == [
         ("bind", str(guest_data)),
         ("slave", isolation.mount_manager.MS_REC | isolation.mount_manager.MS_SLAVE),
-        ("bind", str(guest_data / "system")),
+        ("bind", str(guest_system)),
+        ("slave", isolation.mount_manager.MS_REC | isolation.mount_manager.MS_SLAVE),
     ]
 
 

@@ -41,10 +41,9 @@ a descriptor the child does not need is a way out of the rootfs (a holder's
 go-pipe or PTY master still names a host file), so each forked child runs
 `_close_fds_above` between its own setup and the exec.
 
-`_try_exec` retries through the binary's own PT_INTERP when a direct execve fails
-with ENOENT or EACCES on a binary that plainly exists. That is an Android/Termux
-kernel quirk on the login path, not a missing file, and running the dynamic linker
-explicitly sidesteps it.
+Guest execs on Termux call bionic directly so the host's preloaded termux-exec
+cannot rewrite guest paths. `_try_exec` can still retry through the binary's own
+PT_INTERP when execve fails with ENOENT or EACCES and both files exist.
 """
 
 from __future__ import annotations
@@ -63,6 +62,7 @@ import sys
 import time
 import typing
 
+from chroot_distro.constants import IS_TERMUX
 from chroot_distro.syscalls._constants import PR_SET_NO_NEW_PRIVS
 from chroot_distro.syscalls._libc import get_libc, libc_prctl, syscall_libc
 from chroot_distro.syscalls.capabilities import clear_ambient_caps, drop_bounding_caps
@@ -859,24 +859,42 @@ def _binary_interpreter(target: str) -> str | None:
         return None
 
 
+def _termux_execvpe(file: str, args: list[str], env: dict[str, str]) -> typing.NoReturn:
+    """Exec with guest PATH lookup, bypassing termux-exec on Android."""
+    encoded_args = [os.fsencode(arg) for arg in args]
+    encoded_env = [os.fsencode(f"{key}={value}") for key, value in env.items()]
+    if not encoded_args or not encoded_args[0]:
+        raise ValueError("execve: argv must start with a non-empty string")
+    if any(not key or "=" in key for key in env):
+        raise ValueError("execve: illegal environment variable name")
+    if any(b"\0" in entry for entry in (os.fsencode(file), *encoded_args, *encoded_env)):
+        raise ValueError("execve: embedded null byte")
+
+    argv = (ctypes.c_char_p * (len(encoded_args) + 1))(*encoded_args)
+    envp = (ctypes.c_char_p * (len(encoded_env) + 1))(*encoded_env)
+    execve = get_libc().execve
+    paths = [file] if os.path.dirname(file) else [os.path.join(path, file) for path in os.get_exec_path(env)]
+    first_error = None
+    last_error = None
+    for path in paths:
+        execve(os.fsencode(path), argv, envp)
+        err = ctypes.get_errno()
+        last_error = OSError(err, os.strerror(err), path)
+        if first_error is None and err not in (errno.ENOENT, errno.ENOTDIR):
+            first_error = last_error
+    assert last_error is not None
+    raise first_error or last_error
+
+
 def _try_exec(cmd: list[str], run_env: dict[str, str]) -> None:
-    """Attempt to exec *cmd*; on ENOENT or EACCES for an existing binary, retry via its
-    ELF interpreter. Returns the final OSError (this never returns on success).
-
-    A direct ``execve`` of a dynamically linked guest binary can fail with
-    ENOENT or EACCES on some Termux/Android kernels even though the binary, its
-    architecture and its PT_INTERP all exist inside the chroot. Re-running it
-    as ``<interpreter> <binary> <args...>`` makes the dynamic linker load the
-    program explicitly and sidesteps that failure.
-    """
-    import errno as _errno
-
+    """Exec *cmd*, retrying an existing ELF binary through its interpreter."""
+    exec_guest = _termux_execvpe if IS_TERMUX else os.execvpe
     try:
-        os.execvpe(cmd[0], cmd, run_env)
+        exec_guest(cmd[0], cmd, run_env)
     except OSError as exc:
-        if exc.errno not in (_errno.ENOENT, _errno.EACCES) or not os.path.exists(cmd[0]):
+        if exc.errno not in (errno.ENOENT, errno.EACCES) or not os.path.exists(cmd[0]):
             raise
         interp = _binary_interpreter(cmd[0])
         if not interp or not os.path.exists(interp):
             raise
-        os.execvpe(interp, [interp, *cmd], run_env)
+        exec_guest(interp, [interp, *cmd], run_env)

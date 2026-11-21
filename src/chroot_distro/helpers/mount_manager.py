@@ -421,7 +421,7 @@ def make_rslave(target: str, holder: NamespaceHolder | None = None) -> bool:
 
 
 def stop_guest_bind_propagation(rootfs: str, target: str) -> None:
-    """Make a bind of a rootfs ancestor receive mount events only."""
+    """Make a directory bind and its submounts receive mount events only."""
     parts = mount_targets.guest_parts(rootfs, target)
     fd = mount_targets.resolve_mount_target(rootfs, parts, want="dir", create=False)
     if fd is None:

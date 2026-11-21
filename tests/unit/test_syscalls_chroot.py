@@ -86,18 +86,54 @@ def test_binary_interpreter_missing_file(tmp_path):
 
 
 # ── _try_exec ─────────────────────────────────────────────────────────────────
-def test_try_exec_success_calls_execvpe():
+def test_try_exec_success_calls_execvpe(monkeypatch):
+    monkeypatch.setattr(chroot, "IS_TERMUX", False)
     with patch("os.execvpe") as ex:
         chroot._try_exec(["/bin/true"], {})
     ex.assert_called_once_with("/bin/true", ["/bin/true"], {})
 
 
-def test_try_exec_reraises_non_enoent():
+@pytest.mark.parametrize(
+    ("command", "paths"),
+    [
+        ("/bin/sh", [b"/bin/sh"]),
+        ("sh", [b"/missing/sh", b"/bin/sh"]),
+    ],
+)
+def test_termux_guest_exec_bypasses_host_shim(monkeypatch, command, paths):
+    class GuestStarted(Exception):
+        pass
+
+    calls = []
+
+    def execve(path, argv, envp):
+        calls.append(path)
+        assert argv[:] == [os.fsencode(command), b"-l", None]
+        assert envp[:] == [b"PATH=/missing:/bin", None]
+        if path == b"/bin/sh":
+            raise GuestStarted
+        ctypes.set_errno(errno.ENOENT)
+        return -1
+
+    monkeypatch.setattr(chroot, "IS_TERMUX", True)
+    with (
+        patch.object(chroot, "get_libc", return_value=Mock(execve=execve)),
+        patch("os.execvpe", side_effect=AssertionError("host exec shim called")),
+        pytest.raises(GuestStarted),
+    ):
+        chroot._try_exec([command, "-l"], {"PATH": "/missing:/bin"})
+
+    assert calls == paths
+
+
+def test_try_exec_reraises_non_enoent(monkeypatch):
+    monkeypatch.setattr(chroot, "IS_TERMUX", False)
     with patch("os.execvpe", side_effect=OSError(errno.EPERM, "denied")), pytest.raises(OSError):
         chroot._try_exec(["/bin/x"], {})
 
 
-def test_try_exec_retries_via_interpreter(tmp_path):
+def test_try_exec_retries_via_interpreter(tmp_path, monkeypatch):
+    monkeypatch.setattr(chroot, "IS_TERMUX", False)
     binary = tmp_path / "prog"
     binary.write_bytes(b"\x7fELF")
     interp = tmp_path / "lib" / "ld.so"
