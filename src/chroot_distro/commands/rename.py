@@ -19,7 +19,7 @@ import chroot_distro.helpers.session as session
 from chroot_distro.locking import ContainerLock
 from chroot_distro.message import crit_error, log_error, log_info
 from chroot_distro.names import require_valid_name
-from chroot_distro.paths import container_dir, container_rootfs
+from chroot_distro.paths import container_dir, container_is_installed, container_rootfs
 
 
 def command_rename(args) -> None:
@@ -38,19 +38,18 @@ def command_rename(args) -> None:
     new_dir = container_dir(new)
     orig_rootfs = container_rootfs(orig)
 
-    if not os.path.isdir(orig_rootfs):
-        crit_error(f"container '{orig}' is not installed.")
-        sys.exit(1)
-
-    if os.path.isdir(new_dir):
-        crit_error(f"container '{new}' already exists.")
-        sys.exit(1)
-
     first, second = (orig, new) if orig < new else (new, orig)
     with (
         ContainerLock(first, exclusive=True, command="rename"),
         ContainerLock(second, exclusive=True, command="rename"),
     ):
+        if not container_is_installed(orig):
+            crit_error(f"container '{orig}' is not installed.")
+            sys.exit(1)
+        if os.path.isdir(new_dir):
+            crit_error(f"container '{new}' already exists.")
+            sys.exit(1)
+
         active_pids = session.get_active_chroot_pids(orig)
         if active_pids:
             crit_error(f"Cannot rename container '{orig}': It has active sessions (PIDs: {active_pids}).")

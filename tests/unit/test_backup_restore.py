@@ -19,7 +19,7 @@ from unittest.mock import patch
 import pytest
 
 from chroot_distro import locking, paths
-from chroot_distro.commands import backup
+from chroot_distro.commands import backup, restore
 from chroot_distro.commands.backup import command_backup
 from chroot_distro.commands.restore import command_restore
 from chroot_distro.message import StdoutError
@@ -63,7 +63,7 @@ _BACKUP_CLI = """
 import sys
 from contextlib import nullcontext
 from chroot_distro import cli, paths
-from chroot_distro.commands import backup
+from chroot_distro.commands import backup, restore
 
 paths.CONTAINERS_DIR = sys.argv.pop(1)
 cli._ensure_root_user = lambda: None
@@ -193,11 +193,9 @@ def test_backup_source_broken_pipe_is_a_source_failure(tmp_path, monkeypatch, ca
 @patch("chroot_distro.commands.backup.session.get_active_chroot_pids", return_value=[])
 @patch("chroot_distro.commands.backup.mount_manager.get_active_mounts", return_value=[])
 @patch("chroot_distro.commands.backup.ContainerLock")
-@patch("chroot_distro.commands.restore.mount_manager.ensure_no_mounts")
 @patch("chroot_distro.commands.restore.ContainerLock")
 def test_backup_and_restore_end_to_end(
     mock_restore_lock,
-    mock_ensure_no_mounts,
     mock_backup_lock,
     mock_get_active_mounts,
     mock_get_active_chroot_pids,
@@ -237,10 +235,7 @@ def test_backup_and_restore_end_to_end(
     backup_args = parser.parse_args(["backup", container_name, "--output", str(backup_archive)])
 
     # Patch paths to point to our temp containers directory
-    with (
-        patch("chroot_distro.paths.CONTAINERS_DIR", str(containers_dir)),
-        patch("chroot_distro.commands.restore.CONTAINERS_DIR", str(containers_dir)),
-    ):
+    with patch("chroot_distro.paths.CONTAINERS_DIR", str(containers_dir)):
         # 2. Run backup
         command_backup(backup_args)
 
@@ -296,11 +291,9 @@ def test_backup_and_restore_end_to_end(
 @patch("chroot_distro.commands.backup.session.get_active_chroot_pids", return_value=[])
 @patch("chroot_distro.commands.backup.mount_manager.get_active_mounts", return_value=[])
 @patch("chroot_distro.commands.backup.ContainerLock")
-@patch("chroot_distro.commands.restore.mount_manager.ensure_no_mounts")
 @patch("chroot_distro.commands.restore.ContainerLock")
 def test_backup_and_restore_zstd(
     mock_restore_lock,
-    mock_ensure_no_mounts,
     mock_backup_lock,
     mock_get_active_mounts,
     mock_get_active_chroot_pids,
@@ -333,10 +326,7 @@ def test_backup_and_restore_zstd(
     parser = build_parser()
     backup_args = parser.parse_args(["backup", container_name, "--output", str(backup_archive)])
 
-    with (
-        patch("chroot_distro.paths.CONTAINERS_DIR", str(containers_dir)),
-        patch("chroot_distro.commands.restore.CONTAINERS_DIR", str(containers_dir)),
-    ):
+    with patch("chroot_distro.paths.CONTAINERS_DIR", str(containers_dir)):
         command_backup(backup_args)
 
         assert backup_archive.exists()
@@ -397,11 +387,9 @@ def test_backup_failure_returns_exit_code_1(
 @patch("chroot_distro.commands.backup.session.get_active_chroot_pids", return_value=[])
 @patch("chroot_distro.commands.backup.mount_manager.get_active_mounts", return_value=[])
 @patch("chroot_distro.commands.backup.ContainerLock")
-@patch("chroot_distro.commands.restore.mount_manager.ensure_no_mounts")
 @patch("chroot_distro.commands.restore.ContainerLock")
 def test_restore_failure_returns_exit_code_1(
     mock_restore_lock,
-    mock_ensure_no_mounts,
     mock_backup_lock,
     mock_get_active_mounts,
     mock_get_active_chroot_pids,
@@ -426,26 +414,21 @@ def test_restore_failure_returns_exit_code_1(
     shutil.rmtree(containers_dir / "testcont")
     assert not (containers_dir / "testcont").exists()
 
-    original_open = open
+    def deny_restore_write(*args, **kwargs):
+        raise PermissionError("Permission denied")
 
-    def _deny_restore_write(path, *args, **kwargs):
-        mode = kwargs.get("mode") or (args[0] if args else None)
-        if mode == "wb" and "testcont" in str(path) and "rootfs" in str(path):
-            raise OSError(13, "Permission denied")
-        return original_open(path, *args, **kwargs)
-
-    monkeypatch.setattr("builtins.open", _deny_restore_write)
+    monkeypatch.setattr(restore.dirfd, "open_new_at", deny_restore_write)
 
     restore_args = parser.parse_args(["restore", str(backup_archive)])
     with (
         patch("chroot_distro.paths.CONTAINERS_DIR", str(containers_dir)),
-        patch("chroot_distro.commands.restore.CONTAINERS_DIR", str(containers_dir)),
         pytest.raises(SystemExit) as exc,
     ):
         command_restore(restore_args)
 
     assert exc.value.code == 1
-    assert "could not be restored" in capsys.readouterr().err
+    assert "Failed to restore container: Permission denied" in capsys.readouterr().err
+    assert (containers_dir / "testcont/.install-incomplete").is_file()
 
 
 def test_restore_recovers_leading_dot_before_absolute_path(tmp_path, capsys):
@@ -455,3 +438,199 @@ def test_restore_recovers_leading_dot_before_absolute_path(tmp_path, capsys):
         command_restore(SimpleNamespace(archive=f"./{archive}", verbose=False))
     assert exc.value.code == 1
     assert "Failed to restore container" in capsys.readouterr().err
+
+
+@pytest.fixture
+def restore_store(tmp_path, monkeypatch):
+    store = tmp_path / "containers"
+    monkeypatch.setattr(paths, "CONTAINERS_DIR", str(store))
+    monkeypatch.setattr(locking, "RUNTIME_DIR", str(tmp_path))
+    monkeypatch.setattr(locking, "LOCKS_DIR", str(tmp_path / "locks"))
+    return store
+
+
+def _add_restore_entry(tf, name, data=b"", *, kind=tarfile.REGTYPE, link="", mode=0o644):
+    member = tarfile.TarInfo(name)
+    member.type = kind
+    member.uid, member.gid = os.geteuid(), os.getegid()
+    member.size = len(data)
+    member.mode = mode
+    member.linkname = link
+    tf.addfile(member, io.BytesIO(data))
+
+
+@pytest.mark.parametrize("failure", ["hardlink", "truncated", "interrupt", "manifest", "ownership", "directory mode"])
+def test_failed_restore_is_incomplete_and_can_be_retried(restore_store, tmp_path, monkeypatch, capsys, failure):
+    archive = tmp_path / "broken.tar"
+    with tarfile.open(archive, "w") as tf:
+        _add_restore_entry(tf, "box/rootfs/kept", b"first")
+        if failure == "hardlink":
+            _add_restore_entry(tf, "box/rootfs/broken", kind=tarfile.LNKTYPE, link="box/rootfs/missing")
+        elif failure == "truncated":
+            _add_restore_entry(tf, "box/rootfs/broken", b"x" * 40000)
+        elif failure == "manifest":
+            _add_restore_entry(tf, "box/manifest.json", b'{"image_ref":"old"}')
+        elif failure == "directory mode":
+            _add_restore_entry(tf, "box/rootfs/restricted", kind=tarfile.DIRTYPE, mode=0o500)
+        else:
+            _add_restore_entry(tf, "box/rootfs/broken", b"second")
+
+    if failure == "truncated":
+        with archive.open("r+b") as stream:
+            stream.truncate(4096)
+
+    def fail(*args, **kwargs):
+        raise OSError("injected restore failure")
+
+    with monkeypatch.context() as scoped:
+        if failure == "interrupt":
+            def interrupt(*args, **kwargs):
+                raise KeyboardInterrupt
+
+            scoped.setattr(restore, "draw_bytes_bar", interrupt)
+        elif failure == "manifest":
+            scoped.setattr(restore, "atomic_write", fail)
+        elif failure == "ownership":
+            scoped.setattr(os, "fchown", fail)
+        elif failure == "directory mode":
+            chmod = os.fchmod
+
+            def fail_final_mode(fd, mode):
+                if mode == 0o500:
+                    fail()
+                chmod(fd, mode)
+
+            scoped.setattr(os, "fchmod", fail_final_mode)
+        with pytest.raises(SystemExit, match="1"):
+            command_restore(SimpleNamespace(archive=str(archive)))
+
+    box = restore_store / "box"
+    assert (box / "rootfs").is_dir()
+    assert paths.is_install_incomplete("box")
+    assert not paths.container_is_installed("box")
+    assert paths.installed_containers() == []
+    assert "Finished restoring" not in capsys.readouterr().err
+
+    (box / "manifest.json").write_text('{"image_ref":"stale"}')
+    (box / "rootfs").chmod(0o500)
+    with tarfile.open(archive, "w") as tf:
+        _add_restore_entry(tf, "installed-rootfs/box/good", b"restored")
+        _add_restore_entry(tf, "installed-rootfs/box/copy", kind=tarfile.LNKTYPE, link="installed-rootfs/box/good")
+    command_restore(SimpleNamespace(archive=str(archive)))
+
+    original, copied = box / "rootfs/good", box / "rootfs/copy"
+    assert paths.container_is_installed("box")
+    assert not paths.is_install_incomplete("box")
+    assert not (box / "manifest.json").exists()
+    assert sorted(p.name for p in original.parent.iterdir()) == ["copy", "good"]
+    assert original.read_bytes() == copied.read_bytes() == b"restored"
+    assert original.stat().st_ino != copied.stat().st_ino
+    assert original.parent.stat().st_mode & 0o777 == 0o755
+
+
+def test_restore_preserves_rootfs_that_appears_during_creation(restore_store, tmp_path, monkeypatch, capsys):
+    archive = tmp_path / "backup.tar"
+    with tarfile.open(archive, "w") as tf:
+        _add_restore_entry(tf, "box/rootfs/new", b"new")
+
+    mkdir = os.mkdir
+    rootfs = restore_store / "box/rootfs"
+
+    def competing_mkdir(path, *args, **kwargs):
+        if path == "rootfs" and kwargs.get("dir_fd") is not None:
+            mkdir(rootfs)
+            (rootfs / "existing").write_text("keep")
+        return mkdir(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "mkdir", competing_mkdir)
+    for _ in range(2):
+        with pytest.raises(SystemExit, match="1"):
+            command_restore(SimpleNamespace(archive=str(archive)))
+        assert paths.container_is_installed("box")
+        assert sorted(entry.name for entry in rootfs.iterdir()) == ["existing"]
+    assert "already installed" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("mount_location", ["rootfs", "rootfs/child", None])
+def test_restore_refuses_retry_if_mounts_cannot_be_ruled_out(
+    restore_store, tmp_path, monkeypatch, capsys, mount_location
+):
+    from chroot_distro.helpers import mount_manager
+
+    box = _make_container(restore_store, "box")
+    (box / ".install-incomplete").touch()
+
+    def open_mounts(path):
+        assert path == "/proc/self/mounts"
+        if mount_location is None:
+            raise FileNotFoundError("mount table unavailable")
+        return io.StringIO(f"tmpfs {box / mount_location} tmpfs rw 0 0\n")
+
+    monkeypatch.setattr(mount_manager, "open", open_mounts, raising=False)
+    archive = tmp_path / "backup.tar"
+    with tarfile.open(archive, "w") as tf:
+        _add_restore_entry(tf, "box/rootfs/new", b"new")
+    with pytest.raises(SystemExit, match="1"):
+        command_restore(SimpleNamespace(archive=str(archive)))
+    assert (box / "rootfs/hello").read_text() == "hi"
+    assert paths.is_install_incomplete("box")
+    assert not (box / "rootfs/new").exists()
+    expected = "mount table unavailable" if mount_location is None else "Active mounts"
+    assert expected in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("component", ["container", "parent"])
+def test_restore_confines_writes_after_storage_replacement(restore_store, tmp_path, monkeypatch, component):
+    archive = tmp_path / "backup.tar"
+    with tarfile.open(archive, "w") as tf:
+        _add_restore_entry(tf, "box/rootfs/dir/first", b"first")
+        _add_restore_entry(tf, "box/rootfs/dir/keep", b"changed")
+
+    box = restore_store / "box"
+    source = box if component == "container" else box / "rootfs/dir"
+    saved = tmp_path / "saved"
+    outside = tmp_path / "outside"
+    destination = outside / "rootfs/dir" if component == "container" else outside
+    destination.mkdir(parents=True)
+    (destination / "keep").write_text("keep")
+
+    def replace_after_first_entry(*args, **kwargs):
+        if not saved.exists():
+            source.rename(saved)
+            source.symlink_to(outside, target_is_directory=True)
+
+    if component == "container":
+        monkeypatch.setattr(restore, "draw_bytes_bar", replace_after_first_entry)
+    else:
+        descend_at = restore.dirfd.descend_at
+
+        def replace_before_walk(fd, parts, **kwargs):
+            if list(parts) == ["dir"] and source.is_dir():
+                replace_after_first_entry()
+            return descend_at(fd, parts, **kwargs)
+
+        monkeypatch.setattr(restore.dirfd, "descend_at", replace_before_walk)
+
+    with pytest.raises(SystemExit, match="1"):
+        command_restore(SimpleNamespace(archive=str(archive)))
+    assert ((saved if component == "container" else box) / ".install-incomplete").is_file()
+    assert (destination / "keep").read_text() == "keep"
+
+
+def test_restore_marker_blocks_backup_diff_rename_and_reset(restore_store, tmp_path):
+    from chroot_distro.commands import diff, rename, reset
+    from chroot_distro.exceptions import ContainerNotFoundError
+
+    box = _make_container(restore_store, "box")
+    (box / ".install-incomplete").touch()
+    output = tmp_path / "partial.tar"
+    args = SimpleNamespace(container_name="box", orig_name="box", new_name="other", output=str(output))
+
+    for command in (command_backup, rename.command_rename, reset.command_reset):
+        with pytest.raises(SystemExit, match="1"):
+            command(args)
+    with pytest.raises(ContainerNotFoundError, match="not installed"):
+        diff.command_diff(args)
+    assert not output.exists()
+    assert not (restore_store / "other").exists()
+    assert (box / "rootfs/hello").read_text() == "hi"

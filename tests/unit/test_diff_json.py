@@ -26,7 +26,7 @@ def _noop(*_a, **_k):
 def _run(*, added=(), modified=(), deleted=(), json_mode=True):
     args = SimpleNamespace(container_name="demo", json=json_mode)
     with (
-        patch.object(diff_mod.os.path, "isdir", return_value=True),
+        patch.object(diff_mod, "container_is_installed", return_value=True),
         patch.object(diff_mod.os.path, "isfile", return_value=True),
         patch.object(diff_mod, "ContainerLock", _noop),
         patch.object(diff_mod, "loading_line", _noop),
@@ -93,7 +93,10 @@ def test_guest_paths_are_escaped_in_human_output_and_preserved_in_json(capsys):
 
 def test_a_missing_container_raises_instead_of_exiting():
     args = SimpleNamespace(container_name="ghost", json=True)
-    with patch.object(diff_mod.os.path, "isdir", return_value=False):
+    with (
+        patch.object(diff_mod, "container_is_installed", return_value=False),
+        patch.object(diff_mod, "ContainerLock", _noop),
+    ):
         with pytest.raises(ChrootDistroError, match="is not installed"):
             diff_mod.command_diff(args)
 
@@ -101,8 +104,9 @@ def test_a_missing_container_raises_instead_of_exiting():
 def test_a_missing_manifest_raises():
     args = SimpleNamespace(container_name="demo", json=True)
     with (
-        patch.object(diff_mod.os.path, "isdir", return_value=True),
+        patch.object(diff_mod, "container_is_installed", return_value=True),
         patch.object(diff_mod.os.path, "isfile", return_value=False),
+        patch.object(diff_mod, "ContainerLock", _noop),
     ):
         with pytest.raises(ChrootDistroError, match="no image manifest"):
             diff_mod.command_diff(args)
@@ -111,7 +115,7 @@ def test_a_missing_manifest_raises():
 def test_an_unreadable_manifest_raises():
     args = SimpleNamespace(container_name="demo", json=True)
     with (
-        patch.object(diff_mod.os.path, "isdir", return_value=True),
+        patch.object(diff_mod, "container_is_installed", return_value=True),
         patch.object(diff_mod.os.path, "isfile", return_value=True),
         patch.object(diff_mod, "ContainerLock", _noop),
         patch.object(diff_mod, "_load_layer_digests", side_effect=ValueError("bad json")),
@@ -123,7 +127,7 @@ def test_an_unreadable_manifest_raises():
 def test_a_manifest_without_layers_raises():
     args = SimpleNamespace(container_name="demo", json=True)
     with (
-        patch.object(diff_mod.os.path, "isdir", return_value=True),
+        patch.object(diff_mod, "container_is_installed", return_value=True),
         patch.object(diff_mod.os.path, "isfile", return_value=True),
         patch.object(diff_mod, "ContainerLock", _noop),
         patch.object(diff_mod, "_load_layer_digests", return_value=[]),

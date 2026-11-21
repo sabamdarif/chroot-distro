@@ -28,7 +28,7 @@ from chroot_distro.commands.remove import _remove_path
 from chroot_distro.locking import ContainerLock
 from chroot_distro.message import crit_error, log_info, warn
 from chroot_distro.names import require_valid_name
-from chroot_distro.paths import container_manifest, container_rootfs
+from chroot_distro.paths import container_is_installed, container_manifest, container_rootfs
 
 
 def command_reset(args) -> None:
@@ -40,26 +40,26 @@ def command_reset(args) -> None:
     rootfs_dir = container_rootfs(container_name)
     manifest_path = container_manifest(container_name)
 
-    if not os.path.isdir(rootfs_dir):
-        crit_error(f"container '{container_name}' is not installed.")
-        sys.exit(1)
-
-    image_ref = None
-    override_arch = None
-    if os.path.isfile(manifest_path):
-        try:
-            with open(manifest_path) as fh:
-                manifest_data = json.load(fh)
-            image_ref = manifest_data.get("image_ref")
-            override_arch = manifest_data.get("arch")
-        except (OSError, json.JSONDecodeError) as exc:
-            warn(f"Failed to read container manifest at {manifest_path}: {exc}")
-
-    if not image_ref:
-        crit_error(f"container '{container_name}' has no OCI manifest. Reset is supported for OCI images only.")
-        sys.exit(1)
-
     with ContainerLock(container_name, exclusive=True, command="reset"):
+        if not container_is_installed(container_name):
+            crit_error(f"container '{container_name}' is not installed.")
+            sys.exit(1)
+
+        image_ref = None
+        override_arch = None
+        if os.path.isfile(manifest_path):
+            try:
+                with open(manifest_path) as fh:
+                    manifest_data = json.load(fh)
+                image_ref = manifest_data.get("image_ref")
+                override_arch = manifest_data.get("arch")
+            except (OSError, json.JSONDecodeError) as exc:
+                warn(f"Failed to read container manifest at {manifest_path}: {exc}")
+
+        if not image_ref:
+            crit_error(f"container '{container_name}' has no OCI manifest. Reset is supported for OCI images only.")
+            sys.exit(1)
+
         active_pids = session.get_active_chroot_pids(container_name)
         if active_pids:
             crit_error(f"Cannot reset container '{container_name}': It has active sessions (PIDs: {active_pids}).")

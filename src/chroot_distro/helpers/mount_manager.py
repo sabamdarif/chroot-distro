@@ -94,7 +94,7 @@ def decode_mount_path(path: str) -> str:
     return re.sub(r"\\([0-7]{3})", lambda m: chr(int(m.group(1), 8)), path)
 
 
-def _mounts_under_rootfs_from_lines(lines: list[str], rootfs: str) -> list[str]:
+def _mounts_under_rootfs_from_lines(lines: list[str], rootfs: str, *, include_root: bool = False) -> list[str]:
     rootfs_abs = os.path.realpath(rootfs)
     # Kernel mount paths are canonical, so cheap prefix checks avoid a
     # realpath per line (Android tables have hundreds of entries).
@@ -112,6 +112,8 @@ def _mounts_under_rootfs_from_lines(lines: list[str], rootfs: str) -> list[str]:
         except OSError:
             continue
         if mount_point_abs == rootfs_abs:
+            if include_root:
+                active_mounts.append(mount_point_abs)
             # A mount at the rootfs itself is the Tier B idmapped stack the
             # whole container runs on, not a stale bind to sweep away.
             continue
@@ -138,6 +140,15 @@ def get_active_mounts(rootfs: str, holder: NamespaceHolder | None = None) -> lis
     """Parse /proc/mounts and return mount points under rootfs (deepest first)."""
     lines = _read_proc_mounts_lines(holder)
     return _mounts_under_rootfs_from_lines(lines, rootfs)
+
+
+def refuse_rootfs_mounts(rootfs_fd: int) -> None:
+    """Require a readable mount table with no mounts at or under the pinned rootfs."""
+    rootfs = os.readlink(fd_path(rootfs_fd))
+    with open("/proc/self/mounts") as fh:
+        mounts = _mounts_under_rootfs_from_lines(fh.readlines(), rootfs, include_root=True)
+    if mounts:
+        raise MountError(f"Active mounts at or under {rootfs}: {mounts}. Unmount them before retrying.")
 
 
 def is_mounted(target: str, holder: NamespaceHolder | None = None) -> bool:

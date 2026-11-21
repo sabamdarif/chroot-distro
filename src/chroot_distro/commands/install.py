@@ -25,7 +25,6 @@ the CLI parser hands it a list.
 """
 
 import contextlib
-import errno
 import json
 import os
 import re
@@ -52,9 +51,16 @@ from chroot_distro.constants import (
     PROGRAM_NAME,
     layer_download_workers,
 )
+from chroot_distro.exceptions import MountError
 from chroot_distro.helpers.android import configure_android_rootfs
 from chroot_distro.helpers.docker import InvalidReferenceError, derive_alias, parse_reference, pull_image
 from chroot_distro.helpers.download import download_file
+from chroot_distro.helpers.install_state import (
+    clear_incomplete_rootfs,
+    create_install_rootfs,
+    finish_install,
+    write_incomplete_marker,
+)
 from chroot_distro.helpers.rootfs import (
     register_android_ids,
     write_hosts,
@@ -249,42 +255,6 @@ def _resolve_install_name(image_ref, local_path, url, custom_container_name):
     return derived
 
 
-def _write_incomplete_marker(marker: str, *, dir_fd: int) -> None:
-    """Publish the marker without a gap when replacing an earlier one."""
-    with atomic_write(marker, mode=0o644, dir_fd=dir_fd):
-        pass
-
-
-def _check_install_identity(name: str, container_fd: int, rootfs_fd: int) -> None:
-    current_fd = open_container_dir(name)
-    try:
-        current_rootfs = dirfd.opendir_at(current_fd, os.path.basename(container_rootfs(name)))
-        try:
-            if not (
-                os.path.samestat(os.fstat(current_fd), os.fstat(container_fd))
-                and os.path.samestat(os.fstat(current_rootfs), os.fstat(rootfs_fd))
-            ):
-                raise OSError(errno.ESTALE, "container storage was replaced")
-        finally:
-            os.close(current_rootfs)
-    finally:
-        os.close(current_fd)
-
-
-def _finish_install(name: str, container_fd: int, rootfs_fd: int, marker: str) -> None:
-    try:
-        _check_install_identity(name, container_fd, rootfs_fd)
-        os.unlink(marker, dir_fd=container_fd)
-        os.fsync(container_fd)
-        _check_install_identity(name, container_fd, rootfs_fd)
-    except BaseException:
-        try:
-            _write_incomplete_marker(marker, dir_fd=container_fd)
-        except OSError as exc:
-            log_error(f"Could not restore the incomplete install marker: {escape_controls(str(exc))}")
-        raise
-
-
 _HINT_WIDTH = len("Run entrypoint:")
 
 
@@ -358,13 +328,12 @@ def _run_install(
             if workers != DEFAULT_LAYER_DOWNLOAD_WORKERS:
                 log_info(f"Parallel download workers: {workers}")
 
-        _write_incomplete_marker(marker, dir_fd=container_fd)
         if rootfs_fd is None:
-            rootfs_fd = dirfd.descend_at(container_fd, (rootfs_leaf,), create=True)
-        elif incomplete:
+            rootfs_fd = create_install_rootfs(container_fd, rootfs_leaf, marker, incomplete=incomplete)
+        else:
+            write_incomplete_marker(marker, dir_fd=container_fd)
             log_info(f"Found remnants of an interrupted install of '{install_name}'; removing and reinstalling...")
-            for child in dirfd.listdir_at(rootfs_fd):
-                dirfd.rmtree_at(rootfs_fd, child, force=True)
+            clear_incomplete_rootfs(install_name, container_fd, rootfs_fd)
         with contextlib.suppress(FileNotFoundError):
             os.unlink(manifest_leaf, dir_fd=container_fd)
 
@@ -424,12 +393,12 @@ def _run_install(
             register_android_ids(rootfs_dir, root_fd=rootfs_fd)
             configure_android_rootfs(rootfs_dir, root_fd=rootfs_fd)
 
-        _finish_install(install_name, container_fd, rootfs_fd, marker)
+        finish_install(install_name, container_fd, rootfs_fd, marker)
     except KeyboardInterrupt:
         clear_bar()
         log_error("Aborted by user.")
         interrupted = True
-    except (EOFError, OSError, tarfile.TarError, RuntimeError) as exc:
+    except (EOFError, OSError, tarfile.TarError, RuntimeError, MountError) as exc:
         clear_bar()
         log_error(f"Failed to install: {escape_controls(str(exc))}")
         sys.exit(1)

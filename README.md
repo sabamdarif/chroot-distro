@@ -111,8 +111,9 @@ layer missing from the archive.
 Failed or interrupted installs retain marked partial data. `list` reports these
 as incomplete, and `login` and `run` refuse them. Repeat the install command to
 clear the partial rootfs and stale image metadata before trying again, or use
-`remove NAME` to discard an incomplete container with a rootfs. An install only
-reports success after removing and syncing its incomplete marker.
+`remove NAME` to discard an incomplete container with a rootfs. Unmount any
+mounts at or below the rootfs before retrying. An install only reports success
+after removing and syncing its incomplete marker.
 
 On Termux, install adds Android account and network groups inside the guest.
 Shadow files remain private (mode 0600). Account and configuration fixups skip
@@ -385,6 +386,8 @@ chroot-distro restore [OPTIONS] [BACKUP_FILE]
 ```
 
 Bring back a container from a backup archive. Without a file, it reads from stdin. Compression is detected automatically. It reuses the container name baked into the archive and refuses to overwrite a container that is already installed; remove that one first, or install the archive under a new name with `install --name`.
+
+If restore fails or is interrupted after extraction starts, `list` shows the container as incomplete. Repeat `restore` to clear the partial rootfs and retry. Unmount any mounts at or below the rootfs before retrying.
 
 | Option            | Description               |
 | ----------------- | ------------------------- |

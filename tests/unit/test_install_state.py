@@ -389,15 +389,16 @@ def test_install_rejects_substituted_atomic_publication(store, monkeypatch, tmp_
     outside = tmp_path / "outside"
     outside.write_text("KEEP")
     outside.chmod(0o600)
-    real_replace = os.replace
+    publish = "link" if destination == ".install-incomplete" else "replace"
+    real_publish = getattr(os, publish)
 
-    def replace(src, dst, **kwargs):
+    def substitute(src, dst, **kwargs):
         if dst == destination:
             os.unlink(src, dir_fd=kwargs["src_dir_fd"])
             os.symlink(outside, src, dir_fd=kwargs["src_dir_fd"])
-        return real_replace(src, dst, **kwargs)
+        return real_publish(src, dst, **kwargs)
 
-    monkeypatch.setattr(os, "replace", replace)
+    monkeypatch.setattr(os, publish, substitute)
     install.pull_image.return_value = {"image_ref": "alpine", "manifest": {}, "image_config": {}}
     with pytest.raises(SystemExit):
         run_install()

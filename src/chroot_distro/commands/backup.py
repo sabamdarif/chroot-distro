@@ -50,7 +50,7 @@ from chroot_distro.message import (
     warn,
 )
 from chroot_distro.names import require_valid_name
-from chroot_distro.paths import container_manifest, container_rootfs
+from chroot_distro.paths import container_is_installed, container_manifest, container_rootfs
 from chroot_distro.progress import (
     REDRAW_THRESHOLD_BYTES,
     clear_bar,
@@ -212,10 +212,6 @@ def command_backup(args) -> None:
     rootfs_dir = container_rootfs(container_name)
     manifest_path = container_manifest(container_name)
 
-    if not os.path.isdir(rootfs_dir):
-        crit_error(f"container '{container_name}' does not exist.")
-        sys.exit(1)
-
     if output_path is not None and not output_path:
         crit_error("output file path cannot be empty.")
         sys.exit(1)
@@ -244,6 +240,10 @@ def command_backup(args) -> None:
         compression = _COMPRESSION_ARG_MAP[compression_arg] if compression_arg is not None else ""
 
     with ContainerLock(container_name, exclusive=False, command="backup"):
+        if not container_is_installed(container_name):
+            crit_error(f"container '{container_name}' is not installed.")
+            sys.exit(1)
+
         active_pids = session.get_active_chroot_pids(container_name)
         if active_pids:
             crit_error(f"Cannot backup container '{container_name}': It has active sessions (PIDs: {active_pids}).")

@@ -32,7 +32,7 @@ from chroot_distro.helpers.layer_diff import (
 from chroot_distro.locking import ContainerLock
 from chroot_distro.message import C, emit_json, msg, quote_path
 from chroot_distro.names import require_valid_name
-from chroot_distro.paths import container_dir, container_manifest, container_rootfs
+from chroot_distro.paths import container_dir, container_is_installed, container_manifest, container_rootfs
 from chroot_distro.progress import loading_line
 
 # Top-level directories that are bind/pseudo mounts at login time and never
@@ -65,17 +65,16 @@ def command_diff(args) -> None:
     require_valid_name(container_name)
 
     rootfs = container_rootfs(container_name)
-    if not os.path.isdir(rootfs):
-        raise ContainerNotFoundError(f"container '{container_name}' is not installed.")
-
     manifest_path = container_manifest(container_name)
-    if not os.path.isfile(manifest_path):
-        raise ChrootDistroError(
-            f"container '{container_name}' has no image manifest; "
-            f"diff is only available for containers installed from an OCI/Docker image."
-        )
 
     with ContainerLock(container_name, exclusive=False, command="diff"):
+        if not container_is_installed(container_name):
+            raise ContainerNotFoundError(f"container '{container_name}' is not installed.")
+        if not os.path.isfile(manifest_path):
+            raise ChrootDistroError(
+                f"container '{container_name}' has no image manifest; "
+                f"diff is only available for containers installed from an OCI/Docker image."
+            )
         try:
             digests = _load_layer_digests(manifest_path)
         except (OSError, ValueError) as exc:
