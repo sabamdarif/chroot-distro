@@ -203,6 +203,8 @@ chroot-distro login ubuntu -- uname -a
 
 Set `CD_USE_NS=1` for namespace isolation while keeping the normal shared folders, instead of `--isolated`.
 
+Set `--no-new-privs` on each `login` or `run` that needs it, including when joining an active session.
+
 With `--shared-display`, an X11 cookie copied for a guest user must come from the invoking user's home or `/run/user/<uid>`. The copy contains the selected display's entries and has owner-only permissions.
 
 Every mode mounts fresh pseudo-filesystems instead of binding the host's: a minimal `/dev`, fresh `/dev/pts`, `/dev/shm` and `/proc`, and a read-only `/sys`, following Docker's defaults (`/proc/kcore` and `/proc/keys` masked, `/proc/sys` read-only). When the kernel or SELinux refuses one, the host tree is bound with a warning.

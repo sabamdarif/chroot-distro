@@ -53,7 +53,8 @@ reported as ignored rather than quietly dropped.
 Entering has four forms: `chroot_and_run` when there is no holder, waiting on a
 foreground holder that execs the command itself (entering one would hang the
 session forever), `enter_and_run_with_pty` into a parked holder, and
-`spawn_detached` for `--detach`.
+`spawn_detached` for `--detach`. The no-new-privileges flag applies to the
+child that runs the command, including when it joins a parked holder.
 
 Detached output uses a validated append descriptor under pinned runtime storage.
 Startup failures close resources before the shared teardown; after a successful
@@ -1530,6 +1531,7 @@ def _command_login_inner_once(container_name: str, args) -> None:
                         gid=chroot_config.gid,
                         groups=chroot_config.groups,
                         workdir=chroot_config.workdir,
+                        no_new_privs=no_new_privs,
                         regain_ids=True,
                     )
 

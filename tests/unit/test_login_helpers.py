@@ -3,7 +3,7 @@ import io
 import json
 import os
 import signal
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
 from unittest.mock import ANY, Mock, patch
 
@@ -242,6 +242,59 @@ def test_unsafe_holder_join_undoes_only_new_session(command_display, monkeypatch
     assert exc.value is error
     assert (data / "sessions").read_text() == "1"
     login.mount_manager.unmount_all.assert_not_called()
+
+
+@pytest.mark.parametrize(("command", "joining"), [("login", False), ("login", True), ("run", True)])
+@pytest.mark.parametrize("requested", [False, True])
+def test_parked_holder_forwards_no_new_privs(command_display, monkeypatch, command, joining, requested):
+    from chroot_distro import cli, paths
+    from chroot_distro.commands import run
+
+    login, _, data = command_display
+    holder = SimpleNamespace(pid=1234, is_foreground=False, _live_ns_flags=Mock(return_value=0))
+    acquire = Mock(return_value=holder)
+    reuse = Mock(return_value=holder)
+    login.namespace.should_use_namespaces.return_value = True
+    monkeypatch.setattr(login.namespace, "acquire_holder", acquire)
+    monkeypatch.setattr(login.namespace, "get_live_holder", reuse)
+    monkeypatch.setattr(login.namespace, "release_holder", Mock())
+    monkeypatch.setattr(login.isolation, "finalize_holder", Mock())
+    monkeypatch.setattr(login, "detect_nvidia_gpu", Mock(return_value=False))
+    login._reap_session_processes.return_value = []
+    if joining:
+        data.mkdir(parents=True)
+        (data / "sessions").write_text("1")
+        login.session.get_active_chroot_pids.return_value = [holder.pid]
+
+    def enter_guest(pid, flags, argv, *, setup, **kwargs):
+        assert pid == holder.pid
+        setup()
+        return 0
+
+    enter_chroot = Mock()
+    monkeypatch.setattr(login, "enter_chroot", enter_chroot)
+    monkeypatch.setattr(login, "enter_and_run_with_pty", enter_guest)
+    monkeypatch.setattr(login, "register_session", Mock())
+    monkeypatch.setattr(cli, "_ensure_root_user", Mock())
+    monkeypatch.setattr(login, "ContainerLock", Mock(side_effect=lambda *args, **kwargs: nullcontext()))
+    monkeypatch.setattr(run, "ContainerLock", login.ContainerLock)
+    arguments = ["chroot-distro", command, "demo"]
+    if requested:
+        arguments.append("--no-new-privs")
+    if command == "run":
+        with open(paths.container_manifest("demo"), "w") as fh:
+            json.dump({"image_config": {"config": {"Cmd": ["/bin/sh"]}}}, fh)
+    else:
+        arguments.extend(["--", "true"])
+    monkeypatch.setattr("sys.argv", arguments)
+
+    cli.main()
+
+    assert acquire.call_count == (0 if joining else 1)
+    assert reuse.call_count == (1 if joining else 0)
+    enter_chroot.assert_called_once()
+    assert enter_chroot.call_args.kwargs.get("no_new_privs", False) is requested
+    assert (data / "sessions").read_text() == ("1" if joining else "0")
 
 
 @pytest.mark.parametrize("command", ["login", "run"])
