@@ -329,6 +329,7 @@ def _restore(sub):
     p = sub.add_parser("restore", add_help=False)
     p._cd_command = "restore"
     p.add_argument("archive", nargs="?")
+    p.add_argument("--legacy-layout", action="store_true")
     vq = p.add_mutually_exclusive_group()
     vq.add_argument("-v", "--verbose", action="store_true")
     vq.add_argument("-q", "--quiet", action="store_true")

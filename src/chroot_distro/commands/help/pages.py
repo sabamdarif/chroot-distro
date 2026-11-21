@@ -741,6 +741,7 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
         ),
         "options": [
             ("-h, --help", "Show this help."),
+            ("--legacy-layout", "Read the archive as installed-rootfs/<name>/..., including old backups of rootfs."),
             ("-v, --verbose", "Log each extracted file."),
             ("-q, --quiet", "Suppress non-error output. Mutually exclusive with --verbose."),
         ],
@@ -767,6 +768,10 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
                     "archive and refuses to overwrite one that is already "
                     "installed; remove it first, or install the archive "
                     "under a new name with install --name."
+                    "\n\n"
+                    "By default, installed-rootfs/rootfs/... restores a "
+                    "container named installed-rootfs. Use --legacy-layout "
+                    "if the archive is an old backup of a container named rootfs."
                 ),
             },
         ],

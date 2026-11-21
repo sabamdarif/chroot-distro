@@ -459,6 +459,101 @@ def _add_restore_entry(tf, name, data=b"", *, kind=tarfile.REGTYPE, link="", mod
     tf.addfile(member, io.BytesIO(data))
 
 
+@pytest.mark.parametrize("sidecar", ["file", "absent", "symlink"])
+def test_backup_restore_round_trip_for_installed_rootfs(restore_store, tmp_path, monkeypatch, sidecar):
+    name = "installed-rootfs"
+    source_store = tmp_path / "source"
+    source = _make_container(source_store, name)
+    source_manifest = source / "manifest.json"
+    manifest_data = source_manifest.read_bytes()
+    if sidecar == "absent":
+        source_manifest.unlink()
+    elif sidecar == "symlink":
+        source_manifest.rename(source / "metadata")
+        source_manifest.symlink_to("metadata")
+    os.link(source / "rootfs/hello", source / "rootfs/hello-copy")
+
+    archive = tmp_path / "backup.tar.gz"
+    parser = build_parser()
+    with monkeypatch.context() as scoped:
+        scoped.setattr(paths, "CONTAINERS_DIR", str(source_store))
+        scoped.setattr(backup.session, "get_active_chroot_pids", lambda name: [])
+        scoped.setattr(backup.mount_manager, "get_active_mounts", lambda rootfs: [])
+        command_backup(parser.parse_args(["backup", name, "-o", str(archive)]))
+
+    with tarfile.open(archive) as tf:
+        assert tf.getmember(f"{name}/rootfs/hello-copy").islnk()
+
+    if sidecar == "absent":
+        with archive.open("rb") as stream, monkeypatch.context() as scoped:
+            scoped.setattr(sys, "stdin", SimpleNamespace(buffer=stream, isatty=lambda: False))
+            command_restore(parser.parse_args(["restore"]))
+    else:
+        command_restore(parser.parse_args(["restore", str(archive)]))
+
+    restored = restore_store / name
+    assert sorted(path.name for path in restore_store.iterdir()) == [name]
+    assert paths.container_is_installed(name)
+    assert (restored / "rootfs/hello").read_text() == "hi"
+    assert (restored / "rootfs/hello-copy").read_text() == "hi"
+    if sidecar == "file":
+        assert (restored / "manifest.json").read_bytes() == manifest_data
+    else:
+        assert not os.path.lexists(restored / "manifest.json")
+
+
+@pytest.mark.parametrize("name", ["box", "manifest.json", "rootfs"])
+def test_restore_legacy_layout(restore_store, tmp_path, name):
+    archive = tmp_path / "old.tar"
+    prefix = f"installed-rootfs/{name}"
+    with tarfile.open(archive, "w") as tf:
+        _add_restore_entry(tf, "installed-rootfs", kind=tarfile.DIRTYPE)
+        _add_restore_entry(tf, prefix, kind=tarfile.DIRTYPE, mode=0o755)
+        _add_restore_entry(tf, f"{prefix}/hello", b"legacy")
+
+    flags = ["--legacy-layout"] if name == "rootfs" else []
+    command_restore(build_parser().parse_args(["restore", *flags, str(archive)]))
+
+    assert sorted(path.name for path in restore_store.iterdir()) == [name]
+    assert paths.container_is_installed(name)
+    assert (restore_store / name / "rootfs/hello").read_bytes() == b"legacy"
+
+
+def test_restore_legacy_override_refuses_current_manifest_before_lock(restore_store, tmp_path, monkeypatch, capsys):
+    archive = tmp_path / "backup.tar"
+    with tarfile.open(archive, "w") as tf:
+        _add_restore_entry(tf, "installed-rootfs/manifest.json", b"{}")
+        _add_restore_entry(tf, "installed-rootfs/rootfs", kind=tarfile.DIRTYPE)
+
+    monkeypatch.setattr(restore, "ContainerLock", lambda *a, **kw: pytest.fail("unexpected lock"))
+    with pytest.raises(SystemExit, match="1"):
+        command_restore(build_parser().parse_args(["restore", "--legacy-layout", str(archive)]))
+
+    assert "Omit --legacy-layout" in capsys.readouterr().err
+    assert not restore_store.exists()
+
+
+@pytest.mark.parametrize(
+    ("name", "first", "second"),
+    [
+        ("installed-rootfs", "installed-rootfs/rootfs", "installed-rootfs/manifest.json"),
+        ("box", "installed-rootfs/box", "box/rootfs"),
+    ],
+)
+def test_restore_refuses_mixed_layouts(restore_store, tmp_path, name, first, second):
+    archive = tmp_path / "mixed.tar"
+    with tarfile.open(archive, "w") as tf:
+        _add_restore_entry(tf, first, kind=tarfile.DIRTYPE, mode=0o755)
+        _add_restore_entry(tf, second, kind=tarfile.DIRTYPE, mode=0o755)
+
+    with pytest.raises(SystemExit, match="1"):
+        command_restore(build_parser().parse_args(["restore", str(archive)]))
+
+    assert sorted(path.name for path in restore_store.iterdir()) == [name]
+    assert paths.is_install_incomplete(name)
+    assert paths.installed_containers() == []
+
+
 @pytest.mark.parametrize("failure", ["hardlink", "truncated", "interrupt", "manifest", "ownership", "directory mode"])
 def test_failed_restore_is_incomplete_and_can_be_retried(restore_store, tmp_path, monkeypatch, capsys, failure):
     archive = tmp_path / "broken.tar"

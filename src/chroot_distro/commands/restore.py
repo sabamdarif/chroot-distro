@@ -2,9 +2,10 @@
 # Copyright (C) 2025-2026 Md Arif
 """Restore one container from a current or legacy backup stream.
 
-The first mapped member fixes the container name and takes its exclusive lock.
-The first rootfs member starts a marked install. Extraction and retries use
-pinned directories, and hardlinks become copies of files in the guest rootfs.
+The first mapped member fixes the layout and container name and takes its lock.
+The same layout maps hardlink targets. The first rootfs member starts a marked
+install. Extraction and retries use pinned directories, and hardlinks become
+copies of files in the guest rootfs.
 The incomplete marker survives errors and interrupts and is removed only after
 all entries and the optional manifest have been written.
 """
@@ -47,7 +48,6 @@ from chroot_distro.message import (
 )
 from chroot_distro.names import is_valid_name
 from chroot_distro.paths import (
-    container_dir,
     container_incomplete_marker,
     container_manifest,
     container_rootfs,
@@ -79,70 +79,31 @@ def _detect_compression(header: bytes) -> str:
     return ""
 
 
-_SKIP = (None, None)
+def _archive_parts(path: str) -> tuple[str, ...]:
+    parts = tuple(path.lstrip("/").split("/"))
+    if len(parts) < 2 or any(part in ("..", ".", "") for part in parts):
+        return ()
+    return parts
 
 
-def _dest_path(member_name: str) -> tuple:
-    """Map a TAR member name to (container_name, dest_path_in_containers)."""
-    name = member_name.lstrip("/")
-    if not name or name == ".":
-        return _SKIP
+def _dest_path(parts: tuple[str, ...], *, legacy_layout: bool) -> tuple[str, tuple[str, ...] | None] | None:
+    """Return the container name and rootfs-relative parts, or None parts for its manifest."""
+    if not parts or not is_valid_name(parts[0]):
+        return None
 
-    parts = name.split("/")
+    prefix, sub = parts[:2]
+    if legacy_layout:
+        if prefix != _LEGACY_PREFIX:
+            raise ChrootDistroError("archive contains members outside the installed-rootfs legacy layout.")
+        return (sub, parts[2:]) if is_valid_name(sub) else None
 
-    if any(p in ("..", ".", "") for p in parts):
-        return _SKIP
-
-    if len(parts) == 1 and not name.endswith("/"):
-        return _SKIP
-
-    # Legacy format: installed-rootfs/<name>/...  ->  containers/<name>/rootfs/...
-    if parts[0] == _LEGACY_PREFIX:
-        if len(parts) < 2:
-            return _SKIP
-        container_name = parts[1]
-        if not is_valid_name(container_name):
-            return _SKIP
-        rest = parts[2:]
-        if not rest:
-            return (container_name, container_rootfs(container_name))
-        return (container_name, os.path.join(container_rootfs(container_name), *rest))
-
-    # New format: <name>/...
-    container_name = parts[0]
-    if not is_valid_name(container_name):
-        return _SKIP
-
-    if len(parts) == 1:
-        return (container_name, container_dir(container_name))
-
-    sub = parts[1]
-    rest = parts[2:]
-
-    if sub == "manifest.json" and not rest:
-        return (container_name, container_manifest(container_name))
-
+    if sub == "manifest.json" and len(parts) == 2:
+        return prefix, None
     if sub == "rootfs":
-        if not rest:
-            return (container_name, container_rootfs(container_name))
-        return (container_name, os.path.join(container_rootfs(container_name), *rest))
-
-    return (container_name, os.path.join(container_rootfs(container_name), *parts[1:]))
-
-
-def _is_rootfs_dest(container_name: str, dest: str) -> bool:
-    """True if *dest* is the rootfs dir or lives inside it.
-
-    Distinguishes real rootfs members (which commit the restore) from the
-    top-level manifest.json.
-    """
-    rootfs = container_rootfs(container_name)
-    return dest == rootfs or dest.startswith(rootfs + os.sep)
-
-
-def _rootfs_parts(name: str, dest: str) -> tuple[str, ...]:
-    relative = os.path.relpath(dest, container_rootfs(name))
-    return () if relative == os.curdir else tuple(relative.split(os.sep))
+        return prefix, parts[2:]
+    if prefix == _LEGACY_PREFIX:
+        raise ChrootDistroError("archive contains members outside the installed-rootfs backup layout.")
+    return prefix, parts[1:]
 
 
 def _start_restore(name: str, pins: contextlib.ExitStack) -> tuple[int, int, str]:
@@ -220,6 +181,8 @@ def _restore_member(
     rootfs_fd: int,
     parts: tuple[str, ...],
     modes: _DirModes,
+    *,
+    legacy_layout: bool,
 ) -> None:
     mode = stat.S_IMODE(member.mode)
     if not parts:
@@ -259,10 +222,10 @@ def _restore_member(
         modes.pop(target, None)
         link = None
         if member.islnk():
-            source_name, source = _dest_path(member.linkname)
-            if source_name != name or not _is_rootfs_dest(name, source):
+            source = _dest_path(_archive_parts(member.linkname), legacy_layout=legacy_layout)
+            if source is None or source[0] != name or source[1] is None:
                 raise OSError(errno.EINVAL, "hardlink target is outside the guest rootfs")
-            link = _open_hardlink(rootfs_fd, _rootfs_parts(name, source))
+            link = _open_hardlink(rootfs_fd, source[1])
             pins.callback(os.close, link[0])
         dirfd.rmtree_at(parent_fd, leaf, force=True)
         if member.issym():
@@ -301,9 +264,14 @@ def _apply_dir_modes(rootfs_fd: int, modes: _DirModes) -> None:
 
 
 def _restore_stream(
-    tf: tarfile.TarFile, on_entry: typing.Callable[[int, str], None], pins: contextlib.ExitStack
+    tf: tarfile.TarFile,
+    on_entry: typing.Callable[[int, str], None],
+    pins: contextlib.ExitStack,
+    *,
+    force_legacy: bool,
 ) -> tuple[str, int, int, str]:
     name = None
+    legacy_layout = None
     opened = None
     manifest = None
     manifest_mode = 0
@@ -313,14 +281,36 @@ def _restore_stream(
             continue
 
         bare_name = member.name.lstrip("/")
+        if bare_name == _LEGACY_PREFIX and member.isdir():
+            continue
         if bare_name and "/" not in bare_name:
             raise ChrootDistroError("provided file has invalid structure.")
 
-        member_name, dest = _dest_path(member.name)
-        if member_name is None:
+        archive_parts = _archive_parts(member.name)
+        if not archive_parts:
             continue
+        alias_manifest = archive_parts == (_LEGACY_PREFIX, "manifest.json")
+        member_legacy = legacy_layout
+        if member_legacy is None:
+            if force_legacy and alias_manifest and not member.isdir():
+                raise ChrootDistroError("archive has a current backup manifest. Omit --legacy-layout.")
+            member_legacy = force_legacy or (
+                archive_parts[0] == _LEGACY_PREFIX
+                and archive_parts[1] != "rootfs"
+                and (not alias_manifest or member.isdir())
+            )
+        if not member_legacy and alias_manifest and member.isdir():
+            raise ChrootDistroError("archive contains a legacy root directory in the current backup layout.")
+
+        destination = _dest_path(archive_parts, legacy_layout=member_legacy)
+        if destination is None:
+            continue
+        member_name, parts = destination
+        if parts == () and not member.isdir():
+            raise ChrootDistroError("the archive rootfs entry must be a directory.")
         if name is None:
             name = member_name
+            legacy_layout = member_legacy
             lock = ContainerLock(name, exclusive=True, command="restore")
             pins.callback(lock.release)
             if not lock.acquire():
@@ -332,15 +322,12 @@ def _restore_stream(
                 "Restore handles a single container at a time."
             )
 
-        if _is_rootfs_dest(name, dest):
-            parts = _rootfs_parts(name, dest)
-            if not parts and not member.isdir():
-                raise ChrootDistroError("the archive rootfs entry must be a directory.")
+        if parts is not None:
             if opened is None:
                 opened = _start_restore(name, pins)
             _, rootfs_fd, _ = opened
-            _restore_member(tf, member, name, rootfs_fd, parts, modes)
-        elif member.isreg() and dest == container_manifest(name):
+            _restore_member(tf, member, name, rootfs_fd, parts, modes, legacy_layout=member_legacy)
+        elif member.isreg():
             if manifest is None:
                 manifest = pins.enter_context(tempfile.SpooledTemporaryFile(max_size=1 << 20))  # noqa: SIM115
             manifest.seek(0)
@@ -375,6 +362,7 @@ def command_restore(args) -> None:
     """Restore a single container from a tar backup."""
     archive = getattr(args, "archive", None)
     verbose = getattr(args, "verbose", False)
+    force_legacy = getattr(args, "legacy_layout", False)
 
     if archive:
         archive = os.path.expanduser(archive)
@@ -429,7 +417,7 @@ def command_restore(args) -> None:
                     mode = f"r|{_detect_compression(header)}"
 
                 tf = sources.enter_context(tarfile.open(fileobj=fileobj, mode=mode))  # type: ignore[call-overload]
-                result = _restore_stream(tf, _on_entry, pins)
+                result = _restore_stream(tf, _on_entry, pins, force_legacy=force_legacy)
             finish_install(*result)
 
     except KeyboardInterrupt:

@@ -229,6 +229,7 @@ _chroot_distro() {
 		restore)
 			_arguments \
 				'(-h --help)'{-h,--help}'[show help]' \
+				'--legacy-layout[read the legacy installed-rootfs archive layout]' \
 				'(-v --verbose -q --quiet)'{-v,--verbose}'[print each extracted file]' \
 				'(-v --verbose -q --quiet)'{-q,--quiet}'[suppress non-error output]' \
 				'1:archive:_files -g "*.tar *.tar.gz *.tgz *.tar.bz2 *.tbz2 *.tar.xz *.txz"'

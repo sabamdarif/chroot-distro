@@ -315,6 +315,8 @@ complete -c chroot-distro -f -n __chroot_distro_seen_backup \
 # restore
 # ---------------------------------------------------------------------------
 complete -c chroot-distro -n '__chroot_distro_seen_command restore' \
+    -l legacy-layout   -d 'Read the legacy installed-rootfs archive layout'
+complete -c chroot-distro -n '__chroot_distro_seen_command restore' \
     -s v -l verbose    -d 'Print each extracted file'
 complete -c chroot-distro -n '__chroot_distro_seen_command restore' \
     -s q -l quiet      -d 'Suppress non-error output'
