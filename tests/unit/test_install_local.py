@@ -110,7 +110,7 @@ def _write_oci(
     return layer_blob
 
 
-def _install_oci(archive, rootfs):
+def _install_archive(archive, rootfs):
     fd = os.open(rootfs, os.O_RDONLY)
     try:
         return install_local.install_from_local_file(str(archive), fd, "x86_64")
@@ -128,7 +128,7 @@ def test_oci_rejects_corrupt_blob_before_use_or_publication(oci, corrupt, fallba
     _write_oci(archive, _layer_bytes(b"expected"), corrupt=corrupt, fallback=fallback)
 
     with pytest.raises(RuntimeError, match="digest mismatch"):
-        _install_oci(archive, rootfs)
+        _install_archive(archive, rootfs)
 
     assert not list(rootfs.iterdir())
     assert not list(base_cache.glob("oci_layers/*"))
@@ -152,7 +152,7 @@ def test_oci_rejects_bad_layer_descriptor(oci, field, value, error):
     _write_oci(archive, layer, layer_descriptor=descriptor)
 
     with pytest.raises(RuntimeError, match=error):
-        _install_oci(archive, rootfs)
+        _install_archive(archive, rootfs)
 
     assert not list(base_cache.glob("oci_layers/*"))
 
@@ -163,7 +163,7 @@ def test_oci_rejects_malformed_config_objects(oci, config):
     _write_oci(archive, _layer_bytes(b"expected"), config=config)
 
     with pytest.raises(RuntimeError, match="JSON object|architecture|field 'config'"):
-        _install_oci(archive, rootfs)
+        _install_archive(archive, rootfs)
 
 
 @pytest.mark.parametrize("member,corrupt", [("absent", None), ("symlink", None), ("regular", "layer")])
@@ -174,7 +174,7 @@ def test_oci_reuses_verified_cache_without_reading_archive_layer(oci, member, co
     cached.parent.mkdir(parents=True)
     cached.write_bytes(layer)
 
-    result = _install_oci(archive, rootfs)
+    result = _install_archive(archive, rootfs)
 
     assert result["image_config"]["config"] is None
     assert (rootfs / "etc" / "fixture").read_bytes() == b"expected"
@@ -189,15 +189,15 @@ def test_oci_repairs_poisoned_cache_only_from_verified_archive(oci):
     cached.write_bytes(wrong)
 
     with pytest.raises(RuntimeError, match="missing required file"):
-        _install_oci(archive, rootfs)
+        _install_archive(archive, rootfs)
     _write_oci(archive, layer, corrupt="layer")
     with pytest.raises(RuntimeError, match="digest mismatch"):
-        _install_oci(archive, rootfs)
+        _install_archive(archive, rootfs)
     assert cached.read_bytes() == wrong
     assert not list(rootfs.iterdir())
 
     _write_oci(archive, layer)
-    _install_oci(archive, rootfs)
+    _install_archive(archive, rootfs)
     assert cached.read_bytes() == layer
     assert (rootfs / "etc" / "fixture").read_bytes() == b"expected"
 
@@ -221,7 +221,7 @@ def test_oci_refuses_symlinked_cache_parent(oci, tmp_path, symlink_parent):
     link.symlink_to(outside, target_is_directory=True)
 
     with pytest.raises(OSError):
-        _install_oci(archive, rootfs)
+        _install_archive(archive, rootfs)
     assert not list(rootfs.iterdir())
     assert decoy.read_bytes() == layer
 
@@ -233,7 +233,7 @@ def test_oci_repairs_fifo_cache_leaf_without_opening_it_for_blocking_io(oci):
     cached.parent.mkdir(parents=True)
     os.mkfifo(cached)
 
-    _install_oci(archive, rootfs)
+    _install_archive(archive, rootfs)
 
     assert cached.read_bytes() == layer
     assert (rootfs / "etc" / "fixture").read_bytes() == b"expected"
@@ -251,7 +251,7 @@ def test_oci_extracts_the_verified_inode_after_cache_name_is_replaced(oci, monke
         extract(*args, **kwargs)
 
     monkeypatch.setattr(install_local, "extract_tar_stream", replace_then_extract)
-    _install_oci(archive, rootfs)
+    _install_archive(archive, rootfs)
 
     assert (rootfs / "etc" / "fixture").read_bytes() == b"expected"
 
@@ -269,7 +269,7 @@ def test_oci_reverifies_cache_entry_after_publication(oci, monkeypatch):
 
     monkeypatch.setattr(install_local, "_oci_cache_layer", publish_then_replace)
     with pytest.raises(RuntimeError, match="digest mismatch"):
-        _install_oci(archive, rootfs)
+        _install_archive(archive, rootfs)
 
     assert not list(rootfs.iterdir())
 
@@ -288,7 +288,7 @@ def test_oci_writer_archive_installs_with_empty_cache(oci):
     oci_writer.write_oci_archive(str(archive), [result], "fixture:latest")
     cached.unlink()
 
-    metadata = _install_oci(archive, rootfs)
+    metadata = _install_archive(archive, rootfs)
 
     assert metadata["image_ref"] == "fixture:latest"
     assert (rootfs / "etc" / "fixture").read_bytes() == b"built"
@@ -322,19 +322,87 @@ def _write_backup_archive(path, name, manifest_bytes, non_regular_manifest=False
         tf.addfile(f, io.BytesIO(payload))
 
 
-def test_detect_backup_manifest():
-    names = [
-        "oracle/manifest.json",
-        "oracle/rootfs",
-        "oracle/rootfs/etc/passwd",
-    ]
-    assert install_local._detect_backup_manifest(names) == "oracle/manifest.json"
+@pytest.mark.parametrize(("mode", "wrapper"), [("w", "backup"), ("w:gz", "backup with spaces")])
+def test_install_backup_filters_members_and_hardlinks_by_rootfs_prefix(tmp_path, mode, wrapper):
+    archive = tmp_path / "backup.tar"
+    rootfs = tmp_path / "rootfs"
+    rootfs.mkdir()
+    with tarfile.open(archive, mode) as tf:
+        _add_bytes(tf, "unrelated/manifest.json", b'{"image_ref":"wrong"}')
+        _add_bytes(tf, f"./{wrapper}/manifest.json", b'{"image_ref":"expected"}')
+        _add_bytes(tf, "other/tree/etc/outside", b"outside")
+        _add_bytes(tf, f"{wrapper}/rootfs-extra/etc/outside", b"also outside")
+        _add_bytes(tf, f"/{wrapper}/rootfs/etc/inside", b"inside")
 
-    # A plain rootfs tarball (no wrapping dir, no sidecar manifest) is not a backup.
-    assert install_local._detect_backup_manifest(["etc/passwd", "usr/bin/sh"]) is None
+        for name, target, kind in (
+            ("etc/copy", f"./{wrapper}/rootfs/etc/inside", tarfile.LNKTYPE),
+            ("other/copy", "other/tree/etc/inside", tarfile.LNKTYPE),
+            ("link", "/etc/inside", tarfile.SYMTYPE),
+        ):
+            entry = tarfile.TarInfo(f"{wrapper}/rootfs/{name}")
+            entry.type = kind
+            entry.linkname = target
+            tf.addfile(entry)
 
-    # A manifest without a matching rootfs tree is not a backup.
-    assert install_local._detect_backup_manifest(["oracle/manifest.json", "oracle/data"]) is None
+    assert _install_archive(archive, rootfs) == {"image_ref": "expected"}
+    assert sorted(path.name for path in rootfs.iterdir()) == ["etc", "link"]
+    assert sorted(path.name for path in (rootfs / "etc").iterdir()) == ["copy", "inside"]
+    assert (rootfs / "etc/inside").read_bytes() == (rootfs / "etc/copy").read_bytes() == b"inside"
+    assert os.readlink(rootfs / "link") == "/etc/inside"
+
+
+def test_install_backup_without_manifest_prefers_leading_rootfs(tmp_path):
+    archive = tmp_path / "usr.tar"
+    rootfs = tmp_path / "rootfs"
+    rootfs.mkdir()
+    with tarfile.open(archive, "w") as tf:
+        entry = tarfile.TarInfo("./usr/rootfs")
+        entry.type = tarfile.DIRTYPE
+        tf.addfile(entry)
+        _add_bytes(tf, "usr/rootfs/etc/inside", b"inside")
+        _add_bytes(tf, "other/manifest.json", b'{"image_ref":"wrong"}')
+        _add_bytes(tf, "other/rootfs/etc/outside", b"outside")
+
+    assert _install_archive(archive, rootfs) is None
+    assert list(rootfs.iterdir()) == [rootfs / "etc"]
+    assert list((rootfs / "etc").iterdir()) == [rootfs / "etc/inside"]
+    assert (rootfs / "etc/inside").read_bytes() == b"inside"
+
+
+def test_install_wrapped_plain_tar_keeps_strip_vote(tmp_path):
+    archive = tmp_path / "plain.tar"
+    rootfs = tmp_path / "rootfs"
+    rootfs.mkdir()
+    with tarfile.open(archive, "w") as tf:
+        _add_bytes(tf, "./wrapper/manifest.json", b"{}")
+        _add_bytes(tf, "./wrapper/etc/inside", b"inside")
+
+    assert _install_archive(archive, rootfs) is None
+    assert (rootfs / "manifest.json").read_bytes() == b"{}"
+    assert (rootfs / "etc/inside").read_bytes() == b"inside"
+
+
+def test_install_backup_keeps_archive_open_between_passes(tmp_path, monkeypatch):
+    archive = tmp_path / "backup.tar"
+    replacement = tmp_path / "replacement.tar"
+    rootfs = tmp_path / "rootfs"
+    rootfs.mkdir()
+    with tarfile.open(archive, "w") as tf:
+        _add_bytes(tf, "box/manifest.json", b'{"image_ref":"original"}')
+        _add_bytes(tf, "box/rootfs/etc/inside", b"original")
+    with tarfile.open(replacement, "w") as tf:
+        _add_bytes(tf, "box/manifest.json", b'{"image_ref":"replacement"}')
+        _add_bytes(tf, "box/rootfs/etc/inside", b"replacement")
+
+    detect_backup = install_local._detect_backup
+
+    def replace_archive(members):
+        replacement.replace(archive)
+        return detect_backup(members)
+
+    monkeypatch.setattr(install_local, "_detect_backup", replace_archive)
+    assert _install_archive(archive, rootfs) == {"image_ref": "original"}
+    assert (rootfs / "etc/inside").read_bytes() == b"original"
 
 
 def test_install_from_backup_returns_manifest_and_extracts_rootfs(tmp_path):

@@ -12,12 +12,11 @@ Addressed documents are checked against their descriptors before parsing, and
 layers before cache publication. Extraction uses the same open file it verified,
 so a cache entry replaced by name cannot redirect the read.
 
-A chroot-distro backup is a plain tar whose members are `<name>/manifest.json` (always
-the first entry) and `<name>/rootfs/...`. It is recognised by that shape and its
-`manifest.json` is read back and returned as metadata, so `install` can write it out
-and `run` works; the rootfs is unpacked by the plain-tarball path with a fixed strip of
-2 (dropping `<name>/rootfs`, and the shorter manifest member falls outside that tree),
-since the voted strip ties toward 0 for a container name that is itself a rootfs dir.
+A backup begins with `<name>/manifest.json` if metadata is present, followed by the
+`<name>/rootfs` directory. A matching sidecar and rootfs tree also identify a backup
+even if the explicit rootfs directory entry is absent. Extraction is limited to the
+selected rootfs prefix, and only its sidecar is read as metadata. The probe, metadata
+read and extraction use the same open archive.
 
 Every member read out of the outer archive must be a regular file, since
 `tarfile.extractfile` follows hardlinks and symlinks within the archive.
@@ -45,8 +44,9 @@ from chroot_distro.helpers.docker import (
     ARCH_TO_DOCKER,
     layer_cache_path,
 )
-from chroot_distro.helpers.tar_extract import extract_tar_stream, extract_tar_to_rootfs
-from chroot_distro.message import log_info, warn
+from chroot_distro.helpers.tar_extract import extract_tar_stream, tar_path_parts
+from chroot_distro.message import escape_controls, log_info, quote_path, warn
+from chroot_distro.names import is_valid_name
 from chroot_distro.progress import clear_bar, fmt_size, progress_active
 
 # Top-level directory names that signal a rootfs filesystem root.
@@ -95,11 +95,6 @@ def detect_strip_count(member_names: list) -> int:
         if score > best_score:
             best_score, best_strip = score, strip
     return best_strip
-
-
-def extract_plain_tar(archive_path: str, strip: int, rootfs_fd: int) -> None:
-    """Stream-extract a plain rootfs tarball into the *rootfs_fd* tree."""
-    extract_tar_to_rootfs(archive_path, rootfs_fd, strip=strip)
 
 
 class _Blob(NamedTuple):
@@ -298,36 +293,32 @@ def _extract_oci(tf, member_map, rootfs_fd, dist_arch) -> dict[str, object]:
     }
 
 
-def _detect_backup_manifest(member_names: list) -> str | None:
-    """Return the `<name>/manifest.json` member name if these look like a backup.
+def _detect_backup(members: list[tarfile.TarInfo]) -> tuple[str, bool] | None:
+    """Return the backup wrapper and whether it has a manifest in the probe."""
+    entries = [(tar_path_parts(member.name), member.isdir()) for member in members]
+    sidecars = [
+        parts[0]
+        for parts, _ in entries
+        if len(parts) == 2 and parts[0] not in ("", ".", "..") and parts[1] == "manifest.json"
+    ]
+    first, is_dir = next(((parts, is_dir) for parts, is_dir in entries if parts), ((), False))
+    if is_dir and len(first) == 2 and first[1] == "rootfs" and is_valid_name(first[0]):
+        return first[0], first[0] in sidecars
 
-    A chroot-distro backup nests everything under one top-level directory holding
-    `manifest.json` and a `rootfs/` tree. The manifest is always the first member,
-    so it is within the probe window even for a large rootfs.
-    """
-    manifest_name: str | None = None
-    top = ""
-    for name in member_names:
-        parts = str(name).lstrip("/").split("/")
-        if len(parts) == 2 and parts[1] == "manifest.json":
-            manifest_name, top = str(name), parts[0]
-            break
-    if manifest_name is None:
-        return None
-    rootfs_prefix = f"{top}/rootfs"
-    for name in member_names:
-        clean = str(name).lstrip("/").rstrip("/")
-        if clean == rootfs_prefix or clean.startswith(rootfs_prefix + "/"):
-            return manifest_name
-    return None
+    roots = {
+        parts[0] for parts, is_dir in entries if len(parts) >= 2 and parts[1] == "rootfs" and (is_dir or len(parts) > 2)
+    }
+    return next(((name, True) for name in sidecars if name in roots), None)
 
 
-def _read_backup_manifest(archive_path: str, manifest_name: str) -> dict | None:
+def _read_backup_manifest(archive: BinaryIO, wrapper: str) -> dict | None:
     """Read and parse a backup's `manifest.json` member, or None if unusable."""
-    with tarfile.open(archive_path, "r|*") as tf:
+    manifest_parts = (wrapper, "manifest.json")
+    with tarfile.open(fileobj=archive, mode="r|*") as tf:
         for m in tf:
-            if m.name.lstrip("/") != manifest_name.lstrip("/"):
+            if tar_path_parts(m.name) != manifest_parts:
                 continue
+            manifest_name = quote_path(m.name)
             if not m.isreg():
                 # extractfile() follows hardlinks/symlinks within the archive; a
                 # non-regular manifest member could redirect this read elsewhere.
@@ -339,7 +330,7 @@ def _read_backup_manifest(archive_path: str, manifest_name: str) -> dict | None:
             try:
                 data = json.loads(fobj.read())
             except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
-                warn(f"backup manifest '{manifest_name}' is not valid JSON ({exc}); ignoring it.")
+                warn(f"backup manifest '{manifest_name}' is not valid JSON ({escape_controls(str(exc))}); ignoring it.")
                 return None
             finally:
                 fobj.close()
@@ -354,32 +345,39 @@ def install_from_local_file(archive_path: str, rootfs_fd: int, dist_arch: str) -
     down with O_NOFOLLOW and hands the result straight through, so nothing
     between that check and the last member written resolves the name again.
     """
-    probe_names: list = []
-    is_oci = False
-    with tarfile.open(archive_path, "r|*") as tf_probe:
-        for m in tf_probe:
-            probe_names.append(m.name)
-            if m.name == "oci-layout":
-                is_oci = True
-                break
-            if len(probe_names) >= 500:
-                break
+    with open(archive_path, "rb") as archive:
+        probe: list[tarfile.TarInfo] = []
+        is_oci = False
+        with tarfile.open(fileobj=archive, mode="r|*") as tf_probe:
+            for member in tf_probe:
+                if member.name == "oci-layout":
+                    is_oci = True
+                    break
+                probe.append(member)
+                if len(probe) >= 500:
+                    break
 
-    if is_oci:
-        with tarfile.open(archive_path, "r:*") as tf:
-            if progress_active():
-                log_info("Indexing OCI archive...")
-                sys.stderr.flush()
-            raw_members = tf.getmembers()
-            clear_bar()
-            member_map = {m.name: m for m in raw_members}
-            return _extract_oci(tf, member_map, rootfs_fd, dist_arch)
+        archive.seek(0)
+        if is_oci:
+            with tarfile.open(fileobj=archive, mode="r:*") as tf:
+                if progress_active():
+                    log_info("Indexing OCI archive...")
+                    sys.stderr.flush()
+                member_map = {m.name: m for m in tf.getmembers()}
+                clear_bar()
+                return _extract_oci(tf, member_map, rootfs_fd, dist_arch)
 
-    backup_manifest = _detect_backup_manifest(probe_names)
-    metadata = _read_backup_manifest(archive_path, backup_manifest) if backup_manifest else None
+        total_size = os.fstat(archive.fileno()).st_size
+        backup = _detect_backup(probe)
+        if backup is None:
+            strip = detect_strip_count([member.name for member in probe])
+            extract_tar_stream(archive, total_size, rootfs_fd, strip=strip)
+            return None
 
-    # A detected backup's layout is fixed (<name>/rootfs/...), so strip is 2 here
-    # rather than voted: detect_strip_count ties toward 0 for a name like "usr".
-    strip = 2 if backup_manifest else detect_strip_count(probe_names)
-    extract_plain_tar(archive_path, strip, rootfs_fd)
-    return metadata
+        wrapper, has_manifest = backup
+        metadata = None
+        if has_manifest:
+            metadata = _read_backup_manifest(archive, wrapper)
+            archive.seek(0)
+        extract_tar_stream(archive, total_size, rootfs_fd, rootfs_prefix=(wrapper, "rootfs"))
+        return metadata

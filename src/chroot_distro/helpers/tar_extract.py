@@ -2,12 +2,11 @@
 # Copyright (C) 2025-2026 Md Arif
 """Extract a tar stream into a rootfs, member by member, safely.
 
-One streaming extractor serves both Docker layer application and plain rootfs
-tarball installs; they differ only in `strip` (leading components to drop from
-each member name, >0 only for a tarball whose entries sit under a wrapper
-directory) and `handle_whiteouts` (when True, OCI whiteouts, `.wh.<name>` and
-opaque `.wh..wh..opq`, consume sibling entries instead of being written as
-ordinary members).
+One streaming extractor serves image layers, plain rootfs tarballs and backups.
+Plain tarballs can drop leading components with `strip`. Backups require an exact
+`rootfs_prefix` on members and hardlink targets before dropping it. When
+`handle_whiteouts` is True, OCI whiteouts consume sibling entries instead of
+being written as ordinary members.
 
 An archive is a document this program did not write, so the loop filters before it
 writes. Block, char and FIFO entries are skipped. A member is dropped when a
@@ -57,6 +56,7 @@ import stat
 import sys
 import typing
 from collections.abc import Sequence
+from itertools import dropwhile
 
 if sys.version_info >= (3, 14):
     import tarfile
@@ -98,6 +98,7 @@ def extract_tar_stream(
     rootfs_fd: int,
     *,
     strip: int = 0,
+    rootfs_prefix: tuple[str, ...] = (),
     handle_whiteouts: bool = False,
 ) -> None:
     """Extract from an open archive at its start. The caller owns both descriptors."""
@@ -115,6 +116,7 @@ def extract_tar_stream(
                     rootfs_fd,
                     parents,
                     strip=strip,
+                    rootfs_prefix=rootfs_prefix,
                     handle_whiteouts=handle_whiteouts,
                     deferred_links=deferred_links,
                     deferred_dirs=deferred_dirs,
@@ -214,19 +216,32 @@ def _copy_hardlink(rootfs_fd, parents, dest_parts, src_parts, uid, gid) -> None:
         os.close(src_fd)
 
 
-def _process_member(member, tf, rootfs_fd, parents, *, strip, handle_whiteouts, deferred_links, deferred_dirs):
+def tar_path_parts(name: str) -> tuple[str, ...]:
+    """Split an archive name after removing leading slashes and dot components."""
+    name = name.strip("/")
+    return tuple(dropwhile(lambda part: part == ".", name.split("/"))) if name else ()
+
+
+def _relative_parts(name: str, strip: int, rootfs_prefix: tuple[str, ...]) -> Sequence[str]:
+    if not rootfs_prefix:
+        return name.strip("/").split("/")[strip:]
+
+    parts = tar_path_parts(name)
+    depth = len(rootfs_prefix)
+    return parts[depth:] if parts[:depth] == rootfs_prefix else ()
+
+
+def _process_member(
+    member, tf, rootfs_fd, parents, *, strip, rootfs_prefix, handle_whiteouts, deferred_links, deferred_dirs
+):
     if member.isblk() or member.ischr() or member.isfifo():
         return
 
-    parts = member.name.lstrip("/").rstrip("/").split("/")
-    if len(parts) <= strip:
-        return
-    rel_parts = parts[strip:]
-    if any(p in ("..", "") for p in rel_parts):
+    rel_parts = _relative_parts(member.name, strip, rootfs_prefix)
+    if not rel_parts or any(p in ("..", "") for p in rel_parts):
         return
 
-    rel_path = "/".join(rel_parts)
-    if not rel_path or rel_parts[-1] == os.curdir:
+    if rel_parts[-1] == os.curdir:
         # A trailing '.' names the directory the member already sits in rather
         # than an entry of its own, so writing it would act on that directory:
         # a symlink member takes its whole contents with it. Interior '.'
@@ -254,6 +269,12 @@ def _process_member(member, tf, rootfs_fd, parents, *, strip, handle_whiteouts, 
             return
         _apply_whiteout(parent_fd, name)
         return
+
+    link_parts: Sequence[str] = ()
+    if member.islnk():
+        link_parts = _relative_parts(member.linkname, strip, rootfs_prefix)
+        if not link_parts or any(p in ("..", "") for p in link_parts):
+            return
 
     parent_fd = parents.get(parent_parts, create=True)
 
@@ -288,8 +309,8 @@ def _process_member(member, tf, rootfs_fd, parents, *, strip, handle_whiteouts, 
     elif member.issym():
         _write_symlink(parent_fd, name, member)
 
-    elif member.islnk():
-        _defer_hardlink(member, strip, rel_parts, deferred_links)
+    elif link_parts:
+        deferred_links.append((rel_parts, link_parts, member.uid, member.gid))
 
     elif member.isreg():
         _write_regular(parent_fd, name, member, tf)
@@ -346,31 +367,6 @@ def _write_symlink(parent_fd, name, member) -> None:
         os.chown(name, member.uid, member.gid, dir_fd=parent_fd, follow_symlinks=False)
     with contextlib.suppress(OSError):
         os.utime(name, (member.mtime, member.mtime), dir_fd=parent_fd, follow_symlinks=False)
-
-
-def _defer_hardlink(member, strip, rel_parts, deferred_links):
-    """Queue a hardlink for copy after all regular files are written.
-
-    The linkname is filtered identically to member.name: leading slashes are
-    stripped, the first *strip* components dropped, and any ".." or empty
-    component drops the entry. Without this a malicious archive could point
-    linkname at a host path (e.g. "../../etc/shadow") and the copy would
-    resolve it through the rootfs prefix, copying host content into the
-    member-defined dest inside the rootfs.
-
-    Only the (validated) relative components of both endpoints are stored, with
-    the member's ownership; both are resolved with safe_resolve_parts_at() at
-    copy time so a symlink planted by a later member can't redirect the read
-    source or the write dest out of the rootfs, and the answers are walked off
-    the rootfs descriptor rather than opened by name.
-    """
-    lparts = member.linkname.lstrip("/").rstrip("/").split("/")
-    if len(lparts) <= strip:
-        return
-    rel_lparts = lparts[strip:]
-    if any(p in ("..", "") for p in rel_lparts):
-        return
-    deferred_links.append((rel_parts, rel_lparts, member.uid, member.gid))
 
 
 def _safe_resolve(root: str, parts: list[str]) -> str | None:

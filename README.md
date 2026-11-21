@@ -108,6 +108,10 @@ OCI archives must provide matching sizes and SHA-256 digests for the manifests,
 configs and layers used during install. A verified cached layer can supply a
 layer missing from the archive.
 
+When installing a backup, `install` extracts only its container's rootfs tree
+and uses the matching manifest when present. Backups without a manifest can
+also be installed.
+
 Failed or interrupted installs retain marked partial data. `list` reports these
 as incomplete, and `login` and `run` refuse them. Repeat the install command to
 clear the partial rootfs and stale image metadata before trying again, or use
