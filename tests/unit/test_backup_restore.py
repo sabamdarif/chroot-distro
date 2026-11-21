@@ -502,34 +502,17 @@ def test_backup_restore_round_trip_for_installed_rootfs(restore_store, tmp_path,
         assert not os.path.lexists(restored / "manifest.json")
 
 
-@pytest.mark.parametrize("name", ["box", "manifest.json", "rootfs"])
-def test_restore_legacy_layout(restore_store, tmp_path, name):
-    archive = tmp_path / "old.tar"
-    prefix = f"installed-rootfs/{name}"
-    with tarfile.open(archive, "w") as tf:
-        _add_restore_entry(tf, "installed-rootfs", kind=tarfile.DIRTYPE)
-        _add_restore_entry(tf, prefix, kind=tarfile.DIRTYPE, mode=0o755)
-        _add_restore_entry(tf, f"{prefix}/hello", b"legacy")
-
-    flags = ["--legacy-layout"] if name == "rootfs" else []
-    command_restore(build_parser().parse_args(["restore", *flags, str(archive)]))
-
-    assert sorted(path.name for path in restore_store.iterdir()) == [name]
-    assert paths.container_is_installed(name)
-    assert (restore_store / name / "rootfs/hello").read_bytes() == b"legacy"
-
-
-def test_restore_legacy_override_refuses_current_manifest_before_lock(restore_store, tmp_path, monkeypatch, capsys):
+@pytest.mark.parametrize("member", ["installed-rootfs/box/hello", "box/hello"])
+def test_restore_rejects_non_backup_layout_before_lock(restore_store, tmp_path, monkeypatch, capsys, member):
     archive = tmp_path / "backup.tar"
     with tarfile.open(archive, "w") as tf:
-        _add_restore_entry(tf, "installed-rootfs/manifest.json", b"{}")
-        _add_restore_entry(tf, "installed-rootfs/rootfs", kind=tarfile.DIRTYPE)
+        _add_restore_entry(tf, member, b"old")
 
     monkeypatch.setattr(restore, "ContainerLock", lambda *a, **kw: pytest.fail("unexpected lock"))
     with pytest.raises(SystemExit, match="1"):
-        command_restore(build_parser().parse_args(["restore", "--legacy-layout", str(archive)]))
+        command_restore(build_parser().parse_args(["restore", str(archive)]))
 
-    assert "Omit --legacy-layout" in capsys.readouterr().err
+    assert "archive members must use <name>/rootfs/" in capsys.readouterr().err
     assert not restore_store.exists()
 
 
@@ -537,10 +520,10 @@ def test_restore_legacy_override_refuses_current_manifest_before_lock(restore_st
     ("name", "first", "second"),
     [
         ("installed-rootfs", "installed-rootfs/rootfs", "installed-rootfs/manifest.json"),
-        ("box", "installed-rootfs/box", "box/rootfs"),
+        ("box", "box/rootfs", "installed-rootfs/box"),
     ],
 )
-def test_restore_refuses_mixed_layouts(restore_store, tmp_path, name, first, second):
+def test_restore_refuses_members_outside_backup_layout(restore_store, tmp_path, name, first, second):
     archive = tmp_path / "mixed.tar"
     with tarfile.open(archive, "w") as tf:
         _add_restore_entry(tf, first, kind=tarfile.DIRTYPE, mode=0o755)
@@ -609,8 +592,8 @@ def test_failed_restore_is_incomplete_and_can_be_retried(restore_store, tmp_path
     (box / "manifest.json").write_text('{"image_ref":"stale"}')
     (box / "rootfs").chmod(0o500)
     with tarfile.open(archive, "w") as tf:
-        _add_restore_entry(tf, "installed-rootfs/box/good", b"restored")
-        _add_restore_entry(tf, "installed-rootfs/box/copy", kind=tarfile.LNKTYPE, link="installed-rootfs/box/good")
+        _add_restore_entry(tf, "box/rootfs/good", b"restored")
+        _add_restore_entry(tf, "box/rootfs/copy", kind=tarfile.LNKTYPE, link="box/rootfs/good")
     command_restore(SimpleNamespace(archive=str(archive)))
 
     original, copied = box / "rootfs/good", box / "rootfs/copy"

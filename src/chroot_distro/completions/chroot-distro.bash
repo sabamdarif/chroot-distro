@@ -189,7 +189,7 @@ _chroot_distro() {
 	# -----------------------------------------------------------------------
 	restore)
 		if [[ "${cur}" == -* ]]; then
-			_chroot_distro_compgen_words "--legacy-layout -v --verbose -q --quiet -h --help" "${cur}"
+			_chroot_distro_compgen_words "-v --verbose -q --quiet -h --help" "${cur}"
 		else
 			_filedir '@(tar|tar.gz|tgz|tar.bz2|tbz2|tar.xz|txz)'
 		fi

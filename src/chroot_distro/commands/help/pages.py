@@ -741,7 +741,6 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
         ),
         "options": [
             ("-h, --help", "Show this help."),
-            ("--legacy-layout", "Read the archive as installed-rootfs/<name>/..., including old backups of rootfs."),
             ("-v, --verbose", "Log each extracted file."),
             ("-q, --quiet", "Suppress non-error output. Mutually exclusive with --verbose."),
         ],
@@ -760,18 +759,14 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
                     "uncompressed tar. Applies to both file and "
                     "stdin input."
                     "\n\n"
-                    "Only one container is restored per archive. An "
-                    "archive holding more than one container, or no "
-                    "container rootfs at all, is rejected."
+                    "Restore expects the layout written by backup, with files "
+                    "under <name>/rootfs/ and an optional <name>/manifest.json. "
+                    "The archive must contain one container rootfs."
                     "\n\n"
                     "Restore reuses the container name baked into the "
                     "archive and refuses to overwrite one that is already "
                     "installed; remove it first, or install the archive "
                     "under a new name with install --name."
-                    "\n\n"
-                    "By default, installed-rootfs/rootfs/... restores a "
-                    "container named installed-rootfs. Use --legacy-layout "
-                    "if the archive is an old backup of a container named rootfs."
                 ),
             },
         ],

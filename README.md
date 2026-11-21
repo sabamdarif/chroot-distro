@@ -393,13 +393,12 @@ Bring back a container from a backup archive. Without a file, it reads from stdi
 
 If restore fails or is interrupted after extraction starts, `list` shows the container as incomplete. Repeat `restore` to clear the partial rootfs and retry. Unmount any mounts at or below the rootfs before retrying.
 
-By default, `installed-rootfs/rootfs/...` restores a container named `installed-rootfs`. Use `--legacy-layout` if the archive is an old backup of a container named `rootfs` with the same paths.
+Restore expects the layout written by `backup`, with files under `<name>/rootfs/` and an optional `<name>/manifest.json`. The first path component is the container name, including when it is `installed-rootfs`.
 
-| Option            | Description                                      |
-| ----------------- | ------------------------------------------------ |
-| `--legacy-layout` | Read the archive as `installed-rootfs/<name>/...`. |
-| `-v`, `--verbose` | Show each extracted file.                        |
-| `-q`, `--quiet`   | Only show errors.                                |
+| Option            | Description               |
+| ----------------- | ------------------------- |
+| `-v`, `--verbose` | Show each extracted file. |
+| `-q`, `--quiet`   | Only show errors.         |
 
 ```sh
 chroot-distro restore ubuntu.tar.xz

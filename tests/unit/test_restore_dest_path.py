@@ -1,8 +1,5 @@
 from chroot_distro.commands import restore
-
-
-def _dest_path(name, *, legacy_layout=False):
-    return restore._dest_path(restore._archive_parts(name), legacy_layout=legacy_layout)
+from chroot_distro.commands.restore import _dest_path
 
 
 # ── _detect_compression ───────────────────────────────────────────────────────
@@ -45,21 +42,7 @@ def test_dest_path_invalid_container_name_rejected():
     assert _dest_path("bad name/rootfs/x") is None
 
 
-# ── _dest_path: legacy format ──────────────────────────────────────────────────
-def test_dest_path_legacy_prefix():
-    assert _dest_path("installed-rootfs/mybox/etc/hostname", legacy_layout=True) == ("mybox", ("etc", "hostname"))
-
-
-def test_dest_path_legacy_trailing_slash_rejected():
-    # trailing slash -> empty final part -> rejected by the traversal guard
-    assert _dest_path("installed-rootfs/mybox/", legacy_layout=True) is None
-
-
-def test_dest_path_legacy_missing_name():
-    assert _dest_path("installed-rootfs/", legacy_layout=True) is None
-
-
-# ── _dest_path: new format ─────────────────────────────────────────────────────
+# ── _dest_path: backup layout ──────────────────────────────────────────────────
 def test_dest_path_new_manifest():
     assert _dest_path("mybox/manifest.json") == ("mybox", None)
 
@@ -72,8 +55,3 @@ def test_dest_path_trailing_slash_rejected():
     # trailing slash -> empty final part -> rejected by the traversal guard
     assert _dest_path("mybox/rootfs/") is None
     assert _dest_path("mybox/") is None
-
-
-def test_dest_path_old_backcompat_layout():
-    # <name>/<other> (not rootfs, not manifest) maps under rootfs
-    assert _dest_path("mybox/data/file") == ("mybox", ("data", "file"))
