@@ -31,6 +31,8 @@ tmpfs whose entries are separate mounts with the bionic linker under one of them
 and inside a user namespace a non-recursive bind of /sys or /dev is refused outright
 because their locked submounts cannot be split off. A /dev bind is also made rslave
 straight away, or the devpts mounted into it next propagates back onto the host /dev.
+In host mode, Android system partition binds become rslave so guest teardown
+cannot propagate unmounts back to the host's nested mounts.
 
 Failure policy is per source. A bind listed in *best_effort_sources* warns and is
 skipped, anything else re-raises, and a missing mount namespace is not an error at
@@ -176,7 +178,7 @@ def apply_bind_mounts(
             raise
         if IS_TERMUX and holder is None:
             source_real = os.path.realpath(src)
-            if os.path.commonpath((source_real, rootfs_real)) == source_real:
+            if src in _ANDROID_SYS_MOUNTS or os.path.commonpath((source_real, rootfs_real)) == source_real:
                 mount_manager.stop_guest_bind_propagation(rootfs, dst)
         # Mounts under /dev or /sys can propagate back onto the host.
         if holder is None and dst_real in (dev_root, sys_root):
