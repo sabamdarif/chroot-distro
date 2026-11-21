@@ -8,7 +8,8 @@ def test_detect_compression_gzip():
 
 
 def test_detect_compression_bzip2():
-    assert restore._detect_compression(b"BZh91") == "bz2"
+    assert restore._detect_compression(b"BZh91AY&SY") == "bz2"
+    assert restore._detect_compression(b"BZh9\x17rE8P\x90") == "bz2"
 
 
 def test_detect_compression_xz():

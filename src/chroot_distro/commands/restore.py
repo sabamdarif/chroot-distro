@@ -7,23 +7,31 @@ member fixes the container name and takes its lock. The first rootfs member
 starts a marked install. Extraction and retries use pinned directories, and
 hardlinks become copies of files in the guest rootfs.
 The incomplete marker survives errors and interrupts and is removed only after
-all entries and the optional manifest have been written.
+the tar terminator and compression stream have been checked and the optional
+manifest has been written.
 """
 
+import bz2
 import contextlib
 import errno
+import gzip
 import io
+import lzma
 import os
 import shutil
 import stat
 import sys
 import tempfile
 import typing
+import zlib
 
 if sys.version_info >= (3, 14):
-    import tarfile
+    import tarfile as tar
+
+    from compression import zstd
 else:
-    from backports.zstd import tarfile
+    from backports import zstd
+    from backports.zstd import tarfile as tar
 
 from chroot_distro import dirfd
 from chroot_distro.atomic import atomic_write
@@ -62,7 +70,6 @@ from chroot_distro.syscalls.mount import fd_path
 
 _MAGIC_COMPRESS = (
     (b"\x1f\x8b", "gz"),  # gzip
-    (b"BZh", "bz2"),  # bzip2
     (b"\xfd7zXZ\x00", "xz"),  # xz
     (b"\x5d\x00", "xz"),  # lzma legacy
     (b"\x28\xb5\x2f\xfd", "zst"),  # zstd
@@ -71,10 +78,72 @@ _MAGIC_COMPRESS = (
 
 def _detect_compression(header: bytes) -> str:
     """Return the tarfile mode suffix inferred from *header* magic bytes."""
+    if header.startswith(b"BZh") and b"1" <= header[3:4] <= b"9" and header[4:10] in (b"1AY&SY", b"\x17rE8P\x90"):
+        return "bz2"
     for magic, mode in _MAGIC_COMPRESS:
         if header.startswith(magic):
             return mode
     return ""
+
+
+class _BackupInput(io.RawIOBase):
+    """Replay the compression header before continuing from a file or pipe."""
+
+    def __init__(self, source: ByteCounter) -> None:
+        self._source = source
+        self._prefix = source.read(10)
+        while len(self._prefix) < 10:
+            chunk = source.read(10 - len(self._prefix))
+            if not chunk:
+                break
+            self._prefix += chunk
+        self.compression = _detect_compression(self._prefix)
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, buffer, /) -> int:
+        if not self._prefix:
+            return typing.cast(int, self._source.readinto(buffer))
+        view = memoryview(buffer)
+        size = min(len(view), len(self._prefix))
+        view[:size] = self._prefix[:size]
+        self._prefix = self._prefix[size:]
+        return size
+
+
+class _BackupTarInfo(tar.TarInfo):
+    """Distinguish a complete tar archive from a bad or missing header."""
+
+    @classmethod
+    def fromtarfile(cls, tarfile: tar.TarFile) -> "_BackupTarInfo":
+        try:
+            return super().fromtarfile(tarfile)
+        except tar.EOFHeaderError:  # type: ignore[attr-defined]
+            stream = tarfile.fileobj
+            if stream.read(tar.BLOCKSIZE) != bytes(tar.BLOCKSIZE):
+                raise tar.ReadError("tar archive must end with two zero blocks") from None
+            while padding := stream.read(1 << 17):
+                if padding.count(0) != len(padding):
+                    raise tar.ReadError("unexpected data after the tar terminator") from None
+            raise
+        except tar.HeaderError as exc:
+            raise tar.ReadError(f"invalid tar header or terminator: {exc}") from exc
+
+
+def _open_backup(source: ByteCounter, sources: contextlib.ExitStack) -> tar.TarFile:
+    archive = _BackupInput(source)
+    stream = sources.enter_context(io.BufferedReader(archive))
+    decoded: typing.Any = stream
+    if archive.compression == "gz":
+        decoded = sources.enter_context(gzip.GzipFile(fileobj=stream, mode="rb"))
+    elif archive.compression == "bz2":
+        decoded = sources.enter_context(bz2.BZ2File(stream))
+    elif archive.compression == "xz":
+        decoded = sources.enter_context(lzma.LZMAFile(stream))  # noqa: SIM115
+    elif archive.compression == "zst":
+        decoded = sources.enter_context(zstd.ZstdFile(stream))
+    return sources.enter_context(tar.open(fileobj=decoded, mode="r|", tarinfo=_BackupTarInfo))
 
 
 def _dest_path(path: str) -> tuple[str, tuple[str, ...] | None] | None:
@@ -147,7 +216,7 @@ _DirModes = dict[tuple[str, ...], tuple[os.stat_result, int]]
 
 
 # The procfs path addresses the symlink inode pinned with O_PATH and O_NOFOLLOW.
-def _restore_symlink(parent_fd: int, leaf: str, member: tarfile.TarInfo) -> None:
+def _restore_symlink(parent_fd: int, leaf: str, member: tar.TarInfo) -> None:
     os.symlink(member.linkname, leaf, dir_fd=parent_fd)
     fd = dirfd.open_file_at(parent_fd, leaf, os.O_PATH)
     try:
@@ -160,8 +229,8 @@ def _restore_symlink(parent_fd: int, leaf: str, member: tarfile.TarInfo) -> None
 
 
 def _restore_member(
-    tf: tarfile.TarFile,
-    member: tarfile.TarInfo,
+    tf: tar.TarFile,
+    member: tar.TarInfo,
     name: str,
     rootfs_fd: int,
     parts: tuple[str, ...],
@@ -225,7 +294,7 @@ def _restore_member(
         else:
             content = tf.extractfile(member)
             if content is None:
-                raise tarfile.ReadError("regular archive member has no data stream")
+                raise tar.ReadError("regular archive member has no data stream")
             with content, open(fd, "wb", closefd=False) as out:
                 shutil.copyfileobj(content, out, 1 << 17)
         os.fchown(fd, member.uid, member.gid)
@@ -247,7 +316,7 @@ def _apply_dir_modes(rootfs_fd: int, modes: _DirModes) -> None:
 
 
 def _restore_stream(
-    tf: tarfile.TarFile,
+    tf: tar.TarFile,
     on_entry: typing.Callable[[int, str], None],
     pins: contextlib.ExitStack,
 ) -> tuple[str, int, int, str]:
@@ -293,7 +362,7 @@ def _restore_stream(
             manifest.truncate()
             content = tf.extractfile(member)
             if content is None:
-                raise tarfile.ReadError("manifest has no data stream")
+                raise tar.ReadError("manifest has no data stream")
             with content:
                 shutil.copyfileobj(content, manifest, 1 << 17)
             manifest_mode = stat.S_IMODE(member.mode)
@@ -347,14 +416,13 @@ def command_restore(args) -> None:
 
     done_size = 0
     total_size = 0
-    counter: ByteCounter | None = None
 
     def _on_entry(member_size: int, member_name: str) -> None:
         nonlocal done_size
         done_size += member_size
         if verbose:
             log_info(f"Extracting: '{quote_path(member_name)}'")
-        if counter is not None and total_size:
+        if total_size:
             draw_bytes_bar(counter.count, total_size)
         else:
             draw_bytes_bar(done_size, 0, noun="extracted")
@@ -362,19 +430,14 @@ def command_restore(args) -> None:
     try:
         with contextlib.ExitStack() as pins:
             with contextlib.ExitStack() as sources:
+                raw: typing.BinaryIO
                 if archive:
                     raw = sources.enter_context(open(archive, "rb"))
                     total_size = os.fstat(raw.fileno()).st_size
-                    counter = ByteCounter(raw)
-                    fileobj: typing.Any = counter
-                    mode = "r|*"
                 else:
-                    buf = sys.stdin.buffer
-                    header = buf.peek(6)[:6] if isinstance(buf, io.BufferedReader) else b""
-                    fileobj = buf
-                    mode = f"r|{_detect_compression(header)}"
-
-                tf = sources.enter_context(tarfile.open(fileobj=fileobj, mode=mode))  # type: ignore[call-overload]
+                    raw = sys.stdin.buffer
+                counter = ByteCounter(raw)
+                tf = _open_backup(counter, sources)
                 result = _restore_stream(tf, _on_entry, pins)
             finish_install(*result)
 
@@ -382,7 +445,17 @@ def command_restore(args) -> None:
         clear_bar()
         log_error("Aborted by user.")
         sys.exit(1)
-    except (ChrootDistroError, EOFError, OSError, OverflowError, ValueError, tarfile.TarError) as exc:
+    except (
+        ChrootDistroError,
+        EOFError,
+        OSError,
+        OverflowError,
+        ValueError,
+        lzma.LZMAError,
+        tar.TarError,
+        zlib.error,
+        zstd.ZstdError,
+    ) as exc:
         clear_bar()
         log_error(f"Failed to restore container: {escape_controls(str(exc))}")
         sys.exit(1)

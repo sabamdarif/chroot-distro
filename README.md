@@ -397,6 +397,8 @@ If restore fails or is interrupted after extraction starts, `list` shows the con
 
 Restore expects the layout written by `backup`, with files under `<name>/rootfs/` and an optional `<name>/manifest.json`. The first path component is the container name, including when it is `installed-rootfs`.
 
+The tar archive must end with two zero blocks and may include zero padding. Restore reads through the end of the stream and checks for compression errors before marking the container installed. When piping a backup, the producer must close its output.
+
 | Option            | Description               |
 | ----------------- | ------------------------- |
 | `-v`, `--verbose` | Show each extracted file. |

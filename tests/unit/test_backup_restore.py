@@ -459,6 +459,118 @@ def _add_restore_entry(tf, name, data=b"", *, kind=tarfile.REGTYPE, link="", mod
     tf.addfile(member, io.BytesIO(data))
 
 
+def _restore_from_fragmented_stdin(data, monkeypatch):
+    class FragmentedInput(io.BytesIO):
+        def read(self, size=-1):
+            return super().read(1 if 0 < size <= 10 else size)
+
+        def seek(self, *args):
+            pytest.fail("restore sought on stdin")
+
+    with FragmentedInput(data) as stream, monkeypatch.context() as scoped:
+        scoped.setattr(sys, "stdin", SimpleNamespace(buffer=stream, isatty=lambda: False))
+        command_restore(SimpleNamespace(archive=None))
+
+
+@pytest.mark.parametrize("archive_format", [tarfile.PAX_FORMAT, tarfile.GNU_FORMAT])
+@pytest.mark.parametrize("use_stdin", [False, True])
+def test_restore_reads_raw_tar_with_bzip2_like_name(restore_store, tmp_path, monkeypatch, archive_format, use_stdin):
+    name = "BZh9example"
+    filename = "long-name-" * 16
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w", format=archive_format) as tf:
+        _add_restore_entry(tf, f"{name}/rootfs/{filename}", b"restored")
+
+    if use_stdin:
+        _restore_from_fragmented_stdin(buffer.getvalue(), monkeypatch)
+    else:
+        archive = tmp_path / "backup.tar"
+        archive.write_bytes(buffer.getvalue())
+        command_restore(SimpleNamespace(archive=str(archive)))
+
+    assert paths.container_is_installed(name)
+    assert (restore_store / name / "rootfs" / filename).read_bytes() == b"restored"
+
+
+@pytest.mark.parametrize(
+    "tail",
+    [
+        b"",
+        bytes(512),
+        bytes(768),
+        b"invalid header".ljust(512, b"\0") + bytes(1024),
+        tarfile.TarInfo.create_pax_global_header({"comment": "dangling"}) + bytes(1024),
+        bytes(1024) + b"unexpected data",
+    ],
+    ids=["missing", "one-block", "short-second-block", "invalid-header", "extension", "trailing-data"],
+)
+def test_restore_rejects_invalid_tar_end(restore_store, tmp_path, capsys, tail):
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w") as tf:
+        _add_restore_entry(tf, "box/manifest.json", b"{}")
+        _add_restore_entry(tf, "box/rootfs/kept", b"saved")
+        end = tf.offset
+    archive = tmp_path / "backup.tar"
+    archive.write_bytes(buffer.getvalue()[:end] + tail)
+
+    with pytest.raises(SystemExit, match="1"):
+        command_restore(SimpleNamespace(archive=str(archive)))
+
+    assert paths.is_install_incomplete("box")
+    assert not paths.container_is_installed("box")
+    assert not (restore_store / "box/manifest.json").exists()
+    errors = capsys.readouterr().err
+    assert "Failed to restore container:" in errors
+    assert "Finished restoring" not in errors
+
+    archive.write_bytes(buffer.getvalue())
+    command_restore(SimpleNamespace(archive=str(archive)))
+    assert paths.container_is_installed("box")
+    assert (restore_store / "box/manifest.json").read_bytes() == b"{}"
+    assert (restore_store / "box/rootfs/kept").read_bytes() == b"saved"
+
+
+@pytest.mark.parametrize(
+    ("compression", "damage"),
+    [("gz", "trailer"), ("gz", "checksum"), ("bz2", "trailer"), ("xz", "trailer"), ("zst", "trailer")],
+)
+def test_restore_requires_complete_compression_stream(restore_store, monkeypatch, capsys, compression, damage):
+    buffer = io.BytesIO()
+    payload = b"x" * (1 << 18)
+    with tarfile.open(fileobj=buffer, mode=f"w|{compression}") as tf:
+        _add_restore_entry(tf, "box/manifest.json", b"{}")
+        _add_restore_entry(tf, "box/rootfs/kept", payload)
+    complete = buffer.getvalue()
+    if damage == "checksum":
+        broken = complete[:-8] + bytes([complete[-8] ^ 1]) + complete[-7:]
+    else:
+        broken = complete[:-1]
+    with pytest.raises(SystemExit, match="1"):
+        _restore_from_fragmented_stdin(broken, monkeypatch)
+
+    assert paths.is_install_incomplete("box")
+    assert not paths.container_is_installed("box")
+    assert not (restore_store / "box/manifest.json").exists()
+    errors = capsys.readouterr().err
+    assert "Failed to restore container:" in errors
+    assert "Finished restoring" not in errors
+
+    _restore_from_fragmented_stdin(complete, monkeypatch)
+    assert paths.container_is_installed("box")
+    assert (restore_store / "box/rootfs/kept").read_bytes() == payload
+
+
+def test_restore_reads_tar_across_gzip_members(restore_store, monkeypatch):
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w") as tf:
+        _add_restore_entry(tf, "box/rootfs/kept", b"saved")
+    raw = buffer.getvalue()
+    _restore_from_fragmented_stdin(gzip.compress(raw[:777]) + gzip.compress(raw[777:]), monkeypatch)
+
+    assert paths.container_is_installed("box")
+    assert (restore_store / "box/rootfs/kept").read_bytes() == b"saved"
+
+
 @pytest.mark.parametrize("sidecar", ["file", "absent", "symlink"])
 def test_backup_restore_round_trip_for_installed_rootfs(restore_store, tmp_path, monkeypatch, sidecar):
     name = "installed-rootfs"
