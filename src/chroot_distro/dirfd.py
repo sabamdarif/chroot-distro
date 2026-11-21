@@ -759,15 +759,14 @@ def _revive_level(frame: _Frame, keys: tuple[Any, ...], child: _Frame) -> None:
         frame[slot] = up
 
 
-def count_tree_at(dir_fd: int) -> int:
+def count_tree_at(dir_fd: int, *, include_dirs: bool = False) -> int:
     """Count the files, symlinks and special entries under dir_fd.
 
     A cheap first pass so a copy can show progress against a total, the way
     `sync` does. Directories are descended into but not counted: copy_tree_at
-    reports an entry once it has *written* one, which for a directory is only
-    true after its contents are in, so counting them would leave the bar short
-    of the end by the number of directories. Anything unreadable counts as
-    nothing and is left for the copy itself to report.
+    reports files and symlinks. Removal passes include_dirs=True to count
+    descendant directories too; the caller counts the root. Unreadable
+    directories contribute no descendants, so totals are approximate.
 
     Frame layout: [fd, None, pending names, owned].
     """
@@ -784,9 +783,11 @@ def count_tree_at(dir_fd: int) -> int:
                 except OSError:
                     pending = frame[2] = []
             if not pending:
-                levels.pop()
-                if owned:
-                    os.close(fd)
+                try:
+                    levels.pop()
+                finally:
+                    if owned:
+                        os.close(fd)
                 continue
             name = pending.pop()
             try:
@@ -797,6 +798,8 @@ def count_tree_at(dir_fd: int) -> int:
             except OSError:
                 total += 1
                 continue
+            if include_dirs:
+                total += 1
             levels.push([sub, None, None, True])
     except BaseException:
         close_frames(stack)
@@ -1146,15 +1149,16 @@ def rmtree_at(
 
             if not pending:
                 try:
-                    levels.pop()
+                    try:
+                        levels.pop()
+                    finally:
+                        os.close(fd)
                 except OSError as exc:
-                    os.close(fd)
                     _removal_failed(rel, exc, on_error)
                     close_frames(stack)
                     del stack[:]
                     return False
                 parent_fd = stack[-1][0] if stack else dir_fd
-                os.close(fd)
                 if frame[5]:
                     try:
                         _unlink_at(parent_fd, entry, True, force)

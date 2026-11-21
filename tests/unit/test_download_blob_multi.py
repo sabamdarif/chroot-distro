@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import os
+import urllib.request
 import urllib.error
 import urllib.parse
 from unittest import mock
@@ -257,65 +258,41 @@ class TestDownloadBlobSegmented:
         # Ensure target file was not created due to atomic replace failure
         assert not os.path.isfile(path)
 
-    def test_auth_headers_presence(self, mock_cache_path, tmp_path):
-        digest, path = mock_cache_path
-        content = b"A" * (8 * 1024 * 1024)
+    @pytest.mark.parametrize(("target", "keeps_auth"), [
+        ("https://cdn.example.com/final.blob", False),
+        ("http://registry-1.docker.io/final.blob", False),
+        ("https://registry-1.docker.io:443/final.blob", True),
+    ])
+    def test_segment_auth_scope(self, tmp_path, target, keeps_auth):
         import hashlib
 
-        expected_hex = hashlib.sha256(content).hexdigest()
-        digest = f"sha256:{expected_hex}"
-        path = str(tmp_path / f"layer_{expected_hex}")
+        content = b"A" * (8 * 1024 * 1024)
+        digest = "sha256:" + hashlib.sha256(content).hexdigest()
+        captured = []
 
-        with mock.patch("chroot_distro.helpers.docker.layers.layer_cache_path", return_value=path):
-            # Case 1: Cross-host redirect (final_url has different host). Authorization should NOT be present.
-            probe_cross_host = _ProbeResult(
-                content_length=len(content),
-                final_url="https://cdn.example.com/final.blob",
-                range_ok=True,
+        def download(seg, url, headers, *_args, **kwargs):
+            captured.append(headers.get("Authorization"))
+            handler = next(
+                h for h in kwargs["opener_factory"]().handlers
+                if isinstance(h, urllib.request.HTTPRedirectHandler)
             )
+            request = urllib.request.Request(url, headers={**headers, "Range": "bytes=0-0"})
+            redirected = handler.redirect_request(request, None, 302, "Found", {}, "https://storage.example/blob")
+            assert redirected.get_header("Authorization") is None
+            assert redirected.get_header("Range") == "bytes=0-0"
+            with open(seg.tmp_path, "wb") as fh:
+                fh.write(content[seg.start : seg.end + 1])
 
-            captured_headers = []
+        with (
+            mock.patch("chroot_distro.helpers.docker.layers.layer_cache_path", return_value=str(tmp_path / "blob")),
+            mock.patch("chroot_distro.helpers.docker.layers._probe_blob", return_value=_ProbeResult(
+                content_length=len(content), final_url=target, range_ok=True,
+            )),
+            mock.patch("chroot_distro.helpers.docker.layers._download_segment", side_effect=download),
+        ):
+            download_blob("library/nextcloud", digest, "Bearer fixture", connections=2, insecure=True)
 
-            def mock_dl_segment(seg, url, headers, progress, abort, bucket=None, live_responses=None, **kwargs):
-                captured_headers.append(headers)
-                with open(seg.tmp_path, "wb") as f:
-                    f.write(content[seg.start : seg.end + 1])
-
-            with (
-                mock.patch("chroot_distro.helpers.docker.layers._probe_blob", return_value=probe_cross_host),
-                mock.patch("chroot_distro.helpers.docker.layers._download_segment", side_effect=mock_dl_segment),
-            ):
-                download_blob(
-                    repo="library/nextcloud",
-                    digest=digest,
-                    auth="Bearer my_secret_token",
-                    connections=2,
-                )
-
-            for h in captured_headers:
-                assert "Authorization" not in h
-
-            # Case 2: Same host registry (final_url is on same host). Authorization MUST be present.
-            probe_same_host = _ProbeResult(
-                content_length=len(content),
-                final_url="https://registry-1.docker.io/v2/library/nextcloud/blobs/sha256/abc",
-                range_ok=True,
-            )
-
-            captured_headers.clear()
-            with (
-                mock.patch("chroot_distro.helpers.docker.layers._probe_blob", return_value=probe_same_host),
-                mock.patch("chroot_distro.helpers.docker.layers._download_segment", side_effect=mock_dl_segment),
-            ):
-                download_blob(
-                    repo="library/nextcloud",
-                    digest=digest,
-                    auth="Bearer my_secret_token",
-                    connections=2,
-                )
-
-            for h in captured_headers:
-                assert h.get("Authorization") == "Bearer my_secret_token"
+        assert captured == ["Bearer fixture" if keeps_auth else None] * 2
 
     def test_fallback_on_segment_download_error(self, mock_cache_path, tmp_path):
         digest, path = mock_cache_path
@@ -410,7 +387,7 @@ class TestDownloadBlobSegmented:
 
             with (
                 mock.patch("chroot_distro.helpers.docker.layers._probe_blob", return_value=probe_result),
-                mock.patch("chroot_distro.helpers.download.http_opener", return_value=mock_opener_first),
+                mock.patch("chroot_distro.helpers.docker.layers.opener", return_value=mock_opener_first),
                 mock.patch("chroot_distro.helpers.download._interruptible_sleep"),
                 pytest.raises(Exception),
             ):
@@ -444,7 +421,7 @@ class TestDownloadBlobSegmented:
 
             with (
                 mock.patch("chroot_distro.helpers.docker.layers._probe_blob", return_value=probe_result),
-                mock.patch("chroot_distro.helpers.download.http_opener", return_value=mock_opener_second),
+                mock.patch("chroot_distro.helpers.docker.layers.opener", return_value=mock_opener_second),
                 mock.patch("chroot_distro.helpers.download._interruptible_sleep"),
             ):
                 result_path = download_blob(

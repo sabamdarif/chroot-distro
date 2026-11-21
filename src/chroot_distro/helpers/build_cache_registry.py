@@ -39,10 +39,11 @@ from chroot_distro.helpers.docker.push import (
     _put_manifest,
     _upload_blob_bytes,
 )
-from chroot_distro.helpers.docker.refs import parse_image_ref
+from chroot_distro.helpers.docker.refs import parse_tag_reference
 from chroot_distro.helpers.docker.transport import (
     auth_note,
     get_auth_token,
+    insecure_for,
     push_denied_msg,
     registry_base_url,
 )
@@ -67,9 +68,8 @@ def push_cache(ref: str, recipes: typing.Iterable[str], insecure: bool = False) 
     uploads config, blob and manifest. Returns (steps, payload bytes), the same
     shape `export_cache` reports.
     """
-    registry, repo, tag = parse_image_ref(ref)
-    if not repo:
-        raise RuntimeError(f"cache reference '{ref}' does not name a repository.")
+    registry, repo, tag, _ = parse_tag_reference(ref)
+    insecure = insecure_for(registry, insecure)
 
     with tempfile.TemporaryDirectory(prefix="cd-cache-push-") as stage:
         steps, _size = build_cache_io.export_cache(stage, recipes)
@@ -127,9 +127,8 @@ def pull_cache(ref: str, insecure: bool = False) -> tuple[int, int]:
     `import_cache` then verifies each entry's blob against its own digest and
     diff_id, so the artifact is held to the same standard as a local directory.
     """
-    registry, repo, tag = parse_image_ref(ref)
-    if not repo:
-        raise RuntimeError(f"cache reference '{ref}' does not name a repository.")
+    registry, repo, tag, _ = parse_tag_reference(ref)
+    insecure = insecure_for(registry, insecure)
 
     log_info(f"Authenticating with registry{auth_note()}...")
     auth, base = get_auth_token(repo, registry, insecure=insecure)

@@ -697,3 +697,56 @@ def test_chown_tree_at_survives_a_tree_deeper_than_its_fd_budget(tmp_path, monke
 
     bottom = os.path.join("tree", *(f"level{i}" for i in range(12)), "bottom.txt")
     assert bottom in {rel for rel, _uid, _gid, _follow in seen}
+
+
+@pytest.mark.parametrize("walker", ["count", "remove"])
+@pytest.mark.parametrize("failure", ["stale", "interrupt"])
+def test_walkers_close_popped_descriptors_when_revival_fails(tmp_path, monkeypatch, walker, failure):
+    root = tmp_path / "tree"
+    bottom = root
+    for _ in range(12):
+        bottom /= "d"
+    bottom.mkdir(parents=True)
+    monkeypatch.setattr(dirfd, "MAX_OPEN_LEVELS", 2)
+    live = set()
+    revived = []
+    real_open, real_close = os.open, os.close
+    error = OSError(errno.ESTALE, "moved parent") if failure == "stale" else KeyboardInterrupt()
+
+    def opening(*args, **kwargs):
+        fd = real_open(*args, **kwargs)
+        live.add(fd)
+        return fd
+
+    def closing(fd):
+        real_close(fd)
+        live.discard(fd)
+
+    def revive(frame, keys, child):
+        revived.append(child[0])
+        raise error
+
+    with opened(tmp_path if walker == "remove" else root) as caller_fd:
+        monkeypatch.setattr(os, "open", opening)
+        monkeypatch.setattr(os, "close", closing)
+        monkeypatch.setattr(dirfd, "_revive_level", revive)
+        if walker == "remove" and failure == "stale":
+            errors = []
+            assert dirfd.rmtree_at(caller_fd, "tree", on_error=lambda rel, exc: errors.append(exc)) is False
+            assert errors == [error]
+        else:
+            with pytest.raises(type(error)):
+                if walker == "count":
+                    dirfd.count_tree_at(caller_fd, include_dirs=True)
+                else:
+                    dirfd.rmtree_at(caller_fd, "tree")
+        assert revived
+        assert not live
+        os.fstat(caller_fd)
+
+
+def test_count_tree_option_includes_descendant_directories(tmp_path):
+    root = _tree(tmp_path / "tree")
+    with opened(root) as fd:
+        assert dirfd.count_tree_at(fd) == 3
+        assert dirfd.count_tree_at(fd, include_dirs=True) == 4

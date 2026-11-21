@@ -19,6 +19,10 @@ accumulates zombies and only ever dies by SIGKILL). With a `ForegroundExec` it
 instead execs the session's own command, so that command *is* PID 1 and the
 namespaces end when it does.
 
+Parked holders close inherited descriptors after idmap setup and before chroot,
+while the host's procfs is available to kernels without close_range. Only stdio
+and the readiness pipe survive until readiness is reported.
+
 Two synchronisation channels are not optional. A pipe carries the holder's host PID
 back out, since a PID inside a new namespace means nothing to the parent. And the
 foreground exec waits for its own go byte, separate from the holder-wide readiness
@@ -629,9 +633,15 @@ def _run_holder(
     with contextlib.suppress(OSError):
         libc_mount(None, b"/", None, MS_REC | MS_PRIVATE, None)
 
+    if rootfs is not None and idmap_r >= 0 and idmap_tree_fd >= 0:
+        _stack_idmapped_rootfs(idmap_r, idmap_tree_fd, rootfs)
+
+    if foreground is None:
+        from chroot_distro.syscalls.chroot import _close_fds_above
+
+        _close_fds_above((notify_fd,))
+
     if rootfs is not None:
-        if idmap_r >= 0 and idmap_tree_fd >= 0:
-            _stack_idmapped_rootfs(idmap_r, idmap_tree_fd, rootfs)
         try:
             os.chroot(rootfs)
             os.chdir("/")

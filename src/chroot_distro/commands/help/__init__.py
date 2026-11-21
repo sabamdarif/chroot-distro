@@ -2,11 +2,9 @@
 # Copyright (C) 2025-2026 Md Arif
 """`help` as a command, plus the per-command `--help` renderers `cli` dispatches to.
 
-`HELP_COMMANDS` maps every key in `pages.HELP_PAGES` to a zero-argument function
-that renders that page, which is the form `cli.main` wants when it intercepts
-`--help`; a new page needs nothing added here. `command_help` is the front page,
-the one that is composed here rather than in `pages.py` because it mixes the
-`TOP_COMMANDS` table with quick-start and troubleshooting prose.
+`HELP_COMMANDS` maps every key in `pages.HELP_PAGES` to a zero-argument renderer
+for both `--help` and `help COMMAND`. Without a topic, `command_help` combines
+the `TOP_COMMANDS` table with quick-start and troubleshooting prose.
 """
 
 from chroot_distro.commands.help.pages import HELP_PAGES, TOP_COMMANDS
@@ -21,7 +19,9 @@ from chroot_distro.commands.help.render import (
     usage_line,
 )
 from chroot_distro.constants import PROGRAM_NAME, RUNTIME_DIR
+from chroot_distro.exceptions import ChrootDistroError
 from chroot_distro.message import C, msg
+from chroot_distro.parser import ALIAS_TO_CANONICAL
 
 
 def _make_help_fn(name):
@@ -36,7 +36,15 @@ HELP_COMMANDS = {name: _make_help_fn(name) for name in HELP_PAGES}
 
 
 def command_help(args=None) -> None:
-    """Render the top-level help page (no command argument)."""
+    """Render the requested command's help or the front page."""
+    topic: str | None = getattr(args, "help_topic", None)
+    if topic is not None:
+        render = HELP_COMMANDS.get(ALIAS_TO_CANONICAL.get(topic, topic))
+        if render is None:
+            raise ChrootDistroError(f"unknown help topic {topic!a}.")
+        render()
+        return
+
     width = term_width()
 
     section("USAGE")
@@ -56,7 +64,8 @@ def command_help(args=None) -> None:
 
     section("GETTING HELP")
     paragraph(
-        f"Run '{PROGRAM_NAME} <command> --help' for details on any command.",
+        f"Run '{PROGRAM_NAME} help <command>' or '{PROGRAM_NAME} <command> --help' for details. "
+        "Use -V or --version to print the version.",
         width,
     )
 

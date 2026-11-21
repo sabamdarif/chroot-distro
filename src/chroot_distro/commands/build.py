@@ -110,6 +110,7 @@ from chroot_distro.helpers.dockerfile import (
     DockerfileSyntaxError,
     parse_dockerfile,
 )
+from chroot_distro.helpers.download import NETWORK_ERRORS
 from chroot_distro.helpers.export_rootfs import export_local_dir, write_rootfs_tar
 from chroot_distro.helpers.isolation import use_isolation_env_enabled
 from chroot_distro.helpers.oci_writer import (
@@ -530,7 +531,12 @@ def _parse_cache_specs(raw: list[str], option: str, key: str) -> list[tuple[str,
         elif kind == "registry":
             ref = fields.pop("ref", "")
             if not ref or fields:
-                crit_error(f"invalid {option} '{item}' (expected type=registry,ref=REF).")
+                crit_error(f"invalid {option} '{quote_path(item)}' (expected type=registry,ref=REF).")
+                sys.exit(1)
+            try:
+                parse_tag_reference(ref)
+            except InvalidReferenceError as exc:
+                crit_error(f"invalid {option} registry reference '{quote_path(ref)}': {exc}.")
                 sys.exit(1)
             entry = ("registry", ref)
         else:
@@ -588,7 +594,7 @@ def _import_cache_dirs(specs: list[tuple[str, str]], quiet: bool, insecure: bool
                 added, refused = pull_cache(value, insecure=insecure)
             else:
                 added, refused = import_cache(value)
-        except (OSError, ValueError, RuntimeError) as exc:
+        except (*NETWORK_ERRORS, ValueError, RuntimeError) as exc:
             crit_error(f"cannot import the build cache from '{value}': {quote_path(str(exc))}.")
             sys.exit(1)
         if refused:
@@ -619,7 +625,7 @@ def _export_cache_dirs(
                 steps, size = push_cache(value, recipes, insecure=insecure)
             else:
                 steps, size = export_cache(value, recipes)
-        except (OSError, ValueError, RuntimeError) as exc:
+        except (*NETWORK_ERRORS, ValueError, RuntimeError) as exc:
             log_error(f"Cannot export the build cache to '{value}': {quote_path(str(exc))}.")
             sys.exit(1)
         if not quiet:

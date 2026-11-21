@@ -10,6 +10,7 @@ from unittest.mock import patch
 import pytest
 
 from chroot_distro.commands.install import _run_install
+from chroot_distro.commands import install
 from chroot_distro.paths import container_incomplete_marker
 
 
@@ -89,14 +90,33 @@ def test_completed_container_still_refuses_reinstall(mock_log, mock_pull, contai
 @patch("chroot_distro.commands.install.pull_image", side_effect=RuntimeError("network died"))
 @patch("chroot_distro.commands.install.log_info")
 @patch("chroot_distro.commands.install.log_error")
-def test_failed_install_cleanup_removes_marker_too(mock_err, mock_log, mock_pull, containers):
-    """A failure that IS handled removes the whole container dir, marker included."""
+def test_failed_install_retains_marked_payload(mock_err, mock_log, mock_pull, containers):
+    """Handled failures retain the marker for automatic retry."""
     cdir, rootfs, marker = _paths(containers, "debian")
     with pytest.raises(SystemExit):
         _run_install("debian", "debian", None, None, "x86_64")
-    assert not cdir.exists()
+    assert rootfs.is_dir()
+    assert marker.is_file()
 
 
 def test_container_incomplete_marker_path():
     path = container_incomplete_marker("ubuntu")
     assert path.endswith(os.path.join("ubuntu", ".install-incomplete"))
+
+
+def test_install_url_diagnostics_keep_request_credentials_private(containers, monkeypatch, capsys):
+    url = "https://user:password@example.com/archive.tar?token=secret#fragment"
+    monkeypatch.setattr(install, "BASE_CACHE_DIR", str(containers / "cache"))
+
+    def download(ref, destination, *, insecure):
+        assert ref == url
+        raise RuntimeError(f"Cannot download {ref}: HTTP 403")
+
+    monkeypatch.setattr(install, "download_file", download)
+
+    with pytest.raises(SystemExit):
+        _run_install("box", url, None, url, "x86_64")
+
+    error = capsys.readouterr().err
+    assert "could not download the archive" in error
+    assert all(value not in error for value in ("password", "secret", "fragment"))

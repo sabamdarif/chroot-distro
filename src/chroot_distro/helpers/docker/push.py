@@ -58,14 +58,11 @@ from chroot_distro.helpers.docker.transport import (
     opener,
     push_denied_msg,
     rate_limited_msg,
+    registry_request,
+    resolve_registry_url,
     same_auth_origin,
 )
-from chroot_distro.helpers.download import (
-    NETWORK_TIMEOUT,
-    is_retryable_http_error,
-    new_request,
-    retry_http,
-)
+from chroot_distro.helpers.download import NETWORK_TIMEOUT, is_retryable_http_error, retry_http
 from chroot_distro.message import (
     C,
     is_quiet,
@@ -114,15 +111,12 @@ def _with_retry(operation: typing.Callable[[], typing.Any], what: str) -> typing
     return retry_http(operation, what=what, max_retries=_push_max_retries() + 1, retry_delay=5)
 
 
-def _resolve_upload_url(base: str, location: str) -> str:
-    """Resolve the Location header from POST /v2/<repo>/blobs/uploads/."""
+def _resolve_upload_url(base: str, source: str, location: str, *, insecure: bool) -> str:
+    """Resolve an upload Location relative to the response that supplied it."""
     if not location:
         raise RuntimeError("Registry did not return an upload Location header.")
-    if location.startswith(("http://", "https://")):
-        return location
-    if location.startswith("/"):
-        return base + location
-    return base.rstrip("/") + "/" + location
+    target = resolve_registry_url(source, location, insecure=insecure)
+    return resolve_registry_url(base, target, insecure=insecure, absolute=True)
 
 
 def _headers_for(headers: dict[str, str], base: str, url: str) -> dict[str, str]:
@@ -153,7 +147,7 @@ def _blob_exists(
         headers["Authorization"] = auth
 
     def _do() -> bool:
-        req = new_request(url, method="HEAD", headers=headers)
+        req = registry_request(url, method="HEAD", headers=headers)
         try:
             op = auth_opener() if not insecure else opener(insecure)
             with op.open(req) as resp:
@@ -218,7 +212,7 @@ def _upload_blob_bytes(
     def _do() -> None:
         upload_url = _open_upload_session(base, repo, headers, insecure=insecure)
         full_put_url = _with_digest(upload_url, digest)
-        put_req = new_request(
+        put_req = registry_request(
             full_put_url,
             data=data,
             method="PUT",
@@ -245,7 +239,7 @@ def _auth_headers(auth: str) -> dict[str, str]:
 
 def _open_upload_session(base: str, repo: str, headers: dict[str, str], insecure: bool = False) -> str:
     """POST a new blob upload session and return the upload URL."""
-    post_req = new_request(
+    post_req = registry_request(
         f"{base}/v2/{repo}/blobs/uploads/",
         data=b"",
         method="POST",
@@ -254,7 +248,7 @@ def _open_upload_session(base: str, repo: str, headers: dict[str, str], insecure
     op = auth_opener() if not insecure else opener(insecure)
     with op.open(post_req) as resp:
         location = resp.headers.get("Location", "")
-    return _resolve_upload_url(base, location)
+        return _resolve_upload_url(base, resp.geturl(), location, insecure=insecure)
 
 
 def _range_end(range_header: str) -> int | None:
@@ -268,8 +262,9 @@ def _range_end(range_header: str) -> int | None:
 
 
 def _with_digest(url: str, digest: str) -> str:
-    sep = "&" if "?" in url else "?"
-    return f"{url}{sep}digest={urllib.parse.quote(digest, safe='')}"
+    path, _, query = url.partition("?")
+    prefix = f"{query}&" if query else ""
+    return f"{path}?{prefix}digest={urllib.parse.quote(digest, safe='')}"
 
 
 def _upload_blob_monolithic(
@@ -292,7 +287,7 @@ def _upload_blob_monolithic(
         put_url = _with_digest(upload_url, digest)
         with open(file_path, "rb") as fh:
             reader = _ProgressReader(fh, size, label or digest[:19])
-            put_req = new_request(
+            put_req = registry_request(
                 put_url,
                 data=reader,
                 method="PUT",
@@ -346,7 +341,7 @@ def _upload_blob_chunked(
                 if not chunk:
                     break
                 end = offset + len(chunk) - 1
-                patch_req = new_request(
+                patch_req = registry_request(
                     upload_url,
                     data=chunk,
                     method="PATCH",
@@ -364,6 +359,8 @@ def _upload_blob_chunked(
                             raise RuntimeError(f"Chunk upload failed for {digest}: HTTP {resp.status}")
                         next_url = resp.headers.get("Location", "")
                         acked = _range_end(resp.headers.get("Range", ""))
+                        if next_url:
+                            upload_url = _resolve_upload_url(base, resp.geturl(), next_url, insecure=insecure)
                 except BaseException as exc:
                     if not _is_retryable(exc) or attempt >= max_retries:
                         raise
@@ -376,8 +373,6 @@ def _upload_blob_chunked(
                     time.sleep(delay)
                     continue
                 attempt = 0
-                if next_url:
-                    upload_url = _resolve_upload_url(base, next_url)
                 # Advance by what the registry acknowledged when available,
                 # else by the chunk we just sent.
                 offset = (acked + 1) if acked is not None and acked >= offset else (end + 1)
@@ -389,7 +384,7 @@ def _upload_blob_chunked(
             commit_timeout = max(NETWORK_TIMEOUT, size / (1024 * 1024))
 
             def _finalize() -> None:
-                put_req = new_request(
+                put_req = registry_request(
                     put_url,
                     data=b"",
                     method="PUT",
@@ -454,7 +449,7 @@ def _put_manifest(
         headers["Authorization"] = auth
 
     def _do() -> str:
-        req = new_request(url, data=body, method="PUT", headers=headers)
+        req = registry_request(url, data=body, method="PUT", headers=headers)
         op = auth_opener() if not insecure else opener(insecure)
         with op.open(req) as resp:
             if resp.status not in _OK_RANGE:

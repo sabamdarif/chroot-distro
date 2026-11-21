@@ -14,13 +14,17 @@ The second is that root can read an auth file the guest uid cannot, so handing
 the guest a bind of the host cookie is not enough.
 `provision_guest_xauthority` copies only the entries matching this display into
 `GUEST_XAUTHORITY_PATH` inside the rootfs, chowned to the guest uid and chmod
-0600, and removes the file again on any failure rather than leaving a partial
-cookie. The path is under `/var/tmp` deliberately: nothing binds over it.
+0600. Guest parent symlinks resolve inside a pinned rootfs, then writes use the
+parent descriptor and an exclusive atomic temporary. Failures before publication
+preserve an old complete cookie. The path is under `/var/tmp` deliberately:
+nothing binds over it by default.
 
-An auth path is only ever used when `_is_safe_auth_path` accepts it, meaning the
-realpath sits under the invoking user's home or `/run/user/<uid>`, since the value
-arrives from another process's environment. A file already inside the runtime dir
-needs no bind of its own, because that directory is bound as a whole.
+An auth path is bound or copied only when `_is_safe_auth_path` accepts its
+canonical form under the invoking user's home or `/run/user/<uid>`, since the
+value arrives from another process's environment. Copying walks that same
+canonical source without following links and reads the opened regular file.
+A file already inside the runtime dir needs no bind of its own, because that
+directory is bound as a whole.
 `_discover_runtime_xauthority` covers a Wayland session that sets no `XAUTHORITY`
 at all, taking the newest of the Xwayland auth files the compositors write there.
 """
@@ -33,7 +37,9 @@ import logging
 import os
 import pwd
 
-from chroot_distro.helpers.xauthority import extract_entries
+from chroot_distro import dirfd
+from chroot_distro.helpers.tar_extract import safe_resolve_parts_at
+from chroot_distro.helpers.xauthority import match_display, read_xauthority, write_xauthority
 
 log = logging.getLogger(__name__)
 
@@ -111,14 +117,13 @@ def _invoking_home(uid: int) -> str | None:
 
 
 def _is_safe_auth_path(path: str, uid: int, home: str | None) -> bool:
-    """Allow only auth files under the invoking user's home or runtime dir."""
-    real = os.path.realpath(path)
+    """Check an already-canonical auth path against the user's home/runtime dir."""
     runtime = f"/run/user/{uid}"
-    if real.startswith(runtime + os.sep) or real == runtime:
+    if path.startswith(runtime + os.sep) or path == runtime:
         return True
     if home:
         home_real = os.path.realpath(home)
-        if real.startswith(home_real + os.sep) or real == home_real:
+        if path.startswith(home_real + os.sep) or path == home_real:
             return True
     return False
 
@@ -177,8 +182,8 @@ def resolve_host_x11_env() -> tuple[dict[str, str], list[str]]:
             env["XAUTHORITY"] = discovered
 
     xauthority = env.get("XAUTHORITY", "")
-    if xauthority and os.path.isfile(xauthority) and _is_safe_auth_path(xauthority, uid, home):
-        real = os.path.realpath(xauthority)
+    real = os.path.realpath(xauthority) if xauthority else ""
+    if real and os.path.isfile(real) and _is_safe_auth_path(real, uid, home):
         if real.startswith(runtime + os.sep) or real == runtime:
             # /run is already bind-mounted by default; ensure runtime dir is set.
             if "XDG_RUNTIME_DIR" not in env and os.path.isdir(runtime):
@@ -207,9 +212,9 @@ def x11_auth_bind_path(xauthority: str) -> str | None:
         return None
     uid = resolve_invoking_uid()
     home = _invoking_home(uid)
-    if not _is_safe_auth_path(xauthority, uid, home):
-        return None
     real = os.path.realpath(xauthority)
+    if not _is_safe_auth_path(real, uid, home):
+        return None
     runtime = f"/run/user/{uid}"
     if real.startswith(runtime + os.sep) or real == runtime:
         return None
@@ -240,28 +245,37 @@ def provision_guest_xauthority(
     chroot-distro runs as root on the host and can read the session cookie even
     when the guest UID cannot.  The copy lives under ``/var/tmp`` (not bind-mounted).
     """
-    if not display or not host_xauthority or not os.path.isfile(host_xauthority):
-        return None
-
-    guest_host_path = os.path.join(rootfs, GUEST_XAUTHORITY_PATH.lstrip("/"))
-    try:
-        os.makedirs(os.path.dirname(guest_host_path), exist_ok=True)
-    except OSError:
-        return None
-
-    with contextlib.suppress(OSError):
-        os.remove(guest_host_path)
-
-    if not extract_entries(host_xauthority, guest_host_path, _display_names(display)):
-        with contextlib.suppress(OSError):
-            os.remove(guest_host_path)
+    if not display or not host_xauthority:
         return None
 
     try:
-        os.chown(guest_host_path, guest_uid, guest_gid)
-        os.chmod(guest_host_path, 0o600)
-    except OSError:
-        with contextlib.suppress(OSError):
-            os.remove(guest_host_path)
+        source = os.path.realpath(host_xauthority)
+        uid = resolve_invoking_uid()
+        if not _is_safe_auth_path(source, uid, _invoking_home(uid)):
+            return None
+        with contextlib.ExitStack() as stack:
+            host_fd = dirfd.opendir(os.sep)
+            stack.callback(os.close, host_fd)
+            source_parts = source.lstrip(os.sep).split(os.sep)
+            source_parent = dirfd.descend_at(host_fd, source_parts[:-1])
+            stack.callback(os.close, source_parent)
+            source_fd, _ = dirfd.open_regular_at(source_parent, source_parts[-1], os.O_RDONLY)
+            entries = read_xauthority(source_fd)
+            for name in _display_names(display):
+                matched = [entry for entry in entries if match_display(entry, name)]
+                if matched:
+                    break
+            else:
+                return None
+            root_fd = dirfd.opendir(rootfs)
+            stack.callback(os.close, root_fd)
+            guest_parts = GUEST_XAUTHORITY_PATH.split("/")
+            parent_parts = safe_resolve_parts_at(root_fd, guest_parts[:-1])
+            if parent_parts is None:
+                return None
+            parent_fd = dirfd.descend_at(root_fd, parent_parts, create=True)
+            stack.callback(os.close, parent_fd)
+            write_xauthority(guest_parts[-1], matched, dir_fd=parent_fd, owner=(guest_uid, guest_gid))
+    except (OSError, ValueError):
         return None
     return GUEST_XAUTHORITY_PATH

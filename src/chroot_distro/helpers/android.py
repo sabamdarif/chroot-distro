@@ -2,8 +2,8 @@
 # Copyright (C) 2025-2026 Md Arif
 """The Android-side adjustments a guest needs on Termux, and nothing on Linux.
 
-Every entry point here returns immediately when `IS_TERMUX` is false, so a caller
-does not have to ask.
+`configure_android_rootfs` returns immediately when `IS_TERMUX` is false.
+The host ownership and mount readers also support diagnostics callers.
 
 Android carries its permissions in supplementary group ids, so a guest whose
 `/etc/group` has never heard of them gets no network, no bluetooth and no audio
@@ -12,10 +12,11 @@ no matter what it is allowed to do: `configure_android_rootfs` adds the
 because apt on Debian and Ubuntu drops to that account to fetch, so `aid_inet`
 becomes its primary group and its state directories are chowned to it.
 
-Both account files are reached through `rootfs.guest_etc_path`, never joined:
-termux-docker images ship `/etc/group` and `/etc/passwd` as absolute symlinks
-into `/system/etc`, which resolve on the host to a read-only filesystem and
-would fail the write with EROFS.
+Account/config edits resolve guest symlinks inside a pinned rootfs and replace
+files through guarded parent descriptors in `rootfs.edit_guest_file`. Apt
+ownership uses a bounded descriptor walk, skipping symlinks, special files and
+multiply linked files. A valid numeric UID is required before ownership changes.
+A link-count check cannot exclude a new hardlink made after the check.
 
 `termux_home_owner_ids` takes the app uid from the ownership of `TERMUX_HOME`
 rather than `getuid()`, which is 0 by the time this runs. `_read_data_mount` is
@@ -24,9 +25,13 @@ suid/exec bind that a nosuid rootfs needs lives in `mount_manager`, so the
 device's mount flags stay as Android set them.
 """
 
+import contextlib
 import logging
 import os
+import stat
+from typing import Any
 
+from chroot_distro import dirfd
 from chroot_distro.constants import IS_TERMUX, TERMUX_HOME
 
 log = logging.getLogger(__name__)
@@ -73,128 +78,134 @@ ANDROID_GROUPS = {
 }
 
 
-def configure_android_rootfs(rootfs: str) -> None:
-    """Apply Android-specific configurations to the rootfs.
-
-    Only executes if running on Android/Termux.
-    """
+def configure_android_rootfs(rootfs: str, *, root_fd: int | None = None) -> None:
+    """Configure Android groups and apt within the pinned guest on Termux."""
     if not IS_TERMUX:
         return
 
-    # Resolve through in-rootfs symlinks: termux-docker's /etc/group and
-    # /etc/passwd are absolute symlinks into /system/etc, which must not be
-    # followed on the host (read-only Android /system -> EROFS).
-    from chroot_distro.helpers.rootfs import guest_etc_path
+    from chroot_distro.helpers.rootfs import edit_guest_file
 
-    group_path = guest_etc_path(rootfs, "/etc/group")
-    if not os.path.exists(group_path):
-        return
-
-    existing_groups = {}
     try:
-        with open(group_path) as f:
-            for line in f:
-                parts = line.strip().split(":")
-                if len(parts) >= 3:
-                    existing_groups[parts[0]] = parts
-    except OSError:
-        return
+        with contextlib.ExitStack() as stack:
+            root_fd = dirfd.opendir(rootfs) if root_fd is None else os.dup(root_fd)
+            stack.callback(os.close, root_fd)
+            has_apt = False
+            try:
+                with edit_guest_file(root_fd, "/etc/passwd") as fh:
+                    has_apt = any(line.startswith("_apt:") for line in fh.getvalue().splitlines())
+            except FileNotFoundError:
+                pass
+            except (OSError, UnicodeError) as exc:
+                log.warning("Failed to read guest /etc/passwd: %s", exc)
 
-    has_apt = False
-    passwd_path = guest_etc_path(rootfs, "/etc/passwd")
-    if os.path.exists(passwd_path):
-        try:
-            with open(passwd_path) as f:
-                for line in f:
-                    if line.startswith("_apt:"):
-                        has_apt = True
-                        break
-        except OSError as exc:
-            log.warning("Failed to read /etc/passwd in setup_android_permissions: %s", exc)
-
-    modified = False
-    for gname, gid in ANDROID_GROUPS.items():
-        if gname not in existing_groups:
-            # Format: group_name:password:GID:user_list
-            users = ["root"]
-            if has_apt and gname in ("aid_inet", "aid_net_raw"):
-                users.append("_apt")
-            existing_groups[gname] = [gname, "x", str(gid), ",".join(users)]
-            modified = True
-        else:
-            parts = existing_groups[gname]
-            users = parts[3].split(",") if len(parts) > 3 and parts[3] else []
-            group_modified = False
-            if "root" not in users:
-                users.append("root")
-                group_modified = True
-            if has_apt and gname in ("aid_inet", "aid_net_raw") and "_apt" not in users:
-                users.append("_apt")
-                group_modified = True
-
-            if group_modified:
-                if len(parts) <= 3:
-                    parts.append(",".join(users))
-                else:
+            with edit_guest_file(root_fd, "/etc/group") as fh:
+                existing_groups = {}
+                for line in fh.getvalue().splitlines():
+                    parts = line.strip().split(":")
+                    if len(parts) >= 3:
+                        existing_groups[parts[0]] = parts
+                for name, gid in ANDROID_GROUPS.items():
+                    parts = existing_groups.setdefault(name, [name, "x", str(gid), ""])
+                    if len(parts) == 3:
+                        parts.append("")
+                    users = parts[3].split(",") if parts[3] else []
+                    if "root" not in users:
+                        users.append("root")
+                    if has_apt and name in ("aid_inet", "aid_net_raw") and "_apt" not in users:
+                        users.append("_apt")
                     parts[3] = ",".join(users)
-                modified = True
+                fh.seek(0)
+                fh.truncate()
+                fh.write("".join(":".join(parts) + "\n" for parts in existing_groups.values()))
 
-    if modified:
-        try:
-            with open(group_path, "w") as f:
-                for parts in existing_groups.values():
-                    f.write(":".join(parts) + "\n")
-        except OSError as exc:
-            log.warning("Failed to write /etc/group in setup_android_permissions: %s", exc)
+            try:
+                with edit_guest_file(root_fd, "/etc/adduser.conf") as fh:
+                    if not any("EXTRA_GROUPS=" in line and "aid_inet" in line for line in fh.getvalue().splitlines()):
+                        fh.write('\nEXTRA_GROUPS="aid_inet aid_net_raw aid_bt_admin aid_bt_net"\n')
+            except FileNotFoundError:
+                pass
+            except (OSError, UnicodeError) as exc:
+                log.warning("Failed to configure guest /etc/adduser.conf: %s", exc)
 
-    adduser_conf = os.path.join(rootfs, "etc", "adduser.conf")
-    if os.path.exists(adduser_conf):
-        try:
-            has_extra_groups = False
-            with open(adduser_conf) as f:
-                for line in f:
-                    if "EXTRA_GROUPS=" in line and "aid_inet" in line:
-                        has_extra_groups = True
-                        break
-            if not has_extra_groups:
-                with open(adduser_conf, "a") as f:
-                    f.write('\nEXTRA_GROUPS="aid_inet aid_net_raw aid_bt_admin aid_bt_net"\n')
-        except OSError as exc:
-            log.warning("Failed to configure adduser.conf in setup_android_permissions: %s", exc)
+            if has_apt:
+                _configure_apt(root_fd)
+    except FileNotFoundError:
+        return
+    except (OSError, UnicodeError) as exc:
+        log.warning("Failed to configure Android guest permissions: %s", exc)
 
-    # apt on Debian/Ubuntu runs as _apt, which needs network access: make
-    # aid_inet (3003) its primary group and let it own its own state dirs.
-    if has_apt and os.path.exists(passwd_path):
-        try:
-            passwd_lines = []
-            passwd_modified = False
-            _apt_uid = 100
-            with open(passwd_path) as f:
-                for raw_line in f:
-                    parts = raw_line.rstrip("\n").split(":")
-                    out_line = raw_line
-                    if parts and parts[0] == "_apt" and len(parts) >= 4:
-                        _apt_uid = int(parts[2])
-                        if parts[3] != "3003":
-                            parts[3] = "3003"
-                            out_line = ":".join(parts) + "\n"
-                            passwd_modified = True
-                    passwd_lines.append(out_line)
-            if passwd_modified:
-                with open(passwd_path, "w") as f:
-                    f.writelines(passwd_lines)
 
-            for apt_dir in ("var/lib/apt", "var/cache/apt"):
-                full_apt_dir = os.path.join(rootfs, apt_dir)
-                if os.path.exists(full_apt_dir):
-                    try:
-                        os.chown(full_apt_dir, _apt_uid, 3003)
-                        for root, dirs, files in os.walk(full_apt_dir):
-                            for d in dirs:
-                                os.chown(os.path.join(root, d), _apt_uid, 3003)
-                            for file in files:
-                                os.chown(os.path.join(root, file), _apt_uid, 3003)
-                    except Exception as exc:
-                        log.warning("Failed to chown apt directory %s in setup_android_permissions: %s", apt_dir, exc)
-        except OSError as exc:
-            log.warning("Failed to update /etc/passwd in setup_android_permissions: %s", exc)
+def _configure_apt(root_fd: int) -> None:
+    from chroot_distro.helpers.rootfs import edit_guest_file
+    from chroot_distro.helpers.tar_extract import safe_resolve_parts_at
+
+    try:
+        apt_uid = None
+        with edit_guest_file(root_fd, "/etc/passwd") as fh:
+            lines = fh.getvalue().splitlines(keepends=True)
+            for index, line in enumerate(lines):
+                parts = line.rstrip("\n").split(":")
+                if parts[0] != "_apt":
+                    continue
+                if len(parts) < 4 or not parts[2].isascii() or not parts[2].isdecimal():
+                    raise ValueError("invalid _apt UID")
+                uid = int(parts[2])
+                if not 0 <= uid < 2**32 - 1:
+                    raise ValueError("invalid _apt UID")
+                apt_uid = uid
+                if parts[3] != "3003":
+                    parts[3] = "3003"
+                    lines[index] = ":".join(parts) + "\n"
+            fh.seek(0)
+            fh.truncate()
+            fh.writelines(lines)
+        if apt_uid is None:
+            return
+        for path in ("var/lib/apt", "var/cache/apt"):
+            try:
+                resolved = safe_resolve_parts_at(root_fd, path.split("/"))
+                if not resolved:
+                    continue
+                fd = dirfd.descend_at(root_fd, resolved)
+                try:
+                    _chown_apt_tree(fd, apt_uid)
+                finally:
+                    os.close(fd)
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                log.warning("Failed to chown guest %s: %s", path, exc)
+    except (OSError, UnicodeError, ValueError) as exc:
+        log.warning("Failed to configure guest _apt account: %s", exc)
+
+
+def _chown_apt_tree(root_fd: int, uid: int) -> None:
+    """Chown pinned directories and unshared regular files, never link targets."""
+    stack: list[list[Any]] = [[root_fd, None, None, False]]
+    levels = dirfd.Levels(stack)
+    try:
+        while stack:
+            frame = stack[-1]
+            fd, _, pending, _ = frame
+            if pending is None:
+                os.fchown(fd, uid, 3003)
+                pending = frame[2] = dirfd.listdir_at(fd)
+            if not pending:
+                levels.pop()
+                if frame[-1]:
+                    os.close(fd)
+                continue
+            name = pending.pop()
+            mode = dirfd.lstat_at(fd, name).st_mode
+            if stat.S_ISDIR(mode):
+                sub = dirfd.opendir_at(fd, name)
+                levels.push([sub, None, None, True])
+            elif stat.S_ISREG(mode):
+                child, _ = dirfd.open_regular_at(fd, name, os.O_RDONLY)
+                try:
+                    if os.fstat(child).st_nlink == 1:
+                        os.fchown(child, uid, 3003)
+                finally:
+                    os.close(child)
+    finally:
+        dirfd.close_frames(stack)

@@ -4,10 +4,9 @@
 real Linux distributions inside Termux (rooted Android) or regular Linux, using
 native kernel features (`chroot`, `mount`, namespaces). It downloads Docker/OCI
 images, builds images from Dockerfiles, and manages container lifecycles, all
-without Docker or Podman. It needs Python 3.10+ (CI tests 3.10, 3.12 and 3.14,
-the versions straddling the 3.12 and 3.14 version gates; add a version when one
-gains a gate of its own; `.python-version` pins 3.12 for local dev), a Linux
-kernel, and root access.
+without Docker or Podman. It needs Python 3.10+, a Linux kernel, and root access.
+CI runs unit tests on 3.10, 3.12, and 3.14. Add a version when it exercises
+behavior the existing matrix misses. `.python-version` pins 3.12 for local dev.
 GPL-3.0-only. A port from
 [proot-distro](https://github.com/termux/proot-distro) is credited by the
 `Co-authored-by:` trailer in its commit, not by a note in the file.
@@ -316,7 +315,7 @@ goes through it:
 
 | File                     | Owns                                                                     |
 | ------------------------ | ------------------------------------------------------------------------ |
-| `elevate.py`             | re-exec as root: caps, Termux `su`, then sudo/doas/pkexec/su            |
+| `elevate.py`             | re-exec as root via Termux `su` or Linux sudo/doas/pkexec/su           |
 
 ### Session lifecycle (`login`, `run`, `build`)
 

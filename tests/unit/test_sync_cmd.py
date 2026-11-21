@@ -360,7 +360,7 @@ def test_command_sync_holds_the_container_lock_while_it_runs(rootfs, tmp_path, m
     command_sync(Namespace(source=str(src), destination="distro:/mirror", verbose=False, checksum=False, delete=True))
 
     assert (rootfs / "mirror" / "sub" / "b.txt").read_text() == "beta"
-    assert os.listdir(locks) == ["distro.lock"]
+    assert sorted(os.listdir(locks)) == ["distro.info", "distro.lock"]
 
 
 # ── ownership ─────────────────────────────────────────────────────────────────

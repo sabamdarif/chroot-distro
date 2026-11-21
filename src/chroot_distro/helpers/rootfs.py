@@ -10,8 +10,8 @@ with nothing usable found, the two public defaults from `constants` stand in.
 `ensure_hosts_entry` adds the running hostname at login, which `sudo` and
 anything else that reverse-resolves needs and which install time could not know.
 
-Everything below the rootfs is image content, including `etc` itself, so both
-writers go through `_open_etc` plus `_replace_at`: the directory is opened
+Everything below the rootfs is image content, including `etc` itself, so the
+install-time writers use `_open_etc` plus `_replace_at`: the directory is opened
 `O_NOFOLLOW` off a pinned rootfs descriptor, an `etc` that is a symlink is
 refused rather than followed (it would aim the write at a host directory, since
 this runs outside the chroot), the old entry is unlinked instead of truncated so
@@ -19,22 +19,29 @@ a symlink under the name goes with it, and the create is `O_EXCL` so whatever
 reappears under the name is not adopted. Mode comes from the descriptor, not the
 umask, because the guest reads both files unprivileged.
 
-`guest_etc_path` is the other half of that, for the files this module does not
-own: it resolves a guest path *within* the rootfs, so an absolute symlink into
-`/system/etc` (termux-docker ships `/etc/passwd` and `/etc/group` that way)
-reaches the container's file instead of Android's read-only one.
 `register_android_ids` is the install-time Termux fixup, adding the invoking
-app's uid and its supplementary group ids to the four account files.
+account and its supplementary group ids to the four account files. Android
+fixups share `edit_guest_file`: guest symlinks resolve inside the pinned root,
+parents are re-walked without following links, and regular files with one link
+are read before fresh atomic replacement. Public accounts use mode 0644,
+shadow files use 0600, and configuration files retain their permissions and
+ownership. Missing parents and unsafe entries never fall back to host paths.
+Login hostname insertion uses the same editor, retaining existing hosts content
+and ordinary permissions while refusing shared inodes and special files.
 """
 
 import contextlib
+import errno
 import grp
+import io
 import logging
 import os
 import pwd
 import stat
+from collections.abc import Iterator
 
 from chroot_distro import dirfd
+from chroot_distro.atomic import atomic_write
 from chroot_distro.constants import (
     DEFAULT_PRIMARY_NS,
     DEFAULT_SECONDARY_NS,
@@ -42,6 +49,7 @@ from chroot_distro.constants import (
     TERMUX_PREFIX,
 )
 from chroot_distro.helpers.android import termux_home_owner_ids
+from chroot_distro.helpers.tar_extract import safe_resolve_parts_at
 
 log = logging.getLogger(__name__)
 
@@ -213,151 +221,134 @@ def ensure_hosts_entry(rootfs: str, *hostnames: str) -> None:
     /etc/hosts was written at install time, so patch it here. Idempotent:
     a name already present on any line is left untouched. Best-effort.
     """
-    path = os.path.join(rootfs, "etc", "hosts")
     try:
-        with open(path) as fh:
-            existing = fh.read()
-    except OSError:
+        with contextlib.ExitStack() as stack:
+            root_fd = dirfd.opendir(rootfs)
+            stack.callback(os.close, root_fd)
+            with edit_guest_file(root_fd, "/etc/hosts") as fh:
+                existing = fh.getvalue()
+                present = set()
+                for line in existing.splitlines():
+                    stripped = line.strip()
+                    if not stripped or stripped.startswith("#"):
+                        continue
+                    present.update(stripped.split()[1:])
+
+                to_add = [h for h in dict.fromkeys(hostnames) if h and h not in present]
+                if not to_add:
+                    return
+
+                if existing and not existing.endswith("\n"):
+                    fh.write("\n")
+                fh.write("".join(f"127.0.0.1   {h}\n" for h in to_add))
+    except (OSError, UnicodeError):
         return
 
-    present = set()
-    for line in existing.splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        present.update(stripped.split()[1:])
 
-    to_add = [h for h in dict.fromkeys(hostnames) if h and h not in present]
-    if not to_add:
-        return
-
-    suffix = ("" if existing.endswith("\n") or not existing else "\n") + "".join(f"127.0.0.1   {h}\n" for h in to_add)
-    with contextlib.suppress(OSError), open(path, "a") as fh:
-        fh.write(suffix)
-
-
-def guest_etc_path(rootfs: str, guest_path: str) -> str:
-    """Resolve *guest_path* to its host location, keeping symlinks inside rootfs.
-
-    Some images (e.g. termux-docker) ship /etc/passwd and /etc/group as
-    symlinks with absolute targets such as /system/etc/passwd. Opening those
-    directly from the host follows the symlink to the HOST's /system, which
-    is read-only on Android (EROFS). Resolving within the rootfs redirects
-    reads/writes to the container's own file instead.
-    """
-    from chroot_distro.commands.login.passwd import resolve_rootfs_path
-
+@contextlib.contextmanager
+def edit_guest_file(
+    root_fd: int,
+    guest_path: str,
+    *,
+    create: bool = False,
+    mode: int | None = None,
+) -> Iterator[io.StringIO]:
+    """Edit a guest file through a pinned parent, refusing shared inodes."""
+    parts = safe_resolve_parts_at(root_fd, guest_path.split("/"))
+    if not parts:
+        raise OSError(errno.ELOOP, "guest file does not resolve to a leaf", guest_path)
+    parent_fd = dirfd.descend_at(root_fd, parts[:-1])
     try:
-        return resolve_rootfs_path(rootfs, guest_path)
-    except OSError:
-        return os.path.join(rootfs, guest_path.lstrip("/"))
+        original = None
+        content = ""
+        try:
+            fd, original = dirfd.open_regular_at(parent_fd, parts[-1], os.O_RDONLY)
+        except FileNotFoundError:
+            if not create:
+                raise
+        else:
+            with os.fdopen(fd) as fh:
+                if original.st_nlink != 1:
+                    raise OSError(errno.EMLINK, "refusing a hardlinked guest file", guest_path)
+                content = fh.read()
+        permissions = mode if mode is not None else (stat.S_IMODE(original.st_mode) & 0o777 if original else 0o644)
+        with io.StringIO() as buffer:
+            buffer.write(content)
+            yield buffer
+            updated = buffer.getvalue()
+        if original is None or updated != content or stat.S_IMODE(original.st_mode) != permissions:
+            with atomic_write(parts[-1], dir_fd=parent_fd, mode=permissions) as out:
+                if original is not None:
+                    os.fchown(out.fileno(), original.st_uid, original.st_gid)
+                out.write(updated)
+    finally:
+        os.close(parent_fd)
 
 
-def register_android_ids(rootfs: str) -> None:
-    """Add the Termux Android UID/GID entries to passwd/shadow/group/gshadow."""
-    for p in ("/etc/passwd", "/etc/shadow", "/etc/group", "/etc/gshadow"):
-        full = guest_etc_path(rootfs, p)
-        if os.path.exists(full):
-            with contextlib.suppress(OSError):
-                os.chmod(
-                    full,
-                    stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IROTH,
-                )
+def _append_account_entries(root_fd: int, path: str, entries: list[str], *, create: bool, mode: int) -> None:
+    with edit_guest_file(root_fd, path, create=create, mode=mode) as fh:
+        existing = {line.split(":", 1)[0] for line in fh.getvalue().splitlines()}
+        for entry in entries:
+            name = entry.split(":", 1)[0]
+            if name not in existing:
+                if fh.getvalue() and not fh.getvalue().endswith("\n"):
+                    fh.write("\n")
+                fh.write(entry + "\n")
+                existing.add(name)
 
+
+def register_android_ids(rootfs: str, *, root_fd: int | None = None) -> None:
+    """Add Android account entries on Termux, requiring an existing guest passwd."""
+    if not IS_TERMUX:
+        return
     try:
         uid = os.getuid()
         gid = os.getgid()
-        username_result = pwd.getpwuid(uid).pw_name
-    except Exception:
+        username = pwd.getpwuid(uid).pw_name
+    except (OSError, KeyError):
         return
 
-    passwd_path = guest_etc_path(rootfs, "/etc/passwd")
-    shadow_path = guest_etc_path(rootfs, "/etc/shadow")
-    group_path = guest_etc_path(rootfs, "/etc/group")
-    gshadow_path = guest_etc_path(rootfs, "/etc/gshadow")
-
     try:
-        with open(passwd_path, "a") as fh:
-            fh.write(f"aid_{username_result}:x:{uid}:{gid}:Termux:/:/sbin/nologin\n")
-        with open(shadow_path, "a") as fh:
-            fh.write(f"aid_{username_result}:*:18446:0:99999:7:::\n")
-    except OSError as exc:
-        log.warning("Failed to write to passwd or shadow file in setup_android_permissions_legacy: %s", exc)
+        with contextlib.ExitStack() as stack:
+            root_fd = dirfd.opendir(rootfs) if root_fd is None else os.dup(root_fd)
+            stack.callback(os.close, root_fd)
+            _append_account_entries(
+                root_fd,
+                "/etc/passwd",
+                [f"aid_{username}:x:{uid}:{gid}:Termux:/:/sbin/nologin"],
+                create=False,
+                mode=0o644,
+            )
+            try:
+                _, termux_gid = termux_home_owner_ids()
+            except OSError:
+                termux_gid = gid
 
-    try:
-        _, termux_gid = termux_home_owner_ids()
-    except OSError:
-        termux_gid = gid
+            groups = [f"termux:x:{termux_gid}:"]
+            gshadow = []
+            for group_id in dict.fromkeys([gid, *os.getgroups()]):
+                if group_id == termux_gid:
+                    continue
+                try:
+                    name = grp.getgrgid(group_id).gr_name
+                except KeyError:
+                    continue
+                groups.append(f"aid_{name}:x:{group_id}:root,aid_{username}")
+                gshadow.append(f"aid_{name}:*::root,aid_{username}")
 
-    seen: set[int] = set()
-    all_gids: list[int] = []
-    for g in [gid, *os.getgroups()]:
-        if g not in seen:
-            seen.add(g)
-            all_gids.append(g)
+            from chroot_distro.helpers.android import ANDROID_GROUPS
 
-    existing_groups: set[str] = set()
-    if os.path.exists(group_path):
-        try:
-            with open(group_path) as fh:
-                for line in fh:
-                    parts = line.strip().split(":")
-                    if parts and parts[0]:
-                        existing_groups.add(parts[0])
-        except OSError as exc:
-            log.warning("Failed to read group file in setup_android_permissions_legacy: %s", exc)
-
-    if os.path.exists(group_path) and "termux" not in existing_groups:
-        try:
-            with open(group_path, "a") as fh:
-                fh.write(f"termux:x:{termux_gid}:\n")
-            existing_groups.add("termux")
-        except OSError as exc:
-            log.warning("Failed to write to group file in setup_android_permissions_legacy: %s", exc)
-
-    for g in all_gids:
-        if g == termux_gid:
-            continue
-        try:
-            gname = grp.getgrgid(g).gr_name
-        except KeyError:
-            continue
-        aid_gname = f"aid_{gname}"
-        if aid_gname in existing_groups:
-            continue
-        try:
-            with open(group_path, "a") as fh:
-                fh.write(f"{aid_gname}:x:{g}:root,aid_{username_result}\n")
-            existing_groups.add(aid_gname)
-            if os.path.exists(gshadow_path):
-                with open(gshadow_path, "a") as fh:
-                    fh.write(f"{aid_gname}:*::root,aid_{username_result}\n")
-        except OSError as exc:
-            log.warning("Failed to append to group or gshadow file in setup_android_permissions_legacy: %s", exc)
-
-    # Ensure Android-specific groups exist in /etc/group
-    android_groups = [
-        ("aid_inet", "aid_inet:x:3003:"),
-        ("aid_net_raw", "aid_net_raw:x:3004:"),
-        ("aid_bluetooth", "aid_bluetooth:x:1002:"),
-        ("aid_graphics", "aid_graphics:x:1003:"),
-        ("aid_input", "aid_input:x:1004:"),
-        ("aid_audio", "aid_audio:x:1005:"),
-        ("aid_video", "aid_video:x:1006:"),
-        ("aid_drm", "aid_drm:x:1007:"),
-        ("aid_wifi", "aid_wifi:x:1010:"),
-        ("aid_usb", "aid_usb:x:1018:"),
-        ("aid_bt_admin", "aid_bt_admin:x:3001:"),
-        ("aid_bt_net", "aid_bt_net:x:3002:"),
-        ("aid_admin", "aid_admin:x:3005:"),
-    ]
-
-    if os.path.exists(group_path):
-        try:
-            with open(group_path, "a") as fh:
-                for gname, gline in android_groups:
-                    if gname not in existing_groups:
-                        fh.write(gline + "\n")
-                        existing_groups.add(gname)
-        except OSError as exc:
-            log.warning("Failed to write Android-specific groups in setup_android_permissions_legacy: %s", exc)
+            groups.extend(f"{name}:x:{group_id}:" for name, group_id in ANDROID_GROUPS.items())
+            for path, entries, mode in (
+                ("/etc/shadow", [f"aid_{username}:*:18446:0:99999:7:::"], 0o600),
+                ("/etc/group", groups, 0o644),
+                ("/etc/gshadow", gshadow, 0o600),
+            ):
+                try:
+                    _append_account_entries(root_fd, path, entries, create=True, mode=mode)
+                except (OSError, UnicodeError) as exc:
+                    log.warning("Failed to register Android accounts in %s: %s", path, exc)
+    except FileNotFoundError:
+        return
+    except (OSError, UnicodeError) as exc:
+        log.warning("Failed to register Android accounts: %s", exc)

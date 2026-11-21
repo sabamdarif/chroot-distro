@@ -2,25 +2,24 @@
 # Copyright (C) 2025-2026 Md Arif
 """`chroot-distro list`: what is installed, how big it is, whether it is in use.
 
-No lock is taken. `list` runs unelevated on Termux, and `container_busy_status` reads
-a lock file's holder line instead of trying for the lock, so a busy container is
-reported without making anyone wait. The picture is a moment's snapshot, which is all
-a listing can be.
+`list` runs unelevated on Termux. It reads advisory holder details without
+acquiring any container locks.
 
-A directory carrying the `.install-incomplete` marker is not a container: it is
-listed separately, with the two commands that resolve it, rather than being offered
-as usable.
+Any entry at `.install-incomplete` makes a directory unavailable for execution.
+It is listed separately even if no rootfs was created. Invalid container names
+and storage that fails the guarded walk are excluded.
 
 `_rootfs_size_bytes` is `du -sb -x` in Python, apparent sizes from lstat and pruning
 at a filesystem boundary, so a mount under the rootfs is not counted into the
 container's own size. `_ensure_manifest_readable` widens a manifest a rooted install
 left mode 0600, because the unelevated Termux run cannot otherwise read the image
-reference out of it, and nothing in that file is secret.
+reference out of it. Installed metadata is therefore readable outside the guest.
 
 `_read_manifest_info` opens the manifest once and both the table row and the
 `--json` document read that one record, so the SOURCE column and the JSON `source`
 field cannot drift. `--json` always carries the detail `-v` prints, since a
-consumer should not have to know which flag adds a field.
+consumer should not have to know which flag adds a field. The human output
+escapes controls in names and metadata at display time.
 """
 
 import errno
@@ -30,9 +29,11 @@ import typing
 from dataclasses import dataclass
 
 from chroot_distro.constants import CONTAINERS_DIR, PROGRAM_NAME
+from chroot_distro.exceptions import ChrootDistroError
 from chroot_distro.locking import container_busy_status
-from chroot_distro.message import C, emit_json, msg, warn
-from chroot_distro.paths import container_manifest, container_rootfs, is_install_incomplete
+from chroot_distro.message import C, emit_json, escape_controls, msg, quote_path, stdout_output, warn
+from chroot_distro.names import is_valid_name
+from chroot_distro.paths import container_is_installed, container_manifest, container_rootfs, is_install_incomplete
 from chroot_distro.progress import fmt_size, loading_line
 
 
@@ -74,15 +75,22 @@ def _iter_container_names() -> tuple[list[str], list[str]]:
     separately so `list` can mention it without presenting it as usable.
     """
     try:
-        entries = sorted(e for e in os.listdir(CONTAINERS_DIR) if os.path.isdir(container_rootfs(e)))
+        entries = sorted(e for e in os.listdir(CONTAINERS_DIR) if is_valid_name(e))
     except OSError as exc:
         if exc.errno in (errno.EACCES, errno.EPERM):
-            warn(f"Permission denied: cannot read containers directory '{CONTAINERS_DIR}'")
+            warn(f"Permission denied: cannot read containers directory '{quote_path(CONTAINERS_DIR)}'")
         elif exc.errno != errno.ENOENT:
-            warn(f"Failed to list containers directory '{CONTAINERS_DIR}': {exc}")
+            warn(f"Failed to list containers directory '{quote_path(CONTAINERS_DIR)}': {escape_controls(str(exc))}")
         return [], []
-    installed = [e for e in entries if not is_install_incomplete(e)]
-    incomplete = [e for e in entries if is_install_incomplete(e)]
+    installed, incomplete = [], []
+    for name in entries:
+        try:
+            if is_install_incomplete(name):
+                incomplete.append(name)
+            elif container_is_installed(name):
+                installed.append(name)
+        except (ChrootDistroError, OSError) as exc:
+            warn(f"Cannot inspect container '{quote_path(name)}': {escape_controls(str(exc))}")
     return installed, incomplete
 
 
@@ -104,7 +112,7 @@ def _rootfs_size_bytes(rootfs: str) -> int:
     try:
         root_dev = os.lstat(rootfs).st_dev
     except OSError as exc:
-        warn(f"Failed to stat rootfs directory '{rootfs}': {exc}")
+        warn(f"Failed to stat rootfs directory '{quote_path(rootfs)}': {escape_controls(str(exc))}")
         return 0
 
     total = 0
@@ -114,14 +122,14 @@ def _rootfs_size_bytes(rootfs: str) -> int:
         try:
             total += os.lstat(dirpath).st_size
         except OSError as exc:
-            warn(f"Failed to lstat directory '{dirpath}': {exc}")
+            warn(f"Failed to lstat directory '{quote_path(dirpath)}': {escape_controls(str(exc))}")
         # Count all files (and symlinks, sockets, etc.)
         for filename in filenames:
             fpath = os.path.join(dirpath, filename)
             try:
                 total += os.lstat(fpath).st_size
             except OSError as exc:
-                warn(f"Failed to lstat file '{fpath}': {exc}")
+                warn(f"Failed to lstat file '{quote_path(fpath)}': {escape_controls(str(exc))}")
                 continue
     return total
 
@@ -136,14 +144,14 @@ def _ensure_manifest_readable(manifest_path: str) -> None:
     try:
         st = os.stat(manifest_path)
     except OSError as exc:
-        warn(f"Failed to stat manifest '{manifest_path}': {exc}")
+        warn(f"Failed to stat manifest '{quote_path(manifest_path)}': {escape_controls(str(exc))}")
         return
     if st.st_mode & 0o004:
         return
     try:
         os.chmod(manifest_path, (st.st_mode & 0o777) | 0o644)
     except OSError as exc:
-        warn(f"Failed to change permissions on manifest '{manifest_path}': {exc}")
+        warn(f"Failed to change permissions on manifest '{quote_path(manifest_path)}': {escape_controls(str(exc))}")
 
 
 def _read_manifest_info(name: str) -> _ManifestInfo:
@@ -163,12 +171,12 @@ def _read_manifest_info(name: str) -> _ManifestInfo:
     except OSError as exc:
         if exc.errno in (errno.EACCES, errno.EPERM):
             return _ManifestInfo(source=name)
-        warn(f"Failed to read manifest '{manifest_path}': {exc}")
+        warn(f"Failed to read manifest '{quote_path(manifest_path)}': {escape_controls(str(exc))}")
         return _ManifestInfo(source="unknown")
     try:
         data: dict[str, typing.Any] = json.loads(raw) if raw.strip() else {}
     except json.JSONDecodeError as exc:
-        warn(f"Failed to parse manifest '{manifest_path}': {exc}")
+        warn(f"Failed to parse manifest '{quote_path(manifest_path)}': {escape_controls(str(exc))}")
         return _ManifestInfo(source="unknown")
 
     cfg = (data.get("image_config") or {}).get("config") or {}
@@ -204,7 +212,7 @@ def _container_row(name: str) -> _ContainerRow:
         size_bytes = _rootfs_size_bytes(rootfs)
         size = fmt_size(size_bytes)
     except OSError as exc:
-        warn(f"Failed to calculate rootfs size for '{name}': {exc}")
+        warn(f"Failed to calculate rootfs size for '{quote_path(name)}': {escape_controls(str(exc))}")
         size = "?"
     manifest = _read_manifest_info(name)
     return _ContainerRow(
@@ -218,21 +226,22 @@ def _container_row(name: str) -> _ContainerRow:
 
 
 def _format_table(rows: list[_ContainerRow]) -> list[str]:
-    name_w = max(len("NAME"), *(len(r.name) for r in rows))
-    size_w = max(len("SIZE"), *(len(r.size) for r in rows))
-    source_w = max(len("SOURCE"), *(len(r.source) for r in rows))
-    status_w = max(len("STATUS"), *(len(r.status) for r in rows))
+    cells = [(quote_path(row.name), row.size, escape_controls(row.source), escape_controls(row.status)) for row in rows]
+    name_w = max(len("NAME"), *(len(name) for name, _, _, _ in cells))
+    size_w = max(len("SIZE"), *(len(size) for _, size, _, _ in cells))
+    source_w = max(len("SOURCE"), *(len(source) for _, _, source, _ in cells))
+    status_w = max(len("STATUS"), *(len(status) for _, _, _, status in cells))
 
     lines = [
         f"  {C['BCYAN']}{'NAME':<{name_w}}  {'SIZE':>{size_w}}  {'SOURCE':<{source_w}}  {'STATUS':<{status_w}}{C['RST']}",
     ]
-    for row in rows:
-        status_color = "YELLOW" if row.status.startswith("in use") else "GREEN"
+    for name, size, source, status in cells:
+        status_color = "YELLOW" if status.startswith("in use") else "GREEN"
         lines.append(
-            f"  {C['GREEN']}{row.name:<{name_w}}{C['RST']}  "
-            f"{C['CYAN']}{row.size:>{size_w}}{C['RST']}  "
-            f"{row.source:<{source_w}}  "
-            f"{C[status_color]}{row.status:<{status_w}}{C['RST']}"
+            f"  {C['GREEN']}{name:<{name_w}}{C['RST']}  "
+            f"{C['CYAN']}{size:>{size_w}}{C['RST']}  "
+            f"{source:<{source_w}}  "
+            f"{C[status_color]}{status:<{status_w}}{C['RST']}"
         )
     return lines
 
@@ -265,8 +274,10 @@ def command_list(args) -> None:
     entries, incomplete = _iter_container_names()
 
     if quiet:
-        for name in entries:
-            print(name)
+        if entries:
+            with stdout_output() as stream:
+                for name in entries:
+                    print(name, file=stream)
         return
 
     if json_mode:
@@ -284,7 +295,7 @@ def command_list(args) -> None:
         total = len(entries)
         with loading_line("Gathering container info...") as update:
             for index, name in enumerate(entries, start=1):
-                update(f"Scanning {name} ({index}/{total})...")
+                update(f"Scanning {quote_path(name)} ({index}/{total})...")
                 rows.append(_container_row(name))
         msg(f"{C['CYAN']}Installed containers:{C['RST']}")
         msg()
@@ -305,22 +316,22 @@ def command_list(args) -> None:
                 )
                 if not has_detail:
                     continue
-                msg(f"  {C['GREEN']}{row.name}{C['RST']}:")
+                msg(f"  {C['GREEN']}{quote_path(row.name)}{C['RST']}:")
                 if info.source_url:
-                    msg(f"    {C['CYAN']}Source:{C['RST']}  {info.source_url}")
+                    msg(f"    {C['CYAN']}Source:{C['RST']}  {escape_controls(str(info.source_url))}")
                 if info.image_type:
-                    msg(f"    {C['CYAN']}Type:{C['RST']}    {info.image_type}")
+                    msg(f"    {C['CYAN']}Type:{C['RST']}    {escape_controls(str(info.image_type))}")
                 if info.user:
-                    msg(f"    {C['CYAN']}User:{C['RST']}    {info.user}")
+                    msg(f"    {C['CYAN']}User:{C['RST']}    {escape_controls(str(info.user))}")
                 if info.workdir:
-                    msg(f"    {C['CYAN']}WorkDir:{C['RST']} {info.workdir}")
+                    msg(f"    {C['CYAN']}WorkDir:{C['RST']} {quote_path(str(info.workdir))}")
                 if info.ports:
-                    msg(f"    {C['CYAN']}Ports:{C['RST']}   {', '.join(info.ports)}")
+                    msg(f"    {C['CYAN']}Ports:{C['RST']}   {', '.join(map(escape_controls, info.ports))}")
         msg()
         msg(f"{C['CYAN']}Log in with: {C['GREEN']}{PROGRAM_NAME} login <name>{C['RST']}")
     if incomplete:
         msg()
-        names = ", ".join(incomplete)
+        names = ", ".join(map(quote_path, incomplete))
         msg(f"{C['YELLOW']}Interrupted install(s) (not usable): {names}{C['RST']}")
         msg(
             f"{C['CYAN']}Re-run {C['GREEN']}{PROGRAM_NAME} install <ref> --name <name>{C['CYAN']} "

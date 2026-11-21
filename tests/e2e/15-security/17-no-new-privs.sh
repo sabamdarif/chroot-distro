@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-only
 # Copyright (C) 2025-2026 Md Arif
-# Security: --no-new-privs must stop a guest setuid binary from elevating
+# Security: check NoNewPrivs in guest commands, including a parked-holder login.
+# Needs: 00-install.sh (debian-sec).
 
 set -e
 
@@ -19,6 +20,17 @@ out=$(sudo chroot-distro login debian-sec --no-new-privs -- grep '^NoNewPrivs:' 
 echo "$out"
 echo "$out" | awk -F': *' '$1=="NoNewPrivs" && $2==1 {found=1} END {exit !found}' || { echo "FAIL: --no-new-privs did not set the bit"; exit 1; }
 echo "PASS: --no-new-privs sets PR_SET_NO_NEW_PRIVS"
+
+host_mnt=$(readlink /proc/self/ns/mnt)
+out=$(sudo chroot-distro login debian-sec --isolated --no-new-privs -- sh -c '
+	readlink /proc/self/ns/mnt &&
+		grep "^NoNewPrivs:" /proc/self/status
+')
+echo "$out"
+guest_mnt=${out%%$'\n'*}
+[[ "$guest_mnt" == mnt:\[*\] && "$guest_mnt" != "$host_mnt" ]] || { echo "FAIL: login did not enter a separate mount namespace"; exit 1; }
+echo "$out" | awk '$1=="NoNewPrivs:" && $2==1 {found=1} END {exit !found}' || { echo "FAIL: parked-holder login lost --no-new-privs"; exit 1; }
+echo "PASS: parked-holder login sets PR_SET_NO_NEW_PRIVS"
 
 # And the env var form must reach the guest, as the other suites pass theirs.
 out=$(sudo env CD_NO_NEW_PRIVS=1 chroot-distro login debian-sec -- grep '^NoNewPrivs:' /proc/self/status)

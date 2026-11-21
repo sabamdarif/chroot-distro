@@ -1,12 +1,16 @@
 import ctypes
 import errno
 import os
+import select
 import signal
 import struct
 import subprocess
+import sys
+import termios
 import threading
 import time
-from unittest.mock import MagicMock, patch
+import tty
+from unittest.mock import MagicMock, Mock, call, patch
 
 import pytest
 
@@ -252,52 +256,49 @@ def test_pty_copy_loop_exits_once_child_dead_and_pty_quiet(monkeypatch):
     # the relay must stop on child death plus a quiet pty, not wait for an
     # EOF that never comes.
     monkeypatch.setattr(chroot.select, "select", lambda fds, *a, **k: ([], [], []))
-    monkeypatch.setattr(os, "waitpid", lambda pid, options: (pid, 0))
+    poll_child = Mock(return_value=True)
     r, w = os.pipe()
     try:
-        chroot._pty_copy_loop(r, 4242)
+        assert chroot._pty_copy_loop(r, poll_child) is None
     finally:
         os.close(r)
         os.close(w)
+    poll_child.assert_called_once_with()
 
 
-def test_pty_copy_loop_escalation_ends_hang_of_alive_child(monkeypatch):
+@pytest.mark.parametrize("master_closed", [False, True])
+def test_pty_relay_escalates_only_while_child_is_alive(monkeypatch, master_closed):
     monkeypatch.setattr(chroot, "_ESCALATE_GRACE_SECS", 0.0)
-    monkeypatch.setattr(chroot.select, "select", lambda fds, *a, **k: ([], [], []))
-    alive = {"value": True}
-    swept = []
+    master, slave = os.openpty()
+    os.close(slave)
+    ready = ([master], [], []) if master_closed else ([], [], [])
+    monkeypatch.setattr(select, "select", Mock(return_value=ready))
+    escalation = Mock()
+    killpg = Mock()
+    polls = 0
 
     def fake_waitpid(pid, options):
-        return (0, 0) if alive["value"] else (pid, 0)
+        nonlocal polls
+        polls += 1
+        if polls == (2 if master_closed else 1):
+            signal.raise_signal(signal.SIGTERM)
+        return (pid, 23 << 8) if escalation.called else (0, 0)
 
     monkeypatch.setattr(os, "waitpid", fake_waitpid)
-
-    def escalate():
-        swept.append(1)
-        alive["value"] = False
-
-    esc = chroot._StuckSignalEscalation([time.monotonic()], escalate)
-    r, w = os.pipe()
-    try:
-        chroot._pty_copy_loop(r, 4242, escalation=esc)
-    finally:
-        os.close(r)
-        os.close(w)
-    assert swept == [1]
+    monkeypatch.setattr(os, "killpg", killpg)
+    assert chroot._pty_relay(master, 4242, escalate=escalation) == 23
+    killpg.assert_called_once_with(4242, signal.SIGTERM)
+    escalation.assert_called_once_with()
 
 
 def test_pty_copy_loop_relays_master_output_while_child_alive(monkeypatch):
-    # The relay restructure must keep copying pty output for a live child.
     master, slave = os.openpty()
-    os.write(slave, b"hello")
+    os.write(slave, b"\xffhello")
     written = []
 
     def fake_write(fd, data):
-        written.append((fd, data))
-        return len(data)
-
-    def fake_waitpid(pid, options):
-        return (pid, 0) if written else (0, 0)
+        written.append((fd, bytes(data)))
+        return min(2, len(data))
 
     polls = {"n": 0}
 
@@ -306,14 +307,324 @@ def test_pty_copy_loop_relays_master_output_while_child_alive(monkeypatch):
         return ([master], [], []) if polls["n"] == 1 else ([], [], [])
 
     monkeypatch.setattr(os, "write", fake_write)
-    monkeypatch.setattr(os, "waitpid", fake_waitpid)
     monkeypatch.setattr(chroot.select, "select", fake_select)
     try:
-        chroot._pty_copy_loop(master, 4242)
+        assert chroot._pty_copy_loop(master, lambda: bool(written)) is None
     finally:
         os.close(master)
         os.close(slave)
-    assert written == [(1, b"hello")]
+    assert written == [(1, b"\xffhello"), (1, b"ello"), (1, b"lo")]
+
+
+@pytest.mark.parametrize("status, expected", [(23 << 8, 23), (0, 0), (signal.SIGTERM, 143), (None, 0)])
+def test_pty_relay_drains_output_after_child_exit(monkeypatch, status, expected):
+    master_fd, slave_fd = os.openpty()
+    attrs = object()
+    signals = (signal.SIGWINCH, signal.SIGTERM, signal.SIGHUP, signal.SIGINT, signal.SIGTSTP)
+    handlers = {sig: signal.getsignal(sig) for sig in signals}
+    waitpid = Mock(return_value=(4242, status), side_effect=ChildProcessError if status is None else None)
+    killpg = Mock()
+
+    def read_master(fd, size):
+        signal.raise_signal(signal.SIGTERM)
+        return b"buffered output"
+
+    read = Mock(side_effect=read_master)
+    write = Mock(return_value=len(b"buffered output"))
+    restore = Mock()
+    monkeypatch.setattr(chroot.select, "select", Mock(side_effect=[([0, master_fd], [], []), ([], [], [])]))
+    monkeypatch.setattr(os, "waitpid", waitpid)
+    monkeypatch.setattr(os, "killpg", killpg)
+    monkeypatch.setattr(os, "read", read)
+    monkeypatch.setattr(os, "write", write)
+    monkeypatch.setattr(termios, "tcgetattr", Mock(return_value=attrs))
+    monkeypatch.setattr(termios, "tcsetattr", restore)
+    monkeypatch.setattr(tty, "setraw", Mock())
+
+    try:
+        assert chroot._pty_relay(master_fd, 4242) == expected
+        read.assert_called_once_with(master_fd, 4096)
+        write.assert_called_once_with(1, b"buffered output")
+        waitpid.assert_called_once_with(4242, os.WNOHANG)
+        killpg.assert_not_called()
+        restore.assert_called_once_with(0, termios.TCSAFLUSH, attrs)
+        assert {sig: signal.getsignal(sig) for sig in signals} == handlers
+        with pytest.raises(OSError) as exc:
+            os.fstat(master_fd)
+        assert exc.value.errno == errno.EBADF
+    finally:
+        os.close(slave_fd)
+
+
+def test_pty_relay_waits_when_master_closes_before_child_is_reaped(monkeypatch):
+    master_fd, slave_fd = os.openpty()
+    os.close(slave_fd)
+    waitpid = Mock(side_effect=[(0, 0), (4242, 42 << 8)])
+    monkeypatch.setattr(chroot.select, "select", Mock(return_value=([master_fd], [], [])))
+    monkeypatch.setattr(os, "waitpid", waitpid)
+
+    assert chroot._pty_relay(master_fd, 4242) == 42
+    assert waitpid.call_args_list == [call(4242, os.WNOHANG), call(4242, os.WNOHANG)]
+
+
+@pytest.mark.parametrize("outcome, expected", [("live", 23), ("reaped", 23), ("echild", 0), ("interrupt", None)])
+def test_pty_relay_defers_signals_during_child_poll(monkeypatch, outcome, expected):
+    master, slave = os.openpty()
+    os.close(slave)
+    original_handlers = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGTSTP, signal.SIGWINCH)}
+    signals = Mock()
+    resize = Mock()
+
+    def poll(pid, options):
+        for sig in original_handlers:
+            signal.raise_signal(sig)
+        assert signals.mock_calls == []
+        if outcome == "interrupt":
+            raise KeyboardInterrupt
+        if outcome == "echild":
+            raise ChildProcessError
+        return (0, 0) if outcome == "live" else (pid, 23 << 8)
+
+    def restore_terminal(*args):
+        if outcome == "interrupt":
+            signal.raise_signal(signal.SIGTERM)
+
+    monkeypatch.setattr(chroot.select, "select", Mock(return_value=([master], [], [])))
+    wait_steps = iter((poll, lambda pid, options: (pid, 23 << 8)))
+    monkeypatch.setattr(os, "waitpid", lambda pid, options: next(wait_steps)(pid, options))
+    monkeypatch.setattr(os, "killpg", signals.killpg)
+    monkeypatch.setattr(os, "kill", signals.kill)
+    monkeypatch.setattr(chroot, "_copy_terminal_size", resize)
+    monkeypatch.setattr(termios, "tcgetattr", Mock(return_value=object()))
+    monkeypatch.setattr(termios, "tcsetattr", restore_terminal)
+    monkeypatch.setattr(tty, "setraw", Mock())
+
+    if outcome == "interrupt":
+        with pytest.raises(KeyboardInterrupt):
+            chroot._pty_relay(master, 4242)
+        assert signals.mock_calls == []
+    else:
+        assert chroot._pty_relay(master, 4242) == expected
+        expected_calls = [call.kill(os.getpid(), signal.SIGTSTP)]
+        if outcome == "live":
+            expected_calls[:0] = [call.killpg(4242, signal.SIGTERM), call.kill(4242, signal.SIGTSTP)]
+        assert signals.mock_calls == expected_calls
+    resize.assert_called_once_with(0, master)
+    assert {sig: signal.getsignal(sig) for sig in original_handlers} == original_handlers
+    with pytest.raises(OSError) as exc:
+        os.fstat(master)
+    assert exc.value.errno == errno.EBADF
+
+
+@pytest.mark.parametrize("reaped", [False, True])
+@pytest.mark.parametrize("error", [BrokenPipeError(errno.EPIPE, "Broken pipe"), None])
+def test_pty_relay_cleans_up_before_reporting_stdout_failure(monkeypatch, reaped, error):
+    master_fd, slave_fd = os.openpty()
+    os.close(slave_fd)
+    attrs = object()
+    signals = (signal.SIGWINCH, signal.SIGTERM, signal.SIGHUP, signal.SIGINT, signal.SIGTSTP)
+    handlers = {sig: signal.getsignal(sig) for sig in signals}
+    restore = Mock()
+
+    def check_restored():
+        restore.assert_called_once_with(0, termios.TCSAFLUSH, attrs)
+        with pytest.raises(OSError) as exc:
+            os.fstat(master_fd)
+        assert exc.value.errno == errno.EBADF
+
+    def final_poll():
+        check_restored()
+        for sig in (signal.SIGWINCH, signal.SIGTSTP):
+            assert signal.getsignal(sig) == handlers[sig]
+        for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+            assert signal.getsignal(sig) != handlers[sig]
+        return 4242, 23 << 8
+
+    first_poll = (4242, 0) if reaped else (0, 0)
+    wait = Mock(side_effect=lambda pid, options: first_poll if wait.call_count == 1 else final_poll())
+    write = Mock(side_effect=[2, error if error is not None else 0])
+    monkeypatch.setattr(chroot.select, "select", Mock(return_value=([master_fd], [], [])))
+    monkeypatch.setattr(os, "waitpid", wait)
+    monkeypatch.setattr(os, "read", Mock(return_value=b"abcdef"))
+    monkeypatch.setattr(os, "write", write)
+    monkeypatch.setattr(termios, "tcgetattr", Mock(return_value=attrs))
+    monkeypatch.setattr(termios, "tcsetattr", restore)
+    monkeypatch.setattr(tty, "setraw", Mock())
+
+    with pytest.raises(chroot.PtyOutputError) as exc:
+        chroot._pty_relay(master_fd, 4242)
+    assert exc.value.errno == (errno.EPIPE if error is not None else errno.EIO)
+    if error is not None:
+        assert exc.value.__cause__ is error
+    assert write.call_args_list == [call(1, b"abcdef"), call(1, b"cdef")]
+    assert wait.call_args_list == [call(4242, os.WNOHANG)] * (1 if reaped else 2)
+    check_restored()
+    assert {sig: signal.getsignal(sig) for sig in signals} == handlers
+
+
+_PTY_STDOUT_PROBE = """
+import errno
+import os
+import sys
+import termios
+
+from chroot_distro.syscalls.chroot import PtyOutputError, _pty_relay, _setup_child_pty
+
+mode, path = sys.argv[1:]
+if mode in ('absent', 'silent'):
+    sys.stdout = sys.__stdout__ = None
+    with open(path, 'r+b') as reused:
+        os.dup2(reused.fileno(), 1)
+attrs = termios.tcgetattr(0)
+master, slave = os.openpty()
+pid = os.fork()
+if pid == 0:
+    _setup_child_pty(master, slave)
+    if mode != 'silent':
+        os.write(1, b'guest output')
+    os._exit(23)
+os.close(slave)
+try:
+    result = _pty_relay(master, pid)
+except PtyOutputError as exc:
+    assert exc.errno == {'pipe': errno.EPIPE, 'full': errno.ENOSPC, 'absent': errno.EBADF}[mode]
+else:
+    assert mode == 'silent' and result == 23
+assert termios.tcgetattr(0) == attrs
+try:
+    os.waitpid(pid, os.WNOHANG)
+except ChildProcessError:
+    pass
+else:
+    raise AssertionError('child was not reaped')
+"""
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Requires Linux PTYs and /dev/full")
+@pytest.mark.parametrize("mode", ["pipe", "full", "absent", "silent"])
+def test_pty_relay_real_stdout_sinks(tmp_path, mode):
+    reused = tmp_path / "reused-fd"
+    reused.write_bytes(b"host file")
+    stdin_master, stdin_slave = os.openpty()
+    output = subprocess.PIPE
+    if mode == "pipe":
+        reader, output = os.pipe()
+        os.close(reader)
+    elif mode == "full":
+        output = os.open("/dev/full", os.O_WRONLY)
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", _PTY_STDOUT_PROBE, mode, str(reused)],
+            stdin=stdin_slave, stdout=output, stderr=subprocess.PIPE, timeout=10,
+        )
+    finally:
+        if output != subprocess.PIPE:
+            os.close(output)
+        os.close(stdin_slave)
+        os.close(stdin_master)
+    assert result.returncode == 0, result.stderr.decode()
+    assert reused.read_bytes() == b"host file"
+
+
+_PTY_FINAL_WAIT_PROBE = """
+import errno
+import os
+import signal
+import sys
+import termios
+import threading
+
+from chroot_distro.syscalls.chroot import PtyOutputError, _pty_relay, _setup_child_pty
+
+mode = sys.argv[1]
+attrs = termios.tcgetattr(0)
+original_term = signal.getsignal(signal.SIGTERM)
+master, slave = os.openpty()
+ready_r, ready_w = os.pipe()
+stop_r, stop_w = os.pipe()
+pid = os.fork()
+if pid == 0:
+    os.close(ready_r)
+    os.close(stop_w)
+    _setup_child_pty(master, slave)
+    signal.signal(signal.SIGHUP, signal.SIG_IGN)
+    signal.signal(signal.SIGTERM, lambda *_: os._exit(43))
+    if mode == 'full':
+        os.write(1, b'guest output')
+    else:
+        for fd in (0, 1, 2):
+            os.close(fd)
+    os.close(ready_w)
+    os.read(stop_r, 1)
+    os._exit(99)
+
+os.close(slave)
+os.close(ready_w)
+os.close(stop_r)
+os.read(ready_r, 1)
+os.close(ready_r)
+
+master_closed = False
+final_wait = threading.Event()
+relay_done = threading.Event()
+close = os.close
+
+def track_close(fd):
+    global master_closed
+    close(fd)
+    if fd == master:
+        master_closed = True
+
+def terminate_relay():
+    if final_wait.wait(3):
+        os.kill(os.getpid(), signal.SIGTERM)
+    relay_done.wait(3)
+    close(stop_w)
+
+os.close = track_close
+sender = threading.Thread(target=terminate_relay)
+sender.start()
+waitpid = os.waitpid
+statuses = []
+
+def track_wait(pid, options):
+    if master_closed:
+        final_wait.set()
+    wpid, status = waitpid(pid, options)
+    if wpid:
+        statuses.append(os.waitstatus_to_exitcode(status))
+    return wpid, status
+
+os.waitpid = track_wait
+try:
+    result = _pty_relay(master, pid)
+except PtyOutputError as exc:
+    assert mode == 'full' and exc.errno == errno.ENOSPC, exc
+else:
+    assert mode == 'eof' and result == 43, result
+finally:
+    relay_done.set()
+sender.join()
+assert statuses == [43], statuses
+assert signal.getsignal(signal.SIGTERM) == original_term
+assert termios.tcgetattr(0) == attrs
+"""
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Requires Linux PTYs and /dev/full")
+@pytest.mark.parametrize("mode", ["eof", "full"])
+def test_pty_relay_forwards_sigterm_after_closing_master(mode):
+    stdin_master, stdin_slave = os.openpty()
+    try:
+        with open("/dev/full", "wb") as output:
+            result = subprocess.run(
+                [sys.executable, "-c", _PTY_FINAL_WAIT_PROBE, mode],
+                stdin=stdin_slave, stdout=output, stderr=subprocess.PIPE, timeout=10,
+            )
+    finally:
+        os.close(stdin_slave)
+        os.close(stdin_master)
+    assert result.returncode == 0, result.stderr.decode()
 
 
 # ── _close_fds_above: the pre-exec descriptor sweep ─────────────────────────────

@@ -80,3 +80,17 @@ def test_registry_openers_carry_the_policy(insecure):
     assert len(handlers) == 1
     assert isinstance(handlers[0], transport.AuthStrippingRedirectHandler)
     assert handlers[0].allow_plaintext is insecure
+
+
+def test_explicit_zero_port_is_not_the_default_https_port():
+    assert not same_auth_origin("https://reg.example", "https://reg.example:0")
+
+
+def test_registry_redirect_errors_omit_signed_queries():
+    with pytest.raises(RedirectRefused) as exc:
+        _make_redirect(
+            "https://reg.example/upload?sig=one",
+            "http://storage.example/upload?sig=two",
+        )
+    assert exc.value.plaintext
+    assert "sig=" not in str(exc.value)

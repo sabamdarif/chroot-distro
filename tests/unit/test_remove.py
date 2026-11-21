@@ -1,10 +1,27 @@
+import fcntl
+import os
 import signal
+from types import SimpleNamespace
 from unittest.mock import ANY, MagicMock, call, patch
 
 import pytest
 
+from chroot_distro import locking, paths
+from chroot_distro.commands import remove
 from chroot_distro.commands.remove import command_remove
 from chroot_distro.parser import build_parser
+
+
+@pytest.fixture
+def removal_storage(tmp_path, monkeypatch):
+    runtime = tmp_path / "runtime"
+    containers = runtime / "containers"
+    (containers / "alpine" / "rootfs").mkdir(parents=True)
+    (runtime / "data" / "alpine").mkdir(parents=True)
+    monkeypatch.setattr(paths, "IS_TERMUX", False)
+    monkeypatch.setattr(paths, "CONTAINERS_DIR", str(containers))
+    monkeypatch.setattr(paths, "RUNTIME_DIR", str(runtime))
+    return runtime
 
 
 def test_parser_remove():
@@ -39,6 +56,45 @@ def test_remove_container_not_installed(mock_crit_error, mock_isdir, mock_rootfs
     mock_crit_error.assert_called_once_with("container 'alpine' is not installed.")
 
 
+def test_remove_preserves_lock_taken_by_another_opener(tmp_path, monkeypatch):
+    container = tmp_path / "containers" / "alpine"
+    rootfs = container / "rootfs"
+    rootfs.mkdir(parents=True)
+    locks = tmp_path / "locks"
+    monkeypatch.setattr(locking, "RUNTIME_DIR", str(tmp_path))
+    monkeypatch.setattr(locking, "LOCKS_DIR", str(locks))
+    monkeypatch.setattr(paths, "RUNTIME_DIR", str(tmp_path))
+    monkeypatch.setattr(paths, "CONTAINERS_DIR", str(container.parent))
+    monkeypatch.setattr(paths, "IS_TERMUX", False)
+    monkeypatch.setattr(remove, "container_dir", lambda _: str(container))
+    monkeypatch.setattr(remove, "container_rootfs", lambda _: str(rootfs))
+    monkeypatch.setattr(remove.session, "get_active_chroot_pids", lambda _: [])
+    monkeypatch.setattr(remove.session, "reset", lambda _: None)
+    monkeypatch.setattr(remove.session, "clear_mount_options", lambda _: None)
+    monkeypatch.setattr(remove.namespace, "get_live_holder", lambda _: None)
+    monkeypatch.setattr(remove.mount_manager, "unmount_all", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(remove.mount_manager, "get_active_mounts", lambda _: [])
+
+    with locking.ContainerLock("alpine", exclusive=True, command="install") as lock:
+        lock_path = lock.lock_path
+
+    with open(lock_path, "r+") as peer:
+
+        class RemovalLock(locking.ContainerLock):
+            def release(self):
+                super().release()
+                fcntl.flock(peer.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+        monkeypatch.setattr(remove, "ContainerLock", RemovalLock)
+        command_remove(SimpleNamespace(container_name="alpine", verbose=False))
+
+        assert not container.exists()
+        assert os.path.samestat(os.stat(lock_path), os.fstat(peer.fileno()))
+        contender = locking.ContainerLock("alpine", exclusive=True, command="install")
+        assert not contender.acquire()
+
+
+@pytest.mark.usefixtures("removal_storage")
 @patch("chroot_distro.commands.remove.namespace.get_live_holder", return_value=None)
 @patch("chroot_distro.commands.remove.container_rootfs", return_value="/mock/containers/alpine/rootfs")
 @patch("chroot_distro.commands.remove.container_dir", return_value="/mock/containers/alpine")
@@ -73,12 +129,12 @@ def test_remove_no_active_sessions_or_mounts(
     mock_lock.assert_called_once_with("alpine", exclusive=True, command="remove")
     mock_session.reset.assert_called_once_with("alpine")
     mock_mount.unmount_all.assert_called_once_with("/mock/containers/alpine/rootfs", holder=None)
-    # _remove_path is called for the container dir, then for the data dir
-    mock_remove_path.assert_any_call("/mock/containers/alpine", ANY)
+    mock_remove_path.assert_any_call("/mock/containers/alpine", ANY, dir_fd=ANY)
     assert mock_remove_path.call_count == 2
     mock_log.assert_any_call("Finished removing the container.")
 
 
+@pytest.mark.usefixtures("removal_storage")
 @patch("chroot_distro.commands.remove.namespace.get_live_holder", return_value=None)
 @patch("chroot_distro.commands.remove.container_rootfs", return_value="/mock/containers/alpine/rootfs")
 @patch("chroot_distro.commands.remove.container_dir", return_value="/mock/containers/alpine")
@@ -132,12 +188,12 @@ def test_remove_with_active_sessions_sigterm(
     )
     mock_session.reset.assert_called_once_with("alpine")
     mock_mount.unmount_all.assert_called_once_with("/mock/containers/alpine/rootfs", holder=None)
-    # _remove_path is called for the container dir, then for the data dir
-    mock_remove_path.assert_any_call("/mock/containers/alpine", ANY)
+    mock_remove_path.assert_any_call("/mock/containers/alpine", ANY, dir_fd=ANY)
     assert mock_remove_path.call_count == 2
     mock_log.assert_any_call("Finished removing the container.")
 
 
+@pytest.mark.usefixtures("removal_storage")
 @patch("chroot_distro.commands.remove.namespace.get_live_holder", return_value=None)
 @patch("chroot_distro.commands.remove.container_rootfs", return_value="/mock/containers/alpine/rootfs")
 @patch("chroot_distro.commands.remove.container_dir", return_value="/mock/containers/alpine")
@@ -193,12 +249,12 @@ def test_remove_with_active_sessions_sigkill(
     )
     mock_session.reset.assert_called_once_with("alpine")
     mock_mount.unmount_all.assert_called_once_with("/mock/containers/alpine/rootfs", holder=None)
-    # _remove_path is called for the container dir, then for the data dir
-    mock_remove_path.assert_any_call("/mock/containers/alpine", ANY)
+    mock_remove_path.assert_any_call("/mock/containers/alpine", ANY, dir_fd=ANY)
     assert mock_remove_path.call_count == 2
     mock_log.assert_any_call("Finished removing the container.")
 
 
+@pytest.mark.usefixtures("removal_storage")
 @patch("chroot_distro.commands.remove.namespace.get_live_holder", return_value=None)
 @patch("chroot_distro.commands.remove.container_rootfs", return_value="/mock/containers/alpine/rootfs")
 @patch("os.path.isdir", return_value=True)
@@ -239,6 +295,7 @@ def test_remove_still_busy_processes(
     )
 
 
+@pytest.mark.usefixtures("removal_storage")
 @patch("chroot_distro.commands.remove.namespace.get_live_holder", return_value=None)
 @patch("chroot_distro.commands.remove.container_rootfs", return_value="/mock/containers/alpine/rootfs")
 @patch("os.path.isdir", return_value=True)
@@ -284,6 +341,7 @@ def test_count_files(tmp_path):
     assert _count_files(str(tmp_path)) == 5  # tmp_path, file1, file2, subdir, nested.txt
 
 
+@pytest.mark.usefixtures("removal_storage")
 @patch("chroot_distro.commands.remove.namespace.get_live_holder", return_value=None)
 @patch("chroot_distro.commands.remove.container_rootfs", return_value="/mock/containers/alpine/rootfs")
 @patch("chroot_distro.commands.remove.container_dir", return_value="/mock/containers/alpine")
@@ -320,7 +378,7 @@ def test_remove_progress_bar(
     mock_mount.get_active_mounts.return_value = []
 
     # Mock _remove_path to trigger the callback
-    def fake_remove_path(path, on_remove):
+    def fake_remove_path(path, on_remove, **kwargs):
         if on_remove:
             on_remove("/mock/containers/alpine/somefile")
         return True

@@ -17,9 +17,8 @@ that makes that impossible (no Range support, one segment, a failed worker) rais
 `_FallbackToSingleError` and the single-connection path runs, which is a fallback in
 speed only: it verifies the same way.
 
-A bearer token is attached to a segment request only when the probe's final URL is on
-the same host as the original. Redirected CDN URLs are pre-signed and reject the
-header, and a credential must not follow a redirect off the registry regardless.
+Segment requests use the registry's credential policy for both the probe URL
+and any redirects the segment encounters.
 
 SIGINT is handled rather than left to unwind. The signal handler sets the shared abort
 event and closes every live response, because a worker blocked in `read()` on a socket
@@ -43,9 +42,6 @@ import shutil
 import signal
 import threading
 import typing
-import urllib.error
-import urllib.parse
-import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from chroot_distro.atomic import atomic_replace
@@ -55,6 +51,7 @@ from chroot_distro.helpers.docker.transport import (
     auth_opener,
     opener,
     registry_base_url,
+    same_auth_origin,
 )
 from chroot_distro.helpers.download import (
     _SOCKET_TIMEOUT,
@@ -209,10 +206,8 @@ def download_blob(
                     if already_downloaded:
                         progress.add(already_downloaded)
 
-                    original_parsed = urllib.parse.urlparse(url)
-                    final_parsed = urllib.parse.urlparse(probe.final_url)
                     seg_headers = {**_ua()}
-                    if auth and original_parsed.netloc == final_parsed.netloc:
+                    if auth and same_auth_origin(url, probe.final_url):
                         seg_headers["Authorization"] = auth
 
                     local_abort = abort_event or threading.Event()
@@ -237,7 +232,7 @@ def download_blob(
                                 local_abort,
                                 bucket,
                                 live,
-                                insecure=insecure,
+                                opener_factory=functools.partial(opener, insecure),
                             ): seg
                             for seg in segments
                         }
