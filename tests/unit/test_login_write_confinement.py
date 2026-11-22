@@ -2,6 +2,7 @@
 
 import contextlib
 import errno
+import fcntl
 import logging
 import os
 import stat
@@ -21,10 +22,171 @@ def container_store(tmp_path, monkeypatch, request):
     root = containers / "box/rootfs"
     root.mkdir(parents=True)
     monkeypatch.setattr(paths, "CONTAINERS_DIR", str(containers))
+    monkeypatch.setattr(paths, "RUNTIME_DIR", str(containers.parent))
     monkeypatch.setattr(paths, "IS_TERMUX", request.param)
     monkeypatch.setattr(paths, "TERMUX_PREFIX", str(prefix))
     monkeypatch.setattr(dirfd, "_mount_id", lambda fd: 1)
     return root
+
+
+@pytest.fixture
+def account_files(container_store, monkeypatch):
+    monkeypatch.setattr(login, "IS_TERMUX", False)
+    parent = container_store / "etc"
+    parent.mkdir()
+    passwd = parent / "passwd"
+    passwd.write_text("demo:x:1500:1500::/home/demo:/bin/sh\n")
+    return passwd
+
+
+@pytest.mark.parametrize("boundary", ["rootfs", "etc", "passwd", "unavailable"])
+def test_shared_home_passwd_refuses_unverified_mounts(container_store, account_files, monkeypatch, capsys, boundary):
+    target = {"rootfs": container_store, "etc": account_files.parent, "passwd": account_files}.get(boundary)
+    before = snapshot(account_files)
+
+    def mount_id(fd):
+        if target is None:
+            raise OSError(errno.ENOTSUP, "mount IDs unavailable")
+        return 2 if os.path.samestat(os.fstat(fd), target.stat()) else 1
+
+    monkeypatch.setattr(dirfd, "_mount_id", mount_id)
+    user = login._resolve_login_user(str(container_store), "box", "demo")
+    assert login._align_login_account("box", "demo", user, owner_ids=(1550, 1550), shared_home=True) is user
+    assert "cannot align guest account" in capsys.readouterr().err
+    assert snapshot(account_files) == before
+
+
+def test_passwd_alignment_refuses_hardlinks_and_rootfs_replacement(
+    container_store, account_files, tmp_path, capsys
+):
+    user = login._resolve_login_user(str(container_store), "box", "demo")
+    host = tmp_path / "host"
+    (host / "etc").mkdir(parents=True)
+    sentinel = host / "etc/passwd"
+    sentinel.hardlink_to(account_files)
+    before = snapshot(sentinel)
+
+    assert login._align_login_account("box", "demo", user, owner_ids=(1550, 1550), shared_home=True) is user
+    assert snapshot(sentinel) == before
+    container_store.rename(container_store.with_name("old"))
+    container_store.symlink_to(host)
+
+    assert login._align_login_account("box", "demo", user, owner_ids=(1550, 1550), shared_home=True) is user
+    assert snapshot(sentinel) == before
+    assert capsys.readouterr().err.count("cannot align guest account") == 2
+
+
+def test_passwd_alignment_refuses_parent_swap(container_store, account_files, tmp_path, monkeypatch):
+    user = login._resolve_login_user(str(container_store), "box", "demo")
+    host = tmp_path / "host"
+    host.mkdir()
+    sentinel = host / "passwd"
+    sentinel.write_bytes(account_files.read_bytes())
+    before = snapshot(sentinel)
+    resolve = rootfs.safe_resolve_parts_at
+
+    def swap(fd, parts):
+        result = resolve(fd, parts)
+        account_files.parent.rename(container_store / "saved")
+        account_files.parent.symlink_to(host)
+        return result
+
+    monkeypatch.setattr(rootfs, "safe_resolve_parts_at", swap)
+    assert login._align_login_account("box", "demo", user, owner_ids=(1550, 1550)) is user
+    assert snapshot(sentinel) == before
+    assert (container_store / "saved/passwd").read_bytes() == before[0]
+
+
+def test_passwd_conflicts_commit_with_selected_account(container_store, account_files, monkeypatch):
+    account_files.write_text(
+        "# keep\nroot:x:1550:1550::/root:/bin/sh\n"
+        "other:x:1550:1550::/home/other:/bin/sh\n"
+        "busy:x:1001:1001::/home/busy:/bin/sh\n"
+        "demo:x:1500:1500::/home/demo:/bin/sh"
+    )
+    alias = account_files.with_name("accounts")
+    account_files.rename(alias)
+    account_files.symlink_to("/etc/accounts")
+    alias.chmod(0o640)
+    user = login._resolve_login_user(str(container_store), "box", "demo")
+    before = snapshot(alias)
+    write = rootfs.atomic_write
+
+    @contextlib.contextmanager
+    def fail(*args, **kwargs):
+        with write(*args, **kwargs) as fh:
+            yield fh
+            raise OSError(errno.EIO, "injected before publication")
+
+    with monkeypatch.context() as failed:
+        failed.setattr(rootfs, "atomic_write", fail)
+        assert login._align_login_account("box", "demo", user, owner_ids=(1550, 1551)) is user
+        assert snapshot(alias) == before
+
+    updated = login._align_login_account("box", "demo", user, owner_ids=(1550, 1551))
+    assert (updated["uid"], updated["gid"]) == ("1550", "1551")
+    assert alias.read_text() == (
+        "# keep\nroot:x:0:0::/root:/bin/sh\n"
+        "other:x:1002:1002::/home/other:/bin/sh\n"
+        "busy:x:1001:1001::/home/busy:/bin/sh\n"
+        "demo:x:1550:1551::/home/demo:/bin/sh"
+    )
+    assert account_files.is_symlink()
+    assert stat.S_IMODE(alias.stat().st_mode) == 0o640
+    alias.chmod(0o4640)
+    after = snapshot(alias)
+    assert login._align_login_account("box", "demo", user, owner_ids=(1550, 1551)) == updated
+    assert snapshot(alias) == after
+
+
+@pytest.mark.parametrize("user_spec", ["1550:1551", "missing"])
+def test_passwd_alignment_requires_a_named_record(account_files, user_spec):
+    from chroot_distro.exceptions import ChrootDistroError
+
+    account_files.write_text("demo:x:1550:1550::/home/demo:/bin/sh\nmissing:x:1500\n")
+    name = user_spec.split(":")[0]
+    user = {"name": name, "uid": "1550", "gid": "1551", "home": "/"}
+    before = snapshot(account_files)
+
+    if name.isdigit():
+        assert login._align_login_account("box", user_spec, user, owner_ids=(1550, 1550), shared_home=True) is user
+    else:
+        with pytest.raises(ChrootDistroError, match="no usable /etc/passwd entry"):
+            login._align_login_account("box", user_spec, user, owner_ids=(1550, 1550), shared_home=True)
+    assert snapshot(account_files) == before
+
+
+def test_root_account_repair_and_identity_refresh_hold_session_lock(container_store, account_files, monkeypatch):
+    account_files.write_text("root:x:10328:10328::/root:/bin/sh\n")
+    user = login._resolve_login_user(str(container_store), "box", "root")
+    update = login.set_passwd_uid_gid
+    resolve = login._resolve_login_user
+
+    def check_lock(operation):
+        def checked(*args, **kwargs):
+            with open(os.path.join(paths.container_data_dir("box"), "sessions.lock"), "rb") as contender:
+                with pytest.raises(BlockingIOError):
+                    fcntl.flock(contender.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return operation(*args, **kwargs)
+
+        return checked
+
+    monkeypatch.setattr(login, "set_passwd_uid_gid", check_lock(update))
+    monkeypatch.setattr(login, "_resolve_login_user", check_lock(resolve))
+    repaired = login._align_login_account("box", "root", user, owner_ids=(1550, 1550), shared_home=True)
+    assert (repaired["uid"], repaired["gid"]) == ("0", "0")
+    assert account_files.read_text() == "root:x:0:0::/root:/bin/sh\n"
+
+
+def test_automatic_alignment_does_not_map_named_user_to_uid_zero(container_store, account_files):
+    from chroot_distro.exceptions import ChrootDistroError
+
+    user = login._resolve_login_user(str(container_store), "box", "demo")
+    before = snapshot(account_files)
+    assert login._align_login_account("box", "demo", user, owner_ids=(0, 0)) is user
+    with pytest.raises(ChrootDistroError, match="refusing to map guest account .* to UID 0"):
+        login._align_login_account("box", "demo", user, owner_ids=(0, 0), shared_home=True)
+    assert snapshot(account_files) == before
 
 
 def test_image_volumes_create_missing_leaves_and_keep_existing_entries(container_store, monkeypatch):

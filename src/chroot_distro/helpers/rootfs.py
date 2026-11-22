@@ -28,6 +28,8 @@ shadow files use 0600, and configuration files retain their permissions and
 ownership. Missing parents and unsafe entries never fall back to host paths.
 Login hostname insertion uses the same editor, retaining existing hosts content
 and ordinary permissions while refusing shared inodes and special files.
+Login account updates also require the opened parent and file to stay on the
+pinned rootfs mount.
 """
 
 import contextlib
@@ -252,17 +254,18 @@ def edit_guest_file(
     *,
     create: bool = False,
     mode: int | None = None,
+    same_mount: bool = False,
 ) -> Iterator[io.StringIO]:
     """Edit a guest file through a pinned parent, refusing shared inodes."""
     parts = safe_resolve_parts_at(root_fd, guest_path.split("/"))
     if not parts:
         raise OSError(errno.ELOOP, "guest file does not resolve to a leaf", guest_path)
-    parent_fd = dirfd.descend_at(root_fd, parts[:-1])
+    parent_fd = dirfd.descend_at(root_fd, parts[:-1], same_mount=same_mount)
     try:
         original = None
         content = ""
         try:
-            fd, original = dirfd.open_regular_at(parent_fd, parts[-1], os.O_RDONLY)
+            fd, original = dirfd.open_regular_at(parent_fd, parts[-1], os.O_RDONLY, same_mount=same_mount)
         except FileNotFoundError:
             if not create:
                 raise
@@ -276,7 +279,7 @@ def edit_guest_file(
             buffer.write(content)
             yield buffer
             updated = buffer.getvalue()
-        if original is None or updated != content or stat.S_IMODE(original.st_mode) != permissions:
+        if original is None or updated != content or (mode is not None and stat.S_IMODE(original.st_mode) != mode):
             with atomic_write(parts[-1], dir_fd=parent_fd, mode=permissions) as out:
                 if original is not None:
                     os.fchown(out.fileno(), original.st_uid, original.st_gid)

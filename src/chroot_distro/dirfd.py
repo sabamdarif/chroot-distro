@@ -201,7 +201,9 @@ def open_file_at(dir_fd: int, name: str, flags: int, mode: int = 0o644) -> int:
     return os.open(name, flags | os.O_NOFOLLOW, mode, dir_fd=dir_fd)
 
 
-def open_regular_at(dir_fd: int, name: str, flags: int, mode: int = 0o644) -> tuple[int, os.stat_result]:
+def open_regular_at(
+    dir_fd: int, name: str, flags: int, mode: int = 0o644, *, same_mount: bool = False
+) -> tuple[int, os.stat_result]:
     """Open *name* under dir_fd as a regular file. Returns (fd, stat).
 
     O_NOFOLLOW keeps a planted symlink from being followed but says nothing
@@ -209,14 +211,16 @@ def open_regular_at(dir_fd: int, name: str, flags: int, mode: int = 0o644) -> tu
     hostile guest simply never provides. O_NONBLOCK makes that open return
     instead, and the fstat that follows refuses every remaining type, so a
     device, a socket, or a pipe with a reader attached cannot be read or
-    written either. The flag has no effect on a regular file, which is all
-    that gets past here.
+    written either. With *same_mount*, also refuse files mounted over the
+    parent's entries.
     """
     fd = open_file_at(dir_fd, name, flags | os.O_NONBLOCK, mode)
     try:
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode):
             raise OSError(errno.EINVAL, "not a regular file", name)
+        if same_mount and _mount_id(fd) != _mount_id(dir_fd):
+            raise OSError(errno.EXDEV, "file is on another mount", name)
     except BaseException:
         os.close(fd)
         raise

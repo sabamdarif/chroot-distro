@@ -207,6 +207,8 @@ Set `--no-new-privs` on each `login` or `run` that needs it, including when join
 
 With `--shared-display`, an X11 cookie copied for a guest user must come from the invoking user's home or `/run/user/<uid>`. The copy contains the selected display's entries and has owner-only permissions.
 
+When matching a named guest account to a home owner, `login` and `run` update only the guest's `/etc/passwd` on the installed rootfs mount. Numeric user selections keep their specified identity. Account changes are skipped if mount IDs are unavailable or a bind covers the account file or rootfs, including a live Termux exec self-bind. Start a fresh session if a running Termux container needs a different account mapping.
+
 Every mode mounts fresh pseudo-filesystems instead of binding the host's: a minimal `/dev`, fresh `/dev/pts`, `/dev/shm` and `/proc`, and a read-only `/sys`, following Docker's defaults (`/proc/kcore` and `/proc/keys` masked, `/proc/sys` read-only). When the kernel or SELinux refuses one, the host tree is bound with a warning.
 
 Single-instance devpts kernels share the host's `/dev/pts` with the guest. When chroot-distro supplies the guest's `/dev`, it creates a legacy `/dev/ptmx` device so guest programs can allocate pseudoterminals.

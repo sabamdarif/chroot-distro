@@ -17,20 +17,21 @@ have under the same name. `resolve_host_home` is the deliberate exception, since
 (`SUDO_USER`, the real uid, `LOGNAME`) even for a root login, because the program
 self-elevates through sudo and `$HOME` is `/root` by then.
 
-The writers exist for `--shared-home`, where the guest user has to own the files
-under a bind-mounted host home. `set_passwd_uid_gid` keeps `/etc/shadow` in step,
-`release_passwd_uid_conflicts` moves whoever else held the uid off it, and
-`sync_passwd_to_path_owner` never hands root a borrowed uid, repairing a root entry
-that a previous Termux `--shared-home` left non-zero instead: `/root` on disk stays
-root-owned, so the next plain login would fail with EACCES on `$HOME`. Each of them
-reports whether it changed anything, because the caller has to re-resolve the user
-when it did.
+Login can match a guest account to the owner of a shared home or its own home.
+The caller pins the installed rootfs and holds the session lock while editing and
+refreshing the identity. One atomic passwd replacement updates both the selected
+account and any UID conflicts. Root is only repaired to 0:0. Password hashes
+and aging data in /etc/shadow are independent of these IDs.
 """
 
 import contextlib
 import errno
 import logging
 import os
+
+from chroot_distro import dirfd
+from chroot_distro.helpers.rootfs import edit_guest_file
+from chroot_distro.helpers.tar_extract import safe_resolve_parts_at
 
 log = logging.getLogger(__name__)
 
@@ -138,89 +139,55 @@ def read_group_gid(rootfs: str, group: str) -> str:
 
 
 def set_passwd_uid_gid(
-    rootfs: str,
+    root_fd: int,
     username: str,
     uid: int,
     gid: int,
-) -> bool:
-    """Update a user's uid/gid in container ``/etc/passwd`` and ``/etc/shadow``."""
-    try:
-        passwd_path = resolve_rootfs_path(rootfs, "/etc/passwd")
-    except OSError:
-        return False
+    *,
+    release_conflicts: bool = False,
+) -> bool | None:
+    """Report a committed ID change, or None if there is no usable account."""
+    with edit_guest_file(root_fd, "/etc/passwd", same_mount=True) as fh:
+        lines = fh.getvalue().split("\n")
+        records = {}
+        for index, line in enumerate(lines):
+            fields = line.split(":")
+            valid = len(fields) == 7 and bool(fields[0]) and "\0" not in line
+            if fields[0] == username and not valid:
+                return None
+            if valid:
+                records[index] = fields
+        if not any(fields[0] == username for fields in records.values()):
+            return None
 
-    uid_s, gid_s = str(uid), str(gid)
-    changed = False
-    try:
-        with open(passwd_path) as fh:
-            lines = fh.readlines()
-    except OSError:
-        return False
+        uid_s, gid_s = str(uid), str(gid)
+        used_uids = {fields[2].lstrip("0") or "0" for fields in records.values()}
+        used_uids.add(uid_s)
+        candidate = 1001
+        changed = False
+        for index, fields in records.items():
+            if fields[0] == username:
+                new_ids = [uid_s, gid_s]
+            elif release_conflicts and (fields[2].lstrip("0") or "0") == uid_s:
+                if fields[0] == "root":
+                    new_ids = ["0", "0"]
+                else:
+                    while str(candidate) in used_uids:
+                        candidate += 1
+                    new_ids = [str(candidate), str(candidate)]
+                    candidate += 1
+            else:
+                continue
 
-    new_lines: list[str] = []
-    for line in lines:
-        parts = line.rstrip("\n").split(":")
-        if not parts or parts[0] != username:
-            new_lines.append(line)
-            continue
-        if len(parts) < 7:
-            new_lines.append(line)
-            continue
-        if parts[2] == uid_s and parts[3] == gid_s:
-            new_lines.append(line)
-            continue
-        parts[2] = uid_s
-        parts[3] = gid_s
-        new_lines.append(":".join(parts) + "\n")
-        changed = True
-
-    if not changed:
-        return False
-
-    try:
-        with open(passwd_path, "w") as fh:
-            fh.writelines(new_lines)
-    except OSError:
-        return False
-
-    try:
-        shadow_path = resolve_rootfs_path(rootfs, "/etc/shadow")
-    except OSError:
-        return True
-
-    try:
-        with open(shadow_path) as fh:
-            shadow_lines = fh.readlines()
-    except OSError:
-        return True
-
-    shadow_out: list[str] = []
-    for line in shadow_lines:
-        parts = line.rstrip("\n").split(":")
-        if parts and parts[0] == username and len(parts) >= 4:
-            parts[2] = uid_s
-            parts[3] = gid_s
-            shadow_out.append(":".join(parts) + "\n")
-        else:
-            shadow_out.append(line)
-
-    try:
-        with open(shadow_path, "w") as fh:
-            fh.writelines(shadow_out)
-    except OSError as exc:
-        log.warning("Failed to write to shadow database at %s: %s", shadow_path, exc)
-    return True
-
-
-def align_user_to_termux_owner(
-    rootfs: str,
-    username: str,
-    uid: int,
-    gid: int,
-) -> bool:
-    """Map a container passwd user to the Termux app uid/gid for
-    ``--shared-home``, so the guest user owns the bind-mounted home files."""
-    return set_passwd_uid_gid(rootfs, username, uid, gid)
+            if fields[2:4] != new_ids:
+                fields[2:4] = new_ids
+                lines[index] = ":".join(fields)
+                changed = True
+        if changed:
+            fh.seek(0)
+            fh.truncate()
+            fh.write("\n".join(lines))
+    return changed
 
 
 def resolve_host_home(login_user: str | None = None) -> str | None:
@@ -265,111 +232,22 @@ def resolve_host_home(login_user: str | None = None) -> str | None:
     return None
 
 
-def _next_free_uid(rootfs: str, reserved: set[int]) -> int:
-    """Return a uid not present in container ``/etc/passwd`` or *reserved*."""
-    used = set(reserved)
+def sync_passwd_to_home_owner(root_fd: int, username: str, guest_home: str) -> bool | None:
+    """Match an account to a home directory on the installed rootfs mount."""
+    if not guest_home or guest_home == "/" or "\0" in guest_home:
+        return False
+    parts = safe_resolve_parts_at(root_fd, guest_home.split("/"))
+    if not parts:
+        return False
+    home_fd = dirfd.descend_at(root_fd, parts, same_mount=True)
     try:
-        passwd_path = resolve_rootfs_path(rootfs, "/etc/passwd")
-        with open(passwd_path) as fh:
-            for line in fh:
-                parts = line.strip().split(":")
-                if len(parts) >= 3 and parts[2].isdigit():
-                    used.add(int(parts[2]))
-    except OSError as exc:
-        log.debug("Failed to read passwd file when scanning for free UID: %s", exc)
-    candidate = 1001
-    while candidate in used:
-        candidate += 1
-    return candidate
+        st = os.fstat(home_fd)
+    finally:
+        os.close(home_fd)
 
-
-def release_passwd_uid_conflicts(
-    rootfs: str,
-    keep_username: str,
-    uid: int,
-    gid: int,
-) -> bool:
-    """Move other passwd entries off (*uid*, *gid*) after *keep_username* claims them."""
-    try:
-        passwd_path = resolve_rootfs_path(rootfs, "/etc/passwd")
-        with open(passwd_path) as fh:
-            lines = fh.readlines()
-    except OSError:
+    if st.st_uid == 0:
         return False
-
-    uid_s = str(uid)
-    changed = False
-    for line in lines:
-        parts = line.rstrip("\n").split(":")
-        if len(parts) < 3 or parts[0] == keep_username:
-            continue
-        if parts[2] != uid_s:
-            continue
-        if parts[0] == "root":
-            new_uid, new_gid = 0, 0
-        else:
-            new_uid = _next_free_uid(rootfs, {uid, 0})
-            new_gid = new_uid
-        if set_passwd_uid_gid(rootfs, parts[0], new_uid, new_gid):
-            changed = True
-    return changed
-
-
-def sync_passwd_to_path_owner(
-    rootfs: str,
-    username: str,
-    host_path: str,
-) -> bool:
-    """Match passwd uid/gid to the owner of a host path (bind-mount source)."""
-    if not host_path:
-        return False
-    try:
-        st = os.stat(host_path)
-    except OSError:
-        return False
-    if username == "root":
-        # Never reassign root's uid/gid to a bind-mount owner, but a past
-        # Termux --shared-home login may have left root with a non-zero uid
-        # (the guest runs as the Termux app uid while /root on disk stays
-        # root-owned, breaking the next plain login with EACCES on $HOME).
-        # Repair root back to 0:0 instead.
-        try:
-            cur_uid = read_passwd_field(rootfs, "root", 2)
-            cur_gid = read_passwd_field(rootfs, "root", 3)
-        except OSError:
-            return False
-        if cur_uid and cur_gid and (cur_uid != "0" or cur_gid != "0"):
-            return set_passwd_uid_gid(rootfs, "root", 0, 0)
-        return False
-    try:
-        if os.path.realpath(host_path) == os.path.realpath("/root"):
-            return False
-    except OSError as exc:
-        log.debug("Failed to resolve real path for host_path %s: %s", host_path, exc)
-    set_passwd_uid_gid(rootfs, username, st.st_uid, st.st_gid)
-    release_passwd_uid_conflicts(
-        rootfs,
-        username,
-        st.st_uid,
-        st.st_gid,
-    )
-    return True
-
-
-def sync_passwd_to_home_owner(
-    rootfs: str,
-    username: str,
-    home_guest_path: str,
-) -> bool:
-    """Match passwd uid/gid to the on-disk home directory owner inside
-    rootfs (a past ``--shared-home`` may have left them out of sync)."""
-    if not home_guest_path or home_guest_path == "/":
-        return False
-    try:
-        home_host = resolve_rootfs_path(rootfs, home_guest_path)
-    except OSError:
-        return False
-    return sync_passwd_to_path_owner(rootfs, username, home_host)
+    return set_passwd_uid_gid(root_fd, username, st.st_uid, st.st_gid, release_conflicts=True)
 
 
 def reown_home_tree_for_uid(

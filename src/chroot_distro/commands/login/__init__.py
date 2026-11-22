@@ -39,6 +39,9 @@ and chroots the holder, so mixing it with a running session is an error, and a
 `CD_USE_NS` mismatch is a warning, since namespaces cannot be retrofitted onto
 a session that is already inside.
 
+Account alignment pins the installed rootfs and serializes passwd edits and
+identity refreshes under the session lock. Numeric selectors keep their IDs.
+
 A Termux rootfs is a separate shape rather than a variant: the session runs
 `$PREFIX/bin/login` and takes its uid from the owner of the in-rootfs Termux home,
 because Termux executables are commonly mode 700 and a mismatched uid cannot run
@@ -107,7 +110,6 @@ from chroot_distro.commands.login.env import (
     user_env_keys,
 )
 from chroot_distro.commands.login.passwd import (
-    align_user_to_termux_owner,
     find_passwd_by_uid,
     find_user_groups,
     read_group_gid,
@@ -117,7 +119,6 @@ from chroot_distro.commands.login.passwd import (
     resolve_rootfs_path,
     set_passwd_uid_gid,
     sync_passwd_to_home_owner,
-    sync_passwd_to_path_owner,
 )
 from chroot_distro.constants import (
     DEFAULT_PATH_ENV,
@@ -375,6 +376,50 @@ def _resolve_login_user(rootfs: str, container_name: str, user_arg: str) -> dict
         "home": home,
         "shell": shell,
     }
+
+
+def _align_login_account(
+    container_name: str,
+    user_spec: str,
+    user: dict,
+    *,
+    owner_ids: tuple[int, int] | None = None,
+    shared_home: bool = False,
+) -> dict:
+    username = user["name"]
+    if username.isdigit() or (owner_ids is None and user["home"] in ("", "/")):
+        return user
+    if username == "root":
+        owner_ids = (0, 0)
+    if owner_ids is not None and username != "root" and owner_ids[0] == 0:
+        if shared_home:
+            raise ChrootDistroError(f"refusing to map guest account {quote_path(username)} to UID 0 for --shared-home")
+        return user
+
+    try:
+        with session.lock(container_name):
+            root_fd = open_container_rootfs(container_name, same_mount=True)
+            try:
+                if owner_ids is None:
+                    result = sync_passwd_to_home_owner(root_fd, username, user["home"])
+                else:
+                    result = set_passwd_uid_gid(
+                        root_fd, username, *owner_ids, release_conflicts=not IS_TERMUX and username != "root"
+                    )
+                if result is not None:
+                    return _resolve_login_user(container_rootfs(container_name), container_name, user_spec)
+                if shared_home:
+                    raise ChrootDistroError(f"guest account {quote_path(username)} has no usable /etc/passwd entry")
+            finally:
+                os.close(root_fd)
+    except (OSError, UnicodeError) as exc:
+        if owner_ids is not None and (
+            user["uid"] != str(owner_ids[0]) or (":" not in user_spec and user["gid"] != str(owner_ids[1]))
+        ):
+            warn(f"cannot align guest account {quote_path(username)}: {quote_path(str(exc))}")
+        else:
+            log.debug("Could not align guest account: %s", exc)
+    return user
 
 
 def _merge_image_path(image_path: str, system_path: str) -> str:
@@ -801,6 +846,8 @@ def _command_login_inner_once(container_name: str, args) -> None:
         has_nvidia = detect_nvidia_gpu()
         want_mesa = not has_nvidia
 
+    user_spec = login_user
+    user = None
     if dist_type == "termux":
         if not login_wd:
             login_wd = TERMUX_HOME
@@ -846,86 +893,35 @@ def _command_login_inner_once(container_name: str, args) -> None:
         except Exception:
             groups = [login_gid, "3003", "9997"] if IS_TERMUX else [login_gid]
     else:
-        user = _resolve_login_user(rootfs, container_name, login_user)
+        user = _resolve_login_user(rootfs, container_name, user_spec)
         login_user = user["name"]
+
+        if use_shared_home and not minimal:
+            try:
+                if IS_TERMUX:
+                    owner_ids = (0, 0) if login_user == "root" else termux_home_owner_ids()
+                else:
+                    host_home = resolve_host_home(login_user)
+                    if not host_home or not os.path.isdir(host_home):
+                        raise ChrootDistroError(
+                            f"cannot determine host home for --shared-home with user {quote_path(login_user)}. "
+                            "Run via sudo from your normal user account or pass --bind HOST_HOME:GUEST_HOME."
+                        )
+                    st = os.stat(host_home)
+                    owner_ids = (st.st_uid, st.st_gid)
+                user = _align_login_account(container_name, user_spec, user, owner_ids=owner_ids, shared_home=True)
+            except OSError as exc:
+                warn(f"cannot align user for shared home: {quote_path(str(exc))}")
+        elif not minimal:
+            user = _align_login_account(container_name, user_spec, user)
+
         login_uid = user["uid"]
         login_gid = user["gid"]
         groups = user["groups"]
         login_home = user["home"]
         login_shell = user["shell"]
-        passwd_home = login_home
 
-        if use_shared_home and not minimal:
-            try:
-                if IS_TERMUX:
-                    if login_user == "root":
-                        # Keep root at 0:0: remapping it to the Termux app
-                        # uid makes the session run unprivileged (apt/dpkg
-                        # EACCES). Root still reads the app-owned home via
-                        # CAP_DAC_OVERRIDE.
-                        set_passwd_uid_gid(rootfs, "root", 0, 0)
-                        aligned = True
-                    else:
-                        termux_owner_uid, termux_owner_gid = termux_home_owner_ids()
-                        aligned = align_user_to_termux_owner(
-                            rootfs,
-                            login_user,
-                            termux_owner_uid,
-                            termux_owner_gid,
-                        )
-                else:
-                    host_home = resolve_host_home(login_user)
-                    if not host_home or not os.path.isdir(host_home):
-                        crit_error(
-                            f"cannot determine host home for --shared-home "
-                            f"with user '{login_user}'. Run via sudo from your "
-                            f"normal user account (so SUDO_USER is set), or add "
-                            f"--bind HOST_HOME:{login_home}."
-                        )
-                        sys.exit(1)
-                    if login_user == "root":
-                        set_passwd_uid_gid(rootfs, "root", 0, 0)
-                        aligned = True
-                    else:
-                        aligned = sync_passwd_to_path_owner(
-                            rootfs,
-                            login_user,
-                            host_home,
-                        )
-                        if not aligned:
-                            crit_error(
-                                f"refusing to map user '{login_user}' to root for "
-                                f"--shared-home (host home resolved to '{host_home}'). "
-                                f"Run via sudo from your normal user account."
-                            )
-                            sys.exit(1)
-                if aligned:
-                    user = _resolve_login_user(
-                        rootfs,
-                        container_name,
-                        login_user,
-                    )
-                    login_uid = user["uid"]
-                    login_gid = user["gid"]
-                    groups = user["groups"]
-            except OSError as exc:
-                warn(f"cannot align user for shared home: {exc}")
-        elif (
-            not use_shared_home
-            and not minimal
-            and login_home
-            and sync_passwd_to_home_owner(rootfs, login_user, login_home)
-        ):
-            user = _resolve_login_user(
-                rootfs,
-                container_name,
-                login_user,
-            )
-            login_uid = user["uid"]
-            login_gid = user["gid"]
-            groups = user["groups"]
-
-        if login_home and login_home != "/" and login_home == passwd_home:
+        if login_home and login_home != "/":
             try:
                 host_home_path = resolve_rootfs_path(rootfs, login_home)
                 home_exists = os.path.isdir(host_home_path)
@@ -1006,23 +1002,23 @@ def _command_login_inner_once(container_name: str, args) -> None:
 
     x11_auth_binds: list[str] = []
     display_socket_binds: list[str] = []
-    if not IS_TERMUX and dist_type == "normal" and not minimal and shared_display:
+    if not IS_TERMUX and dist_type == "normal" and user is not None and not minimal and shared_display:
         if not use_shared_home and login_user != "root" and login_uid is not None:
             invoking_uid = resolve_invoking_uid()
             if int(login_uid) != invoking_uid:
                 host_home = resolve_host_home(login_user)
                 if host_home and os.path.isdir(host_home):
                     old_uid = int(login_uid)
-                    if sync_passwd_to_path_owner(rootfs, login_user, host_home):
-                        user = _resolve_login_user(
-                            rootfs,
-                            container_name,
-                            login_user,
-                        )
+                    try:
+                        st = os.stat(host_home)
+                    except OSError as exc:
+                        log.debug("Could not read the host home owner: %s", exc)
+                    else:
+                        user = _align_login_account(container_name, user_spec, user, owner_ids=(st.st_uid, st.st_gid))
                         login_uid = user["uid"]
                         login_gid = user["gid"]
                         groups = user["groups"]
-                        if login_home and login_home != "/":
+                        if int(login_uid) != old_uid and login_home and login_home != "/":
                             reown_home_tree_for_uid(
                                 rootfs,
                                 login_home,

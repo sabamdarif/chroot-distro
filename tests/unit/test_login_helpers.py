@@ -851,144 +851,50 @@ def test_resolve_host_home_returns_none_for_unknown_guest_user():
         assert resolve_host_home("root") == "/root"
 
 
-def test_sync_passwd_to_path_owner(tmp_path):
-    from chroot_distro.commands.login.passwd import sync_passwd_to_path_owner
+@pytest.mark.parametrize("termux", [False, True])
+@pytest.mark.parametrize("is_run", [False, True])
+def test_shared_home_aligns_named_account_without_changing_shadow(command_display, tmp_path, monkeypatch, termux, is_run):
+    from pathlib import Path
 
-    rootfs = tmp_path / "rootfs"
-    etc = rootfs / "etc"
-    etc.mkdir(parents=True)
-    host_dir = tmp_path / "hosthome"
-    host_dir.mkdir()
-    uid, gid = os.getuid(), os.getgid()
-    os.chown(host_dir, uid, gid)
-    (etc / "passwd").write_text(
-        "ubuntu:x:1000:1000:Ubuntu:/home/ubuntu:/bin/bash\nsaba:x:1001:1001:Saba:/home/saba:/bin/bash\n",
-        encoding="utf-8",
-    )
-    assert sync_passwd_to_path_owner(str(rootfs), "saba", str(host_dir))
-    passwd = (etc / "passwd").read_text(encoding="utf-8")
-    assert f"saba:x:{uid}:{gid}:" in passwd
-    assert f"ubuntu:x:{uid}:{gid}:" not in passwd
+    login, args, _ = command_display
+    root = Path(login.container_rootfs("demo"))
+    (root / "etc").mkdir()
+    (root / "home/saba").mkdir(parents=True)
+    passwd = root / "etc/passwd"
+    passwd.write_text("saba:x:10328:10328:Saba:/home/saba:/bin/sh\n")
+    (root / "etc/group").write_text("demo:x:6000:saba\n")
+    shadow = root / "etc/shadow"
+    shadow.write_text("saba:!:18446:0:99999:7:::\n")
+    before = shadow.read_bytes(), shadow.stat()
+    host_home = tmp_path / "host"
+    host_home.mkdir()
+    owner_ids = (10428, 10428) if termux else (os.getuid(), os.getgid())
+    if owner_ids[0] == 0:
+        pytest.skip("Linux fixture needs a nonroot host home")
+    monkeypatch.setattr(login, "IS_TERMUX", termux)
+    monkeypatch.setattr(login, "termux_home_owner_ids", lambda: owner_ids)
+    monkeypatch.setattr(login, "resolve_host_home", lambda _: str(host_home))
+    monkeypatch.setattr(login.bindings, "resolve_host_home", lambda _: str(host_home))
+    monkeypatch.setattr(login, "TERMUX_HOME", str(host_home))
+    monkeypatch.setattr(login.dirfd, "_mount_id", lambda fd: 1)
+    monkeypatch.setattr(os, "fchown", lambda *args: None)
+    config = Mock(wraps=login.build_chroot_config)
+    monkeypatch.setattr(login, "build_chroot_config", config)
 
+    args.user = "saba:demo"
+    args.shared_home = True
+    if is_run:
+        args._run_inner = ["/bin/sh"]
 
-def test_sync_passwd_to_path_owner_skips_root(tmp_path):
-    from chroot_distro.commands.login.passwd import sync_passwd_to_path_owner
+    with pytest.raises(SystemExit) as exc:
+        login._command_login_inner_once("demo", args)
 
-    rootfs = tmp_path / "rootfs"
-    etc = rootfs / "etc"
-    etc.mkdir(parents=True)
-    host_dir = tmp_path / "hosthome"
-    host_dir.mkdir()
-    os.chown(host_dir, os.getuid(), os.getgid())
-    (etc / "passwd").write_text(
-        "root:x:0:0:root:/root:/bin/bash\n",
-        encoding="utf-8",
-    )
-    assert not sync_passwd_to_path_owner(str(rootfs), "root", str(host_dir))
-    assert (etc / "passwd").read_text(encoding="utf-8") == ("root:x:0:0:root:/root:/bin/bash\n")
-
-
-def test_sync_passwd_to_path_owner_repairs_stale_root(tmp_path):
-    """Regression (Termux): a previous --shared-home bind left root's passwd
-    uid/gid remapped to the Termux app uid even though /root on disk is
-    root-owned. The next plain login must repair root back to 0:0 so the
-    guest can read its own $HOME."""
-    from chroot_distro.commands.login.passwd import sync_passwd_to_path_owner
-
-    rootfs = tmp_path / "rootfs"
-    etc = rootfs / "etc"
-    etc.mkdir(parents=True)
-    (etc / "passwd").write_text(
-        "root:x:10328:10328:root:/root:/bin/bash\n",
-        encoding="utf-8",
-    )
-    host_dir = tmp_path / "root_home"
-    host_dir.mkdir()
-    assert sync_passwd_to_path_owner(str(rootfs), "root", str(host_dir))
-    assert (etc / "passwd").read_text(encoding="utf-8") == ("root:x:0:0:root:/root:/bin/bash\n")
-
-
-def test_sync_passwd_to_home_owner_repairs_stale_root(tmp_path):
-    """End-to-end: resolve the in-rootfs /root and repair the stale root
-    passwd entry left behind by a Termux --shared-home session."""
-    from chroot_distro.commands.login.passwd import sync_passwd_to_home_owner
-
-    rootfs = tmp_path / "rootfs"
-    home = rootfs / "root"
-    home.mkdir(parents=True)
-    etc = rootfs / "etc"
-    etc.mkdir()
-    (etc / "passwd").write_text(
-        "root:x:10328:10328:root:/root:/bin/bash\n",
-        encoding="utf-8",
-    )
-    assert sync_passwd_to_home_owner(str(rootfs), "root", "/root")
-    assert (etc / "passwd").read_text(encoding="utf-8") == ("root:x:0:0:root:/root:/bin/bash\n")
-
-
-def test_release_passwd_uid_conflicts(tmp_path):
-    from chroot_distro.commands.login.passwd import (
-        release_passwd_uid_conflicts,
-        set_passwd_uid_gid,
-    )
-
-    rootfs = tmp_path / "rootfs"
-    etc = rootfs / "etc"
-    etc.mkdir(parents=True)
-    (etc / "passwd").write_text(
-        "root:x:1000:1000:root:/root:/bin/bash\n"
-        "ubuntu:x:1000:1000:Ubuntu:/home/ubuntu:/bin/bash\n"
-        "saba:x:1001:1001:Saba:/home/saba:/bin/bash\n",
-        encoding="utf-8",
-    )
-    uid, gid = 1000, 1000
-    set_passwd_uid_gid(str(rootfs), "saba", uid, gid)
-    release_passwd_uid_conflicts(str(rootfs), "saba", uid, gid)
-    passwd = (etc / "passwd").read_text(encoding="utf-8")
-    assert f"saba:x:{uid}:{gid}:" in passwd
-    assert "root:x:0:0:" in passwd
-    assert f"ubuntu:x:{uid}:{gid}:" not in passwd
-
-
-def test_sync_passwd_to_home_owner(tmp_path):
-    from chroot_distro.commands.login.passwd import sync_passwd_to_home_owner
-
-    rootfs = tmp_path / "rootfs"
-    home = rootfs / "home" / "saba"
-    home.mkdir(parents=True)
-    uid, gid = os.getuid(), os.getgid()
-    os.chown(home, uid, gid)
-    etc = rootfs / "etc"
-    etc.mkdir()
-    (etc / "passwd").write_text(
-        "saba:x:10328:10328:Saba:/home/saba:/bin/bash\n",
-        encoding="utf-8",
-    )
-    assert sync_passwd_to_home_owner(str(rootfs), "saba", "/home/saba")
-    passwd = (etc / "passwd").read_text(encoding="utf-8")
-    assert f"saba:x:{uid}:{gid}:" in passwd
-
-
-def test_align_user_to_termux_owner(tmp_path):
-    from chroot_distro.commands.login.passwd import align_user_to_termux_owner
-
-    rootfs = tmp_path / "rootfs"
-    etc = rootfs / "etc"
-    etc.mkdir(parents=True)
-    (etc / "passwd").write_text(
-        "root:x:0:0:root:/root:/bin/bash\nsaba:x:1000:1000:Saba:/home/saba:/bin/bash\n",
-        encoding="utf-8",
-    )
-    (etc / "shadow").write_text(
-        "root:*:1::::::\nsaba:*:1::::::\n",
-        encoding="utf-8",
-    )
-    assert align_user_to_termux_owner(str(rootfs), "saba", 10328, 10328)
-    passwd = (etc / "passwd").read_text(encoding="utf-8")
-    assert "saba:x:10328:10328:" in passwd
-    shadow = (etc / "shadow").read_text(encoding="utf-8")
-    assert shadow.startswith("root:")
-    assert "saba:*:10328:10328:" in shadow
+    assert exc.value.code == 0
+    assert passwd.read_text() == f"saba:x:{owner_ids[0]}:{owner_ids[1]}:Saba:/home/saba:/bin/sh\n"
+    assert shadow.read_bytes() == before[0]
+    assert os.path.samestat(shadow.stat(), before[1])
+    assert str(config.call_args.kwargs["login_uid"]) == str(owner_ids[0])
+    assert str(config.call_args.kwargs["login_gid"]) == "6000"
 
 
 def test_termux_home_owner_ids(tmp_path):
