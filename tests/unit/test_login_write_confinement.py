@@ -1,7 +1,8 @@
-"""Login profile, hostname and volume writes stay beneath the opened guest root."""
+"""Login setup writes stay beneath the opened guest root."""
 
 import contextlib
 import errno
+import logging
 import os
 import stat
 
@@ -14,7 +15,7 @@ from chroot_distro.helpers import rootfs
 
 
 @pytest.fixture(params=[False, True], ids=["linux", "termux"])
-def volume_store(tmp_path, monkeypatch, request):
+def container_store(tmp_path, monkeypatch, request):
     prefix = tmp_path / "prefix"
     containers = (prefix / "var/lib" if request.param else tmp_path) / "chroot-distro/containers"
     root = containers / "box/rootfs"
@@ -26,8 +27,8 @@ def volume_store(tmp_path, monkeypatch, request):
     return root
 
 
-def test_image_volumes_create_missing_leaves_and_keep_existing_entries(volume_store, monkeypatch):
-    root = volume_store
+def test_image_volumes_create_missing_leaves_and_keep_existing_entries(container_store, monkeypatch):
+    root = container_store
     (root / "state/keep").mkdir(parents=True)
     (root / "alias").symlink_to("/state")
     (root / "state/link").symlink_to("keep")
@@ -47,8 +48,8 @@ def test_image_volumes_create_missing_leaves_and_keep_existing_entries(volume_st
 
 
 @pytest.mark.parametrize("boundary", ["root", "parent", "leaf", "unknown"])
-def test_image_volumes_require_the_rootfs_mount_for_each_write(volume_store, monkeypatch, boundary):
-    root = volume_store
+def test_image_volumes_require_the_rootfs_mount_for_each_write(container_store, monkeypatch, boundary):
+    root = container_store
     (root / "state").mkdir()
     target = {"root": root, "parent": root / "state", "leaf": root / "state/volume"}.get(boundary)
 
@@ -68,8 +69,8 @@ def test_image_volumes_require_the_rootfs_mount_for_each_write(volume_store, mon
     assert (root / "state/volume").exists() == (boundary == "leaf")
 
 
-def test_image_volumes_refuse_replaced_parent(volume_store, tmp_path, monkeypatch):
-    root = volume_store
+def test_image_volumes_refuse_replaced_parent(container_store, tmp_path, monkeypatch):
+    root = container_store
     outside = tmp_path / "outside"
     outside.mkdir()
     (root / "state").mkdir()
@@ -89,8 +90,8 @@ def test_image_volumes_refuse_replaced_parent(volume_store, tmp_path, monkeypatc
     assert list((root / "saved").iterdir()) == []
 
 
-def test_image_volumes_refuse_replaced_leaf(volume_store, tmp_path, monkeypatch):
-    root = volume_store
+def test_image_volumes_refuse_replaced_leaf(container_store, tmp_path, monkeypatch):
+    root = container_store
     outside = tmp_path / "outside"
     outside.mkdir()
     opendir = dirfd.opendir_at
@@ -113,8 +114,8 @@ def test_image_volumes_refuse_replaced_leaf(volume_store, tmp_path, monkeypatch)
     assert (root / "volume").is_symlink()
 
 
-def test_image_volumes_refuse_symlinked_rootfs(volume_store, tmp_path):
-    root = volume_store
+def test_image_volumes_refuse_symlinked_rootfs(container_store, tmp_path):
+    root = container_store
     outside = tmp_path / "outside"
     outside.mkdir()
     root.rmdir()
@@ -123,6 +124,91 @@ def test_image_volumes_refuse_symlinked_rootfs(volume_store, tmp_path):
     login._prepare_image_volumes("box", ["/vol"], 123, 456)
 
     assert list(outside.iterdir()) == []
+
+
+@pytest.fixture
+def termux_cache(container_store, monkeypatch):
+    monkeypatch.setattr(login, "TERMUX_APP_PACKAGE", "com.example.termux")
+    return container_store / "data/data/com.example.termux/cache"
+
+
+def test_termux_cache_resolves_guest_aliases_and_preserves_existing_directory(container_store, termux_cache):
+    termux_cache.parent.mkdir(parents=True)
+    target = container_store / "var/cache/termux"
+    termux_cache.symlink_to("/var/cache/termux")
+
+    login._prepare_termux_cache("box")
+
+    assert target.is_dir()
+    assert termux_cache.is_symlink()
+    target.chmod(0o700)
+    before = target.stat()
+
+    login._prepare_termux_cache("box")
+
+    assert os.path.samestat(target.stat(), before)
+    assert stat.S_IMODE(target.stat().st_mode) == 0o700
+
+
+@pytest.mark.parametrize("boundary", ["root", "parent", "leaf", "unknown"])
+def test_termux_cache_requires_a_verified_mount(container_store, termux_cache, monkeypatch, caplog, boundary):
+    termux_cache.parent.mkdir(parents=True)
+    if boundary == "leaf":
+        termux_cache.mkdir()
+    target = {"root": container_store, "parent": termux_cache.parent, "leaf": termux_cache}.get(boundary)
+
+    def mount_id(fd):
+        if target is None:
+            raise OSError(errno.ENOTSUP, "mount IDs unavailable")
+        return 2 if os.path.samestat(os.fstat(fd), target.stat()) else 1
+
+    monkeypatch.setattr(dirfd, "_mount_id", mount_id)
+    with caplog.at_level(logging.DEBUG, logger=login.__name__):
+        login._prepare_termux_cache("box")
+
+    assert "Could not prepare guest Termux cache" in caplog.text
+    assert termux_cache.exists() == (boundary == "leaf")
+
+
+def test_termux_cache_refuses_replaced_parent(termux_cache, tmp_path, monkeypatch):
+    parent = termux_cache.parent
+    parent.mkdir(parents=True)
+    saved = parent.with_name("saved")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    resolve = login.safe_resolve_parts_at
+
+    def swap(fd, parts):
+        resolved = resolve(fd, parts)
+        parent.rename(saved)
+        parent.symlink_to(outside)
+        return resolved
+
+    monkeypatch.setattr(login, "safe_resolve_parts_at", swap)
+    login._prepare_termux_cache("box")
+
+    assert list(saved.iterdir()) == []
+    assert list(outside.iterdir()) == []
+
+
+def test_termux_cache_refuses_symlinked_rootfs(container_store, tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    container_store.rmdir()
+    container_store.symlink_to(outside)
+
+    login._prepare_termux_cache("box")
+
+    assert list(outside.iterdir()) == []
+
+
+@pytest.mark.parametrize("package", ["", ".", "..", "nested/name", "bad\0name"])
+def test_termux_cache_refuses_invalid_package_component(container_store, monkeypatch, package):
+    monkeypatch.setattr(login, "TERMUX_APP_PACKAGE", package)
+
+    login._prepare_termux_cache("box")
+
+    assert list(container_store.iterdir()) == []
 
 
 @pytest.fixture

@@ -42,7 +42,7 @@ a session that is already inside.
 A Termux rootfs is a separate shape rather than a variant: the session runs
 `$PREFIX/bin/login` and takes its uid from the owner of the in-rootfs Termux home,
 because Termux executables are commonly mode 700 and a mismatched uid cannot run
-them.
+them. On Android, cache setup creates directories only on the guest rootfs mount.
 
 Isolation degrades rather than failing, twice over. A max-isolation setup that
 dies on an Android kernel (SELinux, usually) raises `_MaxIsolationFallback` and
@@ -662,6 +662,23 @@ def _prepare_image_volumes(container_name: str, volumes: list[str], uid: int, gi
         os.close(root_fd)
 
 
+def _prepare_termux_cache(container_name: str) -> None:
+    package = TERMUX_APP_PACKAGE
+    if package in ("", ".", "..") or "/" in package or "\0" in package:
+        log.debug("Skipping guest Termux cache for invalid package name %r", package)
+        return
+    try:
+        with contextlib.ExitStack() as stack:
+            root_fd = open_container_rootfs(container_name, same_mount=True)
+            stack.callback(os.close, root_fd)
+            parts = safe_resolve_parts_at(root_fd, ("data", "data", package, "cache"))
+            if parts:
+                cache_fd = dirfd.descend_at(root_fd, parts, create=True, same_mount=True)
+                stack.callback(os.close, cache_fd)
+    except (OSError, UnicodeError) as exc:
+        log.debug("Could not prepare guest Termux cache: %r", exc)
+
+
 def _command_login_inner_once(container_name: str, args) -> None:
     display_command = getattr(args, "get_chroot_cmd", False)
     command_line: str | None = None
@@ -798,10 +815,7 @@ def _command_login_inner_once(container_name: str, args) -> None:
 
         # Never bound from the host, so the guest needs its own.
         if IS_TERMUX and not skip_extra_mounts:
-            os.makedirs(
-                os.path.join(rootfs, "data", "data", TERMUX_APP_PACKAGE, "cache"),
-                exist_ok=True,
-            )
+            _prepare_termux_cache(container_name)
 
         if run_inner is not None:
             inner = run_inner

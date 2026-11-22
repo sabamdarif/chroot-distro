@@ -38,6 +38,9 @@ def command_display(tmp_path, monkeypatch):
     monkeypatch.setattr(paths, "CONTAINERS_DIR", str(rootfs.parent.parent))
     monkeypatch.setattr(paths, "RUNTIME_DIR", str(tmp_path))
     monkeypatch.setattr(paths, "IS_TERMUX", False)
+    monkeypatch.setattr(login, "IS_TERMUX", False)
+    monkeypatch.setattr(login, "detect_nvidia_gpu", Mock(return_value=False))
+    monkeypatch.setattr(login.bindings.nvidia_helper, "find_mesa_device_nodes", Mock(return_value=[]))
     monkeypatch.setattr(login.namespace, "check_isolation_conflicts", Mock())
     monkeypatch.setattr(login.namespace, "should_use_namespaces", Mock(return_value=False))
     monkeypatch.setattr(
@@ -123,6 +126,43 @@ def test_first_session_prepares_image_volume_before_mounts(command_display, monk
     login.isolation.apply_bind_mounts.assert_called_once()
     login.isolation.apply_special_mounts.assert_called_once()
     assert login.mount_manager.ensure_rootfs_exec.called == (not namespaced)
+
+
+@pytest.mark.parametrize(
+    ("termux_host", "dist_type", "mode", "is_run", "prepare_cache"),
+    [
+        (True, "termux", "default", False, True),
+        (True, "termux", "default", True, True),
+        (True, "termux", "minimal", False, True),
+        (True, "termux", "isolated", False, False),
+        (True, "normal", "default", False, False),
+        (False, "termux", "default", False, False),
+    ],
+)
+def test_login_termux_cache_setup(command_display, monkeypatch, termux_host, dist_type, mode, is_run, prepare_cache):
+    from pathlib import Path
+
+    login, args, _data = command_display
+    monkeypatch.setattr(login, "IS_TERMUX", termux_host)
+    monkeypatch.setattr(login, "TERMUX_APP_PACKAGE", "com.example.termux")
+    monkeypatch.setattr(login, "_detect_dist_type", Mock(return_value=dist_type))
+    monkeypatch.setattr(login.dirfd, "_mount_id", lambda fd: 1)
+    args.minimal = mode == "minimal"
+    args.isolated = mode == "isolated"
+    if is_run:
+        args._run_inner = ["/bin/sh"]
+    cache = Path(login.container_rootfs("demo")) / "data/data/com.example.termux/cache"
+
+    def mount(*args, **kwargs):
+        assert cache.is_dir() == prepare_cache
+
+    login.isolation.apply_bind_mounts.side_effect = mount
+    with pytest.raises(SystemExit) as exc:
+        login._command_login_inner_once("demo", args)
+
+    assert exc.value.code == 0
+    assert cache.is_dir() == prepare_cache
+    login.isolation.apply_bind_mounts.assert_called_once()
 
 
 @pytest.mark.parametrize("is_run", [False, True])

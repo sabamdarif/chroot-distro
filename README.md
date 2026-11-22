@@ -213,6 +213,8 @@ Single-instance devpts kernels share the host's `/dev/pts` with the guest. When 
 
 On Termux, Android mounts `/data` with `nosuid`, so a default login binds the container's rootfs onto itself with `suid` and `exec` enabled, letting setuid binaries like `sudo` work without touching Android's mount flags. `--shared-tmp` binds `$PREFIX/tmp` as it is; make it world-writable yourself if a non-root guest user must write there.
 
+On rooted Android, `login` and `run` prepare the app cache for Termux guests unless isolated. Cache creation stays on the installed rootfs mount and resolves links within the guest. Login and run continue if cache setup stops because a mount hides the rootfs or a cache path component, mount IDs are unavailable, or a directory cannot be created.
+
 A second `login` to a busy container joins the running session and adds whatever extra `--bind`/`--shared-*`/`--env` it asks for, so no `unmount` is needed to bring a folder in. Conflicting `--bind` destinations are ignored with a warning; `--isolated` and `CD_USE_NS` cannot be turned on for a container that is already running.
 
 The first `login` or `run` creates missing image-declared volume directories on the container's own filesystem before applying session mounts. If the kernel cannot report mount IDs for open directories, any required volume directories must already exist in the image or be supplied by the caller.
