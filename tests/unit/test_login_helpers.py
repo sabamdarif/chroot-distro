@@ -3,6 +3,7 @@ import io
 import json
 import os
 import signal
+import stat
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from types import SimpleNamespace
@@ -986,6 +987,82 @@ def test_shared_home_aligns_named_account_without_changing_shadow(command_displa
     assert os.path.samestat(shadow.stat(), before[1])
     assert str(config.call_args.kwargs["login_uid"]) == str(owner_ids[0])
     assert str(config.call_args.kwargs["login_gid"]) == "6000"
+
+
+@pytest.mark.parametrize("is_run", [False, True])
+@pytest.mark.parametrize(
+    ("uid_matches", "bus_source", "warns"),
+    [(False, "host", True), (True, "host", False), (False, "override", False), (False, "absent", False)],
+)
+def test_shared_display_preserves_guest_home_and_uid(
+    command_display, tmp_path, monkeypatch, capsys, is_run, uid_matches, bus_source, warns
+):
+    login, args, _ = command_display
+    root = Path(login.container_rootfs("demo"))
+    home = root / "home/guest"
+    home.mkdir(parents=True, mode=0o700)
+    private_file = home / "private"
+    private_file.write_text("keep")
+    home_stat = home.stat()
+    file_stat = private_file.stat()
+    uid = home_stat.st_uid or 1500
+    gid = home_stat.st_gid
+    host_uid = uid if uid_matches else uid + 1
+    (root / "etc").mkdir()
+    passwd = root / "etc/passwd"
+    account = f"guest:x:{uid}:{gid}::/home/guest:/bin/sh\n"
+    passwd.write_text(account)
+    host_home = tmp_path / "desktop-home"
+    host_home.mkdir()
+    real_stat = os.stat
+    host_stat = list(host_home.stat())
+    host_stat[stat.ST_UID] = host_uid
+
+    def stat_with_host_uid(path, *args, **kwargs):
+        if path == str(host_home):
+            return os.stat_result(host_stat)
+        return real_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(login.dirfd, "_mount_id", lambda fd: 1)
+    monkeypatch.setattr(login, "resolve_invoking_uid", lambda: host_uid)
+    monkeypatch.setattr(login, "resolve_host_home", lambda _: str(host_home))
+    monkeypatch.setattr(os, "stat", stat_with_host_uid)
+    display_env = {"DISPLAY": ":42", "XAUTHORITY": "/host/cookie", "XDG_RUNTIME_DIR": "/host/runtime"}
+    if bus_source != "absent":
+        display_env["DBUS_SESSION_BUS_ADDRESS"] = "unix:path=/host/runtime/bus"
+    monkeypatch.setattr(login, "resolve_display_env", lambda: (display_env, ["/host/cookie"]))
+    monkeypatch.setattr(login, "resolve_display_socket_binds", Mock(return_value=[]))
+    monkeypatch.setattr(login, "x11_auth_bind_path", lambda _: None)
+    monkeypatch.setattr(login, "guest_can_read_auth", lambda *_: False)
+    cookie = Mock(return_value="/guest/cookie")
+    monkeypatch.setattr(login, "provision_guest_xauthority", cookie)
+    config = Mock(wraps=login.build_chroot_config)
+    monkeypatch.setattr(login, "build_chroot_config", config)
+    args.user = "guest"
+    args.shared_display = True
+    args.env = ["DBUS_SESSION_BUS_ADDRESS=unix:path=/guest/bus"] if bus_source == "override" else []
+    if is_run:
+        args._run_inner = ["/bin/sh"]
+
+    with pytest.raises(SystemExit) as exc:
+        login._command_login_inner_once("demo", args)
+
+    assert exc.value.code == 0
+    assert passwd.read_text() == account
+    assert (home.stat().st_mode, home.stat().st_uid, home.stat().st_gid) == (
+        home_stat.st_mode, home_stat.st_uid, home_stat.st_gid
+    )
+    assert (private_file.stat().st_mode, private_file.stat().st_uid, private_file.stat().st_gid) == (
+        file_stat.st_mode, file_stat.st_uid, file_stat.st_gid
+    )
+    assert private_file.read_text() == "keep"
+    assert int(config.call_args.kwargs["login_uid"]) == uid
+    cookie.assert_called_once_with(
+        str(root), host_xauthority="/host/cookie", display=":42", guest_uid=uid, guest_gid=gid
+    )
+    output = capsys.readouterr()
+    assert ("access the host session bus" in output.err) == warns
+    assert "XAUTHORITY=/guest/cookie" in output.out
 
 
 def test_termux_home_owner_ids(tmp_path):

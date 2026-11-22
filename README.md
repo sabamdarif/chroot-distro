@@ -207,6 +207,8 @@ Set `--no-new-privs` on each `login` or `run` that needs it, including when join
 
 With `--shared-display`, an X11 cookie copied for a guest user must come from the invoking user's home or `/run/user/<uid>`. The copy contains the selected display's entries and has owner-only permissions.
 
+On Linux, `--shared-display` uses the guest's login identity. Access to host Wayland, audio or the D-Bus session bus may require a guest account with the desktop user's UID. When also using `--shared-home`, the normal shared-home account mapping applies.
+
 When matching a named guest account to a home owner, `login` and `run` update only the guest's `/etc/passwd` on the installed rootfs mount. Numeric user selections keep their specified identity. Account changes are skipped if mount IDs are unavailable or a bind covers the account file or rootfs, including a live Termux exec self-bind. Start a fresh session if a running Termux container needs a different account mapping.
 
 Hostname, DNS and environment profile updates require access to the installed rootfs mount. Mounts covering the update paths, including a live Termux exec self-bind over the rootfs, or unavailable mount IDs can cause updates to be skipped. A skipped profile update can leave the previous snippet in effect.
@@ -238,6 +240,7 @@ Run the start command (Entrypoint/Cmd) defined by the container's image, like `d
 `run` is the only way into an image that ships no shell (`scratch`, distroless): `login` refuses those and points here.
 
 Foreground `run` uses the same [terminal output handling as `login`](#login).
+Display forwarding uses the same account rules as [`login`](#login).
 
 `run` accepts all `login` options above, plus:
 

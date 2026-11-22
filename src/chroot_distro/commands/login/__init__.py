@@ -42,6 +42,7 @@ a session that is already inside.
 
 Account alignment pins the installed rootfs and serializes passwd edits and
 identity refreshes under the session lock. Numeric selectors keep their IDs.
+Display forwarding uses the resulting guest identity.
 
 A Termux rootfs is a separate shape rather than a variant: the session runs
 `$PREFIX/bin/login` and takes its uid from the owner of the in-rootfs Termux home,
@@ -116,7 +117,6 @@ from chroot_distro.commands.login.passwd import (
     find_user_groups,
     read_group_gid,
     read_passwd_field,
-    reown_home_tree_for_uid,
     resolve_host_home,
     resolve_rootfs_path,
     set_passwd_uid_gid,
@@ -866,7 +866,6 @@ def _command_login_inner_once(container_name: str, args) -> None:
         want_mesa = not has_nvidia
 
     user_spec = login_user
-    user = None
     if dist_type == "termux":
         if not login_wd:
             login_wd = TERMUX_HOME
@@ -1023,48 +1022,22 @@ def _command_login_inner_once(container_name: str, args) -> None:
 
     x11_auth_binds: list[str] = []
     display_socket_binds: list[str] = []
-    if not IS_TERMUX and dist_type == "normal" and user is not None and not minimal and shared_display:
-        if not use_shared_home and login_user != "root" and login_uid is not None:
-            invoking_uid = resolve_invoking_uid()
-            if int(login_uid) != invoking_uid:
-                host_home = resolve_host_home(login_user)
-                if host_home and os.path.isdir(host_home):
-                    old_uid = int(login_uid)
-                    try:
-                        st = os.stat(host_home)
-                    except OSError as exc:
-                        log.debug("Could not read the host home owner: %s", exc)
-                    else:
-                        user = _align_login_account(container_name, user_spec, user, owner_ids=(st.st_uid, st.st_gid))
-                        login_uid = user["uid"]
-                        login_gid = user["gid"]
-                        groups = user["groups"]
-                        if int(login_uid) != old_uid and login_home and login_home != "/":
-                            reown_home_tree_for_uid(
-                                rootfs,
-                                login_home,
-                                old_uid,
-                                int(login_uid),
-                                int(login_gid),
-                            )
-
-        x11_env, resolved_x11_binds = resolve_display_env()
-        for key, val in x11_env.items():
+    if not IS_TERMUX and dist_type == "normal" and not minimal and shared_display:
+        display_env, resolved_x11_binds = resolve_display_env()
+        for key, val in display_env.items():
             if key not in user_keys:
                 child_env[key] = val
 
-        # The session D-Bus daemon authenticates by SO_PEERCRED UID and
-        # refuses uid 0, so session-bus apps fail for root; warn and point at
-        # --user (the system bus still works).
-        if login_user == "root" and child_env.get("DBUS_SESSION_BUS_ADDRESS"):
+        if (
+            login_uid is not None
+            and display_env.get("DBUS_SESSION_BUS_ADDRESS")
+            and "DBUS_SESSION_BUS_ADDRESS" not in user_keys
+        ):
             invoking_uid = resolve_invoking_uid()
-            if invoking_uid != 0:
+            if int(login_uid) != invoking_uid:
                 warn(
-                    "Logging in as root: the session D-Bus bus rejects uid 0, so "
-                    "session-bus apps (notify-send, portals, etc.) fail with "
-                    "'Connection reset by peer'. Log in as a UID-matched normal "
-                    f"user with '--user <name>' (host uid {invoking_uid}) for a "
-                    "working session bus. The system bus still works for root."
+                    f"Guest UID {login_uid} differs from desktop UID {invoking_uid}. "
+                    f"Use a guest account with UID {invoking_uid} to access the host session bus."
                 )
 
         # Only specific runtime sockets are bound, not the whole host /run.
