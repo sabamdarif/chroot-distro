@@ -149,9 +149,8 @@ def _config_is_for(image_config: typing.Any, platform: Platform) -> bool:
     """True unless a cached image config declares a platform other than *platform*.
 
     Only what the document actually says is checked: a config carries `os` and
-    `architecture` and rarely a `variant`, and a pull whose config blob could not
-    be fetched stores an empty one, so an absent field is not a mismatch. What is
-    a mismatch is an entry for one platform standing under another's key.
+    `architecture` and rarely a `variant`. Older pulls could cache an empty
+    config after a failed fetch. Only a conflicting declared field is a mismatch.
     """
     if not isinstance(image_config, dict):
         return False

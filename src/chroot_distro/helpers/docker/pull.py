@@ -12,8 +12,7 @@ The rootfs arrives as a *descriptor*, not a path. `install` walks
 `containers/<name>/rootfs` with O_NOFOLLOW and hands the result straight down, so no
 name between that check and the last tar member written is resolved a second time.
 
-Two documents come back from a registry and neither is trusted. The Accept header asks
-for all four manifest types, and an index or manifest list is narrowed by
+The Accept header asks for all four manifest types. An index or manifest list is narrowed by
 `_pick_platform`: os must be linux, architecture must match, and a variant matches
 either exactly or when the entry declares none. A miss falls back to any linux entry
 for the architecture, and only then fails, listing what the image does offer, since
@@ -22,6 +21,8 @@ the body's own `mediaType` for deciding which shape arrived, kept as `_ct` on th
 parsed dict, and the digest of the bytes that arrived is kept beside it as `_digest`,
 which is what a build records as the base image it resolved to. Both are private keys
 a caller strips before a manifest goes back to a registry (`push._strip_private_keys`).
+Selected child manifests and config blobs must match the descriptor size and SHA-256
+digest over the received bytes. Both documents must pass before the cache is updated.
 
 Layer order is the one thing that cannot be relaxed. Downloads run in parallel across
 `layer_download_workers()`, but application is strictly sequential, because a later
@@ -31,14 +32,14 @@ built.
 Failures are translated where the HTTP status is known and left alone otherwise: 401
 and 403 become the credential message, 404 becomes "does not exist", and a cache miss
 that then fails to reach the network says how many layers were missing, so a user can
-tell an offline problem from a wrong reference. A config blob that cannot be fetched is
-not fatal: it returns empty, since a rootfs without image metadata is still usable.
+tell an offline problem from a wrong reference. A failed config fetch stops the pull.
 """
 
 import contextlib
 import hashlib
 import json
 import os
+import re
 import signal
 import threading
 import typing
@@ -219,12 +220,23 @@ def _download_layers_parallel(
             aggregate.clear()
 
 
-def _get_manifest(repo: str, ref: str, auth: str, base: str, insecure: bool = False) -> dict[str, typing.Any]:
-    url = f"{base}/v2/{repo}/manifests/{ref}"
-    headers = {**_ua(), "Accept": _ACCEPT_HEADER}
-    if auth:
-        headers["Authorization"] = auth
-    req = new_request(url, headers=headers)
+def _read_descriptor(
+    descriptor: object, label: str, *, max_size: int = MAX_METADATA_BYTES, default_size: int | None = None
+) -> tuple[str, int]:
+    if not isinstance(descriptor, dict):
+        raise RuntimeError(f"{label} descriptor must be an object.")
+    digest = descriptor.get("digest")
+    if not isinstance(digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+        raise RuntimeError(f"{label} descriptor must have a lowercase SHA-256 digest.")
+    size = descriptor.get("size", default_size)
+    if type(size) is not int or not 0 <= size <= max_size:
+        raise RuntimeError(f"{label} descriptor has an invalid size.")
+    return digest, size
+
+
+def _fetch_metadata(
+    req: urllib.request.Request, label: str, insecure: bool, expected: tuple[str, int] | None = None
+) -> tuple[dict[str, typing.Any], str, str]:
 
     def _attempt():
         with opener(insecure).open(req) as resp:
@@ -232,26 +244,62 @@ def _get_manifest(repo: str, ref: str, auth: str, base: str, insecure: bool = Fa
             declared = declared_length(resp)
             content_type = resp.headers.get("Content-Type", "")
         if len(body) > MAX_METADATA_BYTES:
-            raise RuntimeError(f"Manifest for '{repo}' is larger than {MAX_METADATA_BYTES} bytes; refusing to read it.")
-        # A body cut short of its Content-Length raises nothing on its own,
-        # and a manifest fetched by tag has no digest to catch it either.
-        require_complete_body(len(body), declared, f"Manifest for '{repo}'")
+            raise RuntimeError(f"{label} is larger than {MAX_METADATA_BYTES} bytes.")
+        require_complete_body(len(body), declared, label)
         return body, content_type
 
-    body, ct = typing.cast(tuple[bytes, str], retry_http(_attempt, what=f"Fetching manifest {ref}"))
-    data: dict[str, typing.Any] = json.loads(body)
-    data["_ct"] = ct.split(";")[0].strip() or data.get("mediaType", "")
-    # Over the bytes as they arrived, which is what a digest is defined over: a
-    # re-serialised document is a different one.
-    data["_digest"] = "sha256:" + hashlib.sha256(body).hexdigest()
+    body, content_type = typing.cast(tuple[bytes, str], retry_http(_attempt, what=f"Fetching {label}"))
+    digest = "sha256:" + hashlib.sha256(body).hexdigest()
+    if expected is not None:
+        expected_digest, expected_size = expected
+        if len(body) != expected_size:
+            raise RuntimeError(f"{label} size mismatch (expected {expected_size}, got {len(body)} bytes).")
+        if digest != expected_digest:
+            raise RuntimeError(f"{label} digest mismatch (expected {expected_digest}).")
+    try:
+        data = json.loads(body)
+    except (ValueError, RecursionError) as exc:
+        raise RuntimeError(f"{label} is not valid JSON.") from exc
+    if not isinstance(data, dict):
+        raise RuntimeError(f"{label} must be a JSON object.")
+    return data, content_type, digest
+
+
+def _get_manifest(
+    repo: str, ref: str, auth: str, base: str, insecure: bool = False, *, expected_size: int | None = None
+) -> dict[str, typing.Any]:
+    url = f"{base}/v2/{repo}/manifests/{ref}"
+    headers = {**_ua(), "Accept": _ACCEPT_HEADER}
+    if auth:
+        headers["Authorization"] = auth
+    req = new_request(url, headers=headers)
+    expected = (ref, expected_size) if expected_size is not None else None
+    label = "Child manifest" if expected is not None else "Manifest"
+    data, content_type, digest = _fetch_metadata(req, label, insecure, expected)
+    media_type = content_type.split(";")[0].strip() or data.get("mediaType", "")
+    if not isinstance(media_type, str):
+        raise RuntimeError(f"{label} mediaType must be a string.")
+    data["_ct"] = media_type
+    data["_digest"] = digest
     return data
 
 
 def _pick_platform(
-    entries: list[dict[str, typing.Any]], arch: str, variant: str, image_ref: str
+    entries: object, arch: str, variant: str, image_ref: str
 ) -> dict[str, typing.Any]:
     """Find the manifest list entry matching arch (and optionally variant)."""
+    if not isinstance(entries, list):
+        raise RuntimeError("Manifest index field 'manifests' must be a list.")
     for entry in entries:
+        if not isinstance(entry, dict):
+            raise RuntimeError("Manifest index entries must be objects.")
+        plat = entry.get("platform", {})
+        if not isinstance(plat, dict) or any(
+            key in plat and not isinstance(plat[key], str) for key in ("os", "architecture", "variant")
+        ):
+            raise RuntimeError("Manifest index platform must be an object with string fields.")
+    descriptors = typing.cast(list[dict[str, typing.Any]], entries)
+    for entry in descriptors:
         plat = entry.get("platform", {})
         if plat.get("os", "linux") != "linux":
             continue
@@ -262,13 +310,13 @@ def _pick_platform(
         return entry
 
     # Fallback: any linux entry for the arch, whatever its variant.
-    for entry in entries:
+    for entry in descriptors:
         plat = entry.get("platform", {})
         if plat.get("os", "linux") == "linux" and plat.get("architecture") == arch:
             return entry
 
     available = []
-    for e in entries:
+    for e in descriptors:
         plat = e.get("platform", {})
         if plat.get("os", "linux") != "linux":
             continue
@@ -296,49 +344,33 @@ def _resolve_single_manifest(
 
     if manifest["_ct"] in _MANIFEST_LIST_TYPES or "manifests" in manifest:
         target = _pick_platform(
-            manifest.get("manifests", []),
+            manifest.get("manifests"),
             platform.architecture,
             platform.variant,
             image_ref,
         )
+        digest, size = _read_descriptor(target, "Child manifest")
         log_info(f"Fetching {platform} manifest...")
-        manifest = _get_manifest(repo, target["digest"], auth, base, insecure=insecure)
+        manifest = _get_manifest(repo, digest, auth, base, insecure=insecure, expected_size=size)
 
     return manifest, auth, repo, base
 
 
 def _fetch_config_blob(
-    repo: str, cfg_digest: str, auth: str, base: str, insecure: bool = False
+    repo: str, descriptor: object, auth: str, base: str, insecure: bool = False
 ) -> dict[str, typing.Any]:
-    """Fetch the image config blob; return parsed dict (empty on error)."""
-    if not cfg_digest:
-        return {}
-    try:
-        url = f"{base}/v2/{repo}/blobs/{cfg_digest}"
-        headers = {**_ua()}
-        if auth:
-            headers["Authorization"] = auth
-        req = new_request(url, headers=headers)
-
-        def _attempt():
-            with opener(insecure).open(req) as resp:
-                data = resp.read(MAX_METADATA_BYTES + 1)
-                declared = declared_length(resp)
-            if len(data) > MAX_METADATA_BYTES:
-                raise RuntimeError(
-                    f"Image config blob is larger than {MAX_METADATA_BYTES} bytes; refusing to read it."
-                )
-            # Before any digest check: a connection that ended early is
-            # retried as what it is, not reported as the wrong bytes.
-            require_complete_body(len(data), declared, "Image config blob")
-            return data
-
-        result: dict[str, typing.Any] = json.loads(
-            typing.cast(bytes, retry_http(_attempt, what="Fetching image config"))
-        )
-        return result
-    except Exception:
-        return {}
+    """Fetch and verify the config named by an image manifest."""
+    digest, size = _read_descriptor(descriptor, "Image config")
+    headers = _ua()
+    if auth:
+        headers["Authorization"] = auth
+    req = new_request(f"{base}/v2/{repo}/blobs/{digest}", headers=headers)
+    config, _, _ = _fetch_metadata(req, "Image config", insecure, (digest, size))
+    if "architecture" in config and not isinstance(config["architecture"], str):
+        raise RuntimeError("Image config architecture must be a string.")
+    if config.get("config") is not None and not isinstance(config["config"], dict):
+        raise RuntimeError("Image config field 'config' must be an object or null.")
+    return config
 
 
 def pull_image(image_ref: str, rootfs_fd: int, platform: Platform, insecure: bool = False) -> dict[str, typing.Any]:
@@ -367,6 +399,7 @@ def pull_image(image_ref: str, rootfs_fd: int, platform: Platform, insecure: boo
     registry, repo = parsed.registry, parsed.repo
     ref = (parsed.registry, parsed.repo, parsed.tag)
     manifest, _cached_repo, image_config = load_manifest_cache(image_ref, platform)
+    cache_miss = manifest is None
     # Docker Hub is verified HTTPS whatever --allow-insecure says; decided
     # here, once, so no request below can use the insecure opener for it.
     insecure = insecure_for(registry, insecure)
@@ -408,16 +441,28 @@ def pull_image(image_ref: str, rootfs_fd: int, platform: Platform, insecure: boo
                     raise RuntimeError(f"Image not found: '{image_ref}' does not exist on the registry.") from net_err
             log_error(f"No cached manifest found for '{image_ref}' ({platform}).")
             raise RuntimeError(f"Network error: {net_err}") from net_err
-        cfg_digest = manifest.get("config", {}).get("digest", "")
-        image_config = _fetch_config_blob(repo, cfg_digest, auth, base, insecure=insecure)
-        save_manifest_cache(image_ref, platform, manifest, repo, image_config)
-
     layers = manifest.get("layers", [])
+    if not isinstance(layers, list):
+        raise RuntimeError("Manifest field 'layers' must be a list.")
     if not layers:
         raise RuntimeError(f"Manifest for '{image_ref}' contains no filesystem layers.")
 
     if base is None:
         base = registry_base_url(registry, insecure=insecure)
+
+    if cache_miss:
+        for layer in layers:
+            _read_descriptor(layer, "Layer", max_size=2**63 - 1, default_size=0)
+        try:
+            image_config = _fetch_config_blob(repo, manifest.get("config"), auth, base, insecure=insecure)
+        except NETWORK_ERRORS as net_err:
+            if isinstance(net_err, urllib.error.HTTPError):
+                if net_err.code in (401, 403):
+                    raise RuntimeError(auth_denied_msg(image_ref, net_err.code)) from net_err
+                if net_err.code == 429:
+                    raise RuntimeError(rate_limited_msg(image_ref, ref, net_err)) from net_err
+            raise RuntimeError(f"Could not fetch image config for '{image_ref}': {net_err}") from net_err
+        save_manifest_cache(image_ref, platform, manifest, repo, image_config)
 
     n_layers = len(layers)
     _download_layers_parallel(repo, layers, auth, base, image_ref, insecure=insecure)

@@ -108,6 +108,11 @@ OCI archives must provide matching sizes and SHA-256 digests for the manifests,
 configs and layers used during install. A verified cached layer can supply a
 layer missing from the archive.
 
+When fetching an image from a registry, install and build verify the selected
+index entry's manifest and the image config against their declared sizes and
+SHA-256 digests. If either fetch or verification fails, the pull stops before
+saving the manifest and config to the cache.
+
 When installing a backup, `install` extracts only its container's rootfs tree
 and uses the matching manifest when present. Backups without a manifest can
 also be installed.
