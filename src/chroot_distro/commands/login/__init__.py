@@ -14,10 +14,11 @@ depends on those answers; only then is the namespace and mount state built.
 `bindings.get_bindings` names the mounts and `helpers/isolation.py` applies them,
 so nothing here decides what a mount is.
 
-The session counter is the coordination mechanism. The first session writes
-resolv.conf, acquires the holder, and creates image volume directories on the
-rootfs mount before applying new mounts. A later session joins what is already
-there. Setup and teardown pass the directory pin from `session.lock`
+The session counter is the coordination mechanism. The first session acquires
+the holder and clears stale mounts, then refreshes resolv.conf and creates image
+volume directories before applying new mounts. Hostname, DNS and profile edits
+require a pinned directory on the installed rootfs mount. A later session joins
+what is already there. Setup and teardown pass the directory pin from `session.lock`
 to counter, mount-option and namespace-state operations. Storage failures stop
 setup after cleanup rather than triggering an isolation fallback. Every exit
 path decrements under that lock, and reaching
@@ -77,6 +78,7 @@ import shlex
 import signal as _signal
 import sys
 import time as _time
+from collections.abc import Iterator
 
 import chroot_distro.helpers.mount_manager as mount_manager
 import chroot_distro.helpers.namespace as namespace
@@ -142,7 +144,7 @@ from chroot_distro.helpers.nvidia import (
     nvidia_env_vars,
     run_ldconfig_in_chroot,
 )
-from chroot_distro.helpers.rootfs import ensure_hosts_entry
+from chroot_distro.helpers.rootfs import ensure_hosts_entry, write_resolv_conf
 from chroot_distro.helpers.session_registry import register_session
 from chroot_distro.helpers.tar_extract import safe_resolve_parts_at
 from chroot_distro.helpers.x11 import (
@@ -724,6 +726,21 @@ def _prepare_termux_cache(container_name: str) -> None:
         log.debug("Could not prepare guest Termux cache: %r", exc)
 
 
+@contextlib.contextmanager
+def _open_setup_rootfs(container_name: str) -> Iterator[int | None]:
+    """Pin the installed rootfs for a best-effort configuration edit."""
+    try:
+        root_fd = open_container_rootfs(container_name, same_mount=True)
+    except OSError as exc:
+        log.debug("Skipping guest configuration edit: %r", exc)
+        yield None
+        return
+    try:
+        yield root_fd
+    finally:
+        os.close(root_fd)
+
+
 def _command_login_inner_once(container_name: str, args) -> None:
     display_command = getattr(args, "get_chroot_cmd", False)
     command_line: str | None = None
@@ -799,7 +816,9 @@ def _command_login_inner_once(container_name: str, args) -> None:
             live_nodename = os.uname().nodename
         except OSError:
             live_nodename = ""
-        ensure_hosts_entry(rootfs, _safe_hostname(hostname_arg), live_nodename)
+        with _open_setup_rootfs(container_name) as root_fd:
+            if root_fd is not None:
+                ensure_hosts_entry(root_fd, _safe_hostname(hostname_arg), live_nodename)
     raw_custom_binds = getattr(args, "bind", []) or []
     # CD_ENV entries are layered first so a matching --env override wins.
     extra_env = read_cd_env() + (getattr(args, "env", []) or [])
@@ -990,15 +1009,17 @@ def _command_login_inner_once(container_name: str, args) -> None:
         profile_env = child_env if session_profile else {k: v for k, v in child_env.items() if k in force_keys}
         profile_uid = int(login_uid) if login_uid is not None else 0
         profile_gid = int(login_gid) if login_gid is not None else profile_uid
-        inject_env_profile(
-            rootfs,
-            profile_env,
-            force_keys=force_keys,
-            guest_prefix=TERMUX_PREFIX if dist_type == "termux" else "",
-            owner_uid=profile_uid,
-            owner_gid=profile_gid,
-            append_termux_bin=session_profile,
-        )
+        with _open_setup_rootfs(container_name) as root_fd:
+            if root_fd is not None:
+                inject_env_profile(
+                    root_fd,
+                    profile_env,
+                    force_keys=force_keys,
+                    guest_prefix=TERMUX_PREFIX if dist_type == "termux" else "",
+                    owner_uid=profile_uid,
+                    owner_gid=profile_gid,
+                    append_termux_bin=session_profile,
+                )
 
     x11_auth_binds: list[str] = []
     display_socket_binds: list[str] = []
@@ -1200,9 +1221,6 @@ def _command_login_inner_once(container_name: str, args) -> None:
     with session.lock(container_name) as state_fd:
         sess_count = session.increment(container_name, state_fd=state_fd)
         if sess_count == 1:
-            from chroot_distro.helpers.rootfs import write_resolv_conf
-
-            write_resolv_conf(rootfs)
             try:
                 if use_namespaces:
                     # A detached run must use the plain holder + nsenter: the
@@ -1261,6 +1279,9 @@ def _command_login_inner_once(container_name: str, args) -> None:
                     namespace.write_isolation_mode(container_name, namespace.ISOLATION_MODE_HOST, state_fd=state_fd)
                 with contextlib.suppress(Exception):
                     mount_manager.unmount_all(rootfs, holder=holder)
+                with _open_setup_rootfs(container_name) as root_fd:
+                    if root_fd is not None:
+                        write_resolv_conf(rootfs, root_fd=root_fd, same_mount=True)
                 _prepare_image_volumes(
                     container_name,
                     read_manifest_volumes(container_path),

@@ -26,10 +26,9 @@ parents are re-walked without following links, and regular files with one link
 are read before fresh atomic replacement. Public accounts use mode 0644,
 shadow files use 0600, and configuration files retain their permissions and
 ownership. Missing parents and unsafe entries never fall back to host paths.
-Login hostname insertion uses the same editor, retaining existing hosts content
-and ordinary permissions while refusing shared inodes and special files.
-Login account updates also require the opened parent and file to stay on the
-pinned rootfs mount.
+Login hostname insertion and account updates use the same editor and require
+the opened parent and file to stay on the pinned rootfs mount. Login DNS
+refresh also checks the mount of the literal `etc` directory.
 """
 
 import contextlib
@@ -116,7 +115,7 @@ def host_nameservers() -> list[str]:
     return _read_resolv_nameservers(host_path)
 
 
-def _open_etc(rootfs: str, root_fd: int | None) -> int | None:
+def _open_etc(rootfs: str, root_fd: int | None, *, same_mount: bool = False) -> int | None:
     """Open <rootfs>/etc with O_NOFOLLOW, or None when there is none.
 
     `etc` is image content like everything below it: an image shipping it as
@@ -128,7 +127,8 @@ def _open_etc(rootfs: str, root_fd: int | None) -> int | None:
     *root_fd* is the rootfs when the caller has pinned it. `build` has one
     per stage, and the rootfs there is a name inside the build's scratch
     tree, which anything running as the invoking user can re-point,
-    including a process a previous RUN step left behind.
+    including a process a previous RUN step left behind. *same_mount* also
+    refuses an `etc` directory on a different mount from the rootfs.
     """
     own_fd = None
     try:
@@ -137,7 +137,7 @@ def _open_etc(rootfs: str, root_fd: int | None) -> int | None:
     except OSError:
         return None
     try:
-        return dirfd.opendir_at(root_fd, "etc")
+        return dirfd.descend_at(root_fd, ("etc",), same_mount=same_mount)
     except OSError:
         return None
     finally:
@@ -173,13 +173,13 @@ def _replace_at(etc_fd: int, name: str, content: str) -> None:
         os.close(fd)
 
 
-def write_resolv_conf(rootfs: str, *, root_fd: int | None = None) -> None:
+def write_resolv_conf(rootfs: str, *, root_fd: int | None = None, same_mount: bool = False) -> None:
     """Replace guest /etc/resolv.conf with a plain file using host DNS servers."""
     servers = host_nameservers()
     if not servers:
         servers = [DEFAULT_PRIMARY_NS, DEFAULT_SECONDARY_NS]
 
-    etc_fd = _open_etc(rootfs, root_fd)
+    etc_fd = _open_etc(rootfs, root_fd, same_mount=same_mount)
     if etc_fd is None:
         return
     try:
@@ -213,7 +213,7 @@ def write_hosts(rootfs: str, *, root_fd: int | None = None) -> None:
         os.close(etc_fd)
 
 
-def ensure_hosts_entry(rootfs: str, *hostnames: str) -> None:
+def ensure_hosts_entry(root_fd: int, *hostnames: str) -> None:
     """Ensure guest /etc/hosts maps each hostname to 127.0.0.1.
 
     sudo and other tools reverse-resolve the running hostname; without a
@@ -221,28 +221,26 @@ def ensure_hosts_entry(rootfs: str, *hostnames: str) -> None:
     <name>". The relevant names are only known at login (the host kernel
     UTS name when not isolated, or the container name when isolated), after
     /etc/hosts was written at install time, so patch it here. Idempotent:
-    a name already present on any line is left untouched. Best-effort.
+    a name already present on any line is left untouched. Best-effort on the
+    caller's pinned rootfs mount.
     """
     try:
-        with contextlib.ExitStack() as stack:
-            root_fd = dirfd.opendir(rootfs)
-            stack.callback(os.close, root_fd)
-            with edit_guest_file(root_fd, "/etc/hosts") as fh:
-                existing = fh.getvalue()
-                present = set()
-                for line in existing.splitlines():
-                    stripped = line.strip()
-                    if not stripped or stripped.startswith("#"):
-                        continue
-                    present.update(stripped.split()[1:])
+        with edit_guest_file(root_fd, "/etc/hosts", same_mount=True) as fh:
+            existing = fh.getvalue()
+            present = set()
+            for line in existing.splitlines():
+                stripped = line.strip()
+                if not stripped or stripped.startswith("#"):
+                    continue
+                present.update(stripped.split()[1:])
 
-                to_add = [h for h in dict.fromkeys(hostnames) if h and h not in present]
-                if not to_add:
-                    return
+            to_add = [h for h in dict.fromkeys(hostnames) if h and h not in present]
+            if not to_add:
+                return
 
-                if existing and not existing.endswith("\n"):
-                    fh.write("\n")
-                fh.write("".join(f"127.0.0.1   {h}\n" for h in to_add))
+            if existing and not existing.endswith("\n"):
+                fh.write("\n")
+            fh.write("".join(f"127.0.0.1   {h}\n" for h in to_add))
     except (OSError, UnicodeError):
         return
 

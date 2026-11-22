@@ -209,6 +209,8 @@ With `--shared-display`, an X11 cookie copied for a guest user must come from th
 
 When matching a named guest account to a home owner, `login` and `run` update only the guest's `/etc/passwd` on the installed rootfs mount. Numeric user selections keep their specified identity. Account changes are skipped if mount IDs are unavailable or a bind covers the account file or rootfs, including a live Termux exec self-bind. Start a fresh session if a running Termux container needs a different account mapping.
 
+Hostname, DNS and environment profile updates require access to the installed rootfs mount. Mounts covering the update paths, including a live Termux exec self-bind over the rootfs, or unavailable mount IDs can cause updates to be skipped. A skipped profile update can leave the previous snippet in effect.
+
 Every mode mounts fresh pseudo-filesystems instead of binding the host's: a minimal `/dev`, fresh `/dev/pts`, `/dev/shm` and `/proc`, and a read-only `/sys`, following Docker's defaults (`/proc/kcore` and `/proc/keys` masked, `/proc/sys` read-only). When the kernel or SELinux refuses one, the host tree is bound with a warning.
 
 Single-instance devpts kernels share the host's `/dev/pts` with the guest. When chroot-distro supplies the guest's `/dev`, it creates a legacy `/dev/ptmx` device so guest programs can allocate pseudoterminals.

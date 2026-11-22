@@ -30,16 +30,14 @@ the snippet is a mode 0600 file in the guest, not a variable that dies with the
 process. Normal Termux sessions also write the snippet to retain the host
 Termux bin directory in PATH, including when entering through `run`.
 
-Profile parents resolve inside one opened rootfs and are re-walked without
-following links. Cleanup and atomic replacement use the opened directory;
-the final snippet entry is replaced without following it, and its mode and
-owner are applied through the staging descriptor.
+Profile parents resolve inside the caller's pinned rootfs and are re-walked
+without following links or crossing mounts. Cleanup and atomic replacement use
+the opened directory. The staging descriptor sets the snippet's mode and owner.
 
 The `read_manifest_*` readers supply image defaults from `manifest.json` to
 login and run.
 """
 
-import contextlib
 import json
 import logging
 import os
@@ -295,7 +293,7 @@ def read_manifest_volumes(container_dir: str) -> list[str]:
 
 
 def inject_env_profile(
-    rootfs: str,
+    root_fd: int,
     env: dict,
     *,
     force_keys: frozenset[str] | set[str] = frozenset(),
@@ -318,9 +316,9 @@ def inject_env_profile(
     minimal modes, where TERMUX_PREFIX is not bound into the guest).
 
     *guest_prefix* locates ``etc/profile.d`` under a prefix inside the rootfs
-    (termux-type containers keep theirs in ``$PREFIX``). Nothing is written
-    when the directory is absent, and an earlier snippet is removed when
-    there is nothing left to export.
+    (termux-type containers keep theirs in ``$PREFIX``). The opened profile
+    directory must be on the caller's pinned rootfs mount. An earlier snippet
+    is removed when there is nothing left to export.
     """
     lines: list[str] = []
     if append_termux_bin:
@@ -340,18 +338,15 @@ def inject_env_profile(
         escaped = str(val).replace("'", "'\\''")
         lines.append(f"export {key}='{escaped}'")
 
-    with contextlib.ExitStack() as stack:
-        try:
-            root_fd = dirfd.opendir(rootfs)
-            stack.callback(os.close, root_fd)
-            parts = safe_resolve_parts_at(root_fd, [*guest_prefix.split("/"), "etc", "profile.d"])
-            if parts is None:
-                return
-            profile_fd = dirfd.descend_at(root_fd, parts)
-            stack.callback(os.close, profile_fd)
-        except OSError:
+    try:
+        parts = safe_resolve_parts_at(root_fd, [*guest_prefix.split("/"), "etc", "profile.d"])
+        if parts is None:
             return
+        profile_fd = dirfd.descend_at(root_fd, parts, same_mount=True)
+    except OSError:
+        return
 
+    try:
         for name in ("termux-profile.sh", "termux-prefix.sh"):
             dirfd.unlink_quietly(profile_fd, name)
         if not lines:
@@ -365,6 +360,8 @@ def inject_env_profile(
                 fh.write("\n".join(lines) + "\n")
         except OSError as exc:
             warn(f"Failed to write environment snippet file: {exc}")
+    finally:
+        os.close(profile_fd)
 
 
 def resolve_term(rootfs: str, term: str | None) -> str:

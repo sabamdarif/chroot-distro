@@ -4,11 +4,13 @@ import json
 import os
 import signal
 from contextlib import contextmanager, nullcontext
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import ANY, Mock, patch
 
 import pytest
 
+from chroot_distro import dirfd
 from chroot_distro.commands.login import (
     _can_fall_back_to_old_isolated,
     _command_login_inner,
@@ -170,6 +172,7 @@ def test_login_setup_does_not_write_through_profile_or_hosts_links(command_displ
     from chroot_distro.paths import container_rootfs
 
     login, args, _ = command_display
+    monkeypatch.setattr(dirfd, "_mount_id", lambda fd: 1)
     monkeypatch.setattr(os, "fchown", lambda fd, uid, gid: None)
     root = container_rootfs("demo")
     profile = os.path.join(root, "etc/profile.d")
@@ -195,6 +198,94 @@ def test_login_setup_does_not_write_through_profile_or_hosts_links(command_displ
     if not is_run:
         with open(os.path.join(profile, "chroot-profile.sh")) as fh:
             assert fh.read() == "export FOO='value'\n"
+
+
+@pytest.mark.parametrize("is_run", [False, True], ids=["linux-login", "termux-run"])
+@pytest.mark.parametrize("mount_boundary", ["rootfs", "etc", "hosts", "profile.d", "unavailable", None])
+def test_login_setup_checks_mounts_for_hosts_profile_and_dns(command_display, monkeypatch, is_run, mount_boundary):
+    from chroot_distro import paths
+    from chroot_distro.helpers import rootfs
+
+    login, args, _ = command_display
+    root = Path(login.container_rootfs("demo"))
+    etc = root / "etc"
+    profile = etc / "profile.d"
+    profile.mkdir(parents=True)
+    files = {etc / "hosts": "127.0.0.1 localhost\n", etc / "resolv.conf": "nameserver 192.0.2.1\n"}
+    for name in ("chroot-profile.sh", "termux-profile.sh", "termux-prefix.sh"):
+        files[profile / name] = "# old snippet\n"
+    for path, text in files.items():
+        path.write_text(text)
+
+    target = {"rootfs": root, "etc": etc, "hosts": etc / "hosts", "profile.d": profile}.get(mount_boundary)
+
+    def mount_id(fd):
+        if mount_boundary == "unavailable":
+            raise OSError(errno.ENOTSUP, "mount ID unavailable")
+        return 2 if target is not None and os.path.samestat(os.fstat(fd), target.stat()) else 1
+
+    monkeypatch.setattr(dirfd, "_mount_id", mount_id)
+    monkeypatch.setattr(rootfs, "host_nameservers", lambda: ["192.0.2.2"])
+    monkeypatch.setattr(os, "fchown", Mock())
+    args.env = ["FOO=value"]
+    if is_run:
+        monkeypatch.setattr(login, "IS_TERMUX", True)
+        monkeypatch.setattr(paths, "IS_TERMUX", True)
+        monkeypatch.setattr(paths, "TERMUX_PREFIX", str(root.parents[2]))
+        args._run_inner = ["/bin/sh"]
+
+    with pytest.raises(SystemExit) as exc:
+        login._command_login_inner_once("demo", args)
+
+    assert exc.value.code == 0
+    blocked = mount_boundary in ("rootfs", "etc", "unavailable")
+    for path, text in files.items():
+        if blocked or (mount_boundary == "hosts" and path.name == "hosts") or (
+            mount_boundary == "profile.d" and path.parent == profile
+        ):
+            assert path.read_text() == text
+        elif path.name == "hosts":
+            assert "127.0.0.1   demo\n" in path.read_text()
+        elif path.name == "resolv.conf":
+            assert path.read_text() == "nameserver 192.0.2.2\n"
+        elif path.name == "chroot-profile.sh":
+            assert "export FOO='value'\n" in path.read_text()
+        else:
+            assert not path.exists()
+
+
+@pytest.mark.parametrize("interrupt", [False, True])
+def test_first_session_refreshes_dns_after_stale_mount_cleanup(command_display, monkeypatch, interrupt):
+    login, args, data = command_display
+    args.minimal = True
+    root = Path(login.container_rootfs("demo"))
+    fd_seen = []
+    monkeypatch.setattr(dirfd, "_mount_id", lambda fd: 1)
+
+    def refresh(rootfs, *, root_fd, same_mount):
+        login.mount_manager.unmount_all.assert_called_once_with(str(root), holder=None)
+        login.mount_manager.ensure_rootfs_exec.assert_not_called()
+        login.isolation.apply_bind_mounts.assert_not_called()
+        assert same_mount
+        assert os.path.samestat(root.stat(), os.fstat(root_fd))
+        fd_seen.append(root_fd)
+        if interrupt:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(login, "write_resolv_conf", refresh)
+    if interrupt:
+        with pytest.raises(KeyboardInterrupt):
+            login._command_login_inner_once("demo", args)
+        login.isolation.apply_bind_mounts.assert_not_called()
+    else:
+        with pytest.raises(SystemExit) as exc:
+            login._command_login_inner_once("demo", args)
+        assert exc.value.code == 0
+    assert (data / "sessions").read_text() == "0"
+    assert not (data / "isolation.mode").exists()
+    assert len(fd_seen) == 1
+    with pytest.raises(OSError, match="Bad file descriptor"):
+        os.fstat(fd_seen[0])
 
 
 @pytest.mark.parametrize("failure", ["format", "write", "absent"])
@@ -1712,14 +1803,26 @@ def test_user_env_beats_derived_values_in_termux_container(monkeypatch):
     assert env["LANG"] == "C"
 
 
-def test_inject_env_profile_reexports_requested_keys(tmp_path):
+@pytest.fixture
+def profile_root(tmp_path, monkeypatch):
+    rootfs = tmp_path / "rootfs"
+    rootfs.mkdir()
+    monkeypatch.setattr(dirfd, "_mount_id", lambda fd: 1)
+    root_fd = dirfd.opendir(str(rootfs))
+    try:
+        yield rootfs, root_fd
+    finally:
+        os.close(root_fd)
+
+
+def test_inject_env_profile_reexports_requested_keys(profile_root):
     """A login shell sources /etc/profile, which resets PATH; profile.d wins."""
     from chroot_distro.commands.login.env import inject_env_profile
 
-    rootfs = tmp_path / "rootfs"
+    rootfs, root_fd = profile_root
     (rootfs / "etc" / "profile.d").mkdir(parents=True)
     inject_env_profile(
-        str(rootfs),
+        root_fd,
         {"PATH": "/opt/bin", "HOME": "/srv", "HOSTNAME": "debian"},
         force_keys={"PATH"},
     )
@@ -1730,13 +1833,13 @@ def test_inject_env_profile_reexports_requested_keys(tmp_path):
     assert "HOME" not in content
 
 
-def test_inject_env_profile_skips_secret_values(tmp_path):
+def test_inject_env_profile_skips_secret_values(profile_root):
     from chroot_distro.commands.login.env import inject_env_profile
 
-    rootfs = tmp_path / "rootfs"
+    rootfs, root_fd = profile_root
     (rootfs / "etc" / "profile.d").mkdir(parents=True)
     inject_env_profile(
-        str(rootfs),
+        root_fd,
         {"GITHUB_TOKEN": "s3cret", "PATH": "/opt/bin"},
         force_keys={"GITHUB_TOKEN", "PATH"},
     )
@@ -1745,28 +1848,28 @@ def test_inject_env_profile_skips_secret_values(tmp_path):
     assert "export PATH='/opt/bin'" in content
 
 
-def test_inject_env_profile_clears_stale_snippet(tmp_path):
+def test_inject_env_profile_clears_stale_snippet(profile_root):
     """A later session without --env must not inherit the previous one's."""
     from chroot_distro.commands.login.env import inject_env_profile
 
-    rootfs = tmp_path / "rootfs"
+    rootfs, root_fd = profile_root
     profile_d = rootfs / "etc" / "profile.d"
     profile_d.mkdir(parents=True)
     snippet = profile_d / "chroot-profile.sh"
     snippet.write_text("export PATH='/opt/bin'\n")
-    inject_env_profile(str(rootfs), {})
+    inject_env_profile(root_fd, {})
     assert not snippet.exists()
 
 
-def test_inject_env_profile_uses_guest_prefix(tmp_path):
+def test_inject_env_profile_uses_guest_prefix(profile_root):
     from chroot_distro.commands.login import TERMUX_PREFIX
     from chroot_distro.commands.login.env import inject_env_profile
 
-    rootfs = tmp_path / "rootfs"
+    rootfs, root_fd = profile_root
     profile_d = rootfs / TERMUX_PREFIX.lstrip("/") / "etc" / "profile.d"
     profile_d.mkdir(parents=True)
     inject_env_profile(
-        str(rootfs),
+        root_fd,
         {"PATH": "/opt/bin"},
         force_keys={"PATH"},
         guest_prefix=TERMUX_PREFIX,

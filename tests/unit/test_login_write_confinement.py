@@ -379,7 +379,17 @@ def guest(tmp_path, monkeypatch):
     (root / "etc/profile.d").mkdir(parents=True)
     (root / "etc/hosts").write_text("127.0.0.1 localhost\n")
     monkeypatch.setattr(os, "fchown", lambda fd, uid, gid: None)
+    monkeypatch.setattr(dirfd, "_mount_id", lambda fd: 1)
     return root
+
+
+@contextlib.contextmanager
+def opened_guest(root):
+    fd = dirfd.opendir(str(root))
+    try:
+        yield fd
+    finally:
+        os.close(fd)
 
 
 def leaf(root, kind):
@@ -387,10 +397,11 @@ def leaf(root, kind):
 
 
 def update(root, kind):
-    if kind == "hosts":
-        rootfs.ensure_hosts_entry(str(root), "box")
-    else:
-        env.inject_env_profile(str(root), {"FOO": "value"}, owner_uid=123, owner_gid=456)
+    with opened_guest(root) as fd:
+        if kind == "hosts":
+            rootfs.ensure_hosts_entry(fd, "box")
+        else:
+            env.inject_env_profile(fd, {"FOO": "value"}, owner_uid=123, owner_gid=456)
 
 
 def snapshot(path):
@@ -522,7 +533,8 @@ def test_parent_replaced_after_pin_keeps_writes_and_cleanup_in_original(guest, t
 
     monkeypatch.setattr(dirfd, "descend_at", swap)
     if kind == "stale-profile":
-        env.inject_env_profile(str(guest), {})
+        with opened_guest(guest) as fd:
+            env.inject_env_profile(fd, {})
     else:
         update(guest, kind)
 
@@ -634,9 +646,10 @@ def test_hosts_leaf_alias_and_idempotence_preserve_content_and_mode(guest, monke
     owners = []
     monkeypatch.setattr(os, "fchown", lambda fd, uid, gid: owners.append((uid, gid)))
 
-    rootfs.ensure_hosts_entry(str(guest), "localhost", "box", "box", "", "alias")
-    after = snapshot(target)
-    rootfs.ensure_hosts_entry(str(guest), "box", "localhost")
+    with opened_guest(guest) as fd:
+        rootfs.ensure_hosts_entry(fd, "localhost", "box", "box", "", "alias")
+        after = snapshot(target)
+        rootfs.ensure_hosts_entry(fd, "box", "localhost")
 
     assert target.read_text() == "# keep\n127.0.0.1 localhost alias\n127.0.0.1   box\n"
     assert snapshot(target) == after
@@ -660,9 +673,8 @@ def test_termux_profile_directory_alias_and_quoting(guest):
     (guest / prefix.lstrip("/") / "etc").mkdir(parents=True)
     (guest / prefix.lstrip("/") / "etc/profile.d").symlink_to("/etc/profile.d")
 
-    env.inject_env_profile(
-        str(guest), {"FOO": "a'b"}, guest_prefix=prefix, append_termux_bin=True
-    )
+    with opened_guest(guest) as fd:
+        env.inject_env_profile(fd, {"FOO": "a'b"}, guest_prefix=prefix, append_termux_bin=True)
 
     content = leaf(guest, "profile").read_text()
     assert "export FOO='a'\\''b'" in content
