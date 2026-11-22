@@ -215,6 +215,8 @@ On Termux, Android mounts `/data` with `nosuid`, so a default login binds the co
 
 A second `login` to a busy container joins the running session and adds whatever extra `--bind`/`--shared-*`/`--env` it asks for, so no `unmount` is needed to bring a folder in. Conflicting `--bind` destinations are ignored with a warning; `--isolated` and `CD_USE_NS` cannot be turned on for a container that is already running.
 
+The first `login` or `run` creates missing image-declared volume directories on the container's own filesystem before applying session mounts. If the kernel cannot report mount IDs for open directories, any required volume directories must already exist in the image or be supplied by the caller.
+
 GPU acceleration needs no flag on regular Linux: AMD/Intel render nodes (`/dev/dri/*`) and a host NVIDIA driver's devices, libraries and tools are bound in automatically. On Termux `login` binds no GPU nodes.
 
 On WSL, missing guest loader configuration for `/usr/lib/wsl/lib` is created automatically. Existing configuration is kept.

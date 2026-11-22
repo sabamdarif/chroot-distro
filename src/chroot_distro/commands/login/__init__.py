@@ -15,8 +15,9 @@ depends on those answers; only then is the namespace and mount state built.
 so nothing here decides what a mount is.
 
 The session counter is the coordination mechanism. The first session writes
-resolv.conf, acquires the holder and applies every mount; a later one joins what
-is already there. Setup and teardown pass the directory pin from `session.lock`
+resolv.conf, acquires the holder, and creates image volume directories on the
+rootfs mount before applying new mounts. A later session joins what is already
+there. Setup and teardown pass the directory pin from `session.lock`
 to counter, mount-option and namespace-state operations. Storage failures stop
 setup after cleanup rather than triggering an isolation fallback. Every exit
 path decrements under that lock, and reaching
@@ -77,6 +78,7 @@ import time as _time
 import chroot_distro.helpers.mount_manager as mount_manager
 import chroot_distro.helpers.namespace as namespace
 import chroot_distro.helpers.session as session
+from chroot_distro import dirfd
 from chroot_distro.commands.login import bindings
 from chroot_distro.commands.login.chroot_cmd import (
     ChrootConfig,
@@ -141,6 +143,7 @@ from chroot_distro.helpers.nvidia import (
 )
 from chroot_distro.helpers.rootfs import ensure_hosts_entry
 from chroot_distro.helpers.session_registry import register_session
+from chroot_distro.helpers.tar_extract import safe_resolve_parts_at
 from chroot_distro.helpers.x11 import (
     guest_can_read_auth,
     provision_guest_xauthority,
@@ -156,6 +159,7 @@ from chroot_distro.paths import (
     container_log_path,
     container_rootfs,
     open_container_log,
+    open_container_rootfs,
 )
 from chroot_distro.syscalls.chroot import PtyOutputError, chroot_and_run, enter_chroot, spawn_detached
 from chroot_distro.syscalls.nsenter import enter_and_run_with_pty
@@ -622,6 +626,40 @@ def _translate_host_path_to_guest(host_path: str, rootfs: str, resolved_binds: l
         return os.path.normpath(os.path.join(guest_base, rel_from_src))
 
     return host_path
+
+
+def _prepare_image_volumes(container_name: str, volumes: list[str], uid: int, gid: int) -> None:
+    """Create missing volume directories on the pinned rootfs mount."""
+    if not volumes or not (0 <= uid < 0xFFFFFFFF and 0 <= gid < 0xFFFFFFFF):
+        return
+    try:
+        root_fd = open_container_rootfs(container_name, same_mount=True)
+    except OSError as exc:
+        log.debug("Skipping image volume directories: %r", exc)
+        return
+    try:
+        for volume in volumes:
+            parts = [part for part in volume.split("/") if part not in ("", ".")]
+            if not parts or ".." in parts or "\0" in volume:
+                continue
+            try:
+                parent = safe_resolve_parts_at(root_fd, parts[:-1])
+                if parent is None:
+                    continue
+                with contextlib.ExitStack() as stack:
+                    parent_fd = dirfd.descend_at(root_fd, parent, create=True, same_mount=True)
+                    stack.callback(os.close, parent_fd)
+                    try:
+                        os.mkdir(parts[-1], dir_fd=parent_fd)
+                    except FileExistsError:
+                        continue
+                    volume_fd = dirfd.descend_at(parent_fd, parts[-1:], same_mount=True)
+                    stack.callback(os.close, volume_fd)
+                    os.fchown(volume_fd, uid, gid)
+            except (OSError, UnicodeError) as exc:
+                log.debug("Could not create image volume %r: %r", volume, exc)
+    finally:
+        os.close(root_fd)
 
 
 def _command_login_inner_once(container_name: str, args) -> None:
@@ -1211,6 +1249,14 @@ def _command_login_inner_once(container_name: str, args) -> None:
                     isolation.finalize_holder(holder, container_name, hostname=hostname_arg, state_fd=state_fd)
                 else:
                     namespace.write_isolation_mode(container_name, namespace.ISOLATION_MODE_HOST, state_fd=state_fd)
+                with contextlib.suppress(Exception):
+                    mount_manager.unmount_all(rootfs, holder=holder)
+                _prepare_image_volumes(
+                    container_name,
+                    read_manifest_volumes(container_path),
+                    chroot_config.uid or 0,
+                    chroot_config.gid or 0,
+                )
             except BaseException as exc:
                 _abandon_holder_fds()
                 with contextlib.suppress(Exception):
@@ -1229,8 +1275,6 @@ def _command_login_inner_once(container_name: str, args) -> None:
                 crit_error(str(exc))
                 sys.exit(1)
 
-            with contextlib.suppress(Exception):
-                mount_manager.unmount_all(rootfs, holder=holder)
             # best_effort_bind_sources() entries warn+skip on failure;
             # anything else aborts. Binds under /dev (GPU nodes, binderfs)
             # wait for apply_special_mounts: the fresh tmpfs /dev it mounts
@@ -1321,17 +1365,6 @@ def _command_login_inner_once(container_name: str, args) -> None:
 
             if has_nvidia:
                 run_ldconfig_in_chroot(rootfs)
-
-            for vol_path in read_manifest_volumes(container_path):
-                vol_host = os.path.join(rootfs, vol_path.lstrip("/"))
-                if not os.path.exists(vol_host):
-                    try:
-                        os.makedirs(vol_host, exist_ok=True)
-                        uid_v = int(login_uid) if login_uid is not None else 0
-                        gid_v = int(login_gid) if login_gid is not None else 0
-                        os.chown(vol_host, uid_v, gid_v)
-                    except OSError:
-                        log.debug("Could not create volume dir %s", vol_path)
 
             exposed = read_manifest_exposed_ports(container_path)
             if exposed:

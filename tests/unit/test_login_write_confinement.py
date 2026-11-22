@@ -1,4 +1,4 @@
-"""Login profile and hostname edits stay beneath the opened guest root."""
+"""Login profile, hostname and volume writes stay beneath the opened guest root."""
 
 import contextlib
 import errno
@@ -7,9 +7,122 @@ import stat
 
 import pytest
 
-from chroot_distro import dirfd
+from chroot_distro import dirfd, paths
+from chroot_distro.commands import login
 from chroot_distro.commands.login import env
 from chroot_distro.helpers import rootfs
+
+
+@pytest.fixture(params=[False, True], ids=["linux", "termux"])
+def volume_store(tmp_path, monkeypatch, request):
+    prefix = tmp_path / "prefix"
+    containers = (prefix / "var/lib" if request.param else tmp_path) / "chroot-distro/containers"
+    root = containers / "box/rootfs"
+    root.mkdir(parents=True)
+    monkeypatch.setattr(paths, "CONTAINERS_DIR", str(containers))
+    monkeypatch.setattr(paths, "IS_TERMUX", request.param)
+    monkeypatch.setattr(paths, "TERMUX_PREFIX", str(prefix))
+    monkeypatch.setattr(dirfd, "_mount_id", lambda fd: 1)
+    return root
+
+
+def test_image_volumes_create_missing_leaves_and_keep_existing_entries(volume_store, monkeypatch):
+    root = volume_store
+    (root / "state/keep").mkdir(parents=True)
+    (root / "alias").symlink_to("/state")
+    (root / "state/link").symlink_to("keep")
+    chowns = []
+    monkeypatch.setattr(os, "fchown", lambda fd, uid, gid: chowns.append((os.fstat(fd), uid, gid)))
+    declarations = ["/", "/bad/../other", "bad\0name", "/\ud800", "/state/keep", "/state/link", "alias//./new"]
+
+    login._prepare_image_volumes("box", declarations, 123, 456)
+    login._prepare_image_volumes("box", declarations, 123, 456)
+
+    assert {p.name for p in root.iterdir()} == {"alias", "state"}
+    assert {p.name for p in (root / "state").iterdir()} == {"keep", "link", "new"}
+    assert (root / "state/link").is_symlink()
+    [(opened, uid, gid)] = chowns
+    assert os.path.samestat(opened, (root / "state/new").stat())
+    assert (uid, gid) == (123, 456)
+
+
+@pytest.mark.parametrize("boundary", ["root", "parent", "leaf", "unknown"])
+def test_image_volumes_require_the_rootfs_mount_for_each_write(volume_store, monkeypatch, boundary):
+    root = volume_store
+    (root / "state").mkdir()
+    target = {"root": root, "parent": root / "state", "leaf": root / "state/volume"}.get(boundary)
+
+    def mount_id(fd):
+        if target is None:
+            raise OSError(errno.ENOTSUP, "mount IDs unavailable")
+        return 2 if target.exists() and os.path.samestat(os.fstat(fd), target.stat()) else 1
+
+    def chown(fd, uid, gid):
+        pytest.fail("ownership changed without a verified mount")
+
+    monkeypatch.setattr(dirfd, "_mount_id", mount_id)
+    monkeypatch.setattr(os, "fchown", chown)
+
+    login._prepare_image_volumes("box", ["/state/volume"], 123, 456)
+
+    assert (root / "state/volume").exists() == (boundary == "leaf")
+
+
+def test_image_volumes_refuse_replaced_parent(volume_store, tmp_path, monkeypatch):
+    root = volume_store
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (root / "state").mkdir()
+    resolve = login.safe_resolve_parts_at
+
+    def swap(fd, parts):
+        resolved = resolve(fd, parts)
+        (root / "state").rename(root / "saved")
+        (root / "state").symlink_to(outside)
+        return resolved
+
+    monkeypatch.setattr(login, "safe_resolve_parts_at", swap)
+
+    login._prepare_image_volumes("box", ["/state/volume"], 123, 456)
+
+    assert list(outside.iterdir()) == []
+    assert list((root / "saved").iterdir()) == []
+
+
+def test_image_volumes_refuse_replaced_leaf(volume_store, tmp_path, monkeypatch):
+    root = volume_store
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    opendir = dirfd.opendir_at
+
+    def swap(fd, name):
+        if name == "volume":
+            (root / "volume").rename(root / "saved")
+            (root / "volume").symlink_to(outside)
+        return opendir(fd, name)
+
+    def chown(fd, uid, gid):
+        pytest.fail("ownership changed through a substituted link")
+
+    monkeypatch.setattr(dirfd, "opendir_at", swap)
+    monkeypatch.setattr(os, "fchown", chown)
+
+    login._prepare_image_volumes("box", ["/volume"], 123, 456)
+
+    assert (root / "saved").is_dir()
+    assert (root / "volume").is_symlink()
+
+
+def test_image_volumes_refuse_symlinked_rootfs(volume_store, tmp_path):
+    root = volume_store
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    root.rmdir()
+    root.symlink_to(outside)
+
+    login._prepare_image_volumes("box", ["/vol"], 123, 456)
+
+    assert list(outside.iterdir()) == []
 
 
 @pytest.fixture

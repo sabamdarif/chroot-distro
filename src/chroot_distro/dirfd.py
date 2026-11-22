@@ -84,7 +84,18 @@ def opendir(path: str) -> int:
     return os.open(path, _O_RD_DIR)
 
 
-def descend_at(dir_fd: int, parts: Sequence[str], *, create: bool = False, mode: int | None = None) -> int:
+def _mount_id(fd: int) -> int:
+    with open(f"/proc/self/fdinfo/{fd}", "rb") as info:
+        for line in info:
+            field, _, value = line.partition(b":")
+            if field == b"mnt_id" and value.strip().isdigit():
+                return int(value)
+    raise OSError(errno.ENOTSUP, "file descriptor mount ID unavailable")
+
+
+def descend_at(
+    dir_fd: int, parts: Sequence[str], *, create: bool = False, mode: int | None = None, same_mount: bool = False
+) -> int:
     """Open the directory *parts* names under dir_fd. Descriptor, or raises.
 
     Each level is opened O_NOFOLLOW off the level above, so a component that is
@@ -93,6 +104,10 @@ def descend_at(dir_fd: int, parts: Sequence[str], *, create: bool = False, mode:
     FileNotFoundError unless create=True, which makes it with mkdirat off the
     same validated descriptor. *mode* is applied to the leaf through its
     descriptor.
+
+    *same_mount* requires each opened directory to be on the starting mount.
+    Compare mount IDs before using a directory as a parent, since a bind can
+    have the same device number. Unavailable mount IDs raise an OSError.
 
     A caller that has pinned a directory keeps the guarantee that pin gives it
     only by descending from the descriptor: going back to the path re-resolves
@@ -103,6 +118,7 @@ def descend_at(dir_fd: int, parts: Sequence[str], *, create: bool = False, mode:
     on the same directory, so the caller owns and closes what comes back either
     way.
     """
+    expected_mount = _mount_id(dir_fd) if same_mount else None
     fd: int | None = None
     try:
         for part in parts:
@@ -118,6 +134,8 @@ def descend_at(dir_fd: int, parts: Sequence[str], *, create: bool = False, mode:
             if fd is not None:
                 os.close(fd)
             fd = nxt
+            if expected_mount is not None and _mount_id(fd) != expected_mount:
+                raise OSError(errno.EXDEV, "directory is on another mount", part)
         if fd is None:
             fd = reopen(dir_fd)
         if mode is not None:

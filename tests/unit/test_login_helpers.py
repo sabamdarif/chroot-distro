@@ -82,6 +82,49 @@ def test_command_display_reuses_session_directory_pin(command_display, monkeypat
     assert len({fd for _, fd in calls}) == 1
 
 
+@pytest.mark.parametrize("namespaced", [False, True])
+@pytest.mark.parametrize("is_run", [False, True])
+def test_first_session_prepares_image_volume_before_mounts(command_display, monkeypatch, namespaced, is_run):
+    from pathlib import Path
+
+    login, args, data = command_display
+    root = Path(login.container_rootfs("demo"))
+    volume = root / "image" / "volume"
+    manifest = {"image_config": {"config": {"Volumes": {"/image/volume": {}}}}}
+    (root.parent / "manifest.json").write_text(json.dumps(manifest))
+    holder = SimpleNamespace(pid=1234, nsenter_flags=["--mount"]) if namespaced else None
+    login.namespace.should_use_namespaces.return_value = namespaced
+    monkeypatch.setattr(login.namespace, "acquire_holder", Mock(return_value=holder))
+    monkeypatch.setattr(login.namespace, "release_holder", Mock())
+    monkeypatch.setattr(login.isolation, "finalize_holder", Mock())
+    monkeypatch.setattr(login.dirfd, "_mount_id", lambda fd: 1)
+    monkeypatch.setattr(login.os, "fchown", Mock())
+    if is_run:
+        args._run_inner = ["/bin/sh"]
+
+    cleanup_state = []
+
+    def unmount(rootfs, *, holder):
+        cleanup_state.append((volume.exists(), (data / "sessions").read_text(), holder))
+
+    def mounted(*args, **kwargs):
+        assert volume.is_dir()
+
+    login.mount_manager.unmount_all.side_effect = unmount
+    login.mount_manager.ensure_rootfs_exec.side_effect = mounted
+    login.isolation.apply_bind_mounts.side_effect = mounted
+    login.isolation.apply_special_mounts.side_effect = mounted
+    with pytest.raises(SystemExit) as exc:
+        login._command_login_inner_once("demo", args)
+
+    assert exc.value.code == 0
+    assert cleanup_state[0] == (False, "1", holder)
+    assert volume.is_dir()
+    login.isolation.apply_bind_mounts.assert_called_once()
+    login.isolation.apply_special_mounts.assert_called_once()
+    assert login.mount_manager.ensure_rootfs_exec.called == (not namespaced)
+
+
 @pytest.mark.parametrize("is_run", [False, True])
 def test_login_setup_does_not_write_through_profile_or_hosts_links(command_display, tmp_path, monkeypatch, is_run):
     from chroot_distro.paths import container_rootfs
@@ -182,6 +225,7 @@ def test_command_display_preserves_live_session(command_display, monkeypatch, ca
         login.namespace, "get_live_holder", Mock(return_value=SimpleNamespace(pid=1234, nsenter_flags=["--mount"]))
     )
     monkeypatch.setattr(login.namespace, "release_holder", Mock())
+    monkeypatch.setattr(login, "_prepare_image_volumes", Mock())
     with pytest.raises(SystemExit) as exc:
         login._command_login_inner_once("demo", args)
     assert exc.value.code == 0
@@ -190,6 +234,7 @@ def test_command_display_preserves_live_session(command_display, monkeypatch, ca
     assert "nsenter" in capsys.readouterr().out
     login.mount_manager.unmount_all.assert_not_called()
     login.namespace.release_holder.assert_not_called()
+    login._prepare_image_volumes.assert_not_called()
 
 
 @pytest.mark.parametrize("namespaced", [False, True])

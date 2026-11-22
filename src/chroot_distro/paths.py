@@ -348,11 +348,11 @@ def _open_storage_dir(path: str, anchor: str, *, create: bool) -> int:
             os.close(fd)
 
 
-def open_container_rootfs(name: str, *, create: bool = False) -> int:
-    """Pin a rootfs through the guarded container walk; the caller closes it."""
+def open_container_rootfs(name: str, *, create: bool = False, same_mount: bool = False) -> int:
+    """Pin a rootfs, optionally requiring the container directory's mount."""
     fd = open_container_dir(name, create=create)
     try:
-        return dirfd.descend_at(fd, (os.path.basename(container_rootfs(name)),), create=create)
+        return dirfd.descend_at(fd, (os.path.basename(container_rootfs(name)),), create=create, same_mount=same_mount)
     finally:
         os.close(fd)
 
