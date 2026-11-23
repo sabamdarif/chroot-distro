@@ -232,7 +232,7 @@ def test_raw_json_build_stdout(tmp_path, stdout_mode):
         command.append("-u")
     command += [
         "-c",
-        "from chroot_distro import cli; cli._ensure_root_user = lambda: None; cli.main()",
+        "from chroot_distro import cli; cli._ensure_root_user = lambda args: None; cli.main()",
         "build", "--progress=rawjson", "-t", "stdout-test", str(tmp_path),
     ]
     options = {"stdout": subprocess.PIPE}

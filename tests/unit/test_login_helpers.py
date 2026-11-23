@@ -1980,7 +1980,7 @@ def test_format_get_chroot_cmd_termux_su_wrapping():
     with (
         patch.object(chroot_cmd, "IS_TERMUX", True),
         patch.object(chroot_cmd.shutil, "which", return_value=None),
-        patch("chroot_distro.elevate._find_termux_su", return_value="/system/bin/su"),
+        patch("chroot_distro.elevate._find_termux_su", return_value=("/system/bin/su", "")),
     ):
         out = chroot_cmd.format_get_chroot_cmd(env, argv)
     su, dash_c, body = shlex.split(out)

@@ -3,6 +3,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from argparse import Namespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -14,7 +15,7 @@ from chroot_distro.exceptions import ChrootDistroError, RootRequiredError
 def test_ensure_root_user():
     # As non-root, it should call elevate_or_die
     with patch("os.geteuid", return_value=1000), patch("chroot_distro.elevate.elevate_or_die") as mock_elevate:
-        _ensure_root_user()
+        _ensure_root_user(Namespace())
         mock_elevate.assert_called_once()
 
     # As root, it should pass without raising and not call elevate_or_die
@@ -23,7 +24,7 @@ def test_ensure_root_user():
         patch("os.geteuid", return_value=0),
         patch("chroot_distro.elevate.elevate_or_die") as mock_elevate,
     ):
-        _ensure_root_user()
+        _ensure_root_user(Namespace())
         mock_elevate.assert_not_called()
 
 
@@ -269,7 +270,7 @@ def interrupt(_args):
     atexit.register(lambda: print("shutdown hook ran", file=sys.stderr))
     raise KeyboardInterrupt
 
-cli._ensure_root_user = lambda: None
+cli._ensure_root_user = lambda args: None
 cli._COMMAND_HANDLERS["info"] = interrupt
 list_cmd._iter_container_names = lambda: (["demo"], [])
 ps.active_sessions = lambda: [{"pid": 42}]
@@ -352,7 +353,7 @@ def test_empty_quiet_output_with_stdout_absent(command, monkeypatch):
     from chroot_distro.commands import list_cmd, ps
 
     monkeypatch.setattr(message, "_quiet", False)
-    monkeypatch.setattr("chroot_distro.cli._ensure_root_user", lambda: None)
+    monkeypatch.setattr("chroot_distro.cli._ensure_root_user", lambda args: None)
     monkeypatch.setattr(list_cmd, "_iter_container_names", lambda: ([], []))
     monkeypatch.setattr(ps, "active_sessions", list)
     monkeypatch.setattr(ps, "containers_with_active_pids", dict)

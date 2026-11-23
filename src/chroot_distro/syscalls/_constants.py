@@ -234,6 +234,9 @@ PR_CAPBSET_DROP: int = 24
 
 # prctl(2) constants, from <linux/prctl.h>
 
+PR_SET_PDEATHSIG: int = 1
+"""Set the signal delivered when the creating thread exits."""
+
 PR_SET_NO_NEW_PRIVS: int = 38
 """Stop setuid binaries from granting privileges on exec (runc's no_new_privileges)."""
 

@@ -55,6 +55,9 @@ sudo pip install chroot-distro --break-system-packages --root-user-action=ignore
 
 Commands that need root use the first available tool in this order: `sudo`,
 `doas`, `pkexec`, `su`. Help, version and `search` run without elevation.
+Elevated commands use the caller's working directory for relative paths. Builds
+also read bare build arguments, environment-backed secrets and the SSH agent
+socket from the caller's environment.
 
 ### Install on Termux (Android)
 
@@ -67,7 +70,8 @@ pkg install python
 pip install chroot-distro
 ```
 
-No `sudo` or `tsu` package is needed: the root manager's `su` is used directly.
+The root manager's `su` is used directly. Elevated commands keep the caller's
+working directory and build inputs as on regular Linux.
 
 ### Quick start
 

@@ -239,8 +239,7 @@ paths by hand.
 `CD_NO_CAP_DROP=1` (keep the full
 capability bounding set), `CD_NO_BINFMT=1` (never register a binfmt_misc
 handler), `CD_SU_PATH` / `CD_SU_MOUNT_MASTER=1` (Termux `su` selection and
-namespace), `CD_SUBID_BASE` (user-namespace subid base), `CD_PUSH_CHUNK_SIZE`,
-`CD_SECRET_FILE` (internal, set by `elevate.py`).
+namespace), `CD_SUBID_BASE` (user-namespace subid base), `CD_PUSH_CHUNK_SIZE`.
 
 ### This file
 
@@ -316,6 +315,7 @@ goes through it:
 | File                     | Owns                                                                     |
 | ------------------------ | ------------------------------------------------------------------------ |
 | `elevate.py`             | re-exec as root via Termux `su` or Linux sudo/doas/pkexec/su           |
+| `elevation_handoff.py`   | anonymous credential and build input handoff                           |
 
 ### Session lifecycle (`login`, `run`, `build`)
 

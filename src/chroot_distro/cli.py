@@ -36,6 +36,7 @@ import importlib
 import os
 import signal
 import sys
+from argparse import Namespace
 from collections.abc import Callable
 from contextlib import suppress
 from typing import Any
@@ -93,12 +94,16 @@ def _sigquit_to_keyboard_interrupt(_signum: int, _frame: Any) -> None:
     raise KeyboardInterrupt()
 
 
-def _ensure_root_user() -> None:
-    """Elevate when needed and keep the legacy credential reader out of the root path."""
+def _ensure_root_user(args: Namespace) -> None:
+    """Elevate or finish the credential handoff before dispatch."""
     from chroot_distro.elevate import elevate_or_die, is_root
 
     if not is_root():
-        elevate_or_die()
+        elevate_or_die(args)
+    elif os.environ.pop("_CHROOT_DISTRO_ELEVATING", "") == "1":
+        from chroot_distro.elevation_handoff import receive_handoff
+
+        args._build_env = receive_handoff()
 
 
 def _dispatch_help(raw_args: list[str]) -> bool:
@@ -256,7 +261,7 @@ def _run() -> None:
 
     try:
         if requires_root:
-            _ensure_root_user()
+            _ensure_root_user(args)
         handler = _resolve_handler(canonical)
         if handler is None:
             raise ChrootDistroError(f"unknown command {command!a}.")

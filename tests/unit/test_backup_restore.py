@@ -66,7 +66,7 @@ from chroot_distro import cli, paths
 from chroot_distro.commands import backup, restore
 
 paths.CONTAINERS_DIR = sys.argv.pop(1)
-cli._ensure_root_user = lambda: None
+cli._ensure_root_user = lambda args: None
 backup.ContainerLock = lambda *args, **kwargs: nullcontext()
 backup.session.get_active_chroot_pids = lambda name: []
 backup.mount_manager.get_active_mounts = lambda rootfs: []

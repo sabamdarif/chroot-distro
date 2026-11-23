@@ -61,7 +61,8 @@ teardown removes the root under the parent descriptor rather than resolving
 `build-tmp` again.
 
 RUN steps have no isolation flag here: the mode comes from `CD_USE_ISOLATION` or
-`CD_USE_NS` alone.
+`CD_USE_NS` alone. An elevated build reads environment-backed arguments, secrets
+and the SSH socket from the caller's handoff mapping.
 """
 
 import contextlib
@@ -69,6 +70,7 @@ import os
 import re
 import sys
 import typing
+from collections.abc import Mapping
 from contextlib import ExitStack
 from types import SimpleNamespace
 
@@ -148,7 +150,8 @@ def command_build(args: typing.Any) -> None:
     build_path = getattr(args, "path", None) or "."
     dockerfile_path = getattr(args, "dockerfile", None)
     tags = list(getattr(args, "tags", []) or [])
-    build_args = _parse_build_args(getattr(args, "build_args", None) or [])
+    build_env = getattr(args, "_build_env", os.environ)
+    build_args = _parse_build_args(getattr(args, "build_args", None) or [], build_env)
     build_contexts = _parse_build_context_opts(getattr(args, "build_contexts", None) or [])
     override_arch = getattr(args, "override_arch", None) or ""
     target_stage = getattr(args, "target_stage", None) or None
@@ -333,8 +336,8 @@ def command_build(args: typing.Any) -> None:
         tmp_root, tmp_parent_fd, tmp_root_fd = _make_build_tmp()
 
         try:
-            secrets = _parse_secret_opts(getattr(args, "secrets", None) or [], tmp_root)
-            ssh_sockets = _parse_ssh_opts(getattr(args, "ssh", None) or [])
+            secrets = _parse_secret_opts(getattr(args, "secrets", None) or [], tmp_root, build_env)
+            ssh_sockets = _parse_ssh_opts(getattr(args, "ssh", None) or [], build_env)
 
             request = BuildRequest(
                 build_dir=build_dir,
@@ -784,7 +787,7 @@ def _resolve_build_isolation_mode() -> str:
     return "none"
 
 
-def _parse_secret_opts(raw: list[str], tmp_root: str) -> dict[str, str]:
+def _parse_secret_opts(raw: list[str], tmp_root: str, env: Mapping[str, str]) -> dict[str, str]:
     """Parse --secret id=NAME[,src=PATH] items into {id: host_file_path}.
 
     Without src=, the secret value is taken from the environment variable
@@ -807,7 +810,7 @@ def _parse_secret_opts(raw: list[str], tmp_root: str) -> dict[str, str]:
                 crit_error(f"--secret id={sid}: file '{src}' does not exist.")
                 sys.exit(1)
         else:
-            value = os.environ.get(sid)
+            value = env.get(sid)
             if value is None:
                 crit_error(f"--secret id={sid}: no src= given and environment variable '{sid}' is not set.")
                 sys.exit(1)
@@ -819,13 +822,13 @@ def _parse_secret_opts(raw: list[str], tmp_root: str) -> dict[str, str]:
     return out
 
 
-def _parse_ssh_opts(raw: list[str]) -> dict[str, str]:
+def _parse_ssh_opts(raw: list[str], env: Mapping[str, str]) -> dict[str, str]:
     """Parse --ssh [ID[=SOCK]] items into {id: socket_path}."""
     out: dict[str, str] = {}
     for item in raw:
         sid, _, sock = (item or "default").partition("=")
         sid = sid or "default"
-        sock = sock or os.environ.get("SSH_AUTH_SOCK", "")
+        sock = sock or env.get("SSH_AUTH_SOCK", "")
         if not sock:
             crit_error(f"--ssh {sid}: no socket path given and SSH_AUTH_SOCK is not set.")
             sys.exit(1)
@@ -849,7 +852,7 @@ def _parse_build_context_opts(raw: list[str]) -> dict[str, str]:
     return {name: resolve_context_dir(value) for name, value in parsed.items()}
 
 
-def _parse_build_args(raw: list[str]) -> dict[str, str]:
+def _parse_build_args(raw: list[str], env: Mapping[str, str]) -> dict[str, str]:
     out = {}
     for item in raw:
         if "=" in item:
@@ -858,7 +861,7 @@ def _parse_build_args(raw: list[str]) -> dict[str, str]:
             if len(v) >= 2 and ((v.startswith('"') and v.endswith('"')) or (v.startswith("'") and v.endswith("'"))):
                 v = v[1:-1]
         else:
-            k, v = item, os.environ.get(item, "")
+            k, v = item, env.get(item, "")
         if k:
             out[k] = v
     return out
