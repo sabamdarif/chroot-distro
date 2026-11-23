@@ -132,6 +132,11 @@ The default container name for an archive comes from its filename, with the
 recognized extension removed. For a URL, the filename comes from its path.
 Use `--name` if the URL path has no filename.
 
+Archive downloads use the supplied URL for the request only. Install saves a
+registry tag if the archive supplies one. Download failures can show the
+original endpoint and HTTP status without displaying the request path,
+credentials, or server error text.
+
 | Option                      | Description                                                                                                                                                              |
 | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `-n`, `--name NAME`         | Give the container a custom name. Needed to install the same image twice. `--override-alias` is an accepted alias. |
@@ -371,7 +376,11 @@ Force-stop a running container, like `docker kill`. Accepts a container name or 
 chroot-distro reset CONTAINER
 ```
 
-Wipe a container and reinstall it fresh from its original image. All data inside is lost. Only works for containers installed from Docker/OCI images.
+Wipe a container and reinstall it from the registry tag recorded in its manifest.
+All data inside is lost. An archive install needs a recorded registry tag for
+reset. Older installations can still have the download URL in `manifest.json`.
+`list` and `info` show `URL archive` for those entries, and `reset` refuses them
+before removing any data. The existing manifest file is left as stored.
 
 | Option          | Description       |
 | --------------- | ----------------- |

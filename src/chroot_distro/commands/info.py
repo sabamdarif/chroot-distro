@@ -52,7 +52,6 @@ from chroot_distro.commands.kernel_config import (
     probe_feature,
 )
 from chroot_distro.commands.list_cmd import (
-    _ensure_manifest_readable,
     _iter_container_names,
     _read_image_source,
     _rootfs_size_bytes,
@@ -506,7 +505,6 @@ def _read_manifest_labels(name: str) -> tuple[str, str]:
     manifest_path = container_manifest(name)
     if not os.path.isfile(manifest_path):
         return "", ""
-    _ensure_manifest_readable(manifest_path)
     try:
         with open(manifest_path, encoding="utf-8") as fh:
             data = json.loads(fh.read() or "{}")

@@ -2,10 +2,9 @@
 # Copyright (C) 2025-2026 Md Arif
 """`chroot-distro reset`: delete the rootfs and install the same image again.
 
-`manifest.json` is what makes this possible, so a container installed from a plain
-tarball is refused: `image_ref` and `arch` come from that file and go to
-`command_install` under the existing name. Nothing else about the container is
-touched, so its name and lock survive the round trip.
+Reset requires a registry tag in `manifest.json`. Validate the reference and
+architecture before removing the rootfs, then call the registry install path
+under the existing container name and lock.
 
 Sessions and mounts are checked under an exclusive `ContainerLock` and a live one
 aborts, rather than the rootfs going away under a running shell. Removal is
@@ -19,12 +18,13 @@ import json
 import os
 import shutil
 import sys
-from types import SimpleNamespace
 
 import chroot_distro.helpers.mount_manager as mount_manager
 import chroot_distro.helpers.session as session
-from chroot_distro.commands.install import command_install
+from chroot_distro.arch import get_device_cpu_arch, normalize_arch
+from chroot_distro.commands.install import _run_install
 from chroot_distro.commands.remove import _remove_path
+from chroot_distro.helpers.docker import InvalidReferenceError, parse_tag_reference
 from chroot_distro.locking import ContainerLock
 from chroot_distro.message import crit_error, log_info, warn
 from chroot_distro.names import require_valid_name
@@ -45,20 +45,31 @@ def command_reset(args) -> None:
             crit_error(f"container '{container_name}' is not installed.")
             sys.exit(1)
 
-        image_ref = None
-        override_arch = None
+        manifest_data = None
         if os.path.isfile(manifest_path):
             try:
-                with open(manifest_path) as fh:
+                with open(manifest_path, encoding="utf-8") as fh:
                     manifest_data = json.load(fh)
-                image_ref = manifest_data.get("image_ref")
-                override_arch = manifest_data.get("arch")
-            except (OSError, json.JSONDecodeError) as exc:
-                warn(f"Failed to read container manifest at {manifest_path}: {exc}")
-
-        if not image_ref:
-            crit_error(f"container '{container_name}' has no OCI manifest. Reset is supported for OCI images only.")
+            except (OSError, ValueError, RecursionError):
+                pass
+        if not isinstance(manifest_data, dict):
+            manifest_data = {}
+        raw_ref = manifest_data.get("image_ref")
+        image_ref = raw_ref if isinstance(raw_ref, str) else ""
+        try:
+            parse_tag_reference(image_ref)
+        except InvalidReferenceError:
+            crit_error(f"container '{container_name}' has no valid registry tag for reset.")
             sys.exit(1)
+        arch = manifest_data.get("arch")
+        dist_arch: str | None
+        if arch is None or arch == "":
+            dist_arch = get_device_cpu_arch()
+        else:
+            dist_arch = normalize_arch(arch) if isinstance(arch, str) else None
+            if dist_arch is None:
+                crit_error(f"container '{container_name}' has an invalid architecture for reset.")
+                sys.exit(1)
 
         active_pids = session.get_active_chroot_pids(container_name)
         if active_pids:
@@ -78,10 +89,4 @@ def command_reset(args) -> None:
             with contextlib.suppress(OSError):
                 shutil.rmtree(rootfs_dir, ignore_errors=True)
 
-        command_install(
-            SimpleNamespace(
-                image_ref=image_ref,
-                custom_container_name=container_name,
-                override_arch=override_arch,
-            )
-        )
+        _run_install(container_name, image_ref, None, None, dist_arch)

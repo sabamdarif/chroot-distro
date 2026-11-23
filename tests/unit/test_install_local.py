@@ -2,6 +2,7 @@ import hashlib
 import io
 import json
 import os
+import shutil
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -15,7 +16,7 @@ import pytest
 
 from chroot_distro import atomic
 from chroot_distro.arch import Platform
-from chroot_distro.commands import install_local
+from chroot_distro.commands import install, install_local
 from chroot_distro.helpers import oci_writer
 from chroot_distro.helpers.build_engine import PlatformResult
 from chroot_distro.helpers.docker import cache
@@ -80,7 +81,7 @@ def oci(tmp_path, monkeypatch):
 
 
 def _write_oci(
-    archive, layer, *, corrupt=None, member="regular", layer_descriptor=None, fallback=False, config=None
+    archive, layer, *, corrupt=None, member="regular", layer_descriptor=None, fallback=False, config=None, ref=None
 ):
     if config is None:
         config = {"architecture": "amd64", "os": "linux", "config": None}
@@ -89,6 +90,8 @@ def _write_oci(
     layer_blob = _descriptor(layer) if layer_descriptor is None else layer_descriptor
     manifest_bytes = json.dumps({"config": config_blob, "layers": [layer_blob]}).encode()
     manifest_blob = _descriptor(manifest_bytes)
+    if ref is not None:
+        manifest_blob["annotations"] = {"org.opencontainers.image.ref.name": ref}
     entries = [manifest_blob]
     if fallback:
         entries.append({"digest": "unused", "size": 0})
@@ -120,6 +123,39 @@ def _install_archive(archive, rootfs):
 
 def _cached_blob(layer_blob):
     return Path(cache.layer_cache_path(layer_blob["digest"]))
+
+
+@pytest.mark.parametrize(
+    "ref, expected_ref",
+    [(None, ""), ("example.com/fixture:release.tar", "example.com/fixture:release.tar"),
+     ("https://user:private@example.com/file?signature=annotation", "")],
+)
+def test_url_oci_install_saves_registry_tag_without_download_url(oci, tmp_path, monkeypatch, ref, expected_ref):
+    archive, _, base_cache = oci
+    url = "https://user:private@example.com/archive.oci.tar?token=query-token#fragment-token"
+    config = {"architecture": "amd64", "os": "linux", "config": {"Cmd": ["/bin/sh"]}}
+    layer = _write_oci(archive, _layer_bytes(b"fixture"), config=config, ref=ref)
+    containers = tmp_path / "containers"
+    monkeypatch.setattr("chroot_distro.paths.CONTAINERS_DIR", str(containers))
+    monkeypatch.setattr(install, "BASE_CACHE_DIR", str(base_cache))
+    monkeypatch.setattr(install, "IS_TERMUX", False)
+    monkeypatch.setattr(install, "write_hosts", MagicMock())
+    monkeypatch.setattr(install, "write_resolv_conf", MagicMock())
+
+    def download(request_url, destination, *, insecure):
+        assert request_url == url
+        shutil.copyfile(archive, destination)
+
+    monkeypatch.setattr(install, "download_file", download)
+    install._run_install("box", url, None, url, "x86_64")
+
+    payload = (containers / "box" / "manifest.json").read_text(encoding="utf-8")
+    assert all(secret not in payload for secret in ("private", "query-token", "fragment-token", "signature="))
+    metadata = json.loads(payload)
+    assert metadata["image_ref"] == expected_ref
+    assert metadata["manifest"]["layers"] == [layer]
+    assert metadata["image_config"] == config
+    assert metadata["arch"] == "x86_64"
 
 
 @pytest.mark.parametrize("corrupt,fallback", [("manifest", False), ("config", False), ("layer", False), ("config", True)])

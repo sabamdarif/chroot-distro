@@ -86,7 +86,6 @@ def test_read_image_source_permission_denied(monkeypatch):
     import errno
 
     monkeypatch.setattr("chroot_distro.commands.list_cmd.os.path.isfile", lambda _p: True)
-    monkeypatch.setattr("chroot_distro.commands.list_cmd._ensure_manifest_readable", lambda _p: None)
 
     def _deny_open(*_args, **_kwargs):
         raise OSError(errno.EACCES, "Permission denied")
@@ -101,6 +100,32 @@ def test_read_image_source_without_manifest(tmp_path, monkeypatch):
     (containers / name / "rootfs").mkdir(parents=True)
     monkeypatch.setattr("chroot_distro.paths.CONTAINERS_DIR", str(containers))
     assert _read_image_source(name) == "local archive"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="Requires POSIX permissions")
+def test_list_hides_legacy_archive_url_and_leaves_manifest_private(tmp_path, monkeypatch, capsys):
+    from chroot_distro.commands.info import _read_manifest_labels
+
+    _make_container(tmp_path, "box")
+    manifest = tmp_path / "box" / "manifest.json"
+    data = {"image_ref": "https://user:password@example.com/archive.tar?token=secret#fragment"}
+    manifest.write_text(json.dumps(data), encoding="utf-8")
+    manifest.chmod(0o600)
+    monkeypatch.setattr("chroot_distro.commands.list_cmd.CONTAINERS_DIR", str(tmp_path))
+    monkeypatch.setattr("chroot_distro.paths.CONTAINERS_DIR", str(tmp_path))
+
+    command_list(SimpleNamespace(verbose=True))
+    text_output = capsys.readouterr().err
+    assert "URL archive" in text_output
+    command_list(SimpleNamespace(json=True))
+    json_output = capsys.readouterr().out
+    row = json.loads(json_output)["containers"][0]
+    assert row["source"] == "URL archive"
+    assert row["image_ref"] is None
+    assert all(value not in text_output + json_output for value in ("password", "secret", "fragment"))
+    assert _read_manifest_labels("box") == ("", "")
+    assert manifest.stat().st_mode & 0o777 == 0o600
+    assert json.loads(manifest.read_text()) == data
 
 
 def test_format_table_aligns_columns():

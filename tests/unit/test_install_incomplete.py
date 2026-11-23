@@ -4,13 +4,18 @@ exists', and a finished install must not carry the marker."""
 
 from __future__ import annotations
 
+import json
 import os
+import urllib.error
+from contextlib import nullcontext
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 
 from chroot_distro.commands.install import _run_install
-from chroot_distro.commands import install
+from chroot_distro.commands import install, reset
+from chroot_distro.helpers import download
 from chroot_distro.paths import container_incomplete_marker
 
 
@@ -107,16 +112,65 @@ def test_container_incomplete_marker_path():
 def test_install_url_diagnostics_keep_request_credentials_private(containers, monkeypatch, capsys):
     url = "https://user:password@example.com/archive.tar?token=secret#fragment"
     monkeypatch.setattr(install, "BASE_CACHE_DIR", str(containers / "cache"))
+    monkeypatch.setattr("chroot_distro.constants.layer_download_workers", lambda: 1)
+    monkeypatch.setattr(download, "_get_max_retries", lambda: 1)
+    monkeypatch.setattr(download, "_get_retry_delays", lambda _: (0,))
 
-    def download(ref, destination, *, insecure):
-        assert ref == url
-        raise RuntimeError(f"Cannot download {ref}: HTTP 403")
+    def open_response(req, **_):
+        assert req.full_url == url
+        raise urllib.error.HTTPError(url, 503, f"Echoed {url}", {}, None)
 
-    monkeypatch.setattr(install, "download_file", download)
+    monkeypatch.setattr(download, "http_opener", lambda **_: SimpleNamespace(open=open_response))
 
     with pytest.raises(SystemExit):
         _run_install("box", url, None, url, "x86_64")
 
     error = capsys.readouterr().err
-    assert "could not download the archive" in error
-    assert all(value not in error for value in ("password", "secret", "fragment"))
+    assert "Retry 1/1 in 0s (HTTP 503)" in error
+    assert "Failed to install: Cannot download from 'https://example.com': HTTP 503" in error
+    assert all(value not in error for value in ("user:", "password", "archive.tar", "secret", "fragment"))
+
+
+@pytest.mark.parametrize("metadata", [
+    {"image_ref": "https://user:password@example.com/archive.tar?token=secret#fragment"},
+    {"image_ref": ""},
+    {"image_ref": "image@sha256:" + "a" * 64},
+    {"image_ref": "example.com/image:stable", "arch": ["amd64"]},
+    [],
+])
+def test_reset_refuses_invalid_source_before_teardown(containers, monkeypatch, capsys, metadata):
+    container, rootfs, _ = _paths(containers, "box")
+    rootfs.mkdir(parents=True)
+    (container / "manifest.json").write_text(json.dumps(metadata))
+    monkeypatch.setattr(reset, "ContainerLock", lambda *args, **kwargs: nullcontext())
+
+    def unexpected(*args):
+        pytest.fail("reset must validate its source before teardown")
+
+    monkeypatch.setattr(reset.session, "get_active_chroot_pids", unexpected)
+    with pytest.raises(SystemExit, match="1"):
+        reset.command_reset(SimpleNamespace(container_name="box"))
+
+    error = capsys.readouterr().err
+    assert "for reset" in error
+    assert all(part not in error for part in ("password", "secret", "fragment"))
+    assert rootfs.is_dir()
+
+
+def test_reset_uses_registry_path_for_archive_suffixed_tag(containers, monkeypatch):
+    container, rootfs, _ = _paths(containers, "box")
+    rootfs.mkdir(parents=True)
+    ref = "example.com/image:release.tar"
+    (container / "manifest.json").write_text(json.dumps({"image_ref": ref, "arch": "linux/amd64"}))
+    monkeypatch.setattr(reset, "ContainerLock", lambda *args, **kwargs: nullcontext())
+    monkeypatch.setattr(reset.session, "get_active_chroot_pids", lambda _: [])
+    monkeypatch.setattr(reset.mount_manager, "ensure_no_mounts", lambda _: None)
+    monkeypatch.setattr(install, "BASE_CACHE_DIR", str(containers / "cache"))
+    monkeypatch.setattr(install, "IS_TERMUX", False)
+    with patch.object(install, "pull_image", return_value=None) as pull:
+        reset.command_reset(SimpleNamespace(container_name="box"))
+
+    pull.assert_called_once()
+    assert pull.call_args.args[0] == ref
+    assert pull.call_args.args[2].architecture == "amd64"
+    assert rootfs.is_dir()

@@ -473,6 +473,9 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
             "comes from its path. Use --name if the URL path has no filename "
             "or to install under a different name."
             "\n\n"
+            "Archive download URLs are used only for the request. An archive "
+            "can supply a registry tag for reset."
+            "\n\n"
             "Private images require authentication. Set the environment "
             'variable CD_DOCKER_AUTH="user:password" before running '
             "the install command. Some registries use a personal access "
@@ -719,11 +722,11 @@ HELP_PAGES: dict[str, dict[str, typing.Any]] = {
     "reset": {
         "usage": "reset CONTAINER",
         "summary": (
-            "Rebuild the specified container from scratch using the "
-            "stored Docker image manifest. All current data inside "
-            "the container will be lost."
+            "Rebuild the specified container from the registry tag stored "
+            "in its manifest. All current data inside the container will be lost."
             "\n\n"
-            "Works only with containers created from Docker images."
+            "Archive installs also need a registry tag. A stored archive URL "
+            "cannot be used for reset."
         ),
         "options": [
             ("-h, --help", "Show this help."),

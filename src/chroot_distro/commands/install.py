@@ -7,7 +7,8 @@ The three source kinds are told apart by the reference's shape alone: a leading 
 else a registry reference, which is then held to Docker's grammar before a name is
 derived from it or a lock taken. Archive names come from the filename or URL path
 with the longest recognized suffix stripped. A source without an inferable name
-requires `--name`.
+requires `--name`. Download URLs are request inputs only. URL archives can supply
+a registry tag for reset through their image metadata.
 
 The container and rootfs are pinned for marker, metadata, extraction and guest
 configuration writes. The marker is atomically published and synced before
@@ -20,8 +21,8 @@ Ctrl+C ends in `os._exit` on purpose: `sys.exit` would run the `concurrent.futur
 atexit hook, which joins download workers that may each be blocked in a socket read for
 the full timeout, long after the user asked to stop.
 
-`reset` and `build` call `command_install` directly with a single reference string, while
-the CLI parser hands it a list.
+`build` calls `command_install` with a single reference string, while the CLI parser
+hands it a list. `reset` calls `_run_install` with an already validated registry reference.
 """
 
 import contextlib
@@ -53,7 +54,13 @@ from chroot_distro.constants import (
 )
 from chroot_distro.exceptions import MountError
 from chroot_distro.helpers.android import configure_android_rootfs
-from chroot_distro.helpers.docker import InvalidReferenceError, derive_alias, parse_reference, pull_image
+from chroot_distro.helpers.docker import (
+    InvalidReferenceError,
+    derive_alias,
+    parse_reference,
+    parse_tag_reference,
+    pull_image,
+)
 from chroot_distro.helpers.download import download_file
 from chroot_distro.helpers.install_state import (
     clear_incomplete_rootfs,
@@ -142,8 +149,6 @@ def _derive_local_name(path: str) -> str:
 
 def command_install(args) -> None:
     """Install one or more containers from Docker images, URLs, or local archives."""
-    # Internal callers (reset, build) pass a single string; the CLI parser
-    # produces a list (nargs="*").
     refs = args.image_ref if isinstance(args.image_ref, list) else [args.image_ref]
     custom_container_name = getattr(args, "custom_container_name", None)
 
@@ -349,13 +354,7 @@ def _run_install(
             )
             os.close(fd)
             log_info("Downloading archive...")
-            try:
-                download_file(url, tmp_archive, insecure=insecure)
-            except (OSError, RuntimeError) as exc:
-                source = urlsplit(url)
-                if source.username is not None or source.query or source.fragment:
-                    raise RuntimeError("could not download the archive from the supplied URL.") from exc
-                raise
+            download_file(url, tmp_archive, insecure=insecure)
             log_info("Extracting rootfs from archive...")
             metadata = install_from_local_file(tmp_archive, rootfs_fd, dist_arch)
         else:
@@ -363,8 +362,16 @@ def _run_install(
             metadata = pull_image(image_ref, rootfs_fd, platform_from_arch(dist_arch), insecure=insecure)
 
         if metadata is not None:
+            saved_ref = metadata.get("image_ref") or ""
+            if url is not None:
+                try:
+                    parse_tag_reference(saved_ref)
+                except InvalidReferenceError:
+                    saved_ref = ""
+            elif local_path is None:
+                saved_ref = saved_ref or image_ref
             manifest_data = {
-                "image_ref": (metadata.get("image_ref") or (image_ref if local_path is None else "")),
+                "image_ref": saved_ref,
                 "arch": metadata.get("arch") or dist_arch,
                 "manifest": metadata.get("manifest", {}),
                 "image_config": metadata.get("image_config", {}),

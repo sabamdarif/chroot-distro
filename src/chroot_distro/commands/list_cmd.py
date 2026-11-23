@@ -11,15 +11,15 @@ and storage that fails the guarded walk are excluded.
 
 `_rootfs_size_bytes` is `du -sb -x` in Python, apparent sizes from lstat and pruning
 at a filesystem boundary, so a mount under the rootfs is not counted into the
-container's own size. `_ensure_manifest_readable` widens a manifest a rooted install
-left mode 0600, because the unelevated Termux run cannot otherwise read the image
-reference out of it. Installed metadata is therefore readable outside the guest.
+container's own size. An unreadable manifest leaves the container name as its
+reported source.
 
 `_read_manifest_info` opens the manifest once and both the table row and the
 `--json` document read that one record, so the SOURCE column and the JSON `source`
-field cannot drift. `--json` always carries the detail `-v` prints, since a
-consumer should not have to know which flag adds a field. The human output
-escapes controls in names and metadata at display time.
+field cannot drift. Older manifests may store a download URL as their image
+reference. Both outputs describe those as URL archives. `--json` carries the
+detail `-v` prints. The human output escapes controls in names and metadata
+at display time.
 """
 
 import errno
@@ -43,8 +43,8 @@ class _ManifestInfo:
 
     `source` is the display string `list`'s SOURCE column shows, kept here so
     the column and the JSON field cannot disagree: `"ref (arch)"` for an image
-    reference, `"local archive"` when the manifest names none, `"unknown"` when
-    it could not be parsed.
+    reference, `"URL archive"` for a legacy URL reference, `"local archive"`
+    when the manifest names none, `"unknown"` when it could not be parsed.
     """
 
     source: str = "local archive"
@@ -134,26 +134,6 @@ def _rootfs_size_bytes(rootfs: str) -> int:
     return total
 
 
-def _ensure_manifest_readable(manifest_path: str) -> None:
-    """Raise readability of legacy ``0o600`` manifests (mkstemp default).
-
-    Installs that ran as root left manifests unreadable to the Termux app user
-    when ``list`` runs without elevation. World-readable ``0o644`` is safe here
-    (no credentials in manifest.json).
-    """
-    try:
-        st = os.stat(manifest_path)
-    except OSError as exc:
-        warn(f"Failed to stat manifest '{quote_path(manifest_path)}': {escape_controls(str(exc))}")
-        return
-    if st.st_mode & 0o004:
-        return
-    try:
-        os.chmod(manifest_path, (st.st_mode & 0o777) | 0o644)
-    except OSError as exc:
-        warn(f"Failed to change permissions on manifest '{quote_path(manifest_path)}': {escape_controls(str(exc))}")
-
-
 def _read_manifest_info(name: str) -> _ManifestInfo:
     """Read the manifest once and resolve both the display source and the fields.
 
@@ -164,7 +144,6 @@ def _read_manifest_info(name: str) -> _ManifestInfo:
     manifest_path = container_manifest(name)
     if not os.path.isfile(manifest_path):
         return _ManifestInfo()
-    _ensure_manifest_readable(manifest_path)
     try:
         with open(manifest_path, encoding="utf-8") as fh:
             raw = fh.read()
@@ -183,7 +162,10 @@ def _read_manifest_info(name: str) -> _ManifestInfo:
     labels = cfg.get("Labels") or {}
     image_ref = str(data.get("image_ref") or "")
     arch = str(data.get("arch") or "")
-    if not image_ref:
+    if image_ref.lower().startswith(("http://", "https://")):
+        source = "URL archive"
+        image_ref = ""
+    elif not image_ref:
         source = "local archive"
     elif arch:
         source = f"{image_ref} ({arch})"
