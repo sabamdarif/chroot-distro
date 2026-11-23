@@ -1521,8 +1521,7 @@ def _command_login_inner_once(container_name: str, args) -> None:
                     escalate=_signal_sweep,
                 ).returncode
             else:
-                # The chroot is the child's own last step, after setns(2) and
-                # the capability drop.
+                # The chroot child sets up the keyring before installing seccomp.
                 def _enter() -> None:
                     enter_chroot(
                         chroot_config.rootfs,
@@ -1530,6 +1529,8 @@ def _command_login_inner_once(container_name: str, args) -> None:
                         gid=chroot_config.gid,
                         groups=chroot_config.groups,
                         workdir=chroot_config.workdir,
+                        drop_caps=not has_userns,
+                        no_new_privs=no_new_privs,
                         regain_ids=True,
                     )
 
@@ -1538,7 +1539,6 @@ def _command_login_inner_once(container_name: str, args) -> None:
                     holder._live_ns_flags(),
                     chroot_config.command,
                     env=child_env,
-                    drop_caps=not has_userns,
                     setup=_enter,
                     escalate=_signal_sweep,
                 )

@@ -773,6 +773,9 @@ def test_spawn_detached_sweep_keeps_keep_fds(tmp_path):
 def test_join_session_keyring_calls_keyctl(monkeypatch):
     fake_libc = MagicMock()
     fake_libc.syscall.return_value = 42
+    probe = Mock()
+    monkeypatch.setattr(chroot, "IS_TERMUX", False)
+    monkeypatch.setattr(chroot, "_legacy_fscrypt_descriptor", probe)
     monkeypatch.setattr(chroot, "syscall_libc", lambda: fake_libc)
     monkeypatch.setattr(chroot, "__NR_KEYCTL_BY_ARCH", {"x86_64": 250})
 
@@ -783,6 +786,7 @@ def test_join_session_keyring_calls_keyctl(monkeypatch):
     assert args[0].value == 250
     assert args[1].value == 1
     assert args[2].value.startswith(b"_ses.")
+    probe.assert_not_called()
 
 
 def test_join_session_keyring_tolerates_enosys(monkeypatch):
@@ -807,6 +811,132 @@ def test_join_session_keyring_unknown_arch_skips(monkeypatch):
     with patch("chroot_distro.arch.get_device_cpu_arch", return_value="mips"):
         chroot._join_session_keyring()
     fake_libc.syscall.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "policy_errno, version, keyring_errno, descriptor",
+    [
+        (None, 0, errno.ENOTTY, b"00ff010203040506"),
+        (errno.ENODATA, 0, None, None),
+        (errno.ENOTTY, 0, None, None),
+        (None, 2, None, None),
+        (None, 0, errno.EFAULT, None),
+        (None, 0, errno.EPERM, None),
+    ],
+)
+def test_legacy_fscrypt_descriptor(monkeypatch, policy_errno, version, keyring_errno, descriptor):
+    def ioctl(fd, request, arg):
+        assert fd == 99
+        if request == 0x400C6615:
+            assert len(arg) == 12
+            if policy_errno is not None:
+                raise OSError(policy_errno, "policy")
+            arg[:] = bytes([version, 0, 0, 0]) + bytes.fromhex("00ff010203040506")
+        else:
+            assert request == 0xC0506617
+            assert arg == 0
+            assert keyring_errno is not None
+            raise OSError(keyring_errno, "keyring")
+
+    with monkeypatch.context() as m:
+        open_root = Mock(return_value=99)
+        close_root = Mock()
+        m.setattr(chroot.os, "open", open_root)
+        m.setattr(chroot.os, "close", close_root)
+        m.setattr(chroot.fcntl, "ioctl", ioctl)
+        assert chroot._legacy_fscrypt_descriptor() == descriptor
+    open_root.assert_called_once_with("/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    close_root.assert_called_once_with(99)
+
+
+@pytest.mark.parametrize("found", [True, False])
+def test_termux_keyring_requires_a_matching_rootfs_key(monkeypatch, found):
+    expected = [
+        ((10, -3, b"keyring", b"fscrypt", 0), 31),
+        ((10, 31, b"logon", b"ext4:0123456789abcdef", 0), -1),
+        ((10, 31, b"logon", b"f2fs:0123456789abcdef", 0), -1),
+        ((10, 31, b"logon", b"fscrypt:0123456789abcdef", 0), -1),
+        ((10, -3, b"keyring", b"e4crypt", 0), 32),
+        ((10, 32, b"logon", b"ext4:0123456789abcdef", 0), -1),
+        ((10, 32, b"logon", b"f2fs:0123456789abcdef", 0), 71 if found else -1),
+    ]
+    if found:
+        expected.extend([((8, 32, -2), 0), ((1, None), 42), ((8, 32, 42), 0), ((9, 32, -2), 0)])
+    else:
+        expected.extend(
+            [((10, 32, b"logon", b"fscrypt:0123456789abcdef", 0), -1), ((1, f"_ses.{os.getpid()}".encode()), 42)]
+        )
+    calls = []
+
+    def syscall(nr, *args):
+        assert nr.value == 219
+        values = tuple(arg.value for arg in args)
+        expected_args, result = expected[len(calls)]
+        assert values == expected_args
+        calls.append(values)
+        return result
+
+    monkeypatch.setattr(chroot, "IS_TERMUX", True)
+    monkeypatch.setattr(chroot, "_legacy_fscrypt_descriptor", lambda: b"0123456789abcdef")
+    monkeypatch.setattr(chroot, "syscall_libc", lambda: Mock(syscall=syscall))
+    with patch("chroot_distro.arch.get_device_cpu_arch", return_value="aarch64"):
+        chroot._join_session_keyring()
+    assert len(calls) == len(expected)
+
+
+@pytest.mark.parametrize("failure", [None, "process link", "join", "session link", "unlink"])
+def test_enter_chroot_transfers_keyring_before_guest_setup(monkeypatch, failure):
+    operations = {
+        (8, 31, -2): "process link",
+        (1, None): "join",
+        (8, 31, 42): "session link",
+        (9, 31, -2): "unlink",
+    }
+    order = []
+
+    def syscall(nr, *args):
+        assert nr.value == 219
+        operation = operations[tuple(arg.value for arg in args)]
+        order.append(operation)
+        if operation == failure:
+            ctypes.set_errno(errno.EACCES)
+            return -1
+        return 42 if operation == "join" else 0
+
+    monkeypatch.setattr(chroot, "IS_TERMUX", True)
+    monkeypatch.setattr(chroot, "_legacy_fscrypt_descriptor", lambda: order.append("probe") or b"0123456789abcdef")
+    monkeypatch.setattr(chroot, "_find_legacy_fscrypt_keyring", lambda *a: 31)
+    monkeypatch.setattr(chroot, "syscall_libc", lambda: Mock(syscall=syscall))
+    monkeypatch.setattr(chroot, "get_libc", Mock())
+    monkeypatch.setattr(chroot, "should_set_no_new_privs", lambda: False)
+    monkeypatch.setattr(os, "chroot", lambda path: order.append("chroot"))
+    monkeypatch.setattr(os, "chdir", lambda path: order.append("chdir"))
+    monkeypatch.setattr(chroot, "install_guest_filter", lambda: order.append("seccomp"))
+    monkeypatch.setattr(os, "setuid", lambda uid: order.append("setuid"))
+
+    with patch("chroot_distro.arch.get_device_cpu_arch", return_value="aarch64"):
+        if failure is None:
+            chroot.enter_chroot("/rootfs", uid=1000)
+            assert order == [
+                "chroot",
+                "chdir",
+                "probe",
+                "process link",
+                "join",
+                "session link",
+                "unlink",
+                "seccomp",
+                "setuid",
+            ]
+        else:
+            with pytest.raises(OSError, match="keyctl KEYCTL_") as exc:
+                chroot.enter_chroot("/rootfs", uid=1000)
+            assert exc.value.errno == errno.EACCES
+            steps = list(operations.values())
+            attempted = steps[: steps.index(failure) + 1]
+            if failure in ("join", "session link"):
+                attempted.append("unlink")
+            assert order == ["chroot", "chdir", "probe", *attempted]
 
 
 # ── no_new_privs ────────────────────────────────────────────────────────────────

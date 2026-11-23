@@ -22,6 +22,9 @@ nothing it does to memory reaches the parent. The parent reads to EOF before
 reaping, or output larger than the pipe buffer leaves the child blocked in write(2)
 and never waited for.
 
+For a chrooted exec, the setup callback installs the guest filter after joining
+the session keyring. An exec without a callback installs the filter here.
+
 `filter_accessible_namespaces` exists so a caller can degrade instead of failing:
 whether a namespace file can be opened depends on the kernel, its config and the
 caller's privileges, not on a version number.
@@ -320,10 +323,9 @@ def enter_and_run_with_pty(
 ) -> int:
     """Enter namespaces via native ``setns(2)`` and exec *command* with a PTY.
 
-    *setup* runs in the child once it is in the namespaces and has dropped what
-    it is going to drop, immediately before the exec. It is how a caller puts
-    the child somewhere this module knows nothing about (a chroot, an identity)
-    without handing over an argv for a binary that would do it.
+    *setup* runs in the child after entering the namespaces and owns the
+    chroot, capabilities, filter, and identity change. With no *setup*, this
+    function applies *drop_caps*, the no-new-privs setting, and the guest filter.
 
     *escalate* is the caller's force-exit for a stuck wait, passed to the
     relay and the signal-aware wait unchanged.
@@ -378,25 +380,23 @@ def enter_and_run_with_pty(
                     _, status = os.waitpid(inner_pid, 0)
                     os._exit(os.WEXITSTATUS(status) if os.WIFEXITED(status) else 128 + os.WTERMSIG(status))
 
-            # Drop dangerous capabilities when no user namespace is
-            # providing capability scoping. The no-new-privs prctl is
-            # environment-gated here because the setup callable's chroot runs
-            # after this and cannot rely on still being privileged.
-            if drop_caps:
-                drop_bounding_caps()
-                clear_ambient_caps()
-            from chroot_distro.syscalls.chroot import _set_no_new_privs, should_set_no_new_privs
-
-            if should_set_no_new_privs():
-                _set_no_new_privs()
-            from chroot_distro.syscalls.seccomp import install_guest_filter
-
-            install_guest_filter()
-
             if setup is not None:
                 setup()
+            else:
+                from chroot_distro.syscalls.chroot import _set_no_new_privs, should_set_no_new_privs
+                from chroot_distro.syscalls.seccomp import install_guest_filter
+
+                if drop_caps:
+                    drop_bounding_caps()
+                    clear_ambient_caps()
+                if should_set_no_new_privs():
+                    _set_no_new_privs()
+                install_guest_filter()
 
             _try_exec(command, env if env is not None else dict(os.environ))
+        except OSError as exc:
+            log.error("Could not start guest command: %s", exc)
+            os._exit(127)
         except BaseException:
             os._exit(127)
 

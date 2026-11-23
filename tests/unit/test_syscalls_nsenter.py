@@ -2,7 +2,7 @@ import os
 import subprocess
 from unittest.mock import patch
 
-from chroot_distro.syscalls import nsenter
+from chroot_distro.syscalls import chroot, nsenter, seccomp
 from chroot_distro.syscalls._constants import CLONE_NEWNS, CLONE_NEWUSER
 
 
@@ -56,3 +56,22 @@ def test_enter_namespaces_defers_user_ns():
     # Mount ns entered first (pass 1), user ns last (pass 2).
     assert order[-1] == CLONE_NEWUSER
     assert CLONE_NEWNS in order
+
+
+def test_enter_and_run_leaves_seccomp_to_chroot_setup(monkeypatch):
+    def fake_exit(status):
+        raise AssertionError(f"Unexpected child exit {status}")
+
+    order = []
+    monkeypatch.setattr(os, "isatty", lambda fd: False)
+    monkeypatch.setattr(os, "fork", lambda: 0)
+    monkeypatch.setattr(os, "_exit", fake_exit)
+    monkeypatch.setattr(chroot, "_close_fds_above", lambda keep: None)
+    monkeypatch.setattr(chroot, "_try_exec", lambda *a: order.append("exec"))
+    monkeypatch.setattr(chroot, "_wait_for_child_with_signals", lambda *a, **kw: 0)
+    monkeypatch.setattr(nsenter, "enter_namespaces", lambda *a, **kw: order.append("setns"))
+    monkeypatch.setattr(seccomp, "install_guest_filter", lambda: order.append("seccomp"))
+
+    nsenter.enter_and_run_with_pty(42, CLONE_NEWNS, ["/bin/sh"], setup=lambda: order.append("setup"))
+
+    assert order == ["setns", "setup", "exec"]

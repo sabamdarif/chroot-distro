@@ -209,6 +209,8 @@ On Termux, Android mounts `/data` with `nosuid`, so a default login binds the co
 
 On Termux, guest commands use paths inside the container independently of the host's `termux-exec` preload. Android system partition binds receive mount events from the host and keep guest unmounts local.
 
+When a Termux container's rootfs uses legacy Android file-based encryption, its guest session keyring links to Android's filesystem keyring so the kernel can read the rootfs. That keyring can also contain keys for other Android storage. Android still manages when those keys are available.
+
 A second `login` to a busy container joins the running session and adds whatever extra `--bind`/`--shared-*`/`--env` it asks for, so no `unmount` is needed to bring a folder in. Conflicting `--bind` destinations are ignored with a warning; `--isolated` and `CD_USE_NS` cannot be turned on for a container that is already running.
 
 GPU acceleration needs no flag on regular Linux: AMD/Intel render nodes (`/dev/dri/*`) and a host NVIDIA driver's devices, libraries and tools are bound in automatically. On Termux `login` binds no GPU nodes.

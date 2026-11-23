@@ -714,6 +714,9 @@ def _exec_foreground(fg: ForegroundExec) -> None:
         )
 
         _try_exec(fg.command, fg.env if fg.env is not None else dict(os.environ))
+    except OSError as exc:
+        log.error("Could not start guest command: %s", exc)
+        os._exit(127)
     except BaseException:
         os._exit(127)
 

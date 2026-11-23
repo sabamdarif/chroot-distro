@@ -27,12 +27,12 @@ chroot and this file enters it in the process it already has, which is what keep
 the `chroot /proc/1/root` escape closed and what lets a build step or an isolation
 holder be forked the same way.
 
-A guest also leaves the host's session keyring behind: `_join_session_keyring`
-swaps it for a fresh one while the child is still privileged, so host secrets
-root's keyring holds never reach the guest. Best-effort by design, since a
-container that will not start is worse than one sharing a keyring. The seccomp
-denylist (`syscalls/seccomp.py`) installs last, before the identity change:
-it needs the privilege, and the keyring it denies must already be joined.
+`_join_session_keyring` puts the guest in a fresh session keyring. On Termux,
+a rootfs that uses legacy fscrypt also needs a link to Android's filesystem
+keyring. That link keeps Android in charge of adding and removing its keys.
+Joining is best-effort for ordinary rootfses. A verified legacy fscrypt rootfs
+requires the transfer to succeed. The seccomp denylist (`syscalls/seccomp.py`)
+installs after keyring setup and before the identity change.
 
 `spawn_detached` clears close-on-exec on `keep_fds` deliberately: a caller passing
 a lock descriptor needs the flock to survive the exec, since that is what goes on
@@ -64,7 +64,7 @@ import typing
 
 from chroot_distro.constants import IS_TERMUX
 from chroot_distro.syscalls._constants import PR_SET_NO_NEW_PRIVS
-from chroot_distro.syscalls._libc import get_libc, libc_prctl, syscall_libc
+from chroot_distro.syscalls._libc import check_syscall, get_libc, libc_prctl, syscall_libc
 from chroot_distro.syscalls.capabilities import clear_ambient_caps, drop_bounding_caps
 from chroot_distro.syscalls.seccomp import install_guest_filter
 
@@ -159,6 +159,15 @@ def _close_fds_above(keep: typing.Iterable[int]) -> None:
 # The operation codes (KEYCTL_*) are arch-independent.
 __NR_KEYCTL_BY_ARCH = {"x86_64": 250, "i686": 288, "arm": 311, "aarch64": 219, "riscv64": 219}
 KEYCTL_JOIN_SESSION_KEYRING = 1
+KEYCTL_LINK = 8
+KEYCTL_UNLINK = 9
+KEYCTL_SEARCH = 10
+KEY_SPEC_PROCESS_KEYRING = -2
+KEY_SPEC_SESSION_KEYRING = -3
+
+_FS_IOC_GET_ENCRYPTION_POLICY = 0x400C6615
+_FS_IOC_ADD_ENCRYPTION_KEY = 0xC0506617
+_FSCRYPT_POLICY_V1 = 0
 
 _TRUTHY_ENV = frozenset({"1", "true", "yes", "on"})
 
@@ -179,15 +188,70 @@ def _set_no_new_privs() -> None:
         log.debug("PR_SET_NO_NEW_PRIVS failed: %d", result)
 
 
-def _join_session_keyring() -> None:
-    """Leave the host's session keyring by joining a fresh one.
+def _legacy_fscrypt_descriptor() -> bytes | None:
+    """Read the v1 descriptor if Android's null-argument probe gets ENOTTY."""
+    policy = bytearray(12)
+    try:
+        fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        try:
+            fcntl.ioctl(fd, _FS_IOC_GET_ENCRYPTION_POLICY, policy)
+            if policy[0] != _FSCRYPT_POLICY_V1:
+                return None
+            try:
+                fcntl.ioctl(fd, _FS_IOC_ADD_ENCRYPTION_KEY, 0)
+            except OSError as exc:
+                if exc.errno == errno.ENOTTY:
+                    return policy[4:].hex().encode("ascii")
+                if exc.errno != errno.EFAULT:
+                    log.debug("fscrypt keyring capability probe failed: %s", exc)
+        finally:
+            os.close(fd)
+    except OSError as exc:
+        log.debug("could not read rootfs fscrypt policy: %s", exc)
+    return None
 
-    Runs in the guest child while it still has the privilege to: keyctl(2) is
-    unprivileged-safe, but the point is that the guest never sees the session
-    keyring root carries, which can hold host secrets. Best-effort, because a
-    keyring is a nicety and a kernel without keyctl support (old Android) must
-    not refuse the container a start.
-    """
+
+def _find_legacy_fscrypt_keyring(keyctl: typing.Callable[..., int], descriptor: bytes) -> int | None:
+    for name in (b"fscrypt", b"e4crypt"):
+        keyring = keyctl(
+            KEYCTL_SEARCH,
+            ctypes.c_int(KEY_SPEC_SESSION_KEYRING),
+            ctypes.c_char_p(b"keyring"),
+            ctypes.c_char_p(name),
+            ctypes.c_int(0),
+        )
+        if keyring < 0:
+            continue
+        for prefix in (b"ext4:", b"f2fs:", b"fscrypt:"):
+            key = keyctl(
+                KEYCTL_SEARCH,
+                ctypes.c_int(keyring),
+                ctypes.c_char_p(b"logon"),
+                ctypes.c_char_p(prefix + descriptor),
+                ctypes.c_int(0),
+            )
+            if key > 0:
+                return keyring
+    return None
+
+
+def _transfer_legacy_fscrypt_keyring(keyctl: typing.Callable[..., int], keyring: int) -> None:
+    """Keep possession of Android's keyring across the anonymous session join."""
+    android_ring = ctypes.c_int(keyring)
+    process_ring = ctypes.c_int(KEY_SPEC_PROCESS_KEYRING)
+    check_syscall(keyctl(KEYCTL_LINK, android_ring, process_ring), "keyctl KEYCTL_LINK to process keyring")
+    try:
+        session = keyctl(KEYCTL_JOIN_SESSION_KEYRING, ctypes.c_char_p(None))
+        check_syscall(session, "keyctl KEYCTL_JOIN_SESSION_KEYRING")
+        check_syscall(
+            keyctl(KEYCTL_LINK, android_ring, ctypes.c_int(session)), "keyctl KEYCTL_LINK to guest session keyring"
+        )
+    finally:
+        check_syscall(keyctl(KEYCTL_UNLINK, android_ring, process_ring), "keyctl KEYCTL_UNLINK from process keyring")
+
+
+def _join_session_keyring() -> None:
+    """Leave the inherited session keyring before the guest can execute."""
     from chroot_distro.arch import get_device_cpu_arch
 
     nr = __NR_KEYCTL_BY_ARCH.get(get_device_cpu_arch())
@@ -195,14 +259,20 @@ def _join_session_keyring() -> None:
         log.debug("no keyctl syscall number for arch, keeping inherited keyring")
         return
     libc = syscall_libc()
+
+    def keyctl(command: int, *args: ctypes.c_int | ctypes.c_char_p) -> int:
+        return int(libc.syscall(ctypes.c_long(nr), ctypes.c_int(command), *args))
+
+    descriptor = _legacy_fscrypt_descriptor() if IS_TERMUX else None
+    if descriptor is not None:
+        keyring = _find_legacy_fscrypt_keyring(keyctl, descriptor)
+        if keyring is not None:
+            _transfer_legacy_fscrypt_keyring(keyctl, keyring)
+            return
+
     try:
-        result = libc.syscall(
-            ctypes.c_long(nr),
-            ctypes.c_int(KEYCTL_JOIN_SESSION_KEYRING),
-            ctypes.c_char_p(f"_ses.{os.getpid()}".encode()),
-        )
-        if result == -1:
-            raise OSError(ctypes.get_errno(), "keyctl(2)")
+        result = keyctl(KEYCTL_JOIN_SESSION_KEYRING, ctypes.c_char_p(f"_ses.{os.getpid()}".encode()))
+        check_syscall(result, "keyctl KEYCTL_JOIN_SESSION_KEYRING")
     except OSError as exc:
         log.debug("fresh session keyring unavailable, keeping inherited: %s", exc)
 
@@ -443,6 +513,9 @@ def spawn_detached(
             if setup is not None:
                 setup()
             _try_exec(command, env if env is not None else dict(os.environ))
+        except OSError as exc:
+            log.error("Could not start guest command: %s", exc)
+            os._exit(127)
         except BaseException:
             os._exit(127)
 
