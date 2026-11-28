@@ -1,3 +1,6 @@
+import os
+import signal
+import sys
 from types import SimpleNamespace
 from unittest.mock import ANY, MagicMock, patch
 
@@ -5,9 +8,11 @@ import pytest
 
 from chroot_distro.arch import Platform
 from chroot_distro.commands.build import _resolve_build_isolation_mode
+from chroot_distro.commands.login.chroot_cmd import ChrootConfig
 from chroot_distro.helpers import isolation
 from chroot_distro.helpers.build_engine import run_step
 from chroot_distro.helpers.namespace import NamespaceError
+from chroot_distro.syscalls import CLONE_NEWNS, CLONE_NEWPID, nsenter
 
 
 @pytest.fixture(autouse=True)
@@ -107,6 +112,54 @@ def test_mode_none_uses_run_plain(tmp_path):
     run_in_holder.assert_not_called()
     max_sess.assert_not_called()
     ns_sess.assert_not_called()
+
+
+@pytest.fixture
+def run_holder_step(monkeypatch):
+    if not hasattr(os, "fork"):
+        pytest.skip("requires fork")
+
+    def run(flags, script):
+        env = dict(os.environ)
+
+        def record_entry(pid, namespaces, *, regain_ids):
+            assert namespaces == flags and not regain_ids
+            env["JOINER_PID"] = str(os.getpid())
+
+        monkeypatch.setattr(nsenter, "enter_namespaces", record_entry)
+        monkeypatch.setattr(run_step, "enter_chroot", lambda *args, **kwargs: None)
+        holder = SimpleNamespace(pid=1, _live_ns_flags=lambda: flags)
+        config = ChrootConfig(rootfs="/", command=[sys.executable, "-c", script])
+        return run_step._run_in_holder(holder, config, env)
+
+    return run
+
+
+@pytest.mark.parametrize(("flags", "forked"), [(CLONE_NEWNS, False), (CLONE_NEWNS | CLONE_NEWPID, True)])
+def test_holder_step_forks_after_joining_a_pid_namespace(run_holder_step, flags, forked):
+    script = f"""
+import os, sys
+assert os.getsid(0) == os.getpgrp() == os.getpid()
+assert (os.getpid() != int(os.environ["JOINER_PID"])) == {forked}
+sys.exit(37)
+"""
+    assert run_holder_step(flags, script) == 37
+
+
+def test_pid_namespace_step_relays_a_signal_and_waits_for_the_guest(run_holder_step):
+    script = """
+import os, signal
+signal.signal(signal.SIGTERM, lambda *_: os._exit(42))
+signal.alarm(5)
+os.killpg(int(os.environ["JOINER_PID"]), signal.SIGTERM)
+signal.pause()
+"""
+    assert run_holder_step(CLONE_NEWPID, script) == 42
+
+
+def test_pid_namespace_step_reports_a_guest_killed_by_a_signal(run_holder_step):
+    script = "import os, signal; os.kill(os.getpid(), signal.SIGKILL)"
+    assert run_holder_step(CLONE_NEWPID, script) == 128 + signal.SIGKILL
 
 
 @pytest.mark.parametrize(

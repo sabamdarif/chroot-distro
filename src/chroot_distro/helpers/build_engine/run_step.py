@@ -31,11 +31,12 @@ the step leads and the descendants that daemonise out of it, which land back on
 this process because it makes itself a child subreaper first.
 
 `_exec_chroot` picks between a max isolation holder, a namespace holder and the
-plain host-namespace bind set; a step with stdin and a kernel without
-mount-namespace support both fall back to the plain path. Either way the
-chroot happens in the child, as the last thing before the exec so the namespaces
-are already joined; the stage's pinned descriptor serves the plain path only,
-since under a holder the tree to enter is the holder's.
+plain host-namespace bind set. A step uses the plain path when it has stdin
+or the kernel lacks mount namespaces. PID setns selects the
+namespace for future children, so the joining process forks the command and
+relays signals to its session. The command chroots before exec. The plain
+path uses the stage's pinned descriptor, and the holder path uses the rootfs
+as mounted in the holder's namespace.
 `_require_emulator` gates all of it: `build`'s preflight only sees the Dockerfile's
 own RUN lines, so a foreign-arch step with no binfmt_misc handler is refused here
 instead, which is also what leaves a cached foreign step working (nothing execs for
@@ -92,8 +93,11 @@ from chroot_distro.helpers.layer_diff import (
     write_layer_tar,
 )
 from chroot_distro.message import log_info, warn
+from chroot_distro.syscalls import CLONE_NEWPID
 from chroot_distro.syscalls.chroot import (
     _close_fds_above,
+    _decode_status,
+    _signal_child,
     _try_exec,
     _wait_for_child,
     _wait_for_child_with_signals,
@@ -396,6 +400,26 @@ def _step_stdin(stdin_input: str | None) -> int:
     return fd
 
 
+def _fork_into_pid_namespace() -> None:
+    """Run the command in its own session and relay signals from the outer session."""
+    signals = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+    previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, signals)
+    pid = os.fork()
+    if pid == 0:
+        os.setsid()
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+        return
+
+    def relay(signum: int, _frame: object) -> None:
+        _signal_child(pid, signum)
+
+    for sig in signals:
+        signal.signal(sig, relay)
+    signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+    _, status = os.waitpid(pid, 0)
+    os._exit(_decode_status(status))
+
+
 def _fork_step(
     config: typing.Any,
     env: dict[str, str],
@@ -404,14 +428,15 @@ def _fork_step(
     holder: typing.Any = None,
     rootfs_fd: int | None = None,
 ) -> int:
-    """Fork the step's command and return the child's pid.
+    """Start the step and return the session leader the caller waits for.
 
     The child leads a session of its own, so the process group _stop_step
     sweeps afterwards is the step's and nothing else's. With *rootfs_fd* it
     chroots onto that pinned descriptor rather than onto the rootfs path, so
     the name the build validated is not resolved a second time; the chroot is
     the last thing it does before the exec, since it has to happen after the
-    namespaces are joined.
+    namespaces are joined. A holder's mapped user ID may lack access to the
+    rootfs path, so enter_chroot restores that ID after chroot.
     """
     stdin_fd = _step_stdin(stdin_input)
     try:
@@ -428,9 +453,11 @@ def _fork_step(
             if holder is not None:
                 from chroot_distro.syscalls.nsenter import enter_namespaces
 
-                # The regain is enter_chroot's: the mapped id cannot
-                # necessarily traverse the rootfs path.
-                enter_namespaces(holder.pid, holder._live_ns_flags(), regain_ids=False)
+                _close_fds_above((rootfs_fd,) if rootfs_fd is not None else ())
+                flags = holder._live_ns_flags()
+                enter_namespaces(holder.pid, flags, regain_ids=False)
+                if flags & CLONE_NEWPID:
+                    _fork_into_pid_namespace()
             newroot = config.rootfs
             if rootfs_fd is not None:
                 os.fchdir(rootfs_fd)
