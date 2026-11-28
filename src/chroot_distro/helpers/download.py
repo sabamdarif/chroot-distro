@@ -588,7 +588,10 @@ def retry_http(
                 wait = retry_after(exc)
             if wait is not None:
                 delay = max(retry_delay, math.ceil(min(wait, MAX_RETRY_AFTER)))
-            log_info(f"{what}: attempt {attempt + 1}/{max_retries} failed ({exc}); retrying in {delay}s...")
+            if isinstance(exc, urllib.error.HTTPError):
+                exc.close()
+            failure = _download_failure(exc)
+            log_info(f"{what}: attempt {attempt + 1}/{max_retries} failed ({failure}); retrying in {delay}s...")
             if abort_event is not None:
                 _interruptible_sleep(delay, abort_event)
             else:

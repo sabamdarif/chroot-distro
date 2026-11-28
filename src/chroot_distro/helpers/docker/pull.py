@@ -12,11 +12,10 @@ The rootfs arrives as a *descriptor*, not a path. `install` walks
 `containers/<name>/rootfs` with O_NOFOLLOW and hands the result straight down, so no
 name between that check and the last tar member written is resolved a second time.
 
-The Accept header asks for all four manifest types. An index or manifest list is narrowed by
-`_pick_platform`: os must be linux, architecture must match, and a variant matches
-either exactly or when the entry declares none. A miss falls back to any linux entry
-for the architecture, and only then fails, listing what the image does offer, since
-"no image for aarch64" is unhelpful without that. The `Content-Type` header wins over
+The Accept header asks for all four manifest types. Nested indexes can supply
+platform fields inherited by their children. The chosen image must match the
+requested Linux architecture, with an exact variant preferred over an omitted
+one. The `Content-Type` header wins over
 the body's own `mediaType` for deciding which shape arrived, kept as `_ct` on the
 parsed dict, and the digest of the bytes that arrived is kept beside it as `_digest`,
 which is what a build records as the base image it resolved to. Both are private keys
@@ -24,10 +23,8 @@ a caller strips before a manifest goes back to a registry (`push._strip_private_
 Selected child manifests and config blobs must match the descriptor size and SHA-256
 digest over the received bytes. Both documents must pass before the cache is updated.
 
-Layer order is the one thing that cannot be relaxed. Downloads run in parallel across
-`layer_download_workers()`, but application is strictly sequential, because a later
-layer's whiteouts and overwrites only mean anything against the tree the earlier ones
-built.
+Each missing digest gets one download, up to `layer_download_workers()` in
+parallel. Every manifest position is applied in order, including repeated layers.
 
 Failures are translated where the HTTP status is known and left alone otherwise: 401
 and 403 become the credential message, 404 becomes "does not exist", and a cache miss
@@ -39,7 +36,6 @@ import contextlib
 import hashlib
 import json
 import os
-import re
 import signal
 import threading
 import typing
@@ -50,7 +46,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from chroot_distro.arch import Platform
 from chroot_distro.constants import layer_download_workers
 from chroot_distro.helpers.docker.cache import (
-    all_layers_cached,
     layer_cache_path,
     load_manifest_cache,
     save_manifest_cache,
@@ -61,6 +56,9 @@ from chroot_distro.helpers.docker.media import (
     DOCKER_MANIFEST_MEDIA,
     OCI_INDEX_MEDIA,
     OCI_MANIFEST_MEDIA,
+    manifest_layers,
+    normalized_variant,
+    read_descriptor,
 )
 from chroot_distro.helpers.docker.refs import parse_image_ref, parse_reference
 from chroot_distro.helpers.docker.transport import (
@@ -72,6 +70,7 @@ from chroot_distro.helpers.docker.transport import (
     opener,
     rate_limited_msg,
     registry_base_url,
+    registry_failure,
 )
 from chroot_distro.helpers.download import (
     MAX_METADATA_BYTES,
@@ -82,15 +81,14 @@ from chroot_distro.helpers.download import (
     require_complete_body,
     retry_http,
 )
-from chroot_distro.message import log_error, log_info
+from chroot_distro.message import log_error, log_info, quote_path
 from chroot_distro.progress import AggregateByteProgress, fmt_size
 
-_MANIFEST_LIST_TYPES = frozenset(
-    {
-        DOCKER_MANIFEST_LIST_MEDIA,
-        OCI_INDEX_MEDIA,
-    }
-)
+_MANIFEST_LIST_TYPES = (DOCKER_MANIFEST_LIST_MEDIA, OCI_INDEX_MEDIA)
+_INDEX_ENTRY_TYPES = (*_MANIFEST_LIST_TYPES, OCI_MANIFEST_MEDIA, DOCKER_MANIFEST_MEDIA)
+_MAX_INDEX_DEPTH = 16
+_MAX_INDEX_FETCHES = 128
+_PLATFORM_FIELDS = ("os", "architecture", "variant")
 
 _ACCEPT_HEADER = ", ".join(
     [
@@ -106,13 +104,10 @@ def _layer_short_id(digest: str) -> str:
     return digest.rsplit(":", maxsplit=1)[-1][:12]
 
 
-def _check_layer_media_type(layer: dict[str, typing.Any], layer_index: int, n_layers: int) -> None:
-    pass
-
-
 def _download_layers_parallel(
     repo: str,
     layers: list[dict[str, typing.Any]],
+    sizes: dict[str, int | None],
     auth: str,
     base: str,
     image_ref: str,
@@ -120,22 +115,25 @@ def _download_layers_parallel(
 ) -> None:
     """Download uncached layers, using a thread pool when more than one is missing."""
     n_layers = len(layers)
-    pending: list[tuple[int, dict[str, typing.Any]]] = []
+    pending: list[tuple[int, str]] = []
+    seen: set[str] = set()
 
     for i, layer in enumerate(layers):
-        _check_layer_media_type(layer, i, n_layers)
         digest = layer["digest"]
+        if digest in seen:
+            continue
+        seen.add(digest)
         short_id = _layer_short_id(digest)
         if os.path.isfile(layer_cache_path(digest)):
             log_info(f"{short_id}: Layer {i + 1}/{n_layers} already cached, skipping download.")
         else:
-            pending.append((i, layer))
+            pending.append((i, digest))
 
     if not pending:
         return
 
     parallel = len(pending) > 1
-    total_bytes = sum(layer.get("size", 0) or 0 for _, layer in pending) if parallel else 0
+    total_bytes = sum(sizes[digest] or 0 for _, digest in pending) if parallel else 0
     aggregate = AggregateByteProgress(total_bytes, label="layers") if parallel else None
     abort_event = threading.Event()
     # Shared registry of in-flight HTTP responses. On SIGINT we force-close
@@ -152,11 +150,10 @@ def _download_layers_parallel(
         workers_limit if len(pending) == 1 else max(1, workers_limit // min(len(pending), workers_limit))
     )
 
-    def _download_one(item: tuple[int, dict[str, typing.Any]]) -> None:
-        i, layer = item
-        digest = layer["digest"]
+    def _download_one(item: tuple[int, str]) -> None:
+        i, digest = item
         short_id = _layer_short_id(digest)
-        size = layer.get("size", 0)
+        size = sizes[digest]
         size_str = f" ({fmt_size(size)})" if size else ""
         log_info(f"{short_id}: Downloading layer {i + 1}/{n_layers}{size_str}...")
         try:
@@ -170,15 +167,17 @@ def _download_layers_parallel(
                 live_responses=live_responses,
                 connections=connections_per_layer,
                 insecure=insecure,
+                expected_size=size,
             )
         except urllib.error.HTTPError as dl_err:
             if dl_err.code in (401, 403):
                 raise RuntimeError(auth_denied_msg(image_ref, dl_err.code)) from dl_err
             if dl_err.code == 429:
                 raise RuntimeError(rate_limited_msg(image_ref, parse_image_ref(image_ref), dl_err)) from dl_err
-            raise
+            raise RuntimeError(f"Could not download layer {i + 1}/{n_layers}: {registry_failure(dl_err)}") from dl_err
         except NETWORK_ERRORS as dl_err:
-            raise RuntimeError(f"Network error downloading layer {i + 1}/{n_layers} ({short_id}): {dl_err}") from dl_err
+            failure = registry_failure(dl_err)
+            raise RuntimeError(f"Network error downloading layer {i + 1}/{n_layers} ({short_id}): {failure}") from dl_err
 
     def _on_sigint(_signum, _frame):
         abort_event.set()
@@ -218,20 +217,6 @@ def _download_layers_parallel(
             signal.signal(signal.SIGINT, prev_sigint)
         if aggregate is not None:
             aggregate.clear()
-
-
-def _read_descriptor(
-    descriptor: object, label: str, *, max_size: int = MAX_METADATA_BYTES, default_size: int | None = None
-) -> tuple[str, int]:
-    if not isinstance(descriptor, dict):
-        raise RuntimeError(f"{label} descriptor must be an object.")
-    digest = descriptor.get("digest")
-    if not isinstance(digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
-        raise RuntimeError(f"{label} descriptor must have a lowercase SHA-256 digest.")
-    size = descriptor.get("size", default_size)
-    if type(size) is not int or not 0 <= size <= max_size:
-        raise RuntimeError(f"{label} descriptor has an invalid size.")
-    return digest, size
 
 
 def _fetch_metadata(
@@ -284,90 +269,161 @@ def _get_manifest(
     return data
 
 
-def _pick_platform(
-    entries: object, arch: str, variant: str, image_ref: str
-) -> dict[str, typing.Any]:
-    """Find the manifest list entry matching arch (and optionally variant)."""
+def _index_entries(entries: object) -> list[dict[str, typing.Any]]:
     if not isinstance(entries, list):
         raise RuntimeError("Manifest index field 'manifests' must be a list.")
     for entry in entries:
         if not isinstance(entry, dict):
             raise RuntimeError("Manifest index entries must be objects.")
-        plat = entry.get("platform", {})
-        if not isinstance(plat, dict) or any(
-            key in plat and not isinstance(plat[key], str) for key in ("os", "architecture", "variant")
-        ):
-            raise RuntimeError("Manifest index platform must be an object with string fields.")
-    descriptors = typing.cast(list[dict[str, typing.Any]], entries)
-    for entry in descriptors:
-        plat = entry.get("platform", {})
-        if plat.get("os", "linux") != "linux":
-            continue
-        if plat.get("architecture") != arch:
-            continue
-        if variant and plat.get("variant", "") not in (variant, ""):
-            continue
-        return entry
+    return entries
 
-    # Fallback: any linux entry for the arch, whatever its variant.
-    for entry in descriptors:
-        plat = entry.get("platform", {})
-        if plat.get("os", "linux") == "linux" and plat.get("architecture") == arch:
-            return entry
 
-    available = []
-    for e in descriptors:
-        plat = e.get("platform", {})
-        if plat.get("os", "linux") != "linux":
-            continue
-        a = plat.get("architecture", "?")
-        v = plat.get("variant", "")
-        available.append(f"{a}/{v}" if v else a)
-    raise RuntimeError(
-        f"No image found for architecture '{arch}' in '{image_ref}'. "
-        f"Available Linux platforms: {', '.join(available) or 'none'}"
+def _platform_fields(data: object, label: str) -> dict[str, str]:
+    if not isinstance(data, dict):
+        raise RuntimeError(f"{label} must be an object with string fields.")
+    for key in _PLATFORM_FIELDS:
+        if key in data and not isinstance(data[key], str):
+            raise RuntimeError(f"{label} must be an object with string fields (invalid {key}).")
+    return {key: data[key] for key in _PLATFORM_FIELDS if data.get(key)}
+
+
+def _merge_platform(
+    inherited: dict[str, str], declared: dict[str, str], platform: Platform, label: str
+) -> dict[str, str]:
+    fields = inherited | declared
+    arch = fields.get("architecture", platform.architecture)
+    for key in inherited.keys() & declared.keys():
+        old, new = inherited[key], declared[key]
+        if key == "variant":
+            old, new = normalized_variant(arch, old), normalized_variant(arch, new)
+        if old != new:
+            raise RuntimeError(f"{label} disagrees with its index platform on {key}.")
+    return fields
+
+
+def _matches_platform(fields: dict[str, str], platform: Platform) -> bool:
+    variant = fields.get("variant")
+    return (
+        fields.get("os", platform.os) == platform.os
+        and fields.get("architecture", platform.architecture) == platform.architecture
+        and (variant is None or normalized_variant(platform.architecture, variant) == platform.variant)
     )
 
 
-def _resolve_single_manifest(
-    image_ref: str, platform: Platform, insecure: bool = False
-) -> tuple[dict[str, typing.Any], str, str, str]:
-    """Return (single_image_manifest, auth, repo, base) for the platform."""
+def _is_index(manifest: dict[str, typing.Any]) -> bool:
+    return manifest["_ct"] in _MANIFEST_LIST_TYPES or "manifests" in manifest
+
+
+class _Image(typing.NamedTuple):
+    manifest: dict[str, typing.Any]
+    config: dict[str, typing.Any]
+    layers: list[dict[str, typing.Any]]
+    sizes: dict[str, int | None]
+
+
+def _resolve_image(image_ref: str, platform: Platform, insecure: bool = False) -> tuple[_Image, str, str]:
+    """Resolve and verify the selected manifest and config."""
     parsed = parse_reference(image_ref)
     registry, repo, tag = parsed.registry, parsed.repo, parsed.manifest_ref
 
     log_info(f"Authenticating with registry{auth_note()}...")
     auth, base = get_auth_token(repo, registry, insecure=insecure)
 
+    def _read_image(manifest: dict[str, typing.Any]) -> _Image:
+        layers, sizes = manifest_layers(manifest, size_optional=True)
+        try:
+            config = _fetch_config_blob(repo, manifest.get("config"), auth, base, insecure=insecure)
+        except urllib.error.HTTPError as exc:
+            if exc.code in (401, 403):
+                raise RuntimeError(auth_denied_msg(image_ref, exc.code)) from exc
+            if exc.code == 429:
+                ref = (registry, repo, tag)
+                raise RuntimeError(rate_limited_msg(image_ref, ref, exc)) from exc
+            raise RuntimeError(f"Could not fetch image config for '{image_ref}': {registry_failure(exc)}") from exc
+        except NETWORK_ERRORS as exc:
+            raise RuntimeError(f"Could not fetch image config for '{image_ref}': {registry_failure(exc)}") from exc
+        return _Image(manifest, config, layers, sizes)
+
     log_info(f"Fetching manifest for '{image_ref}'...")
     manifest = _get_manifest(repo, tag, auth, base, insecure=insecure)
+    if manifest.get("artifactType"):
+        raise RuntimeError(f"'{image_ref}' is an artifact rather than an image.")
+    if not _is_index(manifest):
+        image = _read_image(manifest)
+        if not _matches_platform(_platform_fields(image.config, "Image config"), platform):
+            raise RuntimeError(f"Image config does not match the requested platform '{platform}'.")
+        return image, auth, base
 
-    if manifest["_ct"] in _MANIFEST_LIST_TYPES or "manifests" in manifest:
-        target = _pick_platform(
-            manifest.get("manifests"),
-            platform.architecture,
-            platform.variant,
-            image_ref,
-        )
-        digest, size = _read_descriptor(target, "Child manifest")
-        log_info(f"Fetching {platform} manifest...")
-        manifest = _get_manifest(repo, digest, auth, base, insecure=insecure, expected_size=size)
+    seen: set[tuple[str, int, tuple[tuple[str, str], ...]]] = set()
+    available: dict[str, None] = {}
 
-    return manifest, auth, repo, base
+    def _candidates(
+        index: dict[str, typing.Any], inherited: dict[str, str], depth: int
+    ) -> typing.Iterator[tuple[_Image, dict[str, str]]]:
+        if depth >= _MAX_INDEX_DEPTH:
+            raise RuntimeError("Registry image index nesting is too deep.")
+        candidates = []
+        for entry in _index_entries(index.get("manifests")):
+            media = entry.get("mediaType")
+            if entry.get("artifactType") or (media is not None and media not in _INDEX_ENTRY_TYPES):
+                continue
+            declared = _platform_fields(entry.get("platform", {}), "Manifest index platform")
+            fields = _merge_platform(inherited, declared, platform, "Nested descriptor")
+            arch, variant = fields.get("architecture"), fields.get("variant")
+            if arch and fields.get("os", "linux") == "linux" and len(available) < 20:
+                available.setdefault(f"{arch}/{variant}" if variant else arch, None)
+            if _matches_platform(fields, platform):
+                candidates.append((entry, fields, media))
+        if platform.variant:
+            candidates.sort(key=lambda candidate: "variant" not in candidate[1])
+
+        for entry, fields, media in candidates:
+            digest, size = read_descriptor(entry, "Child manifest", max_size=MAX_METADATA_BYTES)
+            assert size is not None
+            key = (digest, size, tuple(sorted(fields.items())))
+            if key in seen:
+                continue
+            if len(seen) >= _MAX_INDEX_FETCHES:
+                raise RuntimeError("Registry image index contains too many candidate manifests.")
+            seen.add(key)
+            log_info(f"Fetching {platform} manifest...")
+            child = _get_manifest(repo, digest, auth, base, insecure=insecure, expected_size=size)
+            if child.get("artifactType"):
+                continue
+            if _is_index(child) or media in _MANIFEST_LIST_TYPES:
+                yield from _candidates(child, fields, depth + 1)
+                continue
+            image = _read_image(child)
+            config_fields = _platform_fields(image.config, "Image config")
+            resolved = _merge_platform(fields, config_fields, platform, "Image config")
+            if resolved.get("architecture") and _matches_platform(resolved, platform):
+                yield image, resolved
+
+    fallback = None
+    for image, fields in _candidates(manifest, {}, 0):
+        if not platform.variant or fields.get("variant"):
+            return image, auth, base
+        if fallback is None:
+            fallback = image
+    if fallback is not None:
+        return fallback, auth, base
+    platforms = ", ".join(quote_path(item) for item in available) or "none"
+    raise RuntimeError(
+        f"No image found for '{platform}' in '{image_ref}'. Available Linux platforms: {platforms}"
+    )
 
 
 def _fetch_config_blob(
     repo: str, descriptor: object, auth: str, base: str, insecure: bool = False
 ) -> dict[str, typing.Any]:
     """Fetch and verify the config named by an image manifest."""
-    digest, size = _read_descriptor(descriptor, "Image config")
+    digest, size = read_descriptor(descriptor, "Image config", max_size=MAX_METADATA_BYTES)
+    assert size is not None
     headers = _ua()
     if auth:
         headers["Authorization"] = auth
     req = new_request(f"{base}/v2/{repo}/blobs/{digest}", headers=headers)
     config, _, _ = _fetch_metadata(req, "Image config", insecure, (digest, size))
-    if "architecture" in config and not isinstance(config["architecture"], str):
-        raise RuntimeError("Image config architecture must be a string.")
     if config.get("config") is not None and not isinstance(config["config"], dict):
         raise RuntimeError("Image config field 'config' must be an object or null.")
     return config
@@ -399,17 +455,16 @@ def pull_image(image_ref: str, rootfs_fd: int, platform: Platform, insecure: boo
     registry, repo = parsed.registry, parsed.repo
     ref = (parsed.registry, parsed.repo, parsed.tag)
     manifest, _cached_repo, image_config = load_manifest_cache(image_ref, platform)
-    cache_miss = manifest is None
     # Docker Hub is verified HTTPS whatever --allow-insecure says; decided
     # here, once, so no request below can use the insecure opener for it.
     insecure = insecure_for(registry, insecure)
 
     if manifest is not None:
-        layers = manifest.get("layers", [])
-        if all_layers_cached(layers):
+        layers, sizes = manifest_layers(manifest, size_optional=True)
+        missing = sum(not os.path.isfile(layer_cache_path(digest)) for digest in sizes)
+        if not missing:
             log_info(f"Image '{image_ref}' ({platform}) is cached.")
         else:
-            missing = sum(1 for layer in layers if not os.path.isfile(layer_cache_path(layer["digest"])))
             log_info(f"Downloading {missing} missing layer(s) for '{image_ref}' ({platform})...")
             try:
                 log_info(f"Authenticating with registry{auth_note()}...")
@@ -425,12 +480,13 @@ def pull_image(image_ref: str, rootfs_fd: int, platform: Platform, insecure: boo
                             f"Image not found: '{image_ref}' does not exist on the registry."
                         ) from net_err
                 log_error(
-                    f"{missing} of {len(layers)} layer(s) for '{image_ref}' ({platform}) are not in the local cache."
+                    f"{missing} of {len(sizes)} layer blob(s) for '{image_ref}' ({platform}) are not in the local cache."
                 )
-                raise RuntimeError(f"Network error: {net_err}") from net_err
+                raise RuntimeError(f"Network error: {registry_failure(net_err)}") from net_err
     else:
         try:
-            manifest, auth, repo, base = _resolve_single_manifest(image_ref, platform, insecure=insecure)
+            image, auth, base = _resolve_image(image_ref, platform, insecure=insecure)
+            manifest, image_config, layers, sizes = image
         except NETWORK_ERRORS as net_err:
             if isinstance(net_err, urllib.error.HTTPError):
                 if net_err.code in (401, 403):
@@ -440,32 +496,14 @@ def pull_image(image_ref: str, rootfs_fd: int, platform: Platform, insecure: boo
                 if net_err.code == 404:
                     raise RuntimeError(f"Image not found: '{image_ref}' does not exist on the registry.") from net_err
             log_error(f"No cached manifest found for '{image_ref}' ({platform}).")
-            raise RuntimeError(f"Network error: {net_err}") from net_err
-    layers = manifest.get("layers", [])
-    if not isinstance(layers, list):
-        raise RuntimeError("Manifest field 'layers' must be a list.")
-    if not layers:
-        raise RuntimeError(f"Manifest for '{image_ref}' contains no filesystem layers.")
+            raise RuntimeError(f"Network error: {registry_failure(net_err)}") from net_err
+        save_manifest_cache(image_ref, platform, manifest, repo, image_config)
 
     if base is None:
         base = registry_base_url(registry, insecure=insecure)
 
-    if cache_miss:
-        for layer in layers:
-            _read_descriptor(layer, "Layer", max_size=2**63 - 1, default_size=0)
-        try:
-            image_config = _fetch_config_blob(repo, manifest.get("config"), auth, base, insecure=insecure)
-        except NETWORK_ERRORS as net_err:
-            if isinstance(net_err, urllib.error.HTTPError):
-                if net_err.code in (401, 403):
-                    raise RuntimeError(auth_denied_msg(image_ref, net_err.code)) from net_err
-                if net_err.code == 429:
-                    raise RuntimeError(rate_limited_msg(image_ref, ref, net_err)) from net_err
-            raise RuntimeError(f"Could not fetch image config for '{image_ref}': {net_err}") from net_err
-        save_manifest_cache(image_ref, platform, manifest, repo, image_config)
-
     n_layers = len(layers)
-    _download_layers_parallel(repo, layers, auth, base, image_ref, insecure=insecure)
+    _download_layers_parallel(repo, layers, sizes, auth, base, image_ref, insecure=insecure)
 
     for i, layer in enumerate(layers):
         digest = layer["digest"]

@@ -118,10 +118,12 @@ on a different CPU.
 Archives and image layers must contain a complete tar stream. Compressed
 archives must also have a complete compression stream.
 
-When fetching an image from a registry, install and build verify the selected
-index entry's manifest and the image config against their declared sizes and
-SHA-256 digests. If either fetch or verification fails, the pull stops before
-saving the manifest and config to the cache.
+When fetching an image from a registry, install and build look for the requested
+Linux architecture in the index, including nested indexes. An exact CPU variant
+takes precedence over an omitted variant. They verify the selected manifest
+and image config against the declared sizes and SHA-256 digests before caching
+them. Fresh layer downloads are also verified before their cache files become
+visible.
 
 When installing a backup, `install` extracts only its container's rootfs tree
 and uses the matching manifest when present. Backups without a manifest can
@@ -634,7 +636,14 @@ Both backends hold the same document with a `build-cache.json` listing the steps
 chroot-distro push [OPTIONS] IMAGE
 ```
 
-Upload an image you built with `build -t` to Docker Hub or another registry. Layers already on the registry are skipped.
+Upload an image you built with `build -t` to Docker Hub or another registry.
+Layers already on the registry are skipped. Images built from `scratch` with
+no filesystem layers can be pushed too.
+
+Each push publishes one platform to the tag. For a multi-platform build, use
+`--architecture` to choose the platform. Pushing another platform to the same
+tag replaces that tag's manifest. Use `build -o` to write an OCI archive with
+the multi-platform index.
 
 | Option                      | Description                                                                                                                                                |
 | --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |

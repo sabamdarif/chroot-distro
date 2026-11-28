@@ -107,14 +107,14 @@ def download_blob(
     live_responses: "_LiveResponses | None" = None,
     connections: int = 1,
     insecure: bool = False,
+    expected_size: int | None = None,
 ) -> str:
     """Download a blob to the layer cache; return the local file path.
 
     *auth* is the Authorization value transport.get_auth_token() resolved,
     or '' for none.
 
-    Streams the bytes through sha256 and verifies the result against the
-    expected *digest* before promoting the .tmp file.
+    Checks the SHA-256 digest and any declared size before publishing the file.
 
     Retries up to the configured retry limit times on transient network / SSL
     failures with exponential backoff.
@@ -266,6 +266,10 @@ def download_blob(
                                         shutil.copyfileobj(inp, out, length=1 << 20)
                                 out.flush()
                                 os.fsync(out.fileno())
+                                downloaded = out.tell()
+
+                            if expected_size is not None and downloaded != expected_size:
+                                raise RuntimeError(f"Layer size mismatch for {digest}: expected {expected_size} bytes.")
 
                             # Still inside the atomic_replace block, so a digest
                             # mismatch raises before the rename publishes it.
@@ -329,6 +333,8 @@ def download_blob(
                         chunk = resp.read(_READ_CHUNK)
                         if not chunk:
                             break
+                        if expected_size is not None and downloaded + len(chunk) > expected_size:
+                            raise RuntimeError(f"Layer size mismatch for {digest}: expected {expected_size} bytes.")
                         fh.write(chunk)
                         hasher.update(chunk)
                         chunk_len = len(chunk)
@@ -344,6 +350,8 @@ def download_blob(
                             draw_bytes_bar(downloaded, total, noun="downloaded")
                     if byte_progress is not None and unsent:
                         byte_progress.add(unsent)
+                    if expected_size is not None and downloaded != expected_size:
+                        raise RuntimeError(f"Layer size mismatch for {digest}: expected {expected_size} bytes.")
                     fh.flush()
                     os.fsync(fh.fileno())
                 finally:

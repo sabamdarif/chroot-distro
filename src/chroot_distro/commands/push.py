@@ -24,6 +24,7 @@ from chroot_distro.helpers.docker import (
     push_image,
     with_explicit_tag,
 )
+from chroot_distro.helpers.docker.transport import registry_failure
 from chroot_distro.helpers.download import NETWORK_ERRORS
 from chroot_distro.locking import BuildLock
 from chroot_distro.message import C, crit_error, log_error, log_info, msg, quote_path
@@ -93,7 +94,7 @@ def command_push(args: typing.Any) -> None:
         if sys.stderr.isatty():
             sys.stderr.write("\r\033[K")
             sys.stderr.flush()
-        log_error(f"Network error: {exc}")
+        log_error(f"Network error: {registry_failure(exc)}")
         sys.exit(1)
     except RuntimeError as exc:
         if sys.stderr.isatty():

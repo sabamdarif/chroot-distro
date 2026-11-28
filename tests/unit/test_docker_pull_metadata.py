@@ -14,7 +14,7 @@ import pytest
 
 from chroot_distro.arch import Platform
 from chroot_distro.helpers import download
-from chroot_distro.helpers.docker import cache, pull
+from chroot_distro.helpers.docker import cache, layers, pull
 from chroot_distro.helpers.docker.media import OCI_INDEX_MEDIA, OCI_MANIFEST_MEDIA
 
 BASE = "https://registry.example"
@@ -60,7 +60,7 @@ def registry(tmp_path, monkeypatch):
     routes = {}
     requests = []
 
-    def open_response(req):
+    def open_response(req, **_kwargs):
         assert req.get_header("Authorization") == "Bearer fixture"
         requests.append(req.full_url)
         result = routes[req.full_url].pop(0)
@@ -71,19 +71,21 @@ def registry(tmp_path, monkeypatch):
     monkeypatch.setattr(pull, "opener", lambda insecure: SimpleNamespace(open=open_response))
     download_layers = Mock()
     apply_layer = Mock()
+    original_download_layers = pull._download_layers_parallel
     monkeypatch.setattr(pull, "_download_layers_parallel", download_layers)
     monkeypatch.setattr(pull, "apply_layer", apply_layer)
 
-    def pull_image():
+    def pull_image(platform=PLATFORM):
         root_fd = os.open(root, os.O_RDONLY)
         try:
-            return pull.pull_image(REF, root_fd, PLATFORM)
+            return pull.pull_image(REF, root_fd, platform)
         finally:
             os.close(root_fd)
 
     return SimpleNamespace(
         routes=routes, requests=requests, pull=pull_image, manifest_dir=manifest_dir,
         download_layers=download_layers, apply_layer=apply_layer,
+        open_response=open_response, original_download_layers=original_download_layers,
     )
 
 
@@ -234,3 +236,128 @@ def test_retries_truncated_config_before_checking_descriptor(registry, monkeypat
     registry.routes[url] = [_response(CONFIG[:-1], length=len(CONFIG)), _response(CONFIG)]
     assert registry.pull()["image_config"] == json.loads(CONFIG)
     assert registry.requests == [TAG, url, url]
+
+
+def _serve_manifest(registry, config, media=OCI_MANIFEST_MEDIA, layers=None):
+    if media == OCI_INDEX_MEDIA:
+        body = json.dumps({"manifests": config}).encode()
+    else:
+        config_descriptor = _descriptor(config)
+        registry.routes[API + "/blobs/" + config_descriptor["digest"]] = [_response(config)]
+        body = _manifest(config_descriptor, [] if layers is None else layers)
+    descriptor = {**_descriptor(body), "mediaType": media}
+    registry.routes[API + "/manifests/" + descriptor["digest"]] = [_response(body, media)]
+    return descriptor
+
+
+def _serve_index(registry, *entries):
+    registry.routes[TAG] = [_response(json.dumps({"manifests": entries}).encode(), OCI_INDEX_MEDIA)]
+
+
+def test_nested_arm_index_prefers_exact_variant_and_ignores_unrelated_entries(registry):
+    variant = b'{"os":"linux","architecture":"arm","variant":"v7","config":{"Env":["CHOICE=exact"]}}'
+    leaf = {**_serve_manifest(registry, variant), "platform": {"variant": "v7"}}
+    nested = {
+        **_serve_manifest(registry, [leaf], OCI_INDEX_MEDIA),
+        "platform": {"os": "linux", "architecture": "arm", "variant": "v7"},
+    }
+    _serve_index(
+        registry,
+        {"platform": {"os": "linux", "architecture": "arm"}},
+        {"platform": {"os": "linux", "architecture": "arm", "variant": "v6"}},
+        {"mediaType": "application/vnd.example.other", "platform": {"architecture": "arm", "variant": "v7"}},
+        {"platform": {"os": "windows", "architecture": "arm", "variant": "v7"}},
+        nested,
+    )
+
+    image = registry.pull(Platform("linux", "arm", "v7"))
+
+    assert image["image_config"] == json.loads(variant)
+    assert image["manifest"]["layers"] == []
+    assert registry.requests == [
+        TAG, API + "/manifests/" + nested["digest"], API + "/manifests/" + leaf["digest"],
+        API + "/blobs/" + _descriptor(variant)["digest"],
+    ]
+    registry.apply_layer.assert_not_called()
+
+
+def test_arm_variant_can_fall_back_to_an_unspecified_variant(registry):
+    config = b'{"os":"linux","architecture":"arm"}'
+    leaf = _serve_manifest(registry, config)
+    _serve_index(registry, {**leaf, "platform": {"architecture": "arm"}})
+    assert registry.pull(Platform("linux", "arm", "v7"))["image_config"] == json.loads(config)
+
+
+def test_arm_variant_refuses_explicit_wrong_variant_without_fetching_leaf(registry):
+    _serve_index(registry, {"platform": {"os": "linux", "architecture": "arm", "variant": "v6"}})
+    with pytest.raises(RuntimeError, match=r"No image found.*linux/arm/v7.*arm/v6"):
+        registry.pull(Platform("linux", "arm", "v7"))
+    assert registry.requests == [TAG]
+    assert not list(registry.manifest_dir.iterdir())
+
+
+@pytest.mark.parametrize("indexed", [False, True])
+def test_config_must_match_the_requested_and_declared_platform(registry, indexed):
+    config = b'{"os":"linux","architecture":"arm64"}'
+    if indexed:
+        leaf = _serve_manifest(registry, config)
+        _serve_index(registry, {**leaf, "platform": {"architecture": "amd64"}})
+    else:
+        descriptor = _descriptor(config)
+        registry.routes[TAG] = [_response(_manifest(descriptor))]
+        registry.routes[API + "/blobs/" + descriptor["digest"]] = [_response(config)]
+    _failed_pull(registry, "Image config (disagrees with its index|does not match the requested) platform")
+
+
+def test_nested_index_traversal_is_bounded(registry, monkeypatch):
+    nested = _serve_manifest(registry, [], OCI_INDEX_MEDIA)
+    _serve_index(registry, nested)
+    monkeypatch.setattr(pull, "_MAX_INDEX_DEPTH", 1)
+    _failed_pull(registry, "index nesting is too deep")
+
+
+def test_repeated_layer_descriptors_fetch_once_and_apply_all_positions(registry, monkeypatch):
+    first_body, second_body = b"first layer", b"second layer"
+    first, second = _descriptor(first_body), _descriptor(second_body)
+    config = _descriptor(CONFIG)
+    registry.routes[TAG] = [_response(_manifest(config, [{"digest": first["digest"]}, second, first]))]
+    registry.routes[API + "/blobs/" + config["digest"]] = [_response(CONFIG)]
+    for descriptor, body in [(first, first_body), (second, second_body)]:
+        registry.routes[API + "/blobs/" + descriptor["digest"]] = [_response(body)]
+    monkeypatch.setattr(pull, "_download_layers_parallel", registry.original_download_layers)
+    monkeypatch.setattr(pull, "layer_download_workers", lambda: 2)
+    monkeypatch.setattr(layers, "auth_opener", lambda: SimpleNamespace(open=registry.open_response))
+
+    registry.pull()
+
+    assert registry.requests.count(API + "/blobs/" + first["digest"]) == 1
+    assert registry.requests.count(API + "/blobs/" + second["digest"]) == 1
+    actual = [call.args[0] for call in registry.apply_layer.call_args_list]
+    assert actual == [cache.layer_cache_path(item["digest"]) for item in (first, second, first)]
+
+
+def test_repeated_layer_rejects_conflicting_sizes_before_fetching_config(registry):
+    first = {"digest": LAYER_DIGEST, "size": 1}
+    second = {**first, "size": 2}
+    registry.routes[TAG] = [_response(_manifest(_descriptor(CONFIG), [first, second]))]
+    _failed_pull(registry, "Layer descriptors disagree on the size")
+    assert registry.requests == [TAG]
+
+
+def test_fresh_layer_wrong_size_is_never_published_even_with_correct_digest(registry, monkeypatch):
+    body = b"layer"
+    layer = _descriptor(body)
+    layer["size"] += 1
+    config = _descriptor(CONFIG)
+    registry.routes[TAG] = [_response(_manifest(config, [layer]))]
+    registry.routes[API + "/blobs/" + config["digest"]] = [_response(CONFIG)]
+    registry.routes[API + "/blobs/" + layer["digest"]] = [_response(body)]
+    monkeypatch.setattr(pull, "_download_layers_parallel", registry.original_download_layers)
+    monkeypatch.setattr(pull, "layer_download_workers", lambda: 1)
+    monkeypatch.setattr(layers, "auth_opener", lambda: SimpleNamespace(open=registry.open_response))
+
+    with pytest.raises(RuntimeError, match="Layer size mismatch"):
+        registry.pull()
+
+    assert not os.path.exists(cache.layer_cache_path(layer["digest"]))
+    registry.apply_layer.assert_not_called()

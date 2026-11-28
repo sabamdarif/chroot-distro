@@ -218,7 +218,8 @@ class TestDownloadBlobSegmented:
         with open(path, "rb") as f:
             assert f.read() == content
 
-    def test_integrity_check_failed(self, mock_cache_path, tmp_path):
+    @pytest.mark.parametrize("wrong_size", [False, True])
+    def test_integrity_check_failed(self, mock_cache_path, tmp_path, wrong_size):
         digest, path = mock_cache_path
         content = b"A" * (8 * 1024 * 1024)
         # Expected hash is correct for b"A" * 8MiB, but we will write different data to cause validation error
@@ -240,20 +241,21 @@ class TestDownloadBlobSegmented:
                 seg, url, headers, progress, abort, bucket=None, live_responses=None, **kwargs
             ):
                 with open(seg.tmp_path, "wb") as f:
-                    f.write(b"B" * (seg.end - seg.start + 1))
+                    f.write((b"A" if wrong_size else b"B") * (seg.end - seg.start + 1))
 
             with (
                 mock.patch("chroot_distro.helpers.docker.layers._probe_blob", return_value=probe_result),
                 mock.patch(
                     "chroot_distro.helpers.docker.layers._download_segment", side_effect=mock_download_segment_bad
                 ),
-                pytest.raises(RuntimeError, match="Layer integrity check failed"),
+                pytest.raises(RuntimeError, match="Layer size mismatch" if wrong_size else "Layer integrity check failed"),
             ):
                 download_blob(
                     repo="library/nextcloud",
                     digest=digest,
                     auth="Bearer test_token",
                     connections=2,
+                    expected_size=len(content) + 1 if wrong_size else len(content),
                 )
         # Ensure target file was not created due to atomic replace failure
         assert not os.path.isfile(path)

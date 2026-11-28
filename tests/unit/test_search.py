@@ -3,12 +3,16 @@
 import io
 from contextlib import nullcontext
 import json
+import sys
+import urllib.error
+import urllib.parse
 from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
 
 from chroot_distro.commands import search
+from chroot_distro import cli, message
 
 
 def _response(monkeypatch, body, length=None):
@@ -73,3 +77,43 @@ def test_quiet_search_suppresses_success_and_keeps_errors(monkeypatch, capsys):
     with pytest.raises(SystemExit):
         search.command_search(SimpleNamespace(term="alpine"))
     assert "unexpected response" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(("alias", "options", "limit"), [
+    ("search", [], "25"),
+    ("se", ["--limit", "900"], "100"),
+    ("find", ["--limit", "-1"], "1"),
+])
+def test_search_cli_requests_only_the_first_page(monkeypatch, capsys, alias, options, limit):
+    query = "one + two"
+    response = io.BytesIO(b'{"next":"https://hub.example/unused","results":[{"name":"alpine"}]}')
+    response.headers = {}
+    open_ = Mock(return_value=response)
+    monkeypatch.setattr(search, "http_opener", lambda: Mock(open=open_))
+    monkeypatch.setattr(cli, "_ensure_root_user", Mock(side_effect=AssertionError("search elevated")))
+    monkeypatch.setattr(message, "_quiet", False)
+    monkeypatch.setattr(sys, "argv", ["chroot-distro", alias, *options, query])
+
+    cli.main()
+
+    open_.assert_called_once()
+    request = open_.call_args.args[0]
+    assert urllib.parse.parse_qs(urllib.parse.urlsplit(request.full_url).query) == {
+        "query": [query], "page_size": [limit], "page": ["1"],
+    }
+    assert "alpine" in capsys.readouterr().err
+
+
+def test_search_cli_quiet_http_error(monkeypatch, capsys):
+    body = io.BytesIO()
+    error = urllib.error.HTTPError(search._HUB_SEARCH_URL, 429, "reason-fixture", {}, body)
+    monkeypatch.setattr(search, "http_opener", lambda: Mock(open=Mock(side_effect=error)))
+    monkeypatch.setattr(message, "_quiet", False)
+    monkeypatch.setattr(sys, "argv", ["chroot-distro", "find", "--quiet", "alpine"])
+    with pytest.raises(SystemExit) as caught:
+        cli.main()
+    assert caught.value.code == 1
+    assert body.closed
+    err = capsys.readouterr().err
+    assert "Docker Hub search failed (HTTP 429)" in err
+    assert "reason-fixture" not in err
