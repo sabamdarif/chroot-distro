@@ -1,27 +1,27 @@
-from chroot_distro.commands import restore
 from chroot_distro.commands.restore import _dest_path
+from chroot_distro.helpers.tar_stream import detect_compression
 
 
 # ── _detect_compression ───────────────────────────────────────────────────────
 def test_detect_compression_gzip():
-    assert restore._detect_compression(b"\x1f\x8b\x08rest") == "gz"
+    assert detect_compression(b"\x1f\x8b\x08rest") == "gz"
 
 
 def test_detect_compression_bzip2():
-    assert restore._detect_compression(b"BZh91AY&SY") == "bz2"
-    assert restore._detect_compression(b"BZh9\x17rE8P\x90") == "bz2"
+    assert detect_compression(b"BZh91AY&SY") == "bz2"
+    assert detect_compression(b"BZh9\x17rE8P\x90") == "bz2"
 
 
 def test_detect_compression_xz():
-    assert restore._detect_compression(b"\xfd7zXZ\x00rest") == "xz"
+    assert detect_compression(b"\xfd7zXZ\x00rest") == "xz"
 
 
 def test_detect_compression_zstd():
-    assert restore._detect_compression(b"\x28\xb5\x2f\xfdrest") == "zst"
+    assert detect_compression(b"\x28\xb5\x2f\xfdrest") == "zst"
 
 
 def test_detect_compression_unknown_is_empty():
-    assert restore._detect_compression(b"plain tar data") == ""
+    assert detect_compression(b"plain tar data") == ""
 
 
 # ── _dest_path: rejection cases ────────────────────────────────────────────────

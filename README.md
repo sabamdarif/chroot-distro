@@ -110,7 +110,13 @@ this machine. Pinning an image by digest (`debian@sha256:...`) is not supported 
 
 OCI archives must provide matching sizes and SHA-256 digests for the manifests,
 configs and layers used during install. A verified cached layer can supply a
-layer missing from the archive.
+layer missing from the archive. Install selects a supported Linux image for
+the host CPU or the CPU given with `--architecture`. Without that flag, an
+archive containing a single supported Linux image can also install that image
+on a different CPU.
+
+Archives and image layers must contain a complete tar stream. Compressed
+archives must also have a complete compression stream.
 
 When fetching an image from a registry, install and build verify the selected
 index entry's manifest and the image config against their declared sizes and

@@ -29,6 +29,7 @@ else:
 from chroot_distro.arch import Platform
 from chroot_distro.helpers import layer_diff
 from chroot_distro.helpers.build_engine import copy_step, handlers, run_step
+from chroot_distro.helpers.build_engine import engine as build_engine
 from chroot_distro.helpers.build_engine.stage import Stage
 from chroot_distro.helpers.build_engine.users import resolve_user_for_chroot
 
@@ -106,6 +107,27 @@ def test_layer_packs_the_pinned_inode(staged, tmp_path):
         names = tf.getnames()
     assert "real" in names
     assert "HOST-SECRET" not in names
+
+
+def test_incomplete_layer_prevents_stage_inheritance(staged, monkeypatch, tmp_path):
+    stage, rootfs, _ = staged
+    layer = tmp_path / "layer.tar"
+    directory = tarfile.TarInfo("etc")
+    directory.type = tarfile.DIRTYPE
+    layer.write_bytes(directory.tobuf())
+    monkeypatch.setattr(build_engine, "layer_cache_path", lambda _digest: str(layer))
+    parent = SimpleNamespace(layers=[{"digest": "sha256:fixture"}], image_config={})
+    engine = build_engine.BuildEngine(
+        build_dir=str(tmp_path), tmp_root=str(tmp_path), target_arch_pd="x86_64",
+        user_build_args={}, target_stage=None, verbose=False, quiet=True,
+        no_cache=False, emulator=None,
+    )
+
+    with pytest.raises(OSError, match="Invalid image layer tar"):
+        engine._inherit_from_stage(stage, parent)
+
+    assert not stage.layers
+    assert not list(rootfs.iterdir())
 
 
 # ── COPY/ADD's destination ────────────────────────────────────────────────────

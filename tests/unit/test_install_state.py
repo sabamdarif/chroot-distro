@@ -130,7 +130,7 @@ def test_retry_clears_pinned_rootfs_and_stale_metadata(store, monkeypatch, tmp_p
     archive = tmp_path / "plain.tar"
     archive.touch()
 
-    def extract(path, fd, arch):
+    def extract(path, fd, arch, *, require_platform):
         assert os.fstat(fd).st_ino == original_inode
         assert os.listdir(fd) == []
         assert (rootfs.parent / ".install-incomplete").is_file()

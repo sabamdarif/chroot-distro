@@ -40,9 +40,15 @@ import logging
 import os
 import shutil
 import signal
+import sys
 import threading
 import typing
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+if sys.version_info >= (3, 14):
+    import tarfile
+else:
+    from backports.zstd import tarfile
 
 from chroot_distro.atomic import atomic_replace
 from chroot_distro.helpers.docker.cache import layer_cache_path
@@ -368,7 +374,10 @@ def apply_layer(layer_path: str, rootfs_fd: int) -> None:
     (dir_fd, name) beneath it, so nothing between the caller's check of the
     tree and the last byte written resolves its name a second time.
     """
-    extract_tar_to_rootfs(layer_path, rootfs_fd, handle_whiteouts=True)
+    try:
+        extract_tar_to_rootfs(layer_path, rootfs_fd, handle_whiteouts=True)
+    except tarfile.TarError as exc:
+        raise OSError(f"Invalid image layer tar: {exc}") from exc
 
 
 def materialize_rootfs(layers: list[dict[str, typing.Any]], rootfs_fd: int) -> None:

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import os
+import tarfile
 import urllib.error
 from contextlib import nullcontext
 from types import SimpleNamespace
@@ -41,6 +42,22 @@ def test_successful_install_leaves_no_marker(mock_log, mock_pull, containers):
     _run_install("alpine", "alpine", None, None, "x86_64")
     assert rootfs.is_dir()
     assert not marker.exists()
+
+
+def test_truncated_plain_archive_does_not_complete_install(containers, capsys):
+    archive = containers / "archive.tar"
+    directory = tarfile.TarInfo("etc")
+    directory.type = tarfile.DIRTYPE
+    archive.write_bytes(directory.tobuf())
+
+    with pytest.raises(SystemExit) as exc:
+        _run_install("box", str(archive), str(archive), None, "x86_64")
+
+    _, rootfs, marker = _paths(containers, "box")
+    assert exc.value.code == 1
+    assert "invalid tar header or terminator" in capsys.readouterr().err
+    assert marker.is_file()
+    assert not list(rootfs.iterdir())
 
 
 @patch("chroot_distro.commands.install.pull_image", return_value=None)

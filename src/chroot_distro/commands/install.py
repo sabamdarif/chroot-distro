@@ -214,7 +214,9 @@ def _install_one(image_ref: str, args, custom_container_name) -> None:
     insecure = getattr(args, "insecure", False)
 
     with ContainerLock(install_name, exclusive=True, command="install"):
-        _run_install(install_name, image_ref, local_path, url, dist_arch, insecure=insecure)
+        _run_install(
+            install_name, image_ref, local_path, url, dist_arch, insecure=insecure, require_platform=bool(raw_arch)
+        )
 
 
 def _resolve_install_name(image_ref, local_path, url, custom_container_name):
@@ -287,6 +289,8 @@ def _run_install(
     url,
     dist_arch: str,
     insecure: bool = False,
+    *,
+    require_platform: bool = False,
 ) -> None:
     """Inner install logic, called with the container lock already held."""
     container_path = container_dir(install_name)
@@ -344,7 +348,7 @@ def _run_install(
 
         if local_path is not None:
             log_info("Extracting rootfs from archive...")
-            metadata = install_from_local_file(local_path, rootfs_fd, dist_arch)
+            metadata = install_from_local_file(local_path, rootfs_fd, dist_arch, require_platform=require_platform)
         elif url is not None:
             os.makedirs(BASE_CACHE_DIR, exist_ok=True)
             fd, tmp_archive = tempfile.mkstemp(
@@ -356,7 +360,7 @@ def _run_install(
             log_info("Downloading archive...")
             download_file(url, tmp_archive, insecure=insecure)
             log_info("Extracting rootfs from archive...")
-            metadata = install_from_local_file(tmp_archive, rootfs_fd, dist_arch)
+            metadata = install_from_local_file(tmp_archive, rootfs_fd, dist_arch, require_platform=require_platform)
         else:
             os.makedirs(BASE_CACHE_DIR, exist_ok=True)
             metadata = pull_image(image_ref, rootfs_fd, platform_from_arch(dist_arch), insecure=insecure)

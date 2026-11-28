@@ -11,26 +11,18 @@ the tar terminator and compression stream have been checked and the optional
 manifest has been written.
 """
 
-import bz2
 import contextlib
 import errno
-import gzip
-import io
-import lzma
 import os
 import shutil
 import stat
 import sys
 import tempfile
 import typing
-import zlib
 
 if sys.version_info >= (3, 14):
     import tarfile as tar
-
-    from compression import zstd
 else:
-    from backports import zstd
     from backports.zstd import tarfile as tar
 
 from chroot_distro import dirfd
@@ -45,6 +37,7 @@ from chroot_distro.helpers.install_state import (
     write_incomplete_marker,
 )
 from chroot_distro.helpers.tar_extract import safe_resolve_parts_at
+from chroot_distro.helpers.tar_stream import open_tar
 from chroot_distro.locking import ContainerLock
 from chroot_distro.message import (
     crit_error,
@@ -67,83 +60,6 @@ from chroot_distro.progress import (
     draw_bytes_bar,
 )
 from chroot_distro.syscalls.mount import fd_path
-
-_MAGIC_COMPRESS = (
-    (b"\x1f\x8b", "gz"),  # gzip
-    (b"\xfd7zXZ\x00", "xz"),  # xz
-    (b"\x5d\x00", "xz"),  # lzma legacy
-    (b"\x28\xb5\x2f\xfd", "zst"),  # zstd
-)
-
-
-def _detect_compression(header: bytes) -> str:
-    """Return the tarfile mode suffix inferred from *header* magic bytes."""
-    if header.startswith(b"BZh") and b"1" <= header[3:4] <= b"9" and header[4:10] in (b"1AY&SY", b"\x17rE8P\x90"):
-        return "bz2"
-    for magic, mode in _MAGIC_COMPRESS:
-        if header.startswith(magic):
-            return mode
-    return ""
-
-
-class _BackupInput(io.RawIOBase):
-    """Replay the compression header before continuing from a file or pipe."""
-
-    def __init__(self, source: ByteCounter) -> None:
-        self._source = source
-        self._prefix = source.read(10)
-        while len(self._prefix) < 10:
-            chunk = source.read(10 - len(self._prefix))
-            if not chunk:
-                break
-            self._prefix += chunk
-        self.compression = _detect_compression(self._prefix)
-
-    def readable(self) -> bool:
-        return True
-
-    def readinto(self, buffer, /) -> int:
-        if not self._prefix:
-            return typing.cast(int, self._source.readinto(buffer))
-        view = memoryview(buffer)
-        size = min(len(view), len(self._prefix))
-        view[:size] = self._prefix[:size]
-        self._prefix = self._prefix[size:]
-        return size
-
-
-class _BackupTarInfo(tar.TarInfo):
-    """Distinguish a complete tar archive from a bad or missing header."""
-
-    @classmethod
-    def fromtarfile(cls, tarfile: tar.TarFile) -> "_BackupTarInfo":
-        try:
-            return super().fromtarfile(tarfile)
-        except tar.EOFHeaderError:  # type: ignore[attr-defined]
-            stream = tarfile.fileobj
-            if stream.read(tar.BLOCKSIZE) != bytes(tar.BLOCKSIZE):
-                raise tar.ReadError("tar archive must end with two zero blocks") from None
-            while padding := stream.read(1 << 17):
-                if padding.count(0) != len(padding):
-                    raise tar.ReadError("unexpected data after the tar terminator") from None
-            raise
-        except tar.HeaderError as exc:
-            raise tar.ReadError(f"invalid tar header or terminator: {exc}") from exc
-
-
-def _open_backup(source: ByteCounter, sources: contextlib.ExitStack) -> tar.TarFile:
-    archive = _BackupInput(source)
-    stream = sources.enter_context(io.BufferedReader(archive))
-    decoded: typing.Any = stream
-    if archive.compression == "gz":
-        decoded = sources.enter_context(gzip.GzipFile(fileobj=stream, mode="rb"))
-    elif archive.compression == "bz2":
-        decoded = sources.enter_context(bz2.BZ2File(stream))
-    elif archive.compression == "xz":
-        decoded = sources.enter_context(lzma.LZMAFile(stream))  # noqa: SIM115
-    elif archive.compression == "zst":
-        decoded = sources.enter_context(zstd.ZstdFile(stream))
-    return sources.enter_context(tar.open(fileobj=decoded, mode="r|", tarinfo=_BackupTarInfo))
 
 
 def _dest_path(path: str) -> tuple[str, tuple[str, ...] | None] | None:
@@ -437,8 +353,8 @@ def command_restore(args) -> None:
                 else:
                     raw = sys.stdin.buffer
                 counter = ByteCounter(raw)
-                tf = _open_backup(counter, sources)
-                result = _restore_stream(tf, _on_entry, pins)
+                with open_tar(counter) as tf:
+                    result = _restore_stream(tf, _on_entry, pins)
             finish_install(*result)
 
     except KeyboardInterrupt:
@@ -451,10 +367,7 @@ def command_restore(args) -> None:
         OSError,
         OverflowError,
         ValueError,
-        lzma.LZMAError,
         tar.TarError,
-        zlib.error,
-        zstd.ZstdError,
     ) as exc:
         clear_bar()
         log_error(f"Failed to restore container: {escape_controls(str(exc))}")

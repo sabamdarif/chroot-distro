@@ -138,8 +138,8 @@ def test_our_own_installer_picks_a_platform_out_of_the_index(tmp_path, layer):
     with tarfile.open(out) as tf:
         member_map = {m.name: m for m in tf.getmembers()}
         for arch, expected in (("aarch64", "arm64"), ("x86_64", "amd64")):
-            entry = install_local._oci_find_manifest_entry(tf, member_map, index["manifests"], arch)
-            assert entry["platform"]["architecture"] == expected
+            image = install_local._oci_select_image(tf, member_map, index, arch, require_platform=True)
+            assert image.platform.architecture == expected
 
 
 # ── what a legacy loader is told ──────────────────────────────────────────────

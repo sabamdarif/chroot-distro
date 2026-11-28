@@ -88,7 +88,7 @@ def test_install_derives_url_name_and_passes_original_url(monkeypatch, url, name
 
     install.command_install(args)
 
-    run_install.assert_called_once_with(expected, url, None, url, "x86_64", insecure=False)
+    run_install.assert_called_once_with(expected, url, None, url, "x86_64", insecure=False, require_platform=True)
 
 
 @pytest.mark.parametrize(

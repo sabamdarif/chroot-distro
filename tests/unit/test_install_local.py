@@ -1,3 +1,4 @@
+import gzip
 import hashlib
 import io
 import json
@@ -20,6 +21,7 @@ from chroot_distro.commands import install, install_local
 from chroot_distro.helpers import oci_writer
 from chroot_distro.helpers.build_engine import PlatformResult
 from chroot_distro.helpers.docker import cache
+from chroot_distro.helpers.docker.media import OCI_INDEX_MEDIA, OCI_MANIFEST_MEDIA
 
 
 def test_oci_read_json_rejects_non_regular_file():
@@ -113,16 +115,105 @@ def _write_oci(
     return layer_blob
 
 
-def _install_archive(archive, rootfs):
+def _install_archive(archive, rootfs, arch="x86_64", *, require_platform=False):
     fd = os.open(rootfs, os.O_RDONLY)
     try:
-        return install_local.install_from_local_file(str(archive), fd, "x86_64")
+        return install_local.install_from_local_file(str(archive), fd, arch, require_platform=require_platform)
     finally:
         os.close(fd)
 
 
 def _cached_blob(layer_blob):
     return Path(cache.layer_cache_path(layer_blob["digest"]))
+
+
+def _write_index(archive, images, *, mode="w", late=False, prefix="", nested=False):
+    with tarfile.open(archive, mode) as tf:
+        def add_blob(data, **metadata):
+            descriptor = _descriptor(data) | metadata
+            _add_bytes(tf, prefix + _blob_path(descriptor), data)
+            return descriptor
+
+        entries = []
+        for payload, declared, actual in images:
+            layer = add_blob(_layer_bytes(payload))
+            config = add_blob(json.dumps(actual).encode())
+            manifest = json.dumps({"config": config, "layers": [layer]}).encode()
+            fields = {} if declared is None else {"platform": declared}
+            entries.append(add_blob(manifest, mediaType=OCI_MANIFEST_MEDIA, **fields))
+        if nested:
+            inner = add_blob(json.dumps({"manifests": entries[2:]}).encode(), mediaType=OCI_INDEX_MEDIA)
+            inner["annotations"] = {"org.opencontainers.image.ref.name": "example.com/image:v7"}
+            entries[2:] = [inner]
+            entries.insert(0, {"mediaType": "application/example.artifact"})
+        if late:
+            for i in range(501):
+                _add_bytes(tf, f"filler-{i}", b"")
+        _add_bytes(tf, prefix + "index.json", json.dumps({"manifests": entries}).encode())
+        _add_bytes(tf, prefix + "oci-layout", b'{"imageLayoutVersion":"1.0.0"}')
+
+
+@pytest.mark.parametrize("mode", ["w", "w:gz", "w:bz2", "w:xz", "w:zst"])
+def test_late_dot_prefixed_oci_layout_installs(oci, mode):
+    archive, rootfs, _ = oci
+    platform = {"os": "linux", "architecture": "amd64"}
+    _write_index(archive, [(b"image", platform, platform)], mode=mode, late=True, prefix="./")
+
+    assert _install_archive(archive, rootfs)["arch"] == "x86_64"
+    assert (rootfs / "etc" / "fixture").read_bytes() == b"image"
+    assert not (rootfs / "oci-layout").exists()
+
+
+def test_nested_oci_index_prefers_explicit_arm_v7(oci):
+    archive, rootfs, _ = oci
+    arm = {"os": "linux", "architecture": "arm"}
+    v6, v7 = arm | {"variant": "v6"}, arm | {"variant": "v7"}
+    windows = {"os": "windows", "architecture": "arm", "variant": "v7"}
+    _write_index(archive, [(b"v6", v6, v6), (b"unspecified", None, arm),
+                           (b"windows", windows, windows), (b"v7", v7, v7)], nested=True)
+
+    result = _install_archive(archive, rootfs, "arm", require_platform=True)
+    assert result["arch"] == "arm"
+    assert result["image_config"]["variant"] == "v7"
+    assert result["image_ref"] == "example.com/image:v7"
+    assert (rootfs / "etc" / "fixture").read_bytes() == b"v7"
+
+
+@pytest.mark.parametrize("declared,actual,error", [
+    ({"os": "windows", "architecture": "amd64"}, {"os": "windows", "architecture": "amd64"}, "No supported Linux"),
+    (None, {"os": "windows", "architecture": "amd64"}, "No supported Linux"),
+    ({"os": "linux", "architecture": "amd64"}, {"os": "linux", "architecture": "arm64"}, "disagrees.*architecture"),
+    ({"os": "linux", "architecture": "amd64"}, {"os": "windows", "architecture": "amd64"}, "disagrees.*os"),
+])
+def test_oci_requires_consistent_linux_platform(oci, declared, actual, error):
+    archive, rootfs, _ = oci
+    _write_index(archive, [(b"image", declared, actual)])
+
+    with pytest.raises(RuntimeError, match=error):
+        _install_archive(archive, rootfs)
+    assert not list(rootfs.iterdir())
+
+
+def test_single_foreign_oci_image_requires_matching_explicit_architecture(oci):
+    archive, rootfs, _ = oci
+    platform = {"os": "linux", "architecture": "arm64", "variant": "v8"}
+    _write_index(archive, [(b"foreign", platform, platform)])
+
+    with pytest.raises(RuntimeError, match="No supported Linux image for 'linux/amd64'"):
+        _install_archive(archive, rootfs, require_platform=True)
+    assert _install_archive(archive, rootfs)["arch"] == "aarch64"
+    assert (rootfs / "etc" / "fixture").read_bytes() == b"foreign"
+
+
+def test_oci_checks_outer_gzip_trailer_before_extracting_layers(oci):
+    archive, rootfs, base_cache = oci
+    _write_oci(archive, _layer_bytes(b"image"))
+    archive.write_bytes(gzip.compress(archive.read_bytes())[:-8])
+
+    with pytest.raises(tarfile.ReadError, match="compressed tar"):
+        _install_archive(archive, rootfs)
+    assert not list(rootfs.iterdir())
+    assert not list(base_cache.glob("oci_layers/*"))
 
 
 @pytest.mark.parametrize(
