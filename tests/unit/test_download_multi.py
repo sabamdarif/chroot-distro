@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import http.client
 import io
 import os
 import ssl
@@ -11,6 +12,7 @@ from unittest import mock
 
 import pytest
 
+from chroot_distro.helpers import download
 from chroot_distro.helpers.download import (
     _compute_segments,
     _concat_chunks,
@@ -311,6 +313,85 @@ class TestConcatChunks:
 
 class TestDownloadFile:
     """Integration tests for download_file() dispatcher."""
+
+    @pytest.mark.parametrize("workers", [1, 2])
+    def test_response_diagnostics_do_not_expose_redirect_url(self, tmp_path, monkeypatch, capsys, workers):
+        original = "https://example.com/archive.tar"
+        redirected = "https://user:password@cdn.example.net/signed-path?token=secret#fragment"
+        requests = []
+
+        def open_response(req, **kwargs):
+            requests.append((req.get_method(), req.full_url))
+            if req.get_method() == "HEAD":
+                return _FakeResp(
+                    headers={"Content-Length": str(8 * 1024 * 1024), "Accept-Ranges": "bytes"}, url=redirected
+                )
+            code = 503 if workers == 1 else 403
+            raise urllib.error.HTTPError(redirected, code, f"Echoed {redirected}", {}, None)
+
+        monkeypatch.setattr("chroot_distro.constants.layer_download_workers", lambda: workers)
+        monkeypatch.setattr(download, "http_opener", lambda **kwargs: _opener(open_response))
+        monkeypatch.setattr(download, "_get_max_retries", lambda: 1)
+        monkeypatch.setattr(download, "_get_retry_delays", lambda _: (0, 0))
+
+        with pytest.raises(RuntimeError) as failure:
+            download_file(original, str(tmp_path / "file.tar"))
+
+        output = capsys.readouterr().err + str(failure.value)
+        assert "https://example.com" in output
+        assert all(value not in output for value in ("cdn.example.net", "password", "signed-path", "secret", "fragment"))
+        if workers == 1:
+            assert requests == [("GET", original)] * 2
+            assert "Retry 1/1 in 0s (HTTP 503)" in output
+        else:
+            assert requests[0] == ("HEAD", original)
+            assert requests[1:]
+            assert all(request == ("GET", redirected) for request in requests[1:])
+            assert "HTTP 403" in output
+
+    @pytest.mark.parametrize("head", ["bad length", "bad status", "refused redirect"])
+    def test_probe_diagnostics_omit_response_text(self, tmp_path, monkeypatch, capsys, head):
+        token = "fixture-private-token"
+        methods = []
+
+        def open_response(req, **kwargs):
+            methods.append(req.get_method())
+            if req.get_method() == "HEAD":
+                if head == "bad length":
+                    return _FakeResp(headers={"Content-Length": token})
+                if head == "refused redirect":
+                    download.check_redirect(req.full_url, f"http://example.net/archive.tar?token={token}")
+            raise http.client.BadStatusLine(token)
+
+        monkeypatch.setattr("chroot_distro.constants.layer_download_workers", lambda: 2)
+        monkeypatch.setattr(download, "http_opener", lambda **kwargs: _opener(open_response))
+        monkeypatch.setattr(download, "_get_max_retries", lambda: 0)
+
+        with pytest.raises(RuntimeError) as failure:
+            download_file("https://example.com/archive.tar", str(tmp_path / "file.tar"))
+
+        output = capsys.readouterr().err + str(failure.value)
+        assert token not in output
+        if head == "refused redirect":
+            assert methods == ["HEAD"]
+            assert "--allow-insecure" in output
+        else:
+            assert methods == ["HEAD", "GET"]
+            assert "invalid or incomplete HTTP response" in output
+
+    def test_malformed_get_length_keeps_destination_and_hides_header(self, tmp_path, monkeypatch, capsys):
+        token = "fixture-private-token"
+        dest = tmp_path / "file.tar"
+        dest.write_bytes(b"previous file")
+        response = _FakeResp(headers={"Content-Length": token}, body=b"unverified file")
+        monkeypatch.setattr("chroot_distro.constants.layer_download_workers", lambda: 1)
+        monkeypatch.setattr(download, "http_opener", lambda **kwargs: _opener(response))
+
+        with pytest.raises(RuntimeError, match="Cannot download") as failure:
+            download_file("https://example.com/archive.tar", str(dest))
+
+        assert token not in capsys.readouterr().err + str(failure.value)
+        assert dest.read_bytes() == b"previous file"
 
     def test_single_connection_when_workers_1(self, tmp_path):
         dest = str(tmp_path / "file.tar")

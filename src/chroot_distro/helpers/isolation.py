@@ -21,7 +21,9 @@ and chroots the holder (`max_isolation_session`), where a refused tmpfs /dev
 falls back to the container's own /dev populated with nodes, still not a host
 bind. `CD_USE_ISOLATION` wins when both env vars are set, and
 `resolve_isolated` is the only place the flag and the env var are combined.
-`build` has no CLI flag, so for it the env vars are the whole interface.
+`build` has no CLI flag, so for it the env vars are the whole interface. Its
+session wrappers retain one state-directory descriptor through holder acquisition,
+finalization and teardown, including setup failures.
 
 What a bind needs is decided by `bind_is_recursive`, and each clause is a kernel or
 platform fact, not a preference: /run holds nested socket submounts, /apex is a
@@ -149,9 +151,10 @@ def apply_bind_mounts(
     *bind_options* maps realpath(resolved_target) -> mount option string.
     """
     opts_map = bind_options or {}
-    run_root = os.path.realpath(os.path.join(rootfs, "run"))
-    dev_root = os.path.realpath(os.path.join(rootfs, "dev"))
-    sys_root = os.path.realpath(os.path.join(rootfs, "sys"))
+    rootfs_real = os.path.realpath(rootfs)
+    run_root = os.path.realpath(os.path.join(rootfs_real, "run"))
+    dev_root = os.path.realpath(os.path.join(rootfs_real, "dev"))
+    sys_root = os.path.realpath(os.path.join(rootfs_real, "sys"))
     for src, dst in resolved_binds:
         dst_real = os.path.realpath(dst)
         try:
@@ -171,19 +174,24 @@ def apply_bind_mounts(
                 warn(f"Skipping optional bind {src} -> {dst}: {exc}")
                 continue
             raise
-        # Stop send-propagation: mounts made under /dev or /sys next
-        # (/dev/pts, the path masks) propagate copies back onto the host.
+        if IS_TERMUX and holder is None:
+            source_real = os.path.realpath(src)
+            if os.path.commonpath((source_real, rootfs_real)) == source_real:
+                mount_manager.stop_guest_bind_propagation(rootfs, dst)
+        # Mounts under /dev or /sys can propagate back onto the host.
         if holder is None and dst_real in (dev_root, sys_root):
             mount_manager.make_rslave(dst)
 
 
-def finalize_holder(holder: NamespaceHolder, container_key: str, *, hostname: str) -> None:
+def finalize_holder(
+    holder: NamespaceHolder, container_key: str, *, hostname: str, state_fd: int | None = None
+) -> None:
     """Record the namespace mode, make mounts private, and set the hostname.
 
     The steps every isolated session performs immediately after acquiring (or
     reusing) its holder, regardless of how the holder was created.
     """
-    namespace.write_isolation_mode(container_key, namespace.ISOLATION_MODE_NAMESPACE)
+    namespace.write_isolation_mode(container_key, namespace.ISOLATION_MODE_NAMESPACE, state_fd=state_fd)
     if not namespace.make_mount_private(holder):
         # Many Android kernels already provide isolated propagation in the new
         # mount namespace, so failing to set it explicitly is benign.
@@ -192,17 +200,17 @@ def finalize_holder(holder: NamespaceHolder, container_key: str, *, hostname: st
     namespace.set_namespace_hostname(holder, safe_hostname(hostname))
 
 
-def _ensure_ptmx_symlink(rootfs: str, holder: NamespaceHolder | None) -> None:
-    """Point ``/dev/ptmx`` at the private ``pts/ptmx`` multiplexer, verified.
+def _ensure_ptmx(rootfs: str, holder: NamespaceHolder | None, *, use_userns: bool) -> None:
+    """Provide the multiplexer for the guest's devpts.
 
-    The devpts multiplexer is char 5:2; anything else standing at
-    ``dev/pts/ptmx`` (an image's stand-in) is refused the link rather than
-    pointed at. Under maximum isolation ``/dev`` is a fresh tmpfs, so ``ptmx``
-    must point at the ``newinstance`` devpts multiplexer. Runs inside the
-    holder's namespaces when given, else directly on the host view of the
-    rootfs.
+    Single-instance kernels use the legacy character device outside devpts.
+    Private instances use a relative link to their verified pts/ptmx node.
     """
     from chroot_distro.helpers import mount_targets
+
+    if mount_manager._devpts_single_instance():
+        mount_manager.create_dev_nodes(rootfs, (("ptmx", 5, 2, 0o666),), holder=holder, use_userns=use_userns)
+        return
 
     def _open_rootfs() -> int:
         return mount_targets.open_rootfs_fd(rootfs)
@@ -416,16 +424,13 @@ def apply_special_mounts(
             try:
                 mount_manager.apply_special_mount(rootfs, sm, holder=holder)
             except (OSError, RuntimeError):
-                # Single-instance devpts (< 4.7) over a fresh tmpfs /dev has
-                # no instance to reuse; the host's /dev/pts bind supplies
-                # ptys. PTYs are required, so a failed bind still raises.
                 warn("Could not mount a fresh devpts; falling back to the host /dev/pts bind.")
                 mount_manager.safe_mount("/dev/pts", _guest_dir(rootfs, "/dev/pts"), rootfs=rootfs, holder=holder)
             continue
         mount_manager.apply_special_mount(rootfs, sm, holder=holder)
 
     if fresh_dev or max_isolation:
-        _ensure_ptmx_symlink(rootfs, holder)
+        _ensure_ptmx(rootfs, holder, use_userns=use_userns)
         _ensure_dev_symlinks(rootfs, holder)
 
     _apply_masked_paths(rootfs, holder, masked=bindings.masked_paths(), readonly=bindings.READONLY_PATHS)
@@ -542,43 +547,44 @@ def max_isolation_session(
         return
 
     use_userns = probe_result.has_userns
-    holder: NamespaceHolder | None = None
-    try:
-        holder = namespace.acquire_holder(container_key, rootfs=rootfs)
-        finalize_holder(holder, container_key, hostname=hostname or container_key)
+    with namespace._state_dir(container_key, create=True) as state_fd:
+        holder: NamespaceHolder | None = None
+        try:
+            holder = namespace.acquire_holder(container_key, rootfs=rootfs, state_fd=state_fd)
+            finalize_holder(holder, container_key, hostname=hostname or container_key, state_fd=state_fd)
 
-        write_resolv_conf(rootfs)
+            write_resolv_conf(rootfs)
 
-        # Maximum isolation binds nothing from the host, so this set is
-        # normally empty.
-        resolved_binds, rslave_targets = bindings.get_bindings(
-            rootfs=rootfs,
-            minimal=minimal,
-            isolated=True,
-            max_isolation=True,
-            use_namespaces=True,
-            use_userns=use_userns,
-            dist_type=dist_type,
-        )
-        with contextlib.suppress(Exception):
-            mount_manager.unmount_all(rootfs, holder=holder)
+            # Maximum isolation binds nothing from the host, so this set is
+            # normally empty.
+            resolved_binds, rslave_targets = bindings.get_bindings(
+                rootfs=rootfs,
+                minimal=minimal,
+                isolated=True,
+                max_isolation=True,
+                use_namespaces=True,
+                use_userns=use_userns,
+                dist_type=dist_type,
+            )
+            with contextlib.suppress(Exception):
+                mount_manager.unmount_all(rootfs, holder=holder)
 
-        apply_bind_mounts(rootfs, resolved_binds, holder=holder, use_userns=use_userns)
-        for rslave_path in rslave_targets:
-            mount_manager.make_rslave(rslave_path, holder=holder)
+            apply_bind_mounts(rootfs, resolved_binds, holder=holder, use_userns=use_userns)
+            for rslave_path in rslave_targets:
+                mount_manager.make_rslave(rslave_path, holder=holder)
 
-        apply_special_mounts(rootfs, holder, max_isolation=True, minimal=minimal, use_userns=use_userns)
+            apply_special_mounts(rootfs, holder, max_isolation=True, minimal=minimal, use_userns=use_userns)
 
-        yield holder
-    except NamespaceError as exc:
-        warn(f"Failed to set up isolation: {exc}. Running without isolation.")
-        if holder is not None:
-            _teardown(container_key, rootfs, holder)
-            holder = None
-        yield None
-    finally:
-        if holder is not None:
-            _teardown(container_key, rootfs, holder)
+            yield holder
+        except NamespaceError as exc:
+            warn(f"Failed to set up isolation: {exc}. Running without isolation.")
+            if holder is not None:
+                _teardown(container_key, rootfs, holder, state_fd=state_fd)
+                holder = None
+            yield None
+        finally:
+            if holder is not None:
+                _teardown(container_key, rootfs, holder, state_fd=state_fd)
 
 
 @contextlib.contextmanager
@@ -610,56 +616,59 @@ def namespace_session(
         return
 
     use_userns = probe_result.has_userns
-    holder: NamespaceHolder | None = None
-    try:
-        # No rootfs=, so the namespace-only holder is not chrooted, matching
-        # login's non-max path.
-        holder = namespace.acquire_holder(container_key)
-        finalize_holder(holder, container_key, hostname=hostname or container_key)
+    with namespace._state_dir(container_key, create=True) as state_fd:
+        holder: NamespaceHolder | None = None
+        try:
+            # No rootfs=, so the namespace-only holder is not chrooted, matching
+            # login's non-max path.
+            holder = namespace.acquire_holder(container_key, state_fd=state_fd)
+            finalize_holder(holder, container_key, hostname=hostname or container_key, state_fd=state_fd)
 
-        write_resolv_conf(rootfs)
+            write_resolv_conf(rootfs)
 
-        resolved_binds, rslave_targets = bindings.get_bindings(
-            rootfs=rootfs,
-            minimal=minimal,
-            isolated=False,
-            max_isolation=False,
-            use_namespaces=True,
-            use_userns=use_userns,
-            dist_type=dist_type,
-        )
-        with contextlib.suppress(Exception):
-            mount_manager.unmount_all(rootfs, holder=holder)
+            resolved_binds, rslave_targets = bindings.get_bindings(
+                rootfs=rootfs,
+                minimal=minimal,
+                isolated=False,
+                max_isolation=False,
+                use_namespaces=True,
+                use_userns=use_userns,
+                dist_type=dist_type,
+            )
+            with contextlib.suppress(Exception):
+                mount_manager.unmount_all(rootfs, holder=holder)
 
-        apply_bind_mounts(
-            rootfs,
-            resolved_binds,
-            holder=holder,
-            use_userns=use_userns,
-            best_effort_sources=bindings.best_effort_bind_sources(),
-        )
-        for rslave_path in rslave_targets:
-            mount_manager.make_rslave(rslave_path, holder=holder)
+            apply_bind_mounts(
+                rootfs,
+                resolved_binds,
+                holder=holder,
+                use_userns=use_userns,
+                best_effort_sources=bindings.best_effort_bind_sources(),
+            )
+            for rslave_path in rslave_targets:
+                mount_manager.make_rslave(rslave_path, holder=holder)
 
-        apply_special_mounts(rootfs, holder, max_isolation=False, minimal=minimal, use_userns=use_userns)
+            apply_special_mounts(rootfs, holder, max_isolation=False, minimal=minimal, use_userns=use_userns)
 
-        yield holder
-    except NamespaceError as exc:
-        warn(f"Failed to set up namespaces: {exc}. Running without namespaces.")
-        if holder is not None:
-            _teardown(container_key, rootfs, holder)
-            holder = None
-        yield None
-    finally:
-        if holder is not None:
-            _teardown(container_key, rootfs, holder)
+            yield holder
+        except NamespaceError as exc:
+            warn(f"Failed to set up namespaces: {exc}. Running without namespaces.")
+            if holder is not None:
+                _teardown(container_key, rootfs, holder, state_fd=state_fd)
+                holder = None
+            yield None
+        finally:
+            if holder is not None:
+                _teardown(container_key, rootfs, holder, state_fd=state_fd)
 
 
-def _teardown(container_key: str, rootfs: str, holder: NamespaceHolder) -> None:
+def _teardown(
+    container_key: str, rootfs: str, holder: NamespaceHolder, *, state_fd: int | None = None
+) -> None:
     """Unmount everything in the holder and release it (best-effort)."""
     with contextlib.suppress(Exception):
         mount_manager.unmount_all(rootfs, holder=holder)
     with contextlib.suppress(Exception):
-        namespace.release_holder(container_key)
+        namespace.release_holder(container_key, state_fd=state_fd)
     with contextlib.suppress(Exception):
-        namespace.clear_isolation_mode(container_key)
+        namespace.clear_isolation_mode(container_key, state_fd=state_fd)

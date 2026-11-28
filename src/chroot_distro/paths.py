@@ -5,8 +5,8 @@
 Two unrelated jobs live here. The composition half (`container_dir`,
 `container_rootfs`, `container_manifest`, `container_log_path`,
 `installed_containers`) is the only place that knows how a container's files are
-laid out under CONTAINERS_DIR: nothing else may build those paths by hand. The
-resolution half is a trust boundary, and it is where the care goes.
+laid out under CONTAINERS_DIR or RUNTIME_DIR: nothing else may build those paths
+by hand. The resolution half is a trust boundary, and it is where the care goes.
 
 A `name:path` spec is user input naming an entry inside a rootfs a guest can
 write. `resolve_container_path` walks it with the guest's own semantics, *root*
@@ -25,24 +25,27 @@ works from the `(dir_fd, leaf)` a `PinnedPath` carries. That re-walk both detect
 the swap and pins the inode it validated. Handing the resolved string back to the
 kernel is the bug this file exists to prevent.
 
-`open_container_rootfs` is the entry to that world: `containers/<name>` is
-guest-writable on Termux, so it is descended with O_NOFOLLOW at every step rather
-than opened by composed path, and `container_is_installed` answers through the
-same walk. FileNotFoundError from either is an ordinary "not installed"; any
-other refusal is an entry this program did not create, and becomes
-`_unusable_storage`. ENOTDIR is ambiguous (an O_NOFOLLOW open declining a link,
-or a component that is simply not a directory), so a refusal is only reported as
-a race once the component has been confirmed to be a symlink.
+Storage openers, including the deletion-parent pins, walk from
+the configured XDG data base or Termux prefix, including parents a guest can replace on
+Android. Rootfs and installed-state checks use that same walk. Any entry at the
+incomplete-marker name makes a container unavailable for execution, without opening it.
+FileNotFoundError is ordinary missing storage; other refusals become
+`_unusable_storage` at the installed-state boundary.
+
+`open_container_log` retains that runtime pin while checking the log's type,
+link count and inode identity. It returns only the append descriptor.
 """
 
 import contextlib
+import errno
+import logging
 import os
 import stat
 from collections.abc import Iterator
 from contextlib import contextmanager
 
 from chroot_distro import dirfd
-from chroot_distro.constants import CONTAINERS_DIR, RUNTIME_DIR
+from chroot_distro.constants import CONTAINERS_DIR, IS_TERMUX, RUNTIME_DIR, SESSIONS_DIR, TERMUX_PREFIX
 from chroot_distro.exceptions import (
     ChrootDistroError,
     ContainerNotFoundError,
@@ -65,9 +68,58 @@ def container_log_path(name: str) -> str:
     persists for the lifetime of the container's mounts and is not part of the
     rootfs itself.
     """
-    data_dir = os.path.join(RUNTIME_DIR, "data", name)
-    os.makedirs(data_dir, exist_ok=True)
-    return os.path.join(data_dir, "run.log")
+    return os.path.join(container_data_dir(name), "run.log")
+
+
+def container_data_dir(name: str) -> str:
+    """Return the path of a container's runtime state directory."""
+    return os.path.join(RUNTIME_DIR, "data", name)
+
+
+def open_container_log(name: str) -> int:
+    """Open a singly linked regular log for append under a pinned runtime directory.
+
+    Check links before opening too: unlinking a planted hardlink after open
+    can leave the host inode with one link. Refused entries are never modified.
+    The caller owns the returned descriptor. Checks detect substitution, not
+    links or renames made after the last check.
+    """
+    parent_fd = open_container_data_dir(name, create=True)
+    fd = None
+    try:
+        leaf = os.path.basename(container_log_path(name))
+        for attempt in range(2):
+            try:
+                before = dirfd.lstat_at(parent_fd, leaf)
+            except FileNotFoundError:
+                before = None
+            if before is not None and (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1):
+                raise OSError(errno.EINVAL, "run log must be a singly linked regular file", leaf)
+            flags = os.O_WRONLY | os.O_APPEND
+            if before is None:
+                flags |= os.O_CREAT | os.O_EXCL
+            try:
+                fd, opened = dirfd.open_regular_at(parent_fd, leaf, flags, 0o600)
+            except FileExistsError:
+                if before is None and attempt == 0:
+                    continue
+                raise
+            current = dirfd.lstat_at(parent_fd, leaf)
+            if (
+                opened.st_nlink != 1
+                or (before is not None and not os.path.samestat(before, opened))
+                or not stat.S_ISREG(current.st_mode)
+                or current.st_nlink != 1
+                or not os.path.samestat(opened, current)
+            ):
+                raise OSError(errno.ESTALE, "run log was replaced or linked during open", leaf)
+            result, fd = fd, None
+            return result
+        raise FileExistsError(errno.EEXIST, "run log appeared during creation", leaf)
+    finally:
+        if fd is not None:
+            os.close(fd)
+        os.close(parent_fd)
 
 
 def container_rootfs(name: str) -> str:
@@ -100,7 +152,24 @@ def container_incomplete_marker(name: str) -> str:
 
 def is_install_incomplete(name: str) -> bool:
     """Return True if *name* is a leftover from an interrupted install."""
-    return os.path.isfile(container_incomplete_marker(name))
+    try:
+        fd = open_container_dir(name)
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise _unusable_storage(name, exc) from None
+    try:
+        return _incomplete_at(fd, name)
+    finally:
+        os.close(fd)
+
+
+def _incomplete_at(fd: int, name: str) -> bool:
+    try:
+        dirfd.lstat_at(fd, os.path.basename(container_incomplete_marker(name)))
+    except FileNotFoundError:
+        return False
+    return True
 
 
 def container_from_spec(spec: str) -> str | None:
@@ -214,29 +283,78 @@ def _walk_spec(rootfs: str, rel_path: str, spec: str, deref_leaf: bool) -> str:
 _O_DIR = (getattr(os, "O_PATH", 0) or os.O_RDONLY) | os.O_DIRECTORY
 
 
-def open_container_rootfs(name: str, *, create: bool = False) -> int:
-    """Open containers/<name>/rootfs as a descriptor. The caller closes it.
+def open_containers_dir() -> int:
+    """Pin the container parent for deletion; the caller closes the fd."""
+    anchor = TERMUX_PREFIX if IS_TERMUX else os.path.dirname(os.path.dirname(CONTAINERS_DIR))
+    return _open_storage_dir(CONTAINERS_DIR, anchor, create=False)
 
-    Walked down from CONTAINERS_DIR with O_NOFOLLOW at every step rather than
-    opened by composed path. On Termux the runtime tree lives under the prefix
-    that is bound read-write into every non-isolated container, so
-    `containers/<name>` is guest-writable, and a symlink left in place of it or
-    of its rootfs is how a transfer ends up reading or writing a host directory.
 
-    With create=True each missing level is made with mkdirat off the descriptor
-    of the level above, which is what `install` needs: the tree it is about to
-    unpack into has to be created the same way it is checked, and the
-    descriptor it gets back is the one every member is then written beneath.
+def open_runtime_data_dir() -> int:
+    """Pin the runtime data parent for deletion; the caller closes the fd."""
+    anchor = TERMUX_PREFIX if IS_TERMUX else os.path.dirname(RUNTIME_DIR)
+    return _open_storage_dir(os.path.join(RUNTIME_DIR, "data"), anchor, create=False)
 
-    FileNotFoundError means the container, or its rootfs, is not there, an
-    ordinary answer, left to the caller. Any other refusal is an entry this
-    program did not create.
+
+def open_container_dir(name: str, *, create: bool = False) -> int:
+    """Pin a container below its platform anchor; the caller closes the fd.
+
+    Aliases above the anchor are allowed. Each descendant refuses symlinks,
+    and a newly created directory entry is synced before descending into it.
     """
-    root_fd = os.open(CONTAINERS_DIR, _O_DIR)
+    if not is_valid_name(name):
+        raise InvalidNameError(f"invalid container name '{name}'.")
+    anchor = TERMUX_PREFIX if IS_TERMUX else os.path.dirname(os.path.dirname(CONTAINERS_DIR))
+    return _open_storage_dir(container_dir(name), anchor, create=create)
+
+
+def open_container_data_dir(name: str, *, create: bool = False) -> int:
+    """Pin a container's runtime data directory; the caller closes the fd."""
+    if not is_valid_name(name):
+        raise InvalidNameError(f"invalid container name '{name}'.")
+    anchor = TERMUX_PREFIX if IS_TERMUX else os.path.dirname(RUNTIME_DIR)
+    return _open_storage_dir(container_data_dir(name), anchor, create=create)
+
+
+def open_sessions_dir(*, create: bool = False) -> int:
+    """Pin the session registry below its platform anchor; the caller closes it."""
+    anchor = TERMUX_PREFIX if IS_TERMUX else os.path.dirname(RUNTIME_DIR)
+    return _open_storage_dir(SESSIONS_DIR, anchor, create=create)
+
+
+def _open_storage_dir(path: str, anchor: str, *, create: bool) -> int:
+    if create:
+        os.makedirs(anchor, exist_ok=True)
+    fd = dirfd.opendir(anchor)
     try:
-        return dirfd.descend_at(root_fd, (name, "rootfs"), create=create)
+        parts = os.path.relpath(path, anchor).split(os.sep)
+        if os.pardir in parts:
+            raise ValueError("storage is outside its platform anchor")
+        for part in parts:
+            try:
+                nxt = dirfd.opendir_at(fd, part)
+            except FileNotFoundError:
+                if not create:
+                    raise
+                with contextlib.suppress(FileExistsError):
+                    os.mkdir(part, dir_fd=fd)
+                os.fsync(fd)
+                nxt = dirfd.opendir_at(fd, part)
+            os.close(fd)
+            fd = nxt
+        result, fd = fd, -1
+        return result
     finally:
-        os.close(root_fd)
+        if fd != -1:
+            os.close(fd)
+
+
+def open_container_rootfs(name: str, *, create: bool = False, same_mount: bool = False) -> int:
+    """Pin a rootfs, optionally requiring the container directory's mount."""
+    fd = open_container_dir(name, create=create)
+    try:
+        return dirfd.descend_at(fd, (os.path.basename(container_rootfs(name)),), create=create, same_mount=same_mount)
+    finally:
+        os.close(fd)
 
 
 def _unusable_storage(name: str, exc: OSError) -> ChrootDistroError:
@@ -249,20 +367,25 @@ def _unusable_storage(name: str, exc: OSError) -> ChrootDistroError:
 
 
 def container_is_installed(name: str) -> bool:
-    """True when containers/<name>/rootfs is a directory reachable as one.
-
-    os.path.isdir() on the composed path follows whatever stands in the way; this
-    walks down to it instead, so False means the container is genuinely not
-    installed rather than that a planted entry led somewhere without a rootfs.
-    """
+    """True when a guarded rootfs exists without an incomplete marker."""
     try:
-        fd = open_container_rootfs(name)
+        fd = open_container_dir(name)
     except FileNotFoundError:
         return False
     except OSError as exc:
         raise _unusable_storage(name, exc) from None
-    os.close(fd)
-    return True
+    try:
+        if _incomplete_at(fd, name):
+            return False
+        rootfs_fd = dirfd.opendir_at(fd, os.path.basename(container_rootfs(name)))
+        os.close(rootfs_fd)
+        return True
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise _unusable_storage(name, exc) from None
+    finally:
+        os.close(fd)
 
 
 def resolve_container_path(spec: str, *, deref_leaf: bool = True) -> str:
@@ -555,19 +678,26 @@ def installed_containers() -> list[str]:
     """Return sorted names of all installed containers (those with a rootfs).
 
     Leftovers from interrupted installs (see container_incomplete_marker)
-    are not installed containers and are excluded.
+    are not installed containers and are excluded. Unusable entries do not
+    prevent discovery of other containers.
     """
     try:
-        return sorted(
-            e for e in os.listdir(CONTAINERS_DIR) if os.path.isdir(container_rootfs(e)) and not is_install_incomplete(e)
-        )
+        entries = os.listdir(CONTAINERS_DIR)
     except OSError as exc:
         import errno
 
         if exc.errno in (errno.EACCES, errno.EPERM):
-            import logging
-
             logging.getLogger(__name__).warning(
                 "Permission denied: cannot read containers directory '%s'", CONTAINERS_DIR
             )
         return []
+    installed = []
+    for name in sorted(entries):
+        if not is_valid_name(name):
+            continue
+        try:
+            if container_is_installed(name):
+                installed.append(name)
+        except (ChrootDistroError, OSError) as exc:
+            logging.getLogger(__name__).warning("Cannot inspect container '%s': %s", name, exc)
+    return installed

@@ -1,41 +1,39 @@
 # SPDX-License-Identifier: GPL-3.0-only
 # Copyright (C) 2025-2026 Md Arif
-"""One file per live session, kept alive by the flock the session holds.
+"""One atomically published, flock-held record per login or run session.
 
-`ps` and `kill` need to know which sessions exist, who started them and how, and
-`helpers/session.py`'s refcount cannot say. So each `login` or `run` writes
-`SESSIONS_DIR/<pid>.json` and holds an exclusive flock on it for as long as it runs.
+All registry operations retain a directory descriptor from the platform anchor.
+Registration locks an exclusive temporary and keeps a duplicate descriptor alive
+after publication. The returned handle owns that duplicate; callers retain it
+until exit or pass it through `spawn_detached`'s `keep_fds`. Closing the parent
+copy must not explicitly unlock the child's shared open file description.
 
-The flock *is* the liveness signal, which is the whole design: `ps` tries a shared
-non-blocking lock, and a refusal means the holder is alive while a success means it
-died and the file is pruned on sight. Nothing has to be cleaned up on a crash, because
-the kernel drops the lock when the process goes. The record is written to a temporary
-and renamed into place, since flock lives on the open file description rather than the
-name, so the rename publishes the file without losing the lock.
+Records are limited to 1 MiB and published with mode 0644 so Termux's unelevated
+`ps` can read them. Readers probe and read the same regular-file descriptor and
+prune unlocked entries relative to the pinned directory. Registration I/O failures
+are logged and return None; interrupts propagate after descriptor cleanup.
 
-A detached session outlives the process that started it, so the descriptor's
-close-on-exec is cleared and handed to the child through `spawn_detached`'s *keep_fds*.
-An interactive one keeps the handle in the parent and closes it in a `finally`. Either
-way the caller must hold the returned handle: dropping it releases the lock and the
-session reads as dead.
-
-Registration is best-effort throughout. Every failure returns None and is logged, never
-raised: a session missing from `ps` is a small loss, a session that refused to start
-because it could not be recorded is a large one.
+A flock proves only that the opened inode is locked. These filesystem guards do
+not authenticate record fields, the recorded PID or its container membership.
 """
 
 from __future__ import annotations
 
 import contextlib
+import errno
 import fcntl
 import json
 import logging
 import os
 import time
 
-from chroot_distro.constants import SESSIONS_DIR
+from chroot_distro import dirfd
+from chroot_distro.atomic import atomic_write
+from chroot_distro.paths import open_sessions_dir
 
 log = logging.getLogger(__name__)
+
+_RECORD_LIMIT = 1024 * 1024
 
 
 def register_session(
@@ -55,19 +53,10 @@ def register_session(
     ends, or pass ``handle.fileno()`` to ``pass_fds`` so a detached child
     inherits the lock.
 
-    Best-effort: every failure path returns ``None`` and is silently ignored.
+    I/O failures or oversized records return ``None`` and are logged.
     """
-    try:
-        os.makedirs(SESSIONS_DIR, exist_ok=True)
-    except OSError as exc:
-        log.warning("Failed to create sessions directory '%s': %s", SESSIONS_DIR, exc)
-        return None
-
     pid = os.getpid()
-    final_path = os.path.join(SESSIONS_DIR, f"{pid}.json")
-    tmp_path = os.path.join(SESSIONS_DIR, f".{pid}.{os.urandom(4).hex()}.tmp")
-
-    payload = {
+    record = {
         "pid": pid,
         "container": container,
         "kind": kind,
@@ -78,47 +67,37 @@ def register_session(
         "minimal": bool(minimal),
         "detached": bool(detached),
     }
-
-    try:
-        fd = open(tmp_path, "w")  # noqa: SIM115
-    except OSError as exc:
-        log.warning("Failed to create temporary session file '%s': %s", tmp_path, exc)
+    payload = json.dumps(record, ensure_ascii=True) + "\n"
+    if len(payload) > _RECORD_LIMIT:
+        log.warning("Session record for PID %s exceeds the size limit", pid)
         return None
 
-    # Clear O_CLOEXEC so the fd (and its flock) can be inherited by child
-    # processes when passed via pass_fds for detached sessions.
-    with contextlib.suppress(OSError):
-        os.set_inheritable(fd.fileno(), True)
-
+    directory_fd = None
+    retained = None
     try:
-        fcntl.flock(fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        directory_fd = open_sessions_dir(create=True)
+        with atomic_write(f"{pid}.json", dir_fd=directory_fd, mode=0o644) as fh:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            duplicate = os.dup(fh.fileno())
+            try:
+                retained = os.fdopen(duplicate, "w")
+            except BaseException:
+                os.close(duplicate)
+                raise
+            os.set_inheritable(retained.fileno(), True)
+            fh.write(payload)
+        handle = _SessionHandle(retained)
+        retained = None
+        return handle
     except OSError as exc:
-        log.warning("Failed to flock session file '%s': %s", tmp_path, exc)
-        _safe_close(fd)
-        _safe_unlink(tmp_path)
+        log.warning("Failed to register session for PID %s: %s", pid, exc)
         return None
-
-    try:
-        json.dump(payload, fd)
-        fd.write("\n")
-        fd.flush()
-    except OSError as exc:
-        log.warning("Failed to write session details to '%s': %s", tmp_path, exc)
-        _safe_close(fd)
-        _safe_unlink(tmp_path)
-        return None
-
-    # Atomic publish: flock lives on the open file description (inode),
-    # not the path, so the rename preserves the lock.
-    try:
-        os.replace(tmp_path, final_path)
-    except OSError as exc:
-        log.warning("Failed to publish session file (rename '%s' to '%s'): %s", tmp_path, final_path, exc)
-        _safe_close(fd)
-        _safe_unlink(tmp_path)
-        return None
-
-    return _SessionHandle(fd)
+    finally:
+        if retained is not None:
+            _safe_close(retained)
+        if directory_fd is not None:
+            with contextlib.suppress(OSError):
+                os.close(directory_fd)
 
 
 class _SessionHandle:
@@ -137,8 +116,9 @@ class _SessionHandle:
 
     def close(self) -> None:
         """Release the lock and close the file descriptor."""
-        _safe_close(self._fd)
-        self._fd = None
+        if self._fd is not None:
+            _safe_close(self._fd)
+            self._fd = None
 
 
 def active_sessions() -> list[dict]:
@@ -148,57 +128,51 @@ def active_sessions() -> list[dict]:
     holder has exited are unlinked as a side effect.  Results are sorted by
     start time then PID.
     """
+    directory_fd = None
     try:
-        names = os.listdir(SESSIONS_DIR)
+        directory_fd = open_sessions_dir()
+        sessions = [
+            data
+            for name in os.listdir(directory_fd)
+            if not name.startswith(".") and name.endswith(".json")
+            if (data := _read_session(directory_fd, name)) is not None
+        ]
     except OSError:
         return []
-
-    sessions: list[dict] = []
-    for name in names:
-        if name.startswith(".") or not name.endswith(".json"):
-            continue
-        path = os.path.join(SESSIONS_DIR, name)
-
-        try:
-            with open(path) as fh:
-                data = json.load(fh)
-        except (OSError, ValueError):
-            data = None
-
-        if not _session_alive(path):
-            _safe_unlink(path)
-            continue
-
-        if isinstance(data, dict):
-            sessions.append(data)
-
+    finally:
+        if directory_fd is not None:
+            with contextlib.suppress(OSError):
+                os.close(directory_fd)
     sessions.sort(key=lambda s: (s.get("start_time", 0.0), s.get("pid", 0)))
     return sessions
 
 
-def _session_alive(path: str) -> bool:
-    """Return True iff a process still holds the exclusive lock on *path*.
-
-    Probes with a shared, non-blocking flock: refusal means the session's
-    exclusive lock is still held (alive); success means the file is unheld
-    (the session is dead).
-    """
+def _read_session(directory_fd: int, name: str) -> dict | None:
+    """Read a locked record, or prune an unlocked inode that still has its name."""
+    fd = None
     try:
-        fd = os.open(path, os.O_RDONLY)
-    except OSError:
-        return False
-    try:
+        fd, original = dirfd.open_regular_at(directory_fd, name, os.O_RDONLY)
         try:
             fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
-        except OSError:
-            # EACCES/EAGAIN means the exclusive lock is held → alive.
-            return True
-        # Acquired the shared lock: nobody holds it → dead.
-        fcntl.flock(fd, fcntl.LOCK_UN)
-        return False
+        except OSError as exc:
+            if exc.errno not in (errno.EACCES, errno.EAGAIN):
+                return None
+        else:
+            if os.path.samestat(original, dirfd.lstat_at(directory_fd, name)):
+                os.unlink(name, dir_fd=directory_fd)
+            return None
+        with open(fd, "rb", closefd=False) as fh:
+            payload = fh.read(_RECORD_LIMIT + 1)
+        if len(payload) > _RECORD_LIMIT:
+            return None
+        data = json.loads(payload)
+        return data if isinstance(data, dict) else None
+    except (OSError, ValueError, RecursionError):
+        return None
     finally:
-        with contextlib.suppress(OSError):
-            os.close(fd)
+        if fd is not None:
+            with contextlib.suppress(OSError):
+                os.close(fd)
 
 
 def _safe_close(fd) -> None:
@@ -206,18 +180,13 @@ def _safe_close(fd) -> None:
         fd.close()
 
 
-def _safe_unlink(path: str) -> None:
-    with contextlib.suppress(OSError):
-        os.unlink(path)
-
-
 def resolve_container_by_pid(pid: int) -> str | None:
     """Return the container name for a live session with the given PID, or ``None``.
 
     Iterates the active session registry (the same data ``ps`` displays)
     and returns the ``container`` field of the matching entry.  Only PIDs
-    that appear in the registry are accepted, so arbitrary host PIDs can
-    never be resolved to a container.
+    that appear in a locked registry record are accepted. Record fields are
+    advisory and do not authenticate the process's container membership.
     """
     for sess in active_sessions():
         if sess.get("pid") == pid:

@@ -27,6 +27,8 @@ if sys.platform != "linux":
 
     if not hasattr(os, "getuid"):
         os.getuid = lambda: 1000
+    if not hasattr(os, "geteuid"):
+        os.geteuid = lambda: 1000
     if not hasattr(os, "getgid"):
         os.getgid = lambda: 1000
     if not hasattr(os, "getgroups"):

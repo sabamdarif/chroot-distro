@@ -20,6 +20,8 @@ Every request goes through `http_opener()`, the one place an opener is built: HT
 HTTPS and nothing else, with a redirect handler that refuses a step down from HTTPS to
 plain HTTP. No manifest, `install <url>` archive or `ADD <url>` file is pinned to a
 digest, so a plaintext hop would let whoever sits on it choose what is installed.
+Archive download diagnostics use the original endpoint and structured failure
+details. URLs sent in requests and text supplied by servers can contain credentials.
 
 Segmentation is earned, never assumed: HEAD first, a `Range: bytes=0-0` GET when HEAD
 is silent about ranges or answers 405, and segments only when Range works *and* the
@@ -73,7 +75,7 @@ from chroot_distro.constants import (
     PROGRAM_NAME,
     PROGRAM_VERSION,
 )
-from chroot_distro.message import log_error, log_info, msg, quote_path, warn
+from chroot_distro.message import log_info, quote_path, warn
 from chroot_distro.progress import (
     REDRAW_THRESHOLD_BYTES,
     AggregateByteProgress,
@@ -357,6 +359,7 @@ def http_opener(
     *,
     insecure: bool = False,
     redirect: urllib.request.HTTPRedirectHandler | None = None,
+    opener_class: type[_Opener] = _Opener,
 ) -> urllib.request.OpenerDirector:
     """Return an opener for HTTP(S) requests with a default timeout.
 
@@ -374,7 +377,7 @@ def http_opener(
     if redirect is None:
         redirect = RedirectPolicyHandler(allow_plaintext=insecure)
     context = insecure_ssl_context() if insecure else None
-    opener = _Opener()
+    opener = opener_class()
     for handler in (
         urllib.request.ProxyHandler(),
         urllib.request.UnknownHandler(),
@@ -585,7 +588,10 @@ def retry_http(
                 wait = retry_after(exc)
             if wait is not None:
                 delay = max(retry_delay, math.ceil(min(wait, MAX_RETRY_AFTER)))
-            log_info(f"{what}: attempt {attempt + 1}/{max_retries} failed ({exc}); retrying in {delay}s...")
+            if isinstance(exc, urllib.error.HTTPError):
+                exc.close()
+            failure = _download_failure(exc)
+            log_info(f"{what}: attempt {attempt + 1}/{max_retries} failed ({failure}); retrying in {delay}s...")
             if abort_event is not None:
                 _interruptible_sleep(delay, abort_event)
             else:
@@ -681,7 +687,7 @@ def _range_probe(
                     range_ok=True,
                 )
             return _ProbeResult(
-                content_length=int(resp.headers.get("Content-Length", 0)),
+                content_length=declared_length(resp),
                 final_url=resp.url,
                 range_ok=False,
             )
@@ -716,7 +722,7 @@ def _probe_url(
     try:
         head_req = new_request(url, headers=headers, method="HEAD")
         with open_fn(head_req) as resp:
-            content_length = int(resp.headers.get("Content-Length", 0))
+            content_length = declared_length(resp)
             accept_ranges = (resp.headers.get("Accept-Ranges", "")).lower()
             final_url = resp.url
             if accept_ranges == "bytes":
@@ -862,6 +868,7 @@ def _download_segment(
     bucket: "TokenBucket | None" = None,
     live_responses: "_LiveResponses | None" = None,
     insecure: bool = False,
+    opener_factory: typing.Callable[[], urllib.request.OpenerDirector] | None = None,
 ) -> None:
     """Download one byte-range segment to *seg.tmp_path*.
 
@@ -887,7 +894,8 @@ def _download_segment(
 
     # Each thread gets its own opener to avoid urllib's internal
     # connection serialisation when sharing the default global opener.
-    opener = http_opener(insecure=insecure)
+    make_opener = opener_factory or functools.partial(http_opener, insecure=insecure)
+    opener = make_opener()
 
     reconnections = 0
     while reconnections <= _MAX_RECONNECTIONS:
@@ -977,7 +985,7 @@ def _download_segment(
                 reconnections += 1
                 if reconnections > _MAX_RECONNECTIONS:
                     raise
-                opener = http_opener(insecure=insecure)
+                opener = make_opener()
                 break  # re-enter the reconnection loop
 
     raise RuntimeError(
@@ -1185,12 +1193,11 @@ def _download_single_loop(
     last_exc: BaseException | None,
     insecure: bool = False,
 ) -> None:
-    url = req.full_url
     opener = http_opener(insecure=insecure)
     for attempt in range(max_retries + 1):
         if attempt > 0:
             delay = retry_delays[attempt - 1]
-            warn(f"Retry {attempt}/{max_retries} in {delay}s (reason: {last_exc})...")
+            warn(f"Retry {attempt}/{max_retries} in {delay}s ({_download_failure(last_exc)})...")
             _interruptible_sleep(delay, abort_event)
 
         try:
@@ -1220,7 +1227,7 @@ def _download_single_loop(
                         last_speed_bytes = downloaded
                         last_speed_time = now
                     draw_bytes_bar(downloaded, total, noun="downloaded", speed=speed)
-                require_complete_body(downloaded, total, url)
+                require_complete_body(downloaded, total)
                 fh.flush()
                 os.fsync(fh.fileno())
             clear_bar()
@@ -1229,45 +1236,63 @@ def _download_single_loop(
         except KeyboardInterrupt:
             clear_bar()
             raise
-        except BaseException as exc:
+        except Exception as exc:
             clear_bar()
             if _is_retryable(exc) and attempt < max_retries:
                 last_exc = exc
                 continue
-
-            host = urllib.parse.urlparse(url).netloc or url
-            if isinstance(exc, urllib.error.URLError):
-                if not insecure and is_cert_verification_error(exc):
-                    raise RuntimeError(certificate_error_msg(host)) from exc
-                if is_plaintext_http_tls_error(exc):
-                    raise RuntimeError(
-                        f"The URL '{url}' uses HTTPS, but the server at '{host}' "
-                        f"responded over plain HTTP (no TLS). If you trust this "
-                        f"source, retry with the same URL using the 'http://' "
-                        f"scheme instead."
-                    ) from exc
-            if isinstance(exc, urllib.error.HTTPError) and 400 <= exc.code < 500 and exc.code not in (408, 429):
-                raise RuntimeError(f"Cannot download {url}: HTTP {exc.code} {exc.reason}") from exc
-
-            msg()
-            log_error("Download failure, please check your network connection.")
-            raise RuntimeError(f"Cannot download {url}: {exc}") from exc
+            raise
 
 
-def _refusal_error(url: str, exc: BaseException) -> RuntimeError:
-    """The error reporting a refused redirect or an unusable URL for *url*.
+def _download_failure(exc: BaseException | None) -> str:
+    """Describe a download error without printing server or request text."""
+    if isinstance(exc, urllib.error.HTTPError):
+        return f"HTTP {exc.code}"
+    if isinstance(exc, (InvalidRequest, http.client.InvalidURL)):
+        return "archive URL is not a valid URL or HTTP request"
+    if isinstance(exc, RedirectRefused):
+        return "refused a redirect without a valid HTTP or HTTPS destination"
+    if isinstance(exc, IncompleteResponse):
+        return str(exc)
+    if isinstance(exc, urllib.error.URLError):
+        exc = exc.reason if isinstance(exc.reason, OSError) else None
+    if isinstance(exc, TimeoutError):
+        return "connection timed out"
+    if isinstance(exc, socket.gaierror):
+        return "could not resolve the server name"
+    if isinstance(exc, ssl.SSLError):
+        return "TLS connection failed"
+    if isinstance(exc, OSError) and exc.errno is not None:
+        return os.strerror(exc.errno)
+    if isinstance(exc, http.client.HTTPException):
+        return "invalid or incomplete HTTP response"
+    return "download failed"
 
-    Only a step down from HTTPS is what --allow-insecure lifts, so only
-    that one names the flag; a redirect off HTTP, and a URL that is not
-    one, are refused either way.
-    """
-    remedy = (
-        " If you trust this source and the network path to it, re-run with "
-        "'--allow-insecure' to follow the redirect."
-        if getattr(exc, "plaintext", False)
-        else ""
-    )
-    return RuntimeError(f"Cannot download {url}: {exc}{remedy}")
+
+def _download_error(url: str, exc: Exception, *, insecure: bool) -> RuntimeError:
+    target = "archive URL"
+    with contextlib.suppress(ValueError):
+        source = urllib.parse.urlsplit(url)
+        _ = source.port
+        if source.scheme in _FOLLOWED_SCHEMES and source.hostname:
+            authority = source.netloc.rsplit("@", 1)[-1]
+            target = f"{source.scheme}://{quote_path(authority)}"
+
+    if isinstance(exc, urllib.error.URLError):
+        if not insecure and is_cert_verification_error(exc):
+            return RuntimeError(certificate_error_msg(target))
+        if is_plaintext_http_tls_error(exc):
+            return RuntimeError(
+                f"The HTTPS download from '{target}' received a plain HTTP response. "
+                "If you trust this source, retry using the 'http://' scheme."
+            )
+    if isinstance(exc, RedirectRefused) and exc.plaintext:
+        return RuntimeError(
+            f"Cannot download from '{target}': refused a redirect from HTTPS to plain HTTP. "
+            "If you trust this source and the network path to it, re-run with "
+            "'--allow-insecure' to follow the redirect."
+        )
+    return RuntimeError(f"Cannot download from '{target}': {_download_failure(exc)}")
 
 
 def download_file(
@@ -1294,52 +1319,36 @@ def download_file(
     rate = download_rate_limit()
     bucket = TokenBucket(rate) if rate > 0 else None
 
-    if connections > 1:
-        try:
-            with loading_line("Connecting..."):
-                probe = _probe_server(url, _ua_headers(), insecure=insecure)
-        except (RedirectRefused, InvalidRequest) as exc:
-            raise _refusal_error(url, exc) from exc
-
-        if probe is None:
-            log_info("Server probe failed, falling back to single connection.")
-        elif not probe.range_ok:
-            log_info("Server does not support Range requests, using single connection.")
-        elif probe.content_length <= 0:
-            log_info("Unknown content length, using single connection.")
-        else:
-            log_info(f"Range supported, content length {fmt_size(probe.content_length)}. Using segmented download.")
-            try:
-                _download_multi(url, dest, probe, connections, bucket, insecure=insecure)
-                return
-            except _FallbackToSingleError:
-                log_info("Segments too small for splitting, falling back to single connection.")
-            except KeyboardInterrupt:
-                clear_bar()
-                raise
-            except Exception as exc:
-                clear_bar()
-                host = urllib.parse.urlparse(url).netloc or url
-                if isinstance(exc, (RedirectRefused, InvalidRequest)):
-                    raise _refusal_error(url, exc) from exc
-                if isinstance(exc, urllib.error.URLError):
-                    if not insecure and is_cert_verification_error(exc):
-                        raise RuntimeError(certificate_error_msg(host)) from exc
-                    if is_plaintext_http_tls_error(exc):
-                        raise RuntimeError(
-                            f"The URL '{url}' uses HTTPS, but the server at '{host}' "
-                            f"responded over plain HTTP (no TLS). If you trust this "
-                            f"source, retry with the same URL using the 'http://' "
-                            f"scheme instead."
-                        ) from exc
-                if isinstance(exc, urllib.error.HTTPError) and 400 <= exc.code < 500 and exc.code not in (408, 429):
-                    raise RuntimeError(f"Cannot download {url}: HTTP {exc.code} {exc.reason}") from exc
-                raise RuntimeError(f"Cannot download {url}: {exc}") from exc
-
     try:
+        if connections > 1:
+            try:
+                with loading_line("Connecting..."):
+                    probe = _probe_server(url, _ua_headers(), insecure=insecure)
+            except (RedirectRefused, InvalidRequest):
+                raise
+            except NETWORK_ERRORS:
+                probe = None
+
+            if probe is None:
+                log_info("Server probe failed, falling back to single connection.")
+            elif not probe.range_ok:
+                log_info("Server does not support Range requests, using single connection.")
+            elif probe.content_length <= 0:
+                log_info("Unknown content length, using single connection.")
+            else:
+                log_info(f"Range supported, content length {fmt_size(probe.content_length)}. Using segmented download.")
+                try:
+                    _download_multi(url, dest, probe, connections, bucket, insecure=insecure)
+                    return
+                except _FallbackToSingleError:
+                    log_info("Segments too small for splitting, falling back to single connection.")
         _download_single(url, dest, bucket, insecure=insecure)
-    except (RedirectRefused, InvalidRequest) as exc:
-        raise _refusal_error(url, exc) from exc
+    except KeyboardInterrupt:
+        clear_bar()
+        raise
+    except Exception as exc:
+        clear_bar()
+        raise _download_error(url, exc, insecure=insecure) from exc
 
 
 def sha256_file(path: str) -> str:

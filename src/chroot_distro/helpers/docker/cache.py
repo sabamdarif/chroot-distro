@@ -40,6 +40,7 @@ import typing
 from chroot_distro.arch import Platform
 from chroot_distro.atomic import atomic_write
 from chroot_distro.constants import LAYER_CACHE_DIR, MANIFEST_CACHE_DIR
+from chroot_distro.helpers.docker.media import normalized_variant
 from chroot_distro.helpers.docker.refs import canonical_ref
 
 log = logging.getLogger(__name__)
@@ -131,7 +132,9 @@ def load_manifest_cache(
             with open(path) as fh:
                 data = json.load(fh)
             manifest, repo = data["manifest"], data["repo"]
-            image_config = data.get("image_config") or {}
+            image_config = data.get("image_config")
+            if image_config is None:
+                image_config = {}
         except (OSError, json.JSONDecodeError, KeyError, TypeError):
             continue
         recorded = data.get("platform")
@@ -149,9 +152,8 @@ def _config_is_for(image_config: typing.Any, platform: Platform) -> bool:
     """True unless a cached image config declares a platform other than *platform*.
 
     Only what the document actually says is checked: a config carries `os` and
-    `architecture` and rarely a `variant`, and a pull whose config blob could not
-    be fetched stores an empty one, so an absent field is not a mismatch. What is
-    a mismatch is an entry for one platform standing under another's key.
+    `architecture` and rarely a `variant`. Older pulls could cache an empty
+    config after a failed fetch. Only a conflicting declared field is a mismatch.
     """
     if not isinstance(image_config, dict):
         return False
@@ -161,8 +163,14 @@ def _config_is_for(image_config: typing.Any, platform: Platform) -> bool:
         "variant": platform.variant,
     }
     for key, expected in declared.items():
-        value = image_config.get(key)
-        if isinstance(value, str) and value and expected and value != expected:
+        value = image_config.get(key, "")
+        if not isinstance(value, str):
+            return False
+        if not value:
+            continue
+        if key == "variant":
+            value = normalized_variant(platform.architecture, value)
+        if value != expected:
             return False
     return True
 

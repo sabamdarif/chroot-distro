@@ -1,28 +1,35 @@
 import json
 import os
 import shlex
-import tempfile
+import subprocess
+import sys
+from argparse import Namespace
+from contextlib import nullcontext
+from pathlib import Path
+from importlib.machinery import ModuleSpec
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from chroot_distro.elevate import (
     _find_escalation_tool,
-    _forwarded_env_assignments,
-    _load_secret_file,
-    _write_secret_file,
+    _forwarded_env,
+    _find_termux_su,
+    _su_help_text,
+    _termux_su_argv,
     elevate_or_die,
     get_reexec_argv,
     is_root,
 )
+from chroot_distro.elevation_handoff import HANDOFF_ENV, _read_handoff, receive_handoff, send_handoff
 from chroot_distro.exceptions import RootRequiredError
 
 
 def test_is_root():
-    with patch("os.getuid", return_value=0):
+    with patch("os.geteuid", return_value=0):
         assert is_root() is True
 
-    with patch("os.getuid", return_value=1000):
+    with patch("os.geteuid", return_value=1000):
         assert is_root() is False
 
 
@@ -50,146 +57,63 @@ def test_get_reexec_argv_python_script():
         assert argv == ["/usr/bin/python3", "/path/to/main.py", "list"]
 
 
-@patch("chroot_distro.elevate.IS_TERMUX", True)
-def test_find_escalation_tool_termux():
-    # Termux: sudo -> doas -> pkexec -> su
-    # 1. sudo available
-    with patch(
-        "shutil.which", side_effect=lambda cmd: "/usr/bin/" + cmd if cmd in ("sudo", "doas", "pkexec", "su") else None
-    ):
-        assert _find_escalation_tool() == ["sudo"]
-
-    # 2. doas available (no sudo)
-    with patch("shutil.which", side_effect=lambda cmd: "/usr/bin/" + cmd if cmd in ("doas", "pkexec", "su") else None):
-        assert _find_escalation_tool() == ["doas", "--"]
-
-    # 3. pkexec available (no sudo, no doas)
-    with patch("shutil.which", side_effect=lambda cmd: "/usr/bin/" + cmd if cmd in ("pkexec", "su") else None):
-        assert _find_escalation_tool() == ["pkexec", "--disable-internal-agent"]
-
-    # 4. su available (no sudo, doas, pkexec)
-    with patch("shutil.which", side_effect=lambda cmd: "/usr/bin/" + cmd if cmd == "su" else None):
-        assert _find_escalation_tool() == ["su", "-c"]
-
-    # 5. none available
-    with patch("shutil.which", return_value=None):
-        assert _find_escalation_tool() is None
-
-
-@patch("chroot_distro.elevate.IS_TERMUX", False)
-def test_find_escalation_tool_linux():
-    # Linux: sudo -> doas -> pkexec -> su
-    # 1. sudo available
-    with patch(
-        "shutil.which", side_effect=lambda cmd: "/usr/bin/" + cmd if cmd in ("sudo", "doas", "pkexec", "su") else None
-    ):
-        assert _find_escalation_tool() == ["sudo", "-E"]
-
-    # 2. doas available (no sudo)
-    with patch("shutil.which", side_effect=lambda cmd: "/usr/bin/" + cmd if cmd in ("doas", "pkexec", "su") else None):
-        assert _find_escalation_tool() == ["doas", "--"]
-
-    # 3. pkexec available (no sudo, no doas)
-    with patch("shutil.which", side_effect=lambda cmd: "/usr/bin/" + cmd if cmd in ("pkexec", "su") else None):
-        assert _find_escalation_tool() == ["pkexec", "--disable-internal-agent"]
-
-    # 4. su available (no sudo, doas, pkexec)
-    with patch("shutil.which", side_effect=lambda cmd: "/usr/bin/" + cmd if cmd == "su" else None):
-        assert _find_escalation_tool() == ["su", "-c"]
-
-    # 5. none available
-    with patch("shutil.which", return_value=None):
-        assert _find_escalation_tool() is None
-
-
-def test_elevate_or_die_already_root():
-    with patch("chroot_distro.elevate.is_root", return_value=True), patch("os.execvp") as mock_exec:
-        elevate_or_die()
-        mock_exec.assert_not_called()
-
-
-def test_elevate_or_die_loop_detected():
+@pytest.mark.parametrize(
+    "startup",
+    [
+        ["-S", "-X", "dev", "-m", "chroot_distro"],
+        ["-Smchroot_distro"],
+        ["-I", "-m", "chroot_distro.__main__"],
+    ],
+)
+def test_get_reexec_argv_module(startup):
+    app_args = ["run", "alpine", "--", "-m", "-X"]
+    script = "/checkout/src/chroot_distro/__main__.py"
+    spec = ModuleSpec("chroot_distro.__main__", loader=None, origin=script)
     with (
-        patch("chroot_distro.elevate.is_root", return_value=False),
-        patch.dict("os.environ", {"_CHROOT_DISTRO_ELEVATING": "1"}),
-        pytest.raises(RootRequiredError, match="Privilege elevation loop detected"),
+        patch("__main__.__spec__", spec),
+        patch("sys.argv", [script, *app_args]),
+        patch("sys.orig_argv", ["python3", *startup, *app_args]),
+        patch("sys.executable", "/venv/bin/python3"),
     ):
-        elevate_or_die()
+        assert get_reexec_argv() == ["/venv/bin/python3", *startup, *app_args]
 
 
-def test_elevate_or_die_no_tool():
-    with (
-        patch("chroot_distro.elevate.is_root", return_value=False),
-        patch("chroot_distro.elevate._find_escalation_tool", return_value=None),
-        pytest.raises(RootRequiredError, match="requires root privileges, but no privilege elevation tool"),
-    ):
-        elevate_or_die()
+@pytest.mark.parametrize("ignore_environment", [0, 1])
+def test_forwarded_env_only_carries_module_import_parent(tmp_path, monkeypatch, ignore_environment):
+    parent = tmp_path / "src"
+    script = parent / "chroot_distro" / "__main__.py"
+    spec = ModuleSpec("chroot_distro.__main__", loader=None, origin=str(script))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join(("src", "other")))
+    with patch("__main__.__spec__", spec), patch("sys.flags", ignore_environment=ignore_environment):
+        values = _forwarded_env()
+    if ignore_environment:
+        assert "PYTHONPATH" not in values
+    else:
+        assert values["PYTHONPATH"] == str(parent)
 
 
-def test_elevate_or_die_exec_sudo():
-    mock_exec = MagicMock()
-    with (
-        patch("chroot_distro.elevate.is_root", return_value=False),
-        patch("chroot_distro.elevate._find_escalation_tool", return_value=["sudo", "-E"]),
-        patch("chroot_distro.elevate.get_reexec_argv", return_value=["/usr/bin/chroot-distro", "login", "alpine"]),
-        patch("os.execvp", mock_exec),
-        patch.dict("os.environ", {}, clear=True),
-    ):
-        elevate_or_die()
-
-        mock_exec.assert_called_once()
-        args, _kwargs = mock_exec.call_args
-        assert args[0] == "sudo"
-        # The loop sentinel is always forwarded via the `env` prefix so it
-        # survives a stripped environment.
-        assert args[1] == [
-            "sudo",
-            "-E",
-            "env",
-            "_CHROOT_DISTRO_ELEVATING=1",
-            "/usr/bin/chroot-distro",
-            "login",
-            "alpine",
-        ]
-        assert os.environ.get("_CHROOT_DISTRO_ELEVATING") == "1"
-
-
-def test_elevate_or_die_exec_su():
-    mock_exec = MagicMock()
-    with (
-        patch("chroot_distro.elevate.is_root", return_value=False),
-        patch("chroot_distro.elevate._find_escalation_tool", return_value=["su", "-c"]),
-        patch("chroot_distro.elevate.get_reexec_argv", return_value=["/usr/bin/chroot-distro", "login", "alpine"]),
-        patch("os.execvp", mock_exec),
-        patch.dict("os.environ", {}, clear=True),
-    ):
-        elevate_or_die()
-
-        mock_exec.assert_called_once()
-        args, _kwargs = mock_exec.call_args
-        assert args[0] == "su"
-        # su -c gets a single command string with the env prefix embedded.
-        assert args[1] == [
-            "su",
-            "-c",
-            "env _CHROOT_DISTRO_ELEVATING=1 /usr/bin/chroot-distro login alpine",
-        ]
-        assert os.environ.get("_CHROOT_DISTRO_ELEVATING") == "1"
-
-
-def test_forwarded_env_assignments_only_present_vars():
+def test_forwarded_env_only_present_vars():
     with patch.dict(
         "os.environ",
         {"CD_USE_NS": "1", "CD_DOWNLOAD_WORKERS": "8", "UNRELATED": "x", "CD_DOCKER_AUTH": "user:pass"},
         clear=True,
     ):
-        assignments = _forwarded_env_assignments()
-    assert "CD_USE_NS=1" in assignments
-    assert "CD_DOWNLOAD_WORKERS=8" in assignments
-    # CD_DOCKER_AUTH is a secret and must never ride in plain argv assignments.
-    assert all(not a.startswith("CD_DOCKER_AUTH=") for a in assignments)
-    # Unrelated host vars are never forwarded.
-    assert all(not a.startswith("UNRELATED=") for a in assignments)
+        values = _forwarded_env()
+    assert values == {"CD_USE_NS": "1", "CD_DOWNLOAD_WORKERS": "8"}
+
+
+def test_forwarded_linux_env_preserves_storage_and_runtime_settings(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    settings = {
+        "CD_BUILD_CACHE_MAX": "1G",
+        "CD_USER": "guest",
+        "CD_WORKDIR": "/some dir",
+        "CD_ENTRYPOINT": "/bin/echo",
+        "CD_NO_BINFMT": "1",
+    }
+    with patch.dict(os.environ, {**settings, "XDG_DATA_HOME": "data", "XDG_CACHE_HOME": ""}, clear=True):
+        assert _forwarded_env() == {**settings, "XDG_DATA_HOME": str(tmp_path / "data")}
 
 
 def test_android_host_vars_survive_elevation():
@@ -201,269 +125,278 @@ def test_android_host_vars_survive_elevation():
         "BOOTCLASSPATH": "/apex/com.android.art/javalib/core-oj.jar",
         "ANDROID_ART_ROOT": "/apex/com.android.art",
     }
-    with patch.dict("os.environ", android, clear=True):
-        assignments = _forwarded_env_assignments()
-        with patch("os.makedirs"):
-            prelude = _termux_root_env_exports()
-
-    for key, value in android.items():
-        assert f"{key}={value}" in assignments
-        assert f"export {key}={shlex.quote(value)}" in prelude
-
-
-def test_elevate_forwards_cd_use_ns_via_sudo():
-    mock_exec = MagicMock()
+    termux = {"TERMUX_APP__APP_VERSION_NAME": "0.119", "TERMUX_VERSION": "0.119", "CD_USER": "guest"}
     with (
-        patch("chroot_distro.elevate.is_root", return_value=False),
-        patch("chroot_distro.elevate._find_escalation_tool", return_value=["sudo", "-E"]),
-        patch("chroot_distro.elevate.get_reexec_argv", return_value=["/usr/bin/chroot-distro", "login", "ubuntu"]),
-        patch("os.execvp", mock_exec),
-        patch.dict("os.environ", {"CD_USE_NS": "1"}, clear=True),
+        patch.dict("os.environ", {**android, **termux, "XDG_DATA_HOME": "/ignored"}, clear=True),
+        patch("chroot_distro.elevate.TERMUX_APP_PACKAGE", "com.example"),
+        patch("chroot_distro.elevate.TERMUX_HOME", "/path with space/home"),
+        patch("chroot_distro.elevate.TERMUX_PREFIX", "/path with space/usr"),
+        patch("os.makedirs"),
     ):
-        elevate_or_die()
+        prelude = _termux_root_env_exports()
 
-    args, _kwargs = mock_exec.call_args
-    full_argv = args[1]
-    # CD_USE_NS must cross the boundary via the root-side `env` binary, not
-    # via `sudo -E` (which sudoers policy often ignores).
-    assert "env" in full_argv
-    assert "CD_USE_NS=1" in full_argv
-    # The forwarded assignments must precede the re-exec'd program.
-    assert full_argv.index("CD_USE_NS=1") < full_argv.index("/usr/bin/chroot-distro")
+    for key, value in {
+        **android,
+        **termux,
+        "TERMUX_APP__PACKAGE_NAME": "com.example",
+        "TERMUX__HOME": "/path with space/home",
+        "TERMUX__PREFIX": "/path with space/usr",
+    }.items():
+        assert f"export {key}={shlex.quote(value)}" in prelude
+    assert "XDG_DATA_HOME" not in prelude
 
 
 @pytest.mark.parametrize(
-    "tool_cmd",
+    ("available", "expected"),
     [
-        ["doas", "--"],
-        ["pkexec", "--disable-internal-agent"],
+        (("sudo", "doas", "pkexec", "su"), ["sudo", "-H", "-u", "root", "--"]),
+        (("doas", "pkexec", "su"), ["doas", "--"]),
+        (("pkexec", "su"), ["pkexec", "--disable-internal-agent"]),
+        (("su",), ["su", "-c"]),
+        ((), None),
     ],
 )
-def test_elevate_forwards_cd_use_ns_via_other_tools(tool_cmd):
-    mock_exec = MagicMock()
-    with (
-        patch("chroot_distro.elevate.is_root", return_value=False),
-        patch("chroot_distro.elevate._find_escalation_tool", return_value=tool_cmd),
-        patch("chroot_distro.elevate.get_reexec_argv", return_value=["/usr/bin/chroot-distro", "login", "ubuntu"]),
-        patch("os.execvp", mock_exec),
-        patch.dict("os.environ", {"CD_USE_NS": "yes"}, clear=True),
-    ):
-        elevate_or_die()
-
-    args, _kwargs = mock_exec.call_args
-    full_argv = args[1]
-    assert full_argv[: len(tool_cmd)] == tool_cmd
-    assert "env" in full_argv
-    assert "CD_USE_NS=yes" in full_argv
-    assert full_argv.index("CD_USE_NS=yes") < full_argv.index("/usr/bin/chroot-distro")
+def test_linux_tool_order(available, expected):
+    with patch("shutil.which", side_effect=lambda cmd: "/usr/bin/" + cmd if cmd in available else None):
+        assert _find_escalation_tool() == expected
 
 
-def test_elevate_forwards_cd_use_ns_via_su():
-    mock_exec = MagicMock()
-    with (
-        patch("chroot_distro.elevate.is_root", return_value=False),
-        patch("chroot_distro.elevate._find_escalation_tool", return_value=["su", "-c"]),
-        patch("chroot_distro.elevate.get_reexec_argv", return_value=["/usr/bin/chroot-distro", "login", "ubuntu"]),
-        patch("os.execvp", mock_exec),
-        patch.dict("os.environ", {"CD_USE_NS": "1"}, clear=True),
-    ):
-        elevate_or_die()
-
-    args, _kwargs = mock_exec.call_args
-    cmd_str = args[1][2]
-    assert "env" in cmd_str
-    assert "CD_USE_NS=1" in cmd_str
-    # Sentinel + CD_USE_NS appear before the program inside the command string.
-    assert cmd_str.index("CD_USE_NS=1") < cmd_str.index("/usr/bin/chroot-distro")
+def test_elevation_loop_and_missing_tool(monkeypatch):
+    monkeypatch.setattr("chroot_distro.elevate.IS_TERMUX", False)
+    monkeypatch.setattr("chroot_distro.elevate._find_escalation_tool", lambda: None)
+    with pytest.raises(RootRequiredError, match="no privilege elevation tool"):
+        elevate_or_die(Namespace())
+    monkeypatch.setenv("_CHROOT_DISTRO_ELEVATING", "1")
+    with pytest.raises(RootRequiredError, match="Privilege elevation loop detected"):
+        elevate_or_die(Namespace())
 
 
-def test_elevate_termux_stub_su():
-    with (
-        patch("chroot_distro.elevate.is_root", return_value=False),
-        patch("chroot_distro.elevate.IS_TERMUX", True),
-        patch("chroot_distro.elevate._find_termux_su", return_value="/data/data/com.termux/files/usr/bin/su"),
-        patch(
-            "chroot_distro.elevate._su_help_text",
-            return_value="No su program found on this device. Termux does not supply tools for rooting",
-        ),
-        pytest.raises(RootRequiredError, match="the 'su' command on this device is a Termux stub"),
-    ):
-        elevate_or_die()
+@pytest.mark.parametrize(
+    "tool",
+    [
+        ["sudo", "-H", "-u", "root", "--"],
+        ["doas", "--"],
+        ["pkexec", "--disable-internal-agent"],
+        ["su", "-c"],
+    ],
+)
+def test_linux_bootstrap_restores_cwd_and_fixed_env(tool, tmp_path, monkeypatch):
+    caller = tmp_path / "caller's directory"
+    caller.mkdir()
+    (caller / "context").write_text("relative content")
+    root_home = tmp_path / "root-home"
+    root_home.mkdir()
+    monkeypatch.chdir(caller)
+    monkeypatch.setenv("CD_USE_NS", "1")
+    monkeypatch.setenv("XDG_CACHE_HOME", "cache")
+    monkeypatch.setenv("CD_DOCKER_AUTH", "user:private-token")
+    monkeypatch.setattr("chroot_distro.elevate.IS_TERMUX", False)
+    monkeypatch.setattr("chroot_distro.elevate._find_escalation_tool", lambda: tool)
+    monkeypatch.setattr(
+        "chroot_distro.elevate.get_reexec_argv",
+        lambda: [
+            sys.executable,
+            "-c",
+            "import os; print(open('context').read()); print(os.environ['HOME']); "
+            "print(os.environ['CD_USE_NS']); print(os.environ['XDG_CACHE_HOME'])",
+        ],
+    )
+    monkeypatch.setattr("chroot_distro.elevate.send_handoff", lambda args: nullcontext("123:4:1000"))
+    execvp = MagicMock()
+    monkeypatch.setattr(os, "execvp", execvp)
+
+    elevate_or_die(Namespace())
+    argv = execvp.call_args.args[1]
+    assert argv[: len(tool)] == tool
+    bootstrap = shlex.split(argv[-1]) if tool[0] == "su" else argv[len(tool) :]
+    assert bootstrap[:4] == [sys.executable, "-I", "-S", "-c"]
+    assert "private-token" not in shlex.join(argv)
+    assert json.loads(bootstrap[6])[HANDOFF_ENV] == "123:4:1000"
+
+    run = subprocess.run(
+        bootstrap, cwd=root_home, env={"HOME": str(root_home)}, capture_output=True, text=True, check=True
+    )
+    assert run.stdout.splitlines() == ["relative content", str(root_home), "1", str(caller / "cache")]
+    caller.rename(tmp_path / "moved")
+    run = subprocess.run(bootstrap, cwd=root_home, capture_output=True, text=True)
+    assert run.returncode == 1
+    assert run.stdout == ""
+    assert "root re-entry failed" in run.stderr
 
 
-def test_is_root_available_already_root():
-    from chroot_distro.elevate import is_root_available
-
-    with patch("chroot_distro.elevate.is_root", return_value=True):
-        assert is_root_available() is True
-
-
-def test_is_root_available_has_caps():
-    from chroot_distro.elevate import is_root_available
-
-    with (
-        patch("chroot_distro.elevate.is_root", return_value=False),
-        patch("chroot_distro.elevate.has_required_capabilities", return_value=True),
-    ):
-        assert is_root_available() is True
+def test_elevation_fails_before_launch_if_cwd_is_gone(monkeypatch):
+    execvp = MagicMock()
+    monkeypatch.setattr(os, "execvp", execvp)
+    monkeypatch.setattr(os, "getcwd", MagicMock(side_effect=FileNotFoundError(2, "working directory removed")))
+    with pytest.raises(RootRequiredError, match="working directory removed"):
+        elevate_or_die(Namespace())
+    execvp.assert_not_called()
 
 
-@patch("chroot_distro.elevate.IS_TERMUX", True)
-def test_is_root_available_termux():
-    from chroot_distro.elevate import is_root_available
-
-    # 1. su is found and works
-    with (
-        patch("chroot_distro.elevate.is_root", return_value=False),
-        patch("chroot_distro.elevate.has_required_capabilities", return_value=False),
-        patch("chroot_distro.elevate._find_termux_su", return_value="/system/bin/su"),
-        patch("chroot_distro.elevate._su_help_text", return_value="su version 3.0"),
-    ):
-        assert is_root_available() is True
-
-    # 2. su is not found
-    with (
-        patch("chroot_distro.elevate.is_root", return_value=False),
-        patch("chroot_distro.elevate.has_required_capabilities", return_value=False),
-        patch("chroot_distro.elevate._find_termux_su", return_value=None),
-    ):
-        assert is_root_available() is False
-
-    # 3. su is termux stub
-    with (
-        patch("chroot_distro.elevate.is_root", return_value=False),
-        patch("chroot_distro.elevate.has_required_capabilities", return_value=False),
-        patch("chroot_distro.elevate._find_termux_su", return_value="/system/bin/su"),
-        patch(
-            "chroot_distro.elevate._su_help_text",
-            return_value="No su program found on this device. Termux does not supply tools for rooting",
-        ),
-    ):
-        assert is_root_available() is False
+def test_termux_candidate_selection(tmp_path, monkeypatch):
+    names = ["stub", "denied", "ambiguous", "modern"]
+    paths = {name: str(tmp_path / name) for name in names}
+    for path in paths.values():
+        Path(path).touch(mode=0o700)
+    help_text = {
+        paths["stub"]: "Termux does not supply tools for rooting",
+        paths["denied"]: "su: not allowed",
+        paths["ambiguous"]: "Usage: su [args]",
+        paths["modern"]: "MagiskSU\nUsage: su [options] [--] [user [argument...]]",
+    }
+    monkeypatch.delenv("CD_SU_PATH", raising=False)
+    monkeypatch.setenv("PATH", "")
+    monkeypatch.setattr("chroot_distro.elevate._SU_SEARCH_PATHS", tuple(paths.values()) + (paths["modern"],))
+    probe = MagicMock(side_effect=help_text.__getitem__)
+    monkeypatch.setattr("chroot_distro.elevate._su_help_text", probe)
+    assert _find_termux_su() == (paths["modern"], help_text[paths["modern"]])
+    assert [call.args[0] for call in probe.call_args_list] == list(paths.values())
+    monkeypatch.setenv("CD_SU_PATH", paths["ambiguous"])
+    assert _find_termux_su() == (paths["ambiguous"], help_text[paths["ambiguous"]])
+    monkeypatch.setenv("CD_SU_PATH", paths["denied"])
+    assert _find_termux_su() is None
+    monkeypatch.setenv("CD_SU_PATH", str(tmp_path / "absent"))
+    assert _find_termux_su() is None
 
 
-@patch("chroot_distro.elevate.IS_TERMUX", False)
-def test_is_root_available_linux():
-    from chroot_distro.elevate import is_root_available
-
-    # 1. required file capabilities already present
-    with (
-        patch("chroot_distro.elevate.is_root", return_value=False),
-        patch("chroot_distro.elevate.has_required_capabilities", return_value=True),
-        patch("chroot_distro.elevate._find_escalation_tool", return_value=None),
-    ):
-        assert is_root_available() is True
-
-    # 2. no capabilities, but a fallback tool is available
-    with (
-        patch("chroot_distro.elevate.is_root", return_value=False),
-        patch("chroot_distro.elevate.has_required_capabilities", return_value=False),
-        patch("chroot_distro.elevate._find_escalation_tool", return_value=["sudo"]),
-    ):
-        assert is_root_available() is True
-
-    # 3. no capabilities and no fallback tool
-    with (
-        patch("chroot_distro.elevate.is_root", return_value=False),
-        patch("chroot_distro.elevate.has_required_capabilities", return_value=False),
-        patch("chroot_distro.elevate._find_escalation_tool", return_value=None),
-    ):
-        assert is_root_available() is False
+def test_termux_su_argv_modes(monkeypatch):
+    positional = ("/system/bin/su", "usage: su [WHO [COMMAND...]]")
+    assert _termux_su_argv(positional, "body") == ["/system/bin/su", "0", "/system/bin/sh", "-c", "body"]
+    path = "/system/bin/su"
+    flags = "MagiskSU\n --interactive\n --preserve-environment\n --target PID\n pid 0 means magisk global mount namespace"
+    monkeypatch.delenv("CD_SU_MOUNT_MASTER", raising=False)
+    assert _termux_su_argv((path, flags), "body", elevation=True) == [path, "--interactive", "-c", "body"]
+    monkeypatch.setenv("CD_SU_MOUNT_MASTER", "1")
+    assert _termux_su_argv((path, flags), "body", elevation=True) == [
+        path, "--target", "0", "--interactive", "-c", "body"
+    ]
+    assert _termux_su_argv((path, "--mount-master"), "body", elevation=True) == [path, "--mount-master", "-c", "body"]
+    with pytest.raises(RootRequiredError, match="global mount namespace"):
+        _termux_su_argv((path, "--target PID"), "body", elevation=True)
 
 
-# ---------------------------------------------------------------------------
-# BUG-03: CD_DOCKER_AUTH must never appear in argv
-# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("loader", ["libtermux-exec-ld-preload.so", "libtermux-exec.so"])
+def test_termux_root_environment_and_failed_cd(loader, tmp_path, monkeypatch):
+    caller = tmp_path / "caller"
+    caller.mkdir()
+    prefix = tmp_path / "prefix"
+    (prefix / "lib").mkdir(parents=True)
+    expected_loader = prefix / "lib" / loader
+    expected_loader.touch()
+    home = tmp_path / "home"
+    monkeypatch.chdir(caller)
+    monkeypatch.setattr("chroot_distro.elevate.IS_TERMUX", True)
+    monkeypatch.setattr("chroot_distro.elevate.TERMUX_PREFIX", str(prefix))
+    monkeypatch.setattr("chroot_distro.elevate.TERMUX_HOME", str(home))
+    monkeypatch.setattr("chroot_distro.elevate._find_termux_su", lambda: ("/system/bin/su", "MagiskSU"))
+    monkeypatch.setattr("chroot_distro.elevate.get_reexec_argv", lambda: [sys.executable, "-c", "print('ran')"])
+    monkeypatch.setenv("LD_PRELOAD", "caller-loader")
+    monkeypatch.setenv("LD_LIBRARY_PATH", "caller-library-path")
+    execve = MagicMock()
+    monkeypatch.setattr(os, "execve", execve)
+
+    elevate_or_die(Namespace())
+    _, argv, env = execve.call_args.args
+    assert argv[:2] == ["/system/bin/su", "-c"]
+    assert "LD_PRELOAD" not in env
+    assert "LD_LIBRARY_PATH" not in env
+    assert f"export LD_PRELOAD={shlex.quote(str(expected_loader))}" in argv[-1]
+    assert f"export TMPDIR={shlex.quote(str(prefix / 'tmp'))}" in argv[-1]
+    assert (home / ".suroot").is_dir()
+
+    caller.rename(tmp_path / "moved")
+    result = subprocess.run(["/bin/sh", "-c", argv[-1]], cwd=tmp_path, capture_output=True, text=True)
+    assert result.returncode != 0
+    assert result.stdout == ""
+    assert "cd:" in result.stderr
 
 
-def test_write_secret_file_none_when_no_secrets():
-    with patch.dict("os.environ", {}, clear=True):
-        assert _write_secret_file() is None
+def test_su_help_capture_is_bounded(tmp_path, monkeypatch):
+    tool = tmp_path / "su"
+    tool.write_text("#!/bin/sh\nprintf '%0100d' 0\n")
+    tool.chmod(0o700)
+    monkeypatch.setattr("chroot_distro.elevate._SU_HELP_LIMIT", 32)
+    assert _su_help_text(str(tool)) is None
 
 
-def test_load_secret_file_reads_and_unlinks():
-    fd, path = tempfile.mkstemp(prefix=".cd-test-secret-")
-    with os.fdopen(fd, "w") as f:
-        json.dump({"CD_DOCKER_AUTH": "alice:mytoken"}, f)
-    saved = os.environ.pop("CD_DOCKER_AUTH", None)
-    os.environ["CD_SECRET_FILE"] = path
-    try:
-        _load_secret_file()
-        assert os.environ.get("CD_DOCKER_AUTH") == "alice:mytoken"
-        assert not os.path.exists(path)
-    finally:
-        os.environ.pop("CD_DOCKER_AUTH", None)
-        os.environ.pop("CD_SECRET_FILE", None)
-        if saved is not None:
-            os.environ["CD_DOCKER_AUTH"] = saved
-        try:
-            os.unlink(path)
-        except OSError:
-            pass
+@pytest.mark.skipif(sys.platform != "linux" or os.geteuid() == 0, reason="requires a Linux nonroot sender")
+def test_handoff_pins_anonymous_file_and_reaps_keeper(monkeypatch):
+    monkeypatch.setenv("CD_ENV", "a=1\nb=2")
+    monkeypatch.setenv("PYTHONPATH", "build input")
+    monkeypatch.setenv("SSH_AUTH_SOCK", "/caller/agent")
+    args = Namespace(build_args=["MISSING"], secrets=["id=PYTHONPATH"], ssh=["default"])
+    with send_handoff(args) as ref:
+        pid = int(ref.split(":")[0])
+        assert json.loads(_read_handoff(ref)) == {
+            "secrets": {"CD_ENV": "a=1\nb=2"},
+            "build": {"PYTHONPATH": "build input", "SSH_AUTH_SOCK": "/caller/agent"},
+        }
+    with pytest.raises(ChildProcessError):
+        os.waitpid(pid, os.WNOHANG)
 
 
-def test_secret_file_round_trips_multiline_cd_env():
-    """CD_ENV holds one VAR=VALUE per line; its newlines must survive."""
-    cd_env = "PATH=/opt/bin:/usr/bin\nGITHUB_TOKEN=s3cret"
-    with patch.dict("os.environ", {"CD_ENV": cd_env}, clear=True):
-        path = _write_secret_file()
-        assert path is not None
-        os.environ["CD_SECRET_FILE"] = path
-        _load_secret_file()
-        assert os.environ["CD_ENV"] == cd_env
-        assert not os.path.exists(path)
+@pytest.mark.parametrize(
+    "payload",
+    [
+        b'{"secrets":{"LD_PRELOAD":"loader"},"build":{}}',
+        b'{"secrets":{"CD_ENV":"a\\u0000b"},"build":{}}',
+        b'{"secrets":{},"build":{"S":3}}',
+        b'[' * 10000,
+        b' ' * (1024 * 1024 + 1),
+        b'\xff',
+    ],
+)
+def test_handoff_rejects_invalid_payload(monkeypatch, payload):
+    monkeypatch.setenv(HANDOFF_ENV, "100:4:1000")
+    monkeypatch.setattr("chroot_distro.elevation_handoff._read_handoff", lambda ref: payload)
+    with pytest.raises(RootRequiredError, match="environment passed"):
+        receive_handoff()
+    assert HANDOFF_ENV not in os.environ
 
 
-def test_load_secret_file_noop_when_unset():
-    with patch.dict("os.environ", {}, clear=True):
-        _load_secret_file()  # must not raise
+def test_handoff_ignores_legacy_path_and_rejects_paths(tmp_path, monkeypatch):
+    private = tmp_path / "keep"
+    private.write_text('{"secrets":{},"build":{}}')
+    monkeypatch.setenv("CD_SECRET_FILE", str(private))
+    monkeypatch.delenv(HANDOFF_ENV, raising=False)
+    assert receive_handoff() == {}
+    monkeypatch.setenv(HANDOFF_ENV, str(private))
+    with pytest.raises(RootRequiredError, match="environment passed"):
+        receive_handoff()
+    assert private.is_file()
 
 
-def test_docker_auth_not_in_sudo_argv():
-    """CD_DOCKER_AUTH must travel via tempfile path, not raw value in argv."""
-    mock_exec = MagicMock()
-    with (
-        patch("chroot_distro.elevate.is_root", return_value=False),
-        patch("chroot_distro.elevate._find_escalation_tool", return_value=["sudo", "-E"]),
-        patch("chroot_distro.elevate.get_reexec_argv", return_value=["/usr/bin/chroot-distro", "install", "img"]),
-        patch("chroot_distro.elevate._write_secret_file", return_value="/tmp/.cd-secret-test"),
-        patch("os.execvp", mock_exec),
-        patch.dict("os.environ", {"CD_DOCKER_AUTH": "alice:s3cret"}, clear=True),
-    ):
-        elevate_or_die()
+def test_uid_zero_dispatch_loads_credentials_and_keeps_build_values_inert(tmp_path, monkeypatch):
+    from chroot_distro import cli
+    from chroot_distro.commands.build import _parse_build_args, _parse_secret_opts, _parse_ssh_opts
 
-    args, _ = mock_exec.call_args
-    full_argv = args[1]
-    assert not any("s3cret" in a for a in full_argv), "raw secret must not appear in argv"
-    assert "CD_SECRET_FILE=/tmp/.cd-secret-test" in full_argv
+    monkeypatch.setattr(cli, "IS_TERMUX", False)
+    monkeypatch.setattr("chroot_distro.elevate.is_root", lambda: True)
+    monkeypatch.setenv("_CHROOT_DISTRO_ELEVATING", "1")
+    monkeypatch.setenv(HANDOFF_ENV, "100:4:1000")
+    monkeypatch.setenv("HOME", "/root")
+    monkeypatch.setenv("CD_DOCKER_AUTH", "original")
+    monkeypatch.setattr(
+        "chroot_distro.elevation_handoff._read_handoff",
+        lambda ref: json.dumps({
+            "secrets": {"CD_DOCKER_AUTH": "user:token"},
+            "build": {"PYTHONPATH": "secret data", "SSH_AUTH_SOCK": "agent.sock", "EMPTY": ""},
+        }).encode(),
+    )
 
+    def build(args):
+        env = args._build_env
+        assert os.environ["CD_DOCKER_AUTH"] == "user:token"
+        assert os.environ.get("PYTHONPATH") != "secret data"
+        assert HANDOFF_ENV not in os.environ
+        assert _parse_build_args(args.build_args, env) == {"HOME": "", "EMPTY": ""}
+        secret = _parse_secret_opts(args.secrets, str(tmp_path), env)["PYTHONPATH"]
+        assert Path(secret).read_text() == "secret data"
+        assert _parse_ssh_opts(args.ssh, env) == {"default": str(tmp_path / "agent.sock")}
 
-def test_docker_auth_not_in_su_argv():
-    """Secret must not appear in su -c command string either."""
-    mock_exec = MagicMock()
-    with (
-        patch("chroot_distro.elevate.is_root", return_value=False),
-        patch("chroot_distro.elevate._find_escalation_tool", return_value=["su", "-c"]),
-        patch("chroot_distro.elevate.get_reexec_argv", return_value=["/usr/bin/chroot-distro", "install", "img"]),
-        patch("chroot_distro.elevate._write_secret_file", return_value="/tmp/.cd-secret-test"),
-        patch("os.execvp", mock_exec),
-        patch.dict("os.environ", {"CD_DOCKER_AUTH": "alice:s3cret"}, clear=True),
-    ):
-        elevate_or_die()
-
-    args, _ = mock_exec.call_args
-    cmd_str = args[1][2]  # su -c "<cmd_str>"
-    assert "s3cret" not in cmd_str, "raw secret must not appear in su -c command string"
-    assert "CD_SECRET_FILE=/tmp/.cd-secret-test" in cmd_str
-
-
-def test_secret_file_ignores_unexpected_keys():
-    """The file path arrives as a client-forwarded CD_* var: only the vars this
-    channel exists for may be set on the root side."""
-    fd, path = tempfile.mkstemp(prefix=".cd-test-secret-")
-    with os.fdopen(fd, "w") as f:
-        json.dump({"LD_PRELOAD": "/tmp/evil.so", "CD_DOCKER_AUTH": "alice:tok"}, f)
-    with patch.dict("os.environ", {"CD_SECRET_FILE": path}, clear=True):
-        _load_secret_file()
-        assert "LD_PRELOAD" not in os.environ
-        assert os.environ["CD_DOCKER_AUTH"] == "alice:tok"
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setitem(cli._COMMAND_HANDLERS, "build", build)
+    monkeypatch.setattr(
+        sys, "argv", ["chroot-distro", "build", "--build-arg", "HOME", "--build-arg", "EMPTY", "--secret", "id=PYTHONPATH", "--ssh"]
+    )
+    cli.main()

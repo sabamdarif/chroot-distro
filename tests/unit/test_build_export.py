@@ -4,6 +4,7 @@
 # host's platform.
 
 import os
+import tarfile
 from types import SimpleNamespace
 
 import pytest
@@ -11,6 +12,7 @@ import pytest
 from chroot_distro import paths
 from chroot_distro.arch import Platform
 from chroot_distro.commands import build as build_cmd
+from chroot_distro.helpers import export_rootfs
 
 AMD64 = Platform("linux", "amd64")
 ARM64 = Platform("linux", "arm64")
@@ -112,3 +114,20 @@ def test_an_existing_destination_is_refused_before_the_locks(run, capsys, tmp_pa
         run(exports=[f"type=tar,dest={occupied}"])
     assert "already exists" in capsys.readouterr().err
     assert run.seen.locks == []
+
+
+def test_incomplete_layer_prevents_rootfs_export(run, monkeypatch, capsys, tmp_path):
+    layer = tmp_path / "layer.tar"
+    directory = tarfile.TarInfo("etc")
+    directory.type = tarfile.DIRTYPE
+    layer.write_bytes(directory.tobuf())
+    destination = tmp_path / "rootfs.tar"
+    monkeypatch.setattr(build_cmd, "write_rootfs_tar", export_rootfs.write_rootfs_tar)
+    monkeypatch.setattr(export_rootfs, "layer_cache_path", lambda _digest: str(layer))
+
+    with pytest.raises(SystemExit) as exc:
+        run(exports=[f"type=tar,dest={destination}"])
+
+    assert exc.value.code == 1
+    assert "Invalid image layer tar" in capsys.readouterr().err
+    assert not destination.exists()

@@ -7,11 +7,14 @@ must not propagate a copy back onto the host /dev/pts.
 """
 
 import errno
+import os
+from unittest.mock import Mock
 
 import pytest
 
 from chroot_distro.commands import kernel_config as kc
 from chroot_distro.commands.login.bindings import SpecialMount
+from chroot_distro.helpers import isolation
 from chroot_distro.helpers import mount_manager as mm
 from chroot_distro.helpers import mount_targets
 
@@ -110,6 +113,48 @@ def test_single_instance_binds_host_pts_when_unmounted(rootfs, monkeypatch):
 
     assert mm.apply_special_mount(rootfs, _devpts_special()) is True
     assert binds == [("/dev/pts", rootfs, ["dev", "pts"])]
+
+
+def test_single_instance_binds_host_pts_in_holder(rootfs, monkeypatch):
+    monkeypatch.setattr(mm, "_devpts_single_instance", lambda: True)
+    monkeypatch.setattr(mm, "is_mounted", lambda target, holder=None: False)
+    bind = Mock()
+    monkeypatch.setattr(mount_targets, "bind_mount_fd", bind)
+    holder = Mock()
+
+    def mount_in_namespace(fn, *, prepare):
+        fd = prepare()
+        try:
+            assert fd >= 0
+            return fn(rootfs_fd=fd)
+        finally:
+            os.close(fd)
+
+    holder.call.side_effect = mount_in_namespace
+    assert mm.apply_special_mount(rootfs, _devpts_special(), holder=holder)
+    holder.call.assert_called_once()
+    bind.assert_called_once()
+    assert bind.call_args.args == ("/dev/pts", rootfs, ["dev", "pts"])
+    assert bind.call_args.kwargs["rootfs_fd"] >= 0
+
+
+def test_single_instance_sets_up_legacy_ptmx(rootfs, monkeypatch):
+    monkeypatch.setattr(mm, "_devpts_single_instance", lambda: True)
+    create = Mock()
+    monkeypatch.setattr(mm, "create_dev_nodes", create)
+
+    isolation._ensure_ptmx(rootfs, None, use_userns=False)
+
+    create.assert_called_once_with(rootfs, (("ptmx", 5, 2, 0o666),), holder=None, use_userns=False)
+
+
+def test_private_devpts_links_verified_ptmx(rootfs, monkeypatch, multi_instance):
+    path = os.path.join(rootfs, "dev", "pts", "ptmx")
+    with open(path, "w") as node:
+        monkeypatch.setattr(mount_targets, "open_ptmx", lambda *args, **kwargs: os.dup(node.fileno()))
+        isolation._ensure_ptmx(rootfs, None, use_userns=False)
+
+    assert os.readlink(os.path.join(rootfs, "dev", "ptmx")) == "pts/ptmx"
 
 
 def test_stacking_makes_target_private_first(rootfs, monkeypatch, multi_instance):

@@ -52,7 +52,6 @@ from chroot_distro.commands.kernel_config import (
     probe_feature,
 )
 from chroot_distro.commands.list_cmd import (
-    _ensure_manifest_readable,
     _iter_container_names,
     _read_image_source,
     _rootfs_size_bytes,
@@ -453,24 +452,19 @@ def _gather_capabilities(images: list["_ImageInfo"], host_arch: str) -> list[_Ca
     """Collect host capability checks relevant to launching containers."""
     caps: list[_Capability] = []
 
-    from chroot_distro.elevate import is_root_available
+    from chroot_distro.elevate import is_root, is_root_available
 
-    is_root = os.getuid() == 0
-    if is_root:
+    if is_root():
         caps.append(_Capability("Privileges", "running as root", "ok"))
-    elif is_root_available():
-        tool = _detect_escalation_tool()
-        if IS_TERMUX:
+    elif IS_TERMUX:
+        if is_root_available():
             caps.append(_Capability("Privileges", "not root, root is available (can elevate via su)", "info"))
-        elif tool:
-            caps.append(_Capability("Privileges", f"not root, can elevate via {tool}", "info"))
         else:
-            caps.append(_Capability("Privileges", "not root, has the required file capabilities", "info"))
-    else:
-        if IS_TERMUX:
             caps.append(_Capability("Privileges", "not root, root is not available (su not found)", "bad"))
-        else:
-            caps.append(_Capability("Privileges", "not root, no sudo/doas/pkexec/su found", "bad"))
+    elif tool := _detect_escalation_tool():
+        caps.append(_Capability("Privileges", f"not root, can elevate via {tool}", "info"))
+    else:
+        caps.append(_Capability("Privileges", "not root, no sudo/doas/pkexec/su found", "bad"))
 
     if IS_TERMUX:
         value, level = _data_mount_flags()
@@ -511,7 +505,6 @@ def _read_manifest_labels(name: str) -> tuple[str, str]:
     manifest_path = container_manifest(name)
     if not os.path.isfile(manifest_path):
         return "", ""
-    _ensure_manifest_readable(manifest_path)
     try:
         with open(manifest_path, encoding="utf-8") as fh:
             data = json.loads(fh.read() or "{}")

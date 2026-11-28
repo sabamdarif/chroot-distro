@@ -27,22 +27,26 @@ snippet is therefore the only place a value can be made to stick.
 out of a file that outlives the session, `force_keys` re-admits the ones the caller
 asked for by name, and `is_sensitive_env_key` keeps a secret out of it entirely:
 the snippet is a mode 0600 file in the guest, not a variable that dies with the
-process. A `run` writes nothing there, so its `--env` cannot leak into a later
-login.
+process. Normal Termux sessions also write the snippet to retain the host
+Termux bin directory in PATH, including when entering through `run`.
 
-The `read_manifest_*` readers take the same view of `manifest.json` as
-`build_engine/engine.py` takes of a pulled config: every field is checked against
-the type OCI says it has, and a wrong one reads as absent rather than reaching the
-session as itself.
+Profile parents resolve inside the caller's pinned rootfs and are re-walked
+without following links or crossing mounts. Cleanup and atomic replacement use
+the opened directory. The staging descriptor sets the snippet's mode and owner.
+
+The `read_manifest_*` readers supply image defaults from `manifest.json` to
+login and run.
 """
 
-import contextlib
 import json
 import logging
 import os
 import re
 
+from chroot_distro import dirfd
+from chroot_distro.atomic import atomic_write
 from chroot_distro.constants import ANDROID_HOST_ENV_VARS, TERMUX_PREFIX
+from chroot_distro.helpers.tar_extract import safe_resolve_parts_at
 from chroot_distro.message import warn
 
 log = logging.getLogger(__name__)
@@ -289,7 +293,7 @@ def read_manifest_volumes(container_dir: str) -> list[str]:
 
 
 def inject_env_profile(
-    rootfs: str,
+    root_fd: int,
     env: dict,
     *,
     force_keys: frozenset[str] | set[str] = frozenset(),
@@ -312,20 +316,10 @@ def inject_env_profile(
     minimal modes, where TERMUX_PREFIX is not bound into the guest).
 
     *guest_prefix* locates ``etc/profile.d`` under a prefix inside the rootfs
-    (termux-type containers keep theirs in ``$PREFIX``). Nothing is written
-    when the directory is absent, and an earlier snippet is removed when
-    there is nothing left to export.
+    (termux-type containers keep theirs in ``$PREFIX``). The opened profile
+    directory must be on the caller's pinned rootfs mount. An earlier snippet
+    is removed when there is nothing left to export.
     """
-    profile_d = os.path.join(rootfs, guest_prefix.strip("/"), "etc", "profile.d")
-    if not os.path.isdir(profile_d):
-        return
-    snippet = os.path.join(profile_d, "chroot-profile.sh")
-    legacy_snippet = os.path.join(profile_d, "termux-profile.sh")
-    legacy_snippet2 = os.path.join(profile_d, "termux-prefix.sh")
-    for ls in (legacy_snippet, legacy_snippet2):
-        with contextlib.suppress(OSError):
-            os.remove(ls)
-
     lines: list[str] = []
     if append_termux_bin:
         termux_bin = f"{TERMUX_PREFIX}/bin"
@@ -344,20 +338,30 @@ def inject_env_profile(
         escaped = str(val).replace("'", "'\\''")
         lines.append(f"export {key}='{escaped}'")
 
-    if not lines:
-        with contextlib.suppress(OSError):
-            os.remove(snippet)
+    try:
+        parts = safe_resolve_parts_at(root_fd, [*guest_prefix.split("/"), "etc", "profile.d"])
+        if parts is None:
+            return
+        profile_fd = dirfd.descend_at(root_fd, parts, same_mount=True)
+    except OSError:
         return
 
-    content = "\n".join(lines) + "\n"
     try:
-        with open(snippet, "w") as fh:
-            fh.write(content)
-        os.chmod(snippet, 0o600)
-        if owner_uid is not None and owner_gid is not None:
-            os.chown(snippet, owner_uid, owner_gid)
-    except OSError as exc:
-        warn(f"Failed to write environment snippet file: {exc}")
+        for name in ("termux-profile.sh", "termux-prefix.sh"):
+            dirfd.unlink_quietly(profile_fd, name)
+        if not lines:
+            dirfd.unlink_quietly(profile_fd, "chroot-profile.sh")
+            return
+
+        try:
+            with atomic_write("chroot-profile.sh", dir_fd=profile_fd, mode=0o600) as fh:
+                if owner_uid is not None and owner_gid is not None:
+                    os.fchown(fh.fileno(), owner_uid, owner_gid)
+                fh.write("\n".join(lines) + "\n")
+        except OSError as exc:
+            warn(f"Failed to write environment snippet file: {exc}")
+    finally:
+        os.close(profile_fd)
 
 
 def resolve_term(rootfs: str, term: str | None) -> str:

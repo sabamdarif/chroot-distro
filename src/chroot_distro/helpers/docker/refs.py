@@ -2,8 +2,8 @@
 # Copyright (C) 2025-2026 Md Arif
 """Image references: Docker's grammar, and the total lookups on top of it.
 
-`parse_reference()` is distribution/reference's grammar, normalised the way `docker pull`
-normalises and refusing what Docker refuses. Every place a reference comes *in* asks it:
+`parse_reference()` uses distribution/reference's grammar and validates registry
+addresses before they go into a URL. Every place a reference comes *in* asks it:
 `install`, `push`, `build -t`, a Dockerfile's FROM and COPY --from, and pull_image() and
 push_image() themselves. Splitting a string was not enough, only wrong: `ubuntu#x` and
 `ubuntu&scope=...` reached the registry URL and the token request as written, `ubuntu:`
@@ -21,6 +21,7 @@ list is matched against; `arm` carrying `v7` is the only variant that matters in
 practice. `derive_alias` picks the local container name from the last repo component.
 """
 
+import ipaddress
 import re
 from typing import NamedTuple
 
@@ -166,8 +167,13 @@ def parse_reference(ref: str) -> Reference:
         host = _DOMAIN_RE.fullmatch(domain)
         if host is None:
             raise InvalidReferenceError("invalid reference format: registry host is not valid")
-        if host.group(1) is not None and int(host.group(1)) > _PORT_MAX:
+        if host.group(1) is not None and not 0 < int(host.group(1)) <= _PORT_MAX:
             raise InvalidReferenceError("invalid reference format: registry port is out of range")
+        if domain.startswith("["):
+            try:
+                ipaddress.IPv6Address(domain[1:domain.index("]")])
+            except ValueError:
+                raise InvalidReferenceError("invalid reference format: registry host is not valid") from None
 
     parts = _REMAINDER_RE.fullmatch(remainder)
     if parts is None:

@@ -2,9 +2,8 @@
 # Copyright (C) 2025-2026 Md Arif
 """Every user-facing line this program writes, and the rules they all follow.
 
-Two of those rules are why nothing here should be replaced with a bare `print`.
-Everything goes to stderr, so stdout stays the command's own output and remains
-parseable when a caller pipes it. And every write is gated on
+Human diagnostics go to stderr, so stdout stays the command's own output and
+remains parseable when a caller pipes it. Diagnostic writes are gated on
 `tty_safe_for_writes`, which answers False while another process holds stderr's
 TTY for interactive input: `termios.tcgetattr` with ECHO or ICANON cleared is a
 password prompt or a full-screen UI, and a progress bar drawn over one loses the
@@ -26,13 +25,16 @@ first, since `progress.py` leaves the cursor mid-line.
 `quote_path` is the escaping boundary for text this program did not choose, and
 its own docstring says what it defends against. Pass the untrusted name through
 it, never the assembled message: the colour codes above are control characters by
-definition.
+definition. `stdout_output` marks missing stdout and closed stdout pipes so
+dispatch can distinguish them from failures elsewhere in a command.
 """
 
 import json
 import os
 import sys
-from typing import Any
+from collections.abc import Iterator
+from contextlib import contextmanager
+from typing import Any, TextIO
 
 termios: Any
 try:
@@ -148,6 +150,34 @@ Adding a key is not a bump: a consumer ignores keys it does not know.
 """
 
 
+class StdoutError(Exception):
+    """Stdout was missing or its pipe closed during a write or flush."""
+
+    def __init__(self, stream: TextIO | None) -> None:
+        self.stream = stream
+        super().__init__("stdout is unavailable" if stream is None else "stdout pipe closed")
+
+
+@contextmanager
+def stdout_output() -> Iterator[TextIO]:
+    """Yield stdout and mark failures from writing or flushing it."""
+    stream = sys.stdout
+    if stream is None:
+        raise StdoutError(None)
+    try:
+        yield stream
+    except BrokenPipeError as exc:
+        raise StdoutError(stream) from exc
+
+
+def print_version() -> None:
+    """Write the version without loading package metadata before it is needed."""
+    from chroot_distro.constants import PROGRAM_NAME, PROGRAM_VERSION
+
+    with stdout_output() as stream:
+        print(f"{PROGRAM_NAME} {PROGRAM_VERSION}", file=stream)
+
+
 def emit_json(command: str, payload: dict) -> None:
     """Write one `--json` document to stdout.
 
@@ -155,8 +185,10 @@ def emit_json(command: str, payload: dict) -> None:
     carries `schema` and `command`, including the error ones.
     """
     document = {"schema": JSON_SCHEMA_VERSION, "command": command, **payload}
-    sys.stdout.write(json.dumps(document, sort_keys=True) + "\n")
-    sys.stdout.flush()
+    line = json.dumps(document, sort_keys=True) + "\n"
+    with stdout_output() as stream:
+        stream.write(line)
+        stream.flush()
 
 
 def emit_json_error(command: str, text: str) -> None:
@@ -196,8 +228,7 @@ def crit_error(text: str) -> None:
     msg(f"{C['BRED']}Error: {C['RED']}{text}{C['RST']}")
 
 
-_QUOTE_MAP = {
-    "\\": "\\\\",
+_CONTROL_ESCAPES = {
     "\n": "\\n",
     "\r": "\\r",
     "\t": "\\t",
@@ -205,29 +236,18 @@ _QUOTE_MAP = {
 }
 
 
+def escape_controls(text: str) -> str:
+    """Escape nonprintable characters in a plain diagnostic line."""
+    if text.isprintable():
+        return text
+    return "".join(ch if ch.isprintable() else _CONTROL_ESCAPES.get(ch, ascii(ch)[1:-1]) for ch in text)
+
+
 def quote_path(text: str) -> str:
-    """Render *text* printable, with C-style escapes for control characters.
+    """Escape backslashes and nonprintable characters in an untrusted path.
 
-    Names inside a container rootfs are chosen by whoever controls the guest,
-    and `copy` and `sync` print them freely: `--verbose` logs every entry, the
-    skip warning names the file it passed over, and an OSError carries the name
-    it failed on. A name holding ESC repaints the terminal, hides the lines
-    around it, or hands the emulator whatever sequence follows it, so nothing
-    below 0x20, nor DEL, is allowed through literally. Backslash is escaped
-    too, so an escape this produced cannot be confused with those characters
-    spelled out in a name.
-
-    Only the untrusted text is passed through here, never a whole message: the
-    colour codes the log helpers wrap it in are control characters by
-    definition.
+    A guest can put terminal controls and bidi overrides in a name. Escape
+    literal backslashes so readers can distinguish an escape from a name that
+    spells it out.
     """
-    out = []
-    for ch in text:
-        escaped = _QUOTE_MAP.get(ch)
-        if escaped is not None:
-            out.append(escaped)
-        elif ch < " " or ch == "\x7f":
-            out.append(f"\\x{ord(ch):02x}")
-        else:
-            out.append(ch)
-    return "".join(out)
+    return escape_controls(text.replace("\\", "\\\\"))

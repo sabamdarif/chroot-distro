@@ -113,3 +113,4 @@ def test_quote_path():
     assert quote_path("a\nb\rc\td") == "a\\nb\\rc\\td"
     assert quote_path("\x1b[2K/fake") == "\\e[2K/fake"
     assert quote_path("a\x01b\x7f") == "a\\x01b\\x7f"
+    assert quote_path("café\x9b\u202e\udcff") == r"café\x9b\u202e\udcff"

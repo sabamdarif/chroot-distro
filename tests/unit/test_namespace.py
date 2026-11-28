@@ -1,10 +1,12 @@
 """Unit tests for native namespace isolation helpers."""
 
+import os
 import signal
-from unittest.mock import MagicMock, mock_open, patch
+from unittest.mock import ANY, MagicMock, mock_open, patch
 
 import pytest
 
+from chroot_distro import paths
 from chroot_distro.helpers import namespace as ns
 from chroot_distro.syscalls._constants import (
     CLONE_NEWCGROUP,
@@ -16,6 +18,16 @@ from chroot_distro.syscalls._constants import (
     MS_REC,
 )
 from chroot_distro.syscalls.unshare import HolderPids
+
+@pytest.fixture(autouse=True)
+def namespace_state(tmp_path, monkeypatch):
+    runtime = tmp_path / "runtime"
+    monkeypatch.setattr(paths, "RUNTIME_DIR", str(runtime))
+    monkeypatch.setattr(paths, "IS_TERMUX", False)
+    state = runtime / "data/alpine"
+    state.mkdir(parents=True)
+    return state
+
 
 # ---------------------------------------------------------------------------
 # CD_USE_NS environment detection
@@ -125,13 +137,13 @@ def test_probe_and_report_namespaces_tiered(mock_probe, mock_userns_ok, mock_idm
 
 
 def test_set_namespace_hostname_skips_without_uts():
-    holder = MagicMock(container_name="alpine")
+    holder = MagicMock(container_name="alpine", ns_flags=CLONE_NEWNS | CLONE_NEWPID)
     with patch("chroot_distro.helpers.namespace._read_holder_flags", return_value=CLONE_NEWNS | CLONE_NEWPID):
         assert ns.set_namespace_hostname(holder, "alpine") is False
 
 
 def test_set_namespace_hostname_success():
-    holder = MagicMock(container_name="alpine", pid=123)
+    holder = MagicMock(container_name="alpine", pid=123, ns_flags=CLONE_NEWUTS)
     holder.call.return_value = b""
     with patch("chroot_distro.helpers.namespace._read_holder_flags", return_value=CLONE_NEWUTS):
         assert ns.set_namespace_hostname(holder, "myhost") is True
@@ -140,7 +152,7 @@ def test_set_namespace_hostname_success():
 
 
 def test_set_namespace_hostname_reports_a_failed_call():
-    holder = MagicMock(container_name="alpine", pid=123)
+    holder = MagicMock(container_name="alpine", pid=123, ns_flags=CLONE_NEWUTS)
     holder.call.return_value = None
     with patch("chroot_distro.helpers.namespace._read_holder_flags", return_value=CLONE_NEWUTS):
         assert ns.set_namespace_hostname(holder, "myhost") is False
@@ -200,21 +212,18 @@ def test_acquire_holder_reuses_existing(mock_probe, mock_create, mock_get):
 def test_release_holder(mock_kill, mock_read, mock_remove):
     ns.release_holder("alpine")
     mock_kill.assert_any_call(100, signal.SIGTERM)
-    mock_remove.assert_called_once_with("alpine")
+    mock_remove.assert_called_once_with("alpine", state_fd=ANY)
 
 
 @patch("chroot_distro.helpers.namespace.create_holder_process")
 @patch("chroot_distro.helpers.namespace.filter_accessible_namespaces")
 @patch("chroot_distro.helpers.namespace._remove_holder_state")
 @patch("chroot_distro.helpers.namespace._pid_alive", return_value=True)
-@patch("chroot_distro.helpers.namespace.RUNTIME_DIR", "/tmp")
 def test_create_holder_success(mock_alive, mock_remove, mock_filter, mock_create):
     mock_create.return_value = HolderPids(holder=555, launcher=554)
     mock_filter.return_value = CLONE_NEWNS | CLONE_NEWPID
 
-    m_open = mock_open()
     with (
-        patch("builtins.open", m_open),
         patch("chroot_distro.helpers.namespace._get_process_start_time", return_value=12345.67),
     ):
         holder = ns._create_holder("alpine", CLONE_NEWNS | CLONE_NEWPID, rootfs="/tmp/rootfs")
@@ -232,7 +241,6 @@ def test_create_holder_success(mock_alive, mock_remove, mock_filter, mock_create
 @patch("chroot_distro.helpers.namespace.filter_accessible_namespaces")
 @patch("chroot_distro.helpers.namespace._remove_holder_state")
 @patch("chroot_distro.helpers.namespace._pid_alive", return_value=True)
-@patch("chroot_distro.helpers.namespace.RUNTIME_DIR", "/tmp")
 def test_create_holder_tier_b_uses_clone_and_subordinate_map(
     mock_alive, mock_remove, mock_filter, mock_create
 ):
@@ -244,7 +252,6 @@ def test_create_holder_tier_b_uses_clone_and_subordinate_map(
     mock_filter.return_value = CLONE_NEWNS | CLONE_NEWPID | _c.CLONE_NEWUSER
 
     with (
-        patch("builtins.open", mock_open()),
         patch("chroot_distro.helpers.namespace._get_process_start_time", return_value=12345.67),
         patch("chroot_distro.helpers.namespace._idmapped_mounts_supported", return_value=True),
         patch("chroot_distro.helpers.namespace._open_rootfs_clone", return_value=42) as mock_clone,
@@ -265,14 +272,12 @@ def test_create_holder_tier_b_uses_clone_and_subordinate_map(
 @patch("chroot_distro.helpers.namespace.filter_accessible_namespaces")
 @patch("chroot_distro.helpers.namespace._remove_holder_state")
 @patch("chroot_distro.helpers.namespace._pid_alive", return_value=True)
-@patch("chroot_distro.helpers.namespace.RUNTIME_DIR", "/tmp")
 def test_create_holder_tier_b_needs_rootfs(mock_alive, mock_remove, mock_filter, mock_create):
     import chroot_distro.syscalls._constants as _c
 
     mock_create.return_value = HolderPids(holder=557, launcher=556)
     mock_filter.return_value = CLONE_NEWNS | CLONE_NEWPID | _c.CLONE_NEWUSER
     with (
-        patch("builtins.open", mock_open()),
         patch("chroot_distro.helpers.namespace._get_process_start_time", return_value=12345.67),
         patch("chroot_distro.helpers.namespace._idmapped_mounts_supported", return_value=True),
         patch("chroot_distro.helpers.namespace._open_rootfs_clone") as mock_clone,
@@ -289,7 +294,6 @@ def test_create_holder_tier_b_needs_rootfs(mock_alive, mock_remove, mock_filter,
 @patch("chroot_distro.helpers.namespace.filter_accessible_namespaces")
 @patch("chroot_distro.helpers.namespace._remove_holder_state")
 @patch("chroot_distro.helpers.namespace._pid_alive", return_value=True)
-@patch("chroot_distro.helpers.namespace.RUNTIME_DIR", "/tmp")
 def test_create_holder_idmap_failure_falls_back_to_tier_a(
     mock_alive, mock_remove, mock_filter, mock_create
 ):
@@ -303,12 +307,17 @@ def test_create_holder_idmap_failure_falls_back_to_tier_a(
         HolderPids(holder=558, launcher=557),
     ]
     closed = []
+    real_close = os.close
+
+    def close(fd):
+        closed.append(fd)
+        if fd != 42:
+            real_close(fd)
     with (
-        patch("builtins.open", mock_open()),
         patch("chroot_distro.helpers.namespace._get_process_start_time", return_value=12345.67),
         patch("chroot_distro.helpers.namespace._idmapped_mounts_supported", return_value=True),
         patch("chroot_distro.helpers.namespace._open_rootfs_clone", return_value=42),
-        patch("chroot_distro.helpers.namespace.os.close", side_effect=closed.append),
+        patch("chroot_distro.helpers.namespace.os.close", side_effect=close),
     ):
         ns._create_holder(
             "alpine",

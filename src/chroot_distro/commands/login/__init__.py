@@ -5,7 +5,8 @@
 `commands/run.py` re-enters this file through `args._run_inner`, so this is the
 body of `run` as well, and `run_inner is not None` is the test throughout for "not
 an interactive login". Only a shared `ContainerLock` is taken, since concurrent
-sessions of one container are allowed.
+sessions of one container are allowed. The guarded installed-state check rejects
+incomplete installs under that lock before guest detection or setup.
 
 Order matters. Who and where is settled first (user, home, workdir, env, with
 precedence CLI flag > `CD_*` env > the image manifest), because the mount set
@@ -13,9 +14,14 @@ depends on those answers; only then is the namespace and mount state built.
 `bindings.get_bindings` names the mounts and `helpers/isolation.py` applies them,
 so nothing here decides what a mount is.
 
-The session counter is the coordination mechanism. The first session writes
-resolv.conf, acquires the holder and applies every mount; a later one joins what
-is already there. Every exit path decrements under `session.lock`, and reaching
+The session counter is the coordination mechanism. The first session acquires
+the holder and clears stale mounts, then refreshes resolv.conf and creates image
+volume directories before applying new mounts. Hostname, DNS and profile edits
+require a pinned directory on the installed rootfs mount. A later session joins
+what is already there. Setup and teardown pass the directory pin from `session.lock`
+to counter, mount-option and namespace-state operations. Storage failures stop
+setup after cleanup rather than triggering an isolation fallback. Every exit
+path decrements under that lock, and reaching
 zero sweeps the container's leftover processes (a GUI session outlives its
 shell), unmounts, releases the holder and clears the isolation mode; processes
 the sweep cannot stop leave everything mounted for `kill` rather than unmounting
@@ -34,10 +40,14 @@ and chroots the holder, so mixing it with a running session is an error, and a
 `CD_USE_NS` mismatch is a warning, since namespaces cannot be retrofitted onto
 a session that is already inside.
 
+Account alignment pins the installed rootfs and serializes passwd edits and
+identity refreshes under the session lock. Numeric selectors keep their IDs.
+Display forwarding uses the resulting guest identity.
+
 A Termux rootfs is a separate shape rather than a variant: the session runs
 `$PREFIX/bin/login` and takes its uid from the owner of the in-rootfs Termux home,
 because Termux executables are commonly mode 700 and a mismatched uid cannot run
-them.
+them. On Android, cache setup creates directories only on the guest rootfs mount.
 
 Isolation degrades rather than failing, twice over. A max-isolation setup that
 dies on an Android kernel (SELinux, usually) raises `_MaxIsolationFallback` and
@@ -49,20 +59,32 @@ reported as ignored rather than quietly dropped.
 Entering has four forms: `chroot_and_run` when there is no holder, waiting on a
 foreground holder that execs the command itself (entering one would hang the
 session forever), `enter_and_run_with_pty` into a parked holder, and
-`spawn_detached` for `--detach`.
+`spawn_detached` for `--detach`. The no-new-privileges flag applies to the
+child that runs the command, including when it joins a parked holder.
+
+Detached output uses a validated append descriptor under pinned runtime storage.
+Startup failures close resources before the shared teardown; after a successful
+fork, parent cleanup and diagnostics must leave the child's session standing.
+
+Foreground PTY output failures reach dispatch after session teardown and lock release.
+Command display uses a parked holder. It balances the temporary session
+under the setup lock before writing the command to stdout.
 """
 
 import contextlib
+import errno
 import logging
 import os
 import shlex
 import signal as _signal
 import sys
 import time as _time
+from collections.abc import Iterator
 
 import chroot_distro.helpers.mount_manager as mount_manager
 import chroot_distro.helpers.namespace as namespace
 import chroot_distro.helpers.session as session
+from chroot_distro import dirfd
 from chroot_distro.commands.login import bindings
 from chroot_distro.commands.login.chroot_cmd import (
     ChrootConfig,
@@ -91,17 +113,14 @@ from chroot_distro.commands.login.env import (
     user_env_keys,
 )
 from chroot_distro.commands.login.passwd import (
-    align_user_to_termux_owner,
     find_passwd_by_uid,
     find_user_groups,
     read_group_gid,
     read_passwd_field,
-    reown_home_tree_for_uid,
     resolve_host_home,
     resolve_rootfs_path,
     set_passwd_uid_gid,
     sync_passwd_to_home_owner,
-    sync_passwd_to_path_owner,
 )
 from chroot_distro.constants import (
     DEFAULT_PATH_ENV,
@@ -111,6 +130,7 @@ from chroot_distro.constants import (
     TERMUX_HOME,
     TERMUX_PREFIX,
 )
+from chroot_distro.exceptions import ChrootDistroError
 from chroot_distro.helpers import isolation
 from chroot_distro.helpers.android import termux_home_owner_ids
 from chroot_distro.helpers.display import (
@@ -124,8 +144,9 @@ from chroot_distro.helpers.nvidia import (
     nvidia_env_vars,
     run_ldconfig_in_chroot,
 )
-from chroot_distro.helpers.rootfs import ensure_hosts_entry
+from chroot_distro.helpers.rootfs import ensure_hosts_entry, write_resolv_conf
 from chroot_distro.helpers.session_registry import register_session
+from chroot_distro.helpers.tar_extract import safe_resolve_parts_at
 from chroot_distro.helpers.x11 import (
     guest_can_read_auth,
     provision_guest_xauthority,
@@ -133,10 +154,17 @@ from chroot_distro.helpers.x11 import (
     x11_auth_bind_path,
 )
 from chroot_distro.locking import ContainerLock
-from chroot_distro.message import crit_error, warn
+from chroot_distro.message import StdoutError, crit_error, quote_path, stdout_output, warn
 from chroot_distro.names import require_valid_name
-from chroot_distro.paths import container_dir, container_log_path, container_rootfs
-from chroot_distro.syscalls.chroot import chroot_and_run, enter_chroot, spawn_detached
+from chroot_distro.paths import (
+    container_dir,
+    container_is_installed,
+    container_log_path,
+    container_rootfs,
+    open_container_log,
+    open_container_rootfs,
+)
+from chroot_distro.syscalls.chroot import PtyOutputError, chroot_and_run, enter_chroot, spawn_detached
 from chroot_distro.syscalls.nsenter import enter_and_run_with_pty
 from chroot_distro.syscalls.unshare import ForegroundExec
 
@@ -213,8 +241,8 @@ def _exit_teardown(container_name: str, rootfs: str, holder, sess_handle) -> Non
     """
     if sess_handle is not None:
         sess_handle.close()
-    with session.lock(container_name) as lock_fh:
-        sess_count = session.decrement(container_name, lock_fh=lock_fh)
+    with session.lock(container_name) as state_fd:
+        sess_count = session.decrement(container_name, state_fd=state_fd)
         if sess_count != 0:
             return
         survivors = _reap_session_processes(
@@ -230,10 +258,10 @@ def _exit_teardown(container_name: str, rootfs: str, holder, sess_handle) -> Non
             )
             return
         mount_manager.unmount_all(rootfs, holder=holder)
-        session.clear_mount_options(container_name)
+        session.clear_mount_options(container_name, state_fd=state_fd)
         if holder is not None:
-            namespace.release_holder(container_name)
-        namespace.clear_isolation_mode(container_name)
+            namespace.release_holder(container_name, state_fd=state_fd)
+        namespace.clear_isolation_mode(container_name, state_fd=state_fd)
 
 
 def command_login(args) -> None:
@@ -241,9 +269,14 @@ def command_login(args) -> None:
     container_name = args.container_name
     require_valid_name(container_name)
 
-    # Non-exclusive lock: concurrent login sessions are allowed.
-    with ContainerLock(container_name, exclusive=False, command="login"):
-        _command_login_inner(container_name, args)
+    try:
+        with ContainerLock(container_name, exclusive=False, command="login"):
+            _command_login_inner(container_name, args)
+    except PtyOutputError as exc:
+        stream = sys.__stdout__
+        if exc.errno == errno.EPIPE or (exc.errno == errno.EBADF and stream is None):
+            raise StdoutError(stream) from exc
+        raise ChrootDistroError(f"could not forward guest output to stdout: {exc}") from exc
 
 
 def _detect_dist_type(rootfs: str) -> str:
@@ -345,6 +378,50 @@ def _resolve_login_user(rootfs: str, container_name: str, user_arg: str) -> dict
         "home": home,
         "shell": shell,
     }
+
+
+def _align_login_account(
+    container_name: str,
+    user_spec: str,
+    user: dict,
+    *,
+    owner_ids: tuple[int, int] | None = None,
+    shared_home: bool = False,
+) -> dict:
+    username = user["name"]
+    if username.isdigit() or (owner_ids is None and user["home"] in ("", "/")):
+        return user
+    if username == "root":
+        owner_ids = (0, 0)
+    if owner_ids is not None and username != "root" and owner_ids[0] == 0:
+        if shared_home:
+            raise ChrootDistroError(f"refusing to map guest account {quote_path(username)} to UID 0 for --shared-home")
+        return user
+
+    try:
+        with session.lock(container_name):
+            root_fd = open_container_rootfs(container_name, same_mount=True)
+            try:
+                if owner_ids is None:
+                    result = sync_passwd_to_home_owner(root_fd, username, user["home"])
+                else:
+                    result = set_passwd_uid_gid(
+                        root_fd, username, *owner_ids, release_conflicts=not IS_TERMUX and username != "root"
+                    )
+                if result is not None:
+                    return _resolve_login_user(container_rootfs(container_name), container_name, user_spec)
+                if shared_home:
+                    raise ChrootDistroError(f"guest account {quote_path(username)} has no usable /etc/passwd entry")
+            finally:
+                os.close(root_fd)
+    except (OSError, UnicodeError) as exc:
+        if owner_ids is not None and (
+            user["uid"] != str(owner_ids[0]) or (":" not in user_spec and user["gid"] != str(owner_ids[1]))
+        ):
+            warn(f"cannot align guest account {quote_path(username)}: {quote_path(str(exc))}")
+        else:
+            log.debug("Could not align guest account: %s", exc)
+    return user
 
 
 def _merge_image_path(image_path: str, system_path: str) -> str:
@@ -598,9 +675,77 @@ def _translate_host_path_to_guest(host_path: str, rootfs: str, resolved_binds: l
     return host_path
 
 
+def _prepare_image_volumes(container_name: str, volumes: list[str], uid: int, gid: int) -> None:
+    """Create missing volume directories on the pinned rootfs mount."""
+    if not volumes or not (0 <= uid < 0xFFFFFFFF and 0 <= gid < 0xFFFFFFFF):
+        return
+    try:
+        root_fd = open_container_rootfs(container_name, same_mount=True)
+    except OSError as exc:
+        log.debug("Skipping image volume directories: %r", exc)
+        return
+    try:
+        for volume in volumes:
+            parts = [part for part in volume.split("/") if part not in ("", ".")]
+            if not parts or ".." in parts or "\0" in volume:
+                continue
+            try:
+                parent = safe_resolve_parts_at(root_fd, parts[:-1])
+                if parent is None:
+                    continue
+                with contextlib.ExitStack() as stack:
+                    parent_fd = dirfd.descend_at(root_fd, parent, create=True, same_mount=True)
+                    stack.callback(os.close, parent_fd)
+                    try:
+                        os.mkdir(parts[-1], dir_fd=parent_fd)
+                    except FileExistsError:
+                        continue
+                    volume_fd = dirfd.descend_at(parent_fd, parts[-1:], same_mount=True)
+                    stack.callback(os.close, volume_fd)
+                    os.fchown(volume_fd, uid, gid)
+            except (OSError, UnicodeError) as exc:
+                log.debug("Could not create image volume %r: %r", volume, exc)
+    finally:
+        os.close(root_fd)
+
+
+def _prepare_termux_cache(container_name: str) -> None:
+    package = TERMUX_APP_PACKAGE
+    if package in ("", ".", "..") or "/" in package or "\0" in package:
+        log.debug("Skipping guest Termux cache for invalid package name %r", package)
+        return
+    try:
+        with contextlib.ExitStack() as stack:
+            root_fd = open_container_rootfs(container_name, same_mount=True)
+            stack.callback(os.close, root_fd)
+            parts = safe_resolve_parts_at(root_fd, ("data", "data", package, "cache"))
+            if parts:
+                cache_fd = dirfd.descend_at(root_fd, parts, create=True, same_mount=True)
+                stack.callback(os.close, cache_fd)
+    except (OSError, UnicodeError) as exc:
+        log.debug("Could not prepare guest Termux cache: %r", exc)
+
+
+@contextlib.contextmanager
+def _open_setup_rootfs(container_name: str) -> Iterator[int | None]:
+    """Pin the installed rootfs for a best-effort configuration edit."""
+    try:
+        root_fd = open_container_rootfs(container_name, same_mount=True)
+    except OSError as exc:
+        log.debug("Skipping guest configuration edit: %r", exc)
+        yield None
+        return
+    try:
+        yield root_fd
+    finally:
+        os.close(root_fd)
+
+
 def _command_login_inner_once(container_name: str, args) -> None:
+    display_command = getattr(args, "get_chroot_cmd", False)
+    command_line: str | None = None
     rootfs = container_rootfs(container_name)
-    if not os.path.isdir(rootfs):
+    if not container_is_installed(container_name):
         crit_error(f"container '{container_name}' is not installed.")
         sys.exit(1)
 
@@ -671,7 +816,9 @@ def _command_login_inner_once(container_name: str, args) -> None:
             live_nodename = os.uname().nodename
         except OSError:
             live_nodename = ""
-        ensure_hosts_entry(rootfs, _safe_hostname(hostname_arg), live_nodename)
+        with _open_setup_rootfs(container_name) as root_fd:
+            if root_fd is not None:
+                ensure_hosts_entry(root_fd, _safe_hostname(hostname_arg), live_nodename)
     raw_custom_binds = getattr(args, "bind", []) or []
     # CD_ENV entries are layered first so a matching --env override wins.
     extra_env = read_cd_env() + (getattr(args, "env", []) or [])
@@ -718,6 +865,7 @@ def _command_login_inner_once(container_name: str, args) -> None:
         has_nvidia = detect_nvidia_gpu()
         want_mesa = not has_nvidia
 
+    user_spec = login_user
     if dist_type == "termux":
         if not login_wd:
             login_wd = TERMUX_HOME
@@ -732,10 +880,7 @@ def _command_login_inner_once(container_name: str, args) -> None:
 
         # Never bound from the host, so the guest needs its own.
         if IS_TERMUX and not skip_extra_mounts:
-            os.makedirs(
-                os.path.join(rootfs, "data", "data", TERMUX_APP_PACKAGE, "cache"),
-                exist_ok=True,
-            )
+            _prepare_termux_cache(container_name)
 
         if run_inner is not None:
             inner = run_inner
@@ -766,86 +911,35 @@ def _command_login_inner_once(container_name: str, args) -> None:
         except Exception:
             groups = [login_gid, "3003", "9997"] if IS_TERMUX else [login_gid]
     else:
-        user = _resolve_login_user(rootfs, container_name, login_user)
+        user = _resolve_login_user(rootfs, container_name, user_spec)
         login_user = user["name"]
+
+        if use_shared_home and not minimal:
+            try:
+                if IS_TERMUX:
+                    owner_ids = (0, 0) if login_user == "root" else termux_home_owner_ids()
+                else:
+                    host_home = resolve_host_home(login_user)
+                    if not host_home or not os.path.isdir(host_home):
+                        raise ChrootDistroError(
+                            f"cannot determine host home for --shared-home with user {quote_path(login_user)}. "
+                            "Run via sudo from your normal user account or pass --bind HOST_HOME:GUEST_HOME."
+                        )
+                    st = os.stat(host_home)
+                    owner_ids = (st.st_uid, st.st_gid)
+                user = _align_login_account(container_name, user_spec, user, owner_ids=owner_ids, shared_home=True)
+            except OSError as exc:
+                warn(f"cannot align user for shared home: {quote_path(str(exc))}")
+        elif not minimal:
+            user = _align_login_account(container_name, user_spec, user)
+
         login_uid = user["uid"]
         login_gid = user["gid"]
         groups = user["groups"]
         login_home = user["home"]
         login_shell = user["shell"]
-        passwd_home = login_home
 
-        if use_shared_home and not minimal:
-            try:
-                if IS_TERMUX:
-                    if login_user == "root":
-                        # Keep root at 0:0: remapping it to the Termux app
-                        # uid makes the session run unprivileged (apt/dpkg
-                        # EACCES). Root still reads the app-owned home via
-                        # CAP_DAC_OVERRIDE.
-                        set_passwd_uid_gid(rootfs, "root", 0, 0)
-                        aligned = True
-                    else:
-                        termux_owner_uid, termux_owner_gid = termux_home_owner_ids()
-                        aligned = align_user_to_termux_owner(
-                            rootfs,
-                            login_user,
-                            termux_owner_uid,
-                            termux_owner_gid,
-                        )
-                else:
-                    host_home = resolve_host_home(login_user)
-                    if not host_home or not os.path.isdir(host_home):
-                        crit_error(
-                            f"cannot determine host home for --shared-home "
-                            f"with user '{login_user}'. Run via sudo from your "
-                            f"normal user account (so SUDO_USER is set), or add "
-                            f"--bind HOST_HOME:{login_home}."
-                        )
-                        sys.exit(1)
-                    if login_user == "root":
-                        set_passwd_uid_gid(rootfs, "root", 0, 0)
-                        aligned = True
-                    else:
-                        aligned = sync_passwd_to_path_owner(
-                            rootfs,
-                            login_user,
-                            host_home,
-                        )
-                        if not aligned:
-                            crit_error(
-                                f"refusing to map user '{login_user}' to root for "
-                                f"--shared-home (host home resolved to '{host_home}'). "
-                                f"Run via sudo from your normal user account."
-                            )
-                            sys.exit(1)
-                if aligned:
-                    user = _resolve_login_user(
-                        rootfs,
-                        container_name,
-                        login_user,
-                    )
-                    login_uid = user["uid"]
-                    login_gid = user["gid"]
-                    groups = user["groups"]
-            except OSError as exc:
-                warn(f"cannot align user for shared home: {exc}")
-        elif (
-            not use_shared_home
-            and not minimal
-            and login_home
-            and sync_passwd_to_home_owner(rootfs, login_user, login_home)
-        ):
-            user = _resolve_login_user(
-                rootfs,
-                container_name,
-                login_user,
-            )
-            login_uid = user["uid"]
-            login_gid = user["gid"]
-            groups = user["groups"]
-
-        if login_home and login_home != "/" and login_home == passwd_home:
+        if login_home and login_home != "/":
             try:
                 host_home_path = resolve_rootfs_path(rootfs, login_home)
                 home_exists = os.path.isdir(host_home_path)
@@ -908,70 +1002,42 @@ def _command_login_inner_once(container_name: str, args) -> None:
         components.append(termux_bin)
         child_env["PATH"] = ":".join(components)
 
-    # A login shell sources the guest's /etc/profile, which pins PATH (and
-    # whatever else the distro sets) over the env handed to exec; re-export
-    # the caller's own values from profile.d, which runs last. A `run` writes
-    # nothing there, so its --env cannot leak into later logins.
     session_profile = IS_TERMUX and dist_type == "normal" and not skip_extra_mounts and not minimal
     if session_profile or run_inner is None:
         force_keys = user_keys if run_inner is None else set()
         profile_env = child_env if session_profile else {k: v for k, v in child_env.items() if k in force_keys}
         profile_uid = int(login_uid) if login_uid is not None else 0
         profile_gid = int(login_gid) if login_gid is not None else profile_uid
-        inject_env_profile(
-            rootfs,
-            profile_env,
-            force_keys=force_keys,
-            guest_prefix=TERMUX_PREFIX if dist_type == "termux" else "",
-            owner_uid=profile_uid,
-            owner_gid=profile_gid,
-            append_termux_bin=session_profile,
-        )
+        with _open_setup_rootfs(container_name) as root_fd:
+            if root_fd is not None:
+                inject_env_profile(
+                    root_fd,
+                    profile_env,
+                    force_keys=force_keys,
+                    guest_prefix=TERMUX_PREFIX if dist_type == "termux" else "",
+                    owner_uid=profile_uid,
+                    owner_gid=profile_gid,
+                    append_termux_bin=session_profile,
+                )
 
     x11_auth_binds: list[str] = []
     display_socket_binds: list[str] = []
     if not IS_TERMUX and dist_type == "normal" and not minimal and shared_display:
-        if not use_shared_home and login_user != "root" and login_uid is not None:
-            invoking_uid = resolve_invoking_uid()
-            if int(login_uid) != invoking_uid:
-                host_home = resolve_host_home(login_user)
-                if host_home and os.path.isdir(host_home):
-                    old_uid = int(login_uid)
-                    if sync_passwd_to_path_owner(rootfs, login_user, host_home):
-                        user = _resolve_login_user(
-                            rootfs,
-                            container_name,
-                            login_user,
-                        )
-                        login_uid = user["uid"]
-                        login_gid = user["gid"]
-                        groups = user["groups"]
-                        if login_home and login_home != "/":
-                            reown_home_tree_for_uid(
-                                rootfs,
-                                login_home,
-                                old_uid,
-                                int(login_uid),
-                                int(login_gid),
-                            )
-
-        x11_env, resolved_x11_binds = resolve_display_env()
-        for key, val in x11_env.items():
+        display_env, resolved_x11_binds = resolve_display_env()
+        for key, val in display_env.items():
             if key not in user_keys:
                 child_env[key] = val
 
-        # The session D-Bus daemon authenticates by SO_PEERCRED UID and
-        # refuses uid 0, so session-bus apps fail for root; warn and point at
-        # --user (the system bus still works).
-        if login_user == "root" and child_env.get("DBUS_SESSION_BUS_ADDRESS"):
+        if (
+            login_uid is not None
+            and display_env.get("DBUS_SESSION_BUS_ADDRESS")
+            and "DBUS_SESSION_BUS_ADDRESS" not in user_keys
+        ):
             invoking_uid = resolve_invoking_uid()
-            if invoking_uid != 0:
+            if int(login_uid) != invoking_uid:
                 warn(
-                    "Logging in as root: the session D-Bus bus rejects uid 0, so "
-                    "session-bus apps (notify-send, portals, etc.) fail with "
-                    "'Connection reset by peer'. Log in as a UID-matched normal "
-                    f"user with '--user <name>' (host uid {invoking_uid}) for a "
-                    "working session bus. The system bus still works for root."
+                    f"Guest UID {login_uid} differs from desktop UID {invoking_uid}. "
+                    f"Use a guest account with UID {invoking_uid} to access the host session bus."
                 )
 
         # Only specific runtime sockets are bound, not the whole host /run.
@@ -1125,14 +1191,11 @@ def _command_login_inner_once(container_name: str, args) -> None:
         crit_error(str(exc))
         sys.exit(1)
 
-    with session.lock(container_name) as lock_fh:
-        sess_count = session.increment(container_name, lock_fh=lock_fh)
+    with session.lock(container_name) as state_fd:
+        sess_count = session.increment(container_name, state_fd=state_fd)
         if sess_count == 1:
-            from chroot_distro.helpers.rootfs import write_resolv_conf
-
-            write_resolv_conf(rootfs)
-            if use_namespaces:
-                try:
+            try:
+                if use_namespaces:
                     # A detached run must use the plain holder + nsenter: the
                     # synchronized foreground holder execs the command itself,
                     # so it can't be backgrounded. A foreground run uses the
@@ -1141,7 +1204,7 @@ def _command_login_inner_once(container_name: str, args) -> None:
                     # enter_chroot) before execing, so the command is PID 1 and
                     # the chroot /proc/1/root escape stays closed.
                     _detach_run = getattr(args, "detach", False) and run_inner is not None
-                    if run_inner is not None and not _detach_run:
+                    if run_inner is not None and not _detach_run and not display_command:
                         from chroot_distro.syscalls.chroot import _copy_terminal_size
 
                         pipe_r, pipe_w = os.pipe()
@@ -1152,6 +1215,7 @@ def _command_login_inner_once(container_name: str, args) -> None:
                         try:
                             holder = namespace.acquire_holder(
                                 container_name,
+                                state_fd=state_fd,
                                 foreground=ForegroundExec(
                                     go_fd=pipe_r,
                                     rootfs=chroot_config.rootfs,
@@ -1181,38 +1245,48 @@ def _command_login_inner_once(container_name: str, args) -> None:
                         holder = namespace.acquire_holder(
                             container_name,
                             rootfs=rootfs if (max_isolation and use_namespaces) else None,
+                            state_fd=state_fd,
                         )
-                    isolation.finalize_holder(holder, container_name, hostname=hostname_arg)
-                except NamespaceError as exc:
-                    _abandon_holder_fds()
+                    isolation.finalize_holder(holder, container_name, hostname=hostname_arg, state_fd=state_fd)
+                else:
+                    namespace.write_isolation_mode(container_name, namespace.ISOLATION_MODE_HOST, state_fd=state_fd)
+                with contextlib.suppress(Exception):
+                    mount_manager.unmount_all(rootfs, holder=holder)
+                with _open_setup_rootfs(container_name) as root_fd:
+                    if root_fd is not None:
+                        write_resolv_conf(rootfs, root_fd=root_fd, same_mount=True)
+                _prepare_image_volumes(
+                    container_name,
+                    read_manifest_volumes(container_path),
+                    chroot_config.uid or 0,
+                    chroot_config.gid or 0,
+                )
+            except BaseException as exc:
+                _abandon_holder_fds()
+                with contextlib.suppress(Exception):
+                    mount_manager.unmount_all(rootfs, holder=holder)
+                if holder is not None:
                     with contextlib.suppress(Exception):
-                        mount_manager.unmount_all(rootfs, holder=holder)
-                    if holder is not None:
-                        with contextlib.suppress(Exception):
-                            namespace.release_holder(container_name)
-                        namespace.clear_isolation_mode(container_name)
-                    session.decrement(container_name, lock_fh=lock_fh)
-                    # The chrooted holder can die immediately on Android
-                    # (SELinux); degrade to the old isolated mode.
-                    if _can_fall_back_to_old_isolated(max_isolation, args):
-                        raise _MaxIsolationFallback(str(exc)) from exc
-                    crit_error(str(exc))
-                    sys.exit(1)
-            else:
-                namespace.write_isolation_mode(container_name, namespace.ISOLATION_MODE_HOST)
+                        namespace.release_holder(container_name, state_fd=state_fd)
+                with contextlib.suppress(Exception):
+                    namespace.clear_isolation_mode(container_name, state_fd=state_fd)
+                with contextlib.suppress(Exception):
+                    session.decrement(container_name, state_fd=state_fd)
+                if not isinstance(exc, NamespaceError):
+                    raise
+                if _can_fall_back_to_old_isolated(max_isolation, args):
+                    raise _MaxIsolationFallback(str(exc)) from exc
+                crit_error(str(exc))
+                sys.exit(1)
 
-            with contextlib.suppress(Exception):
-                mount_manager.unmount_all(rootfs, holder=holder)
-            # Android's /data is nosuid; bind the host-mode rootfs onto itself
-            # with suid/exec. A namespace holder cloned its mounts and locks them.
-            if holder is None:
-                mount_manager.ensure_rootfs_exec(rootfs)
             # best_effort_bind_sources() entries warn+skip on failure;
             # anything else aborts. Binds under /dev (GPU nodes, binderfs)
             # wait for apply_special_mounts: the fresh tmpfs /dev it mounts
             # would shadow them.
             non_dev_binds, dev_binds = isolation.split_dev_binds(resolved_binds, rootfs)
             try:
+                if holder is None:
+                    mount_manager.ensure_rootfs_exec(rootfs)
                 isolation.apply_bind_mounts(
                     rootfs,
                     non_dev_binds,
@@ -1223,11 +1297,15 @@ def _command_login_inner_once(container_name: str, args) -> None:
                 )
             except Exception as e:
                 _abandon_holder_fds()
-                mount_manager.unmount_all(rootfs, holder=holder)
+                with contextlib.suppress(Exception):
+                    mount_manager.unmount_all(rootfs, holder=holder)
                 if holder is not None:
-                    namespace.release_holder(container_name)
-                    namespace.clear_isolation_mode(container_name)
-                session.decrement(container_name, lock_fh=lock_fh)
+                    with contextlib.suppress(Exception):
+                        namespace.release_holder(container_name, state_fd=state_fd)
+                with contextlib.suppress(Exception):
+                    namespace.clear_isolation_mode(container_name, state_fd=state_fd)
+                with contextlib.suppress(Exception):
+                    session.decrement(container_name, state_fd=state_fd)
                 crit_error(f"Failed to mount bindings: {e}")
                 sys.exit(1)
 
@@ -1273,11 +1351,15 @@ def _command_login_inner_once(container_name: str, args) -> None:
                     )
             except Exception as e:
                 _abandon_holder_fds()
-                mount_manager.unmount_all(rootfs, holder=holder)
+                with contextlib.suppress(Exception):
+                    mount_manager.unmount_all(rootfs, holder=holder)
                 if holder is not None:
-                    namespace.release_holder(container_name)
-                    namespace.clear_isolation_mode(container_name)
-                session.decrement(container_name, lock_fh=lock_fh)
+                    with contextlib.suppress(Exception):
+                        namespace.release_holder(container_name, state_fd=state_fd)
+                with contextlib.suppress(Exception):
+                    namespace.clear_isolation_mode(container_name, state_fd=state_fd)
+                with contextlib.suppress(Exception):
+                    session.decrement(container_name, state_fd=state_fd)
                 # Android SELinux often denies the fresh pseudo-filesystems;
                 # degrade once to the old isolated mode instead of aborting.
                 if _can_fall_back_to_old_isolated(max_isolation, args):
@@ -1288,24 +1370,13 @@ def _command_login_inner_once(container_name: str, args) -> None:
             if has_nvidia:
                 run_ldconfig_in_chroot(rootfs)
 
-            for vol_path in read_manifest_volumes(container_path):
-                vol_host = os.path.join(rootfs, vol_path.lstrip("/"))
-                if not os.path.exists(vol_host):
-                    try:
-                        os.makedirs(vol_host, exist_ok=True)
-                        uid_v = int(login_uid) if login_uid is not None else 0
-                        gid_v = int(login_gid) if login_gid is not None else 0
-                        os.chown(vol_host, uid_v, gid_v)
-                    except OSError:
-                        log.debug("Could not create volume dir %s", vol_path)
-
             exposed = read_manifest_exposed_ports(container_path)
             if exposed:
                 from chroot_distro.message import log_info
 
                 log_info(f"Image declares exposed ports: {', '.join(exposed)}")
 
-            session.save_mount_options(container_name, current_opts)
+            session.save_mount_options(container_name, current_opts, state_fd=state_fd)
 
             # The foreground holder blocks on this pipe until the mounts exist.
             if pipe_w is not None:
@@ -1320,10 +1391,10 @@ def _command_login_inner_once(container_name: str, args) -> None:
             # live session, so only the isolation level is refused and only what
             # the container lacks is mounted (further down, once the holder that
             # owns its mount namespace is known).
-            stored = live_opts if live_opts is not None else session.load_mount_options(container_name)
+            stored = live_opts if live_opts is not None else session.load_mount_options(container_name, state_fd=state_fd)
             if stored is not None:
                 if max_isolation != bool(stored.get("isolated", False)):
-                    session.decrement(container_name, lock_fh=lock_fh)
+                    session.decrement(container_name, state_fd=state_fd)
                     crit_error(
                         f"Container '{container_name}' has an active session "
                         f"{'with' if stored.get('isolated') else 'without'} "
@@ -1339,25 +1410,31 @@ def _command_login_inner_once(container_name: str, args) -> None:
                         f"namespace mode differs and will be ignored."
                     )
             if use_namespaces:
-                holder = namespace.get_live_holder(container_name)
-                if holder is None:
-                    session.decrement(container_name, lock_fh=lock_fh)
-                    crit_error(
-                        f"Namespace holder for '{container_name}' is not running. "
-                        f"Run '{PROGRAM_NAME} unmount {container_name}' and try again."
-                    )
-                    sys.exit(1)
-                # Never reuse a non-chrooted holder under max isolation: it
-                # would re-open the `chroot /proc/1/root` escape.
-                if max_isolation and not namespace.holder_is_max_isolation(container_name):
-                    session.decrement(container_name, lock_fh=lock_fh)
-                    crit_error(
-                        f"Container '{container_name}' already has an active, "
-                        f"non-isolated session/holder. Run "
-                        f"'{PROGRAM_NAME} unmount {container_name}' first, then "
-                        f"log in again with --isolated."
-                    )
-                    sys.exit(1)
+                try:
+                    holder = namespace.get_live_holder(container_name, state_fd=state_fd)
+                    if holder is None:
+                        session.decrement(container_name, state_fd=state_fd)
+                        crit_error(
+                            f"Namespace holder for '{container_name}' is not running. "
+                            f"Run '{PROGRAM_NAME} unmount {container_name}' and try again."
+                        )
+                        sys.exit(1)
+                    # Never reuse a non-chrooted holder under max isolation: it
+                    # would re-open the `chroot /proc/1/root` escape.
+                    if max_isolation and not namespace.holder_is_max_isolation(container_name, state_fd=state_fd):
+                        session.decrement(container_name, state_fd=state_fd)
+                        crit_error(
+                            f"Container '{container_name}' already has an active, "
+                            f"non-isolated session/holder. Run "
+                            f"'{PROGRAM_NAME} unmount {container_name}' first, then "
+                            f"log in again with --isolated."
+                        )
+                        sys.exit(1)
+
+                except ChrootDistroError:
+                    with contextlib.suppress(Exception):
+                        session.decrement(container_name, state_fd=state_fd)
+                    raise
 
             # Mount what this session asked for and the container does not have
             # yet. Only the missing targets are passed: safe_mount is idempotent
@@ -1391,20 +1468,35 @@ def _command_login_inner_once(container_name: str, args) -> None:
                     if os.path.realpath(rslave_path) in pending_targets:
                         mount_manager.make_rslave(rslave_path, holder=holder)
             # The union is what a third session inherits.
-            session.save_mount_options(container_name, current_opts)
+            session.save_mount_options(container_name, current_opts, state_fd=state_fd)
 
-    if getattr(args, "get_chroot_cmd", False):
-        ns_prefix = ["nsenter", "--target", str(holder.pid), *holder.nsenter_flags] if holder is not None else None
-        print(format_get_chroot_cmd(child_env, chroot_display_argv(chroot_config, ns_prefix)))
+        if display_command:
+            try:
+                ns_prefix = (
+                    ["nsenter", "--target", str(holder.pid), *holder.nsenter_flags] if holder is not None else None
+                )
+                command_line = format_get_chroot_cmd(child_env, chroot_display_argv(chroot_config, ns_prefix))
+            finally:
+                if session.decrement(container_name, state_fd=state_fd) == 0:
+                    try:
+                        mount_manager.unmount_all(rootfs, holder=holder)
+                    except BaseException:
+                        if holder is not None:
+                            with contextlib.suppress(Exception):
+                                namespace.release_holder(container_name, state_fd=state_fd)
+                            with contextlib.suppress(Exception):
+                                session.clear_mount_options(container_name, state_fd=state_fd)
+                            with contextlib.suppress(Exception):
+                                namespace.clear_isolation_mode(container_name, state_fd=state_fd)
+                        raise
+                    if holder is not None:
+                        namespace.release_holder(container_name, state_fd=state_fd)
+                    session.clear_mount_options(container_name, state_fd=state_fd)
+                    namespace.clear_isolation_mode(container_name, state_fd=state_fd)
 
-        with session.lock(container_name) as lock_fh:
-            sess_count = session.decrement(container_name, lock_fh=lock_fh)
-            if sess_count == 0:
-                mount_manager.unmount_all(rootfs, holder=holder)
-                session.clear_mount_options(container_name)
-                if holder is not None:
-                    namespace.release_holder(container_name)
-                    namespace.clear_isolation_mode(container_name)
+    if command_line is not None:
+        with stdout_output() as stream:
+            print(command_line, file=stream)
         sys.exit(0)
 
     # Record this session for `ps`; the handle's flock tracks liveness, so
@@ -1476,6 +1568,7 @@ def _command_login_inner_once(container_name: str, args) -> None:
                         gid=chroot_config.gid,
                         groups=chroot_config.groups,
                         workdir=chroot_config.workdir,
+                        no_new_privs=no_new_privs,
                         regain_ids=True,
                     )
 
@@ -1508,100 +1601,63 @@ def _run_detached(
     """Launch the resolved command in the background and return immediately.
 
     Runs in a new session with output appended to the container's run log.
-    The session counter is intentionally NOT decremented: the container stays
-    mounted while the detached process runs, and 'kill'/'unmount' tear it
-    down like any other session.
+    Successful starts retain the session counter and mounts until kill/unmount.
+    Before a child exists, failures use the foreground teardown gates.
     """
-    log_path = container_log_path(container_name)
+    started = False
     try:
-        log_fh = open(log_path, "ab")  # noqa: SIM115
-    except OSError as exc:
-        with session.lock(container_name) as lock_fh:
-            sess_count = session.decrement(container_name, lock_fh=lock_fh)
-            if sess_count == 0:
-                mount_manager.unmount_all(container_rootfs(container_name), holder=holder)
-                if holder is not None:
-                    namespace.release_holder(container_name)
-                    namespace.clear_isolation_mode(container_name)
-        crit_error(f"cannot open run log '{log_path}': {exc}")
-        sys.exit(1)
+        with contextlib.ExitStack() as stack:
+            if session_handle is not None:
+                stack.callback(session_handle.close)
+            log_path = container_log_path(container_name)
+            log_fd = open_container_log(container_name)
+            stack.callback(os.close, log_fd)
+            devnull = stack.enter_context(open(os.devnull, "rb"))
 
-    try:
-        devnull = open(os.devnull, "rb")  # noqa: SIM115
-    except OSError as exc:
-        log_fh.close()
-        crit_error(f"cannot open {os.devnull}: {exc}")
-        sys.exit(1)
+            extra_fds = (session_handle.fileno(),) if session_handle is not None else ()
+            ns_flags = holder._live_ns_flags() if holder is not None else 0
+            holder_pid = holder.pid if holder is not None else -1
+            from chroot_distro.syscalls._constants import CLONE_NEWUSER
 
-    # Pass the session flock fd to the child so it inherits the liveness
-    # signal; the parent closes its copy once the child has forked.
-    extra_fds: tuple[int, ...] = ()
-    if session_handle is not None:
-        extra_fds = (session_handle.fileno(),)
+            drop_caps = not bool(ns_flags & CLONE_NEWUSER)
 
-    ns_flags = holder._live_ns_flags() if holder is not None else 0
-    holder_pid = holder.pid if holder is not None else -1
-    # A user namespace scopes capabilities, so the drop is only for the
-    # namespace-less case, same as the foreground and pty paths.
-    from chroot_distro.syscalls._constants import CLONE_NEWUSER
+            def _become_guest() -> None:
+                if holder_pid > 0:
+                    from chroot_distro.syscalls.nsenter import enter_namespaces
 
-    has_userns = bool(ns_flags & CLONE_NEWUSER)
-    drop_caps = not has_userns
+                    enter_namespaces(holder_pid, ns_flags, regain_ids=False)
+                enter_chroot(
+                    chroot_config.rootfs,
+                    uid=chroot_config.uid,
+                    gid=chroot_config.gid,
+                    groups=chroot_config.groups,
+                    workdir=chroot_config.workdir,
+                    drop_caps=drop_caps,
+                    no_new_privs=no_new_privs,
+                    regain_ids=holder_pid > 0,
+                )
 
-    def _become_guest() -> None:
-        if holder_pid > 0:
-            from chroot_distro.syscalls.nsenter import enter_namespaces
-
-            # The regain is enter_chroot's: the mapped id cannot necessarily
-            # traverse the rootfs path, and setresuid(2) needs CAP_SETUID.
-            enter_namespaces(holder_pid, ns_flags, regain_ids=False)
-        enter_chroot(
-            chroot_config.rootfs,
-            uid=chroot_config.uid,
-            gid=chroot_config.gid,
-            groups=chroot_config.groups,
-            workdir=chroot_config.workdir,
-            drop_caps=drop_caps,
-            no_new_privs=no_new_privs,
-            regain_ids=holder_pid > 0,
-        )
-
-    try:
-        child_pid = spawn_detached(
-            chroot_config.command,
-            env=child_env,
-            stdin_fd=devnull.fileno(),
-            stdout_fd=log_fh.fileno(),
-            stderr_fd=log_fh.fileno(),
-            keep_fds=extra_fds,
-            setup=_become_guest,
-        )
-    except OSError as exc:
-        log_fh.close()
-        devnull.close()
-        if session_handle is not None:
-            session_handle.close()
-        with session.lock(container_name) as lock_fh:
-            sess_count = session.decrement(container_name, lock_fh=lock_fh)
-            if sess_count == 0:
-                mount_manager.unmount_all(container_rootfs(container_name), holder=holder)
-                session.clear_mount_options(container_name)
-                if holder is not None:
-                    namespace.release_holder(container_name)
-                    namespace.clear_isolation_mode(container_name)
-        crit_error(f"failed to start detached command for '{container_name}': {exc}")
-        sys.exit(1)
-    finally:
-        # The child holds its own copies of these descriptors.
-        log_fh.close()
-        devnull.close()
-        if session_handle is not None:
-            session_handle.close()
+            child_pid = spawn_detached(
+                chroot_config.command,
+                env=child_env,
+                stdin_fd=devnull.fileno(),
+                stdout_fd=log_fd,
+                stderr_fd=log_fd,
+                keep_fds=extra_fds,
+                setup=_become_guest,
+            )
+            started = True
+    except BaseException as exc:
+        if not started:
+            _exit_teardown(container_name, container_rootfs(container_name), holder, None)
+        if isinstance(exc, OSError):
+            raise ChrootDistroError(f"detached command for '{container_name}': {exc}") from exc
+        raise
 
     from chroot_distro.message import log_info
 
     log_info(f"Container '{container_name}' started in background (PID {child_pid}).")
-    log_info(f"Output is being written to: {log_path}")
+    log_info(f"Output is being written to: {quote_path(log_path)}")
     log_info(f"Stop it with: {PROGRAM_NAME} kill {container_name}")
 
 

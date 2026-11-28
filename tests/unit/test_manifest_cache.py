@@ -103,6 +103,13 @@ def test_an_image_config_for_another_variant_is_not_believed():
     assert cache_mod.load_manifest_cache("alpine", ARM_V7) == (None, None, {})
 
 
+def test_default_and_incompatible_arm64_variants_remain_distinct():
+    _save("default", ARM64, {"architecture": "arm64", "variant": "v8"})
+    _save("different", ARM64, {"architecture": "arm64", "variant": "v9"})
+    assert cache_mod.load_manifest_cache("default", ARM64)[0] == MANIFEST
+    assert cache_mod.load_manifest_cache("different", ARM64)[0] is None
+
+
 def test_an_image_config_that_declares_nothing_is_fine():
     # A pull whose config blob could not be fetched stores an empty one, and a
     # rootfs without image metadata is still usable.

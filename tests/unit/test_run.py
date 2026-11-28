@@ -84,7 +84,8 @@ def captured_run(tmp_path, monkeypatch):
 
     def run(config, **arg_overrides):
         name, container = _write_manifest(tmp_path, config)
-        monkeypatch.setattr(run_mod, "container_rootfs", lambda n: os.path.join(container, "rootfs"))
+        monkeypatch.setattr("chroot_distro.paths.CONTAINERS_DIR", str(tmp_path / "containers"))
+        monkeypatch.setattr("chroot_distro.locking.RUNTIME_DIR", str(tmp_path))
         monkeypatch.setattr(run_mod, "container_manifest", lambda n: os.path.join(container, "manifest.json"))
         args = SimpleNamespace(
             container_name=name,

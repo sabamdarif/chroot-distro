@@ -41,6 +41,7 @@ credentials were supplied at all.
 """
 
 import base64
+import http.client
 import json
 import math
 import os
@@ -52,13 +53,21 @@ import urllib.request
 
 from chroot_distro.constants import PROGRAM_NAME, PROGRAM_VERSION
 from chroot_distro.helpers.download import (
+    MAX_METADATA_BYTES,
     NETWORK_ERRORS,
+    InvalidRequest,
     RedirectPolicyHandler,
+    RedirectRefused,
+    _download_failure,
+    _Opener,
     certificate_error_msg,
+    check_redirect,
+    declared_length,
     http_opener,
     is_cert_verification_error,
     is_plaintext_http_tls_error,
     new_request,
+    require_complete_body,
     retry_after,
     retry_http,
 )
@@ -73,6 +82,82 @@ def _ua() -> dict:
 
 
 _DEFAULT_PORTS = {"http": 80, "https": 443}
+_HUB_HOSTS = frozenset({"docker.io", "index.docker.io", "registry-1.docker.io"})
+_AUTHORITY_RE = re.compile(r"(?:\[[^\[\]@%]+\]|[^:\[\]@%]+)(?::[0-9]+)?")
+
+
+def _registry_url_parts(url: str) -> urllib.parse.SplitResult:
+    parts = urllib.parse.urlsplit(url)
+    if (
+        parts.scheme not in _DEFAULT_PORTS
+        or not parts.hostname
+        or not _AUTHORITY_RE.fullmatch(parts.netloc)
+        or parts.port == 0
+    ):
+        raise ValueError("invalid registry URL")
+    return parts
+
+
+def resolve_registry_url(source: str, location: str, *, insecure: bool, absolute: bool = False) -> str:
+    """Resolve a registry-provided URL without logging its query or userinfo."""
+    try:
+        if not location or any(not ch.isprintable() or ch.isspace() or ch in "\\#" for ch in location):
+            raise ValueError
+        raw = urllib.parse.urlsplit(location)
+        if absolute or raw.scheme:
+            _registry_url_parts(location)
+            target = location
+        else:
+            if location.startswith("//") and not raw.netloc:
+                raise ValueError
+            target = urllib.parse.urljoin(source, location)
+            # Older Python versions inherit the source query for a bare '?'.
+            if location.endswith("?") and "?" not in location[:-1]:
+                target = target.split("?", 1)[0] + "?"
+        parts = _registry_url_parts(target)
+    except ValueError:
+        raise RedirectRefused("Registry returned an invalid HTTP(S) URL.") from None
+    try:
+        check_redirect(source, f"{parts.scheme}://{parts.netloc}", allow_plaintext=insecure)
+    except RedirectRefused as exc:
+        if exc.plaintext:
+            raise RedirectRefused(
+                "Refusing a registry URL that leaves HTTPS for plain HTTP.", plaintext=True
+            ) from None
+        raise RedirectRefused("Registry returned an invalid HTTP(S) URL.") from None
+    return target
+
+
+class _RegistryOpener(_Opener):
+    def open(self, *args, **kwargs):
+        try:
+            return super().open(*args, **kwargs)
+        except (InvalidRequest, http.client.InvalidURL):
+            raise InvalidRequest("Could not send a request to the registry or its service.") from None
+        except urllib.error.HTTPError as exc:
+            exc.msg = http.client.responses.get(exc.code, "Registry response")
+            _release(exc)
+            raise
+        except http.client.BadStatusLine as exc:
+            if isinstance(exc, http.client.RemoteDisconnected):
+                raise
+            raise http.client.HTTPException("Invalid registry HTTP response.") from None
+
+
+def registry_failure(exc: BaseException) -> str:
+    """Describe a registry failure without exposing request or response text."""
+    if isinstance(exc, (RedirectRefused, InvalidRequest)):
+        return str(exc)
+    if isinstance(exc, urllib.error.HTTPError):
+        return f"HTTP Error {exc.code}"
+    return _download_failure(exc)
+
+
+def registry_request(url: str, **kwargs) -> urllib.request.Request:
+    try:
+        return new_request(url, **kwargs)
+    except InvalidRequest:
+        raise InvalidRequest("Could not build a request for the registry or its service.") from None
 
 
 def same_auth_origin(from_url: str, to_url: str) -> bool:
@@ -91,11 +176,11 @@ def same_auth_origin(from_url: str, to_url: str) -> bool:
         src_port, dst_port = src.port, dst.port
     except ValueError:
         return False
-    if not src_host or src_host != dst_host:
+    if src.scheme not in _DEFAULT_PORTS or dst.scheme not in _DEFAULT_PORTS or not src_host or src_host != dst_host:
         return False
     if src.scheme == dst.scheme:
         default = _DEFAULT_PORTS.get(src.scheme)
-        return (src_port or default) == (dst_port or default)
+        return (default if src_port is None else src_port) == (default if dst_port is None else dst_port)
     return (
         src.scheme == "http" and dst.scheme == "https" and src_port in (None, 80) and dst_port in (None, 443)
     )
@@ -116,6 +201,14 @@ class AuthStrippingRedirectHandler(RedirectPolicyHandler):
     still loses the header, since it is not the same origin.
     """
 
+    def _refuse(self, fp, from_url, location):
+        try:
+            resolve_registry_url(from_url, location, insecure=self.allow_plaintext)
+        except RedirectRefused:
+            if fp is not None:
+                fp.close()
+            raise
+
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         """Forward the redirect, dropping Authorization off-origin."""
         new_req = super().redirect_request(req, fp, code, msg, headers, newurl)
@@ -135,7 +228,11 @@ def opener(insecure: bool = False) -> urllib.request.OpenerDirector:
     HTTP, which the verifying one refuses. Every request made through the
     returned opener gets a default socket timeout.
     """
-    return http_opener(insecure=insecure, redirect=AuthStrippingRedirectHandler(allow_plaintext=insecure))
+    return http_opener(
+        insecure=insecure,
+        redirect=AuthStrippingRedirectHandler(allow_plaintext=insecure),
+        opener_class=_RegistryOpener,
+    )
 
 
 def auth_opener():
@@ -151,7 +248,13 @@ def insecure_for(registry: str, insecure: bool) -> bool:
     empty registry) is never one of those, so its manifests and blobs stay
     on verified HTTPS whatever the flag says.
     """
-    return bool(insecure and registry)
+    if not insecure or not registry:
+        return False
+    try:
+        hostname = urllib.parse.urlsplit(f"//{registry}").hostname
+    except ValueError:
+        return False
+    return hostname is None or hostname.rstrip(".") not in _HUB_HOSTS
 
 
 def registry_base_url(registry: str, insecure: bool = False) -> str:
@@ -361,16 +464,17 @@ def _granted_auth(data: dict, what: str) -> str:
     quotes the header value, so the refusal is made here, where it can say
     what is wrong without printing the token.
     """
-    token = data.get("token") or data.get("access_token", "")
-    if not isinstance(token, str):
+    token, access_token = data.get("token", ""), data.get("access_token", "")
+    if not isinstance(token, str) or not isinstance(access_token, str):
         raise RuntimeError(f"{what}: the registry's token grant is not a string.")
+    token = token or access_token
     if any(ord(ch) < 0x20 or 0x7F <= ord(ch) < 0xA0 or ord(ch) > 0xFF for ch in token):
         raise RuntimeError(f"{what}: the registry's token grant holds characters an HTTP header cannot carry.")
     return _bearer(token)
 
 
-def _request_body(open_fn, req, what: str) -> bytes:
-    """Open *req* via *open_fn* and return the full response body.
+def _request_body(open_fn, req, what: str, *, read: bool = True) -> bytes:
+    """Open *req* via *open_fn* and optionally read a bounded response body.
 
     Transient network failures are retried (same policy as the URL
     downloader). HTTP errors, including the expected 401 that carries the
@@ -380,9 +484,29 @@ def _request_body(open_fn, req, what: str) -> bytes:
 
     def _attempt():
         with open_fn(req) as resp:
-            return resp.read()
+            if not read:
+                return b""
+            declared = declared_length(resp)
+            if declared > MAX_METADATA_BYTES:
+                raise RuntimeError(f"{what}: the registry response is too large.")
+            body = resp.read(MAX_METADATA_BYTES + 1)
+            if len(body) > MAX_METADATA_BYTES:
+                raise RuntimeError(f"{what}: the registry response is too large.")
+            require_complete_body(len(body), declared, what)
+            return body
 
     return typing.cast(bytes, retry_http(_attempt, what=what))
+
+
+def _request_auth(open_fn, req, what: str) -> str:
+    body = _request_body(open_fn, req, what)
+    try:
+        data = json.loads(body)
+    except (ValueError, RecursionError):
+        raise RuntimeError(f"{what}: the registry returned invalid token JSON.") from None
+    if not isinstance(data, dict):
+        raise RuntimeError(f"{what}: the registry's token response must be a JSON object.")
+    return _granted_auth(data, what)
 
 
 def _release(exc: urllib.error.HTTPError) -> None:
@@ -433,8 +557,9 @@ def _token_url(realm: str, service: str, scope: str = "") -> str:
         params.append(f"scope={scope}")
     if not params:
         return realm
-    sep = "&" if "?" in realm else "?"
-    return f"{realm}{sep}{'&'.join(params)}"
+    path, _, query = realm.partition("?")
+    prefix = f"{query}&" if query else ""
+    return f"{path}?{prefix}{'&'.join(params)}"
 
 
 # What the server judging CD_DOCKER_AUTH answers credentials it refuses.
@@ -459,9 +584,9 @@ def _check_credentials(open_fn, url: str, basic_auth: str, registry: str, reject
     added. Anything else propagates as it would from the request the check
     comes before.
     """
-    req = new_request(url, headers={**_ua(), "Authorization": basic_auth})
+    req = registry_request(url, headers={**_ua(), "Authorization": basic_auth})
     try:
-        _request_body(open_fn, req, "Checking credentials")
+        _request_body(open_fn, req, "Checking credentials", read=False)
     except urllib.error.HTTPError as exc:
         if exc.code in rejected:
             _release(exc)
@@ -508,32 +633,38 @@ def get_auth_token(
                 _REJECTED_BY_TOKEN_SERVICE,
             )
         url = _token_url(AUTH_URL, HUB_SERVICE, f"repository:{repo}:{actions}")
-        req = new_request(url, headers=_ua())
+        req = registry_request(url, headers=_ua())
         if basic_auth:
             req.add_header("Authorization", basic_auth)
         what = f"Authenticating {repo}"
-        data = json.loads(_request_body(auth_opener().open, req, what))
-        return _granted_auth(data, what), REGISTRY_URL
+        return _request_auth(auth_opener().open, req, what), REGISTRY_URL
 
     # Custom registry: probe /v2/ to resolve the scheme and discover the
     # Bearer realm. A registry serving public images still requires the dance:
     # it answers 401 to an unauthenticated request and embeds the token
     # endpoint in the challenge.
+    insecure = insecure_for(registry, insecure)
     op = opener(insecure)
     scheme = "https"
     while True:
         base = f"{scheme}://{registry}"
-        probe_req = new_request(f"{base}/v2/", headers=_ua())
+        probe_req = registry_request(f"{base}/v2/", headers=_ua())
         try:
-            _request_body(op.open, probe_req, f"Probing {base}/v2/")
+            _request_body(op.open, probe_req, f"Probing {base}/v2/", read=False)
             return "", base  # registry is wide open; no token required
         except urllib.error.HTTPError as exc:
             if exc.code != 401:
                 raise
-            www_auth = exc.headers.get("WWW-Authenticate", "").strip()
+            challenge_url = exc.geturl()
+            _release(exc)
+            if not challenge_url or not same_auth_origin(probe_req.full_url, challenge_url):
+                raise RuntimeError("Registry authentication challenge came from another origin.") from None
+            www_auth = (exc.headers.get("WWW-Authenticate", "") if exc.headers is not None else "").strip()
             auth_scheme, _, challenge = www_auth.partition(" ")
             auth_scheme = auth_scheme.lower()
-            _release(exc)
+            challenge_url = resolve_registry_url(base, challenge_url, insecure=insecure, absolute=True)
+            effective = urllib.parse.urlsplit(challenge_url)
+            base = f"{effective.scheme}://{effective.netloc}"
             if auth_scheme == "basic":
                 # A registry that checks passwords itself (distribution with
                 # htpasswd auth, Nexus, Artifactory) has no token service and
@@ -544,7 +675,7 @@ def get_auth_token(
                 # challenged from, so a wrong password is said to be one here
                 # rather than as a refused manifest or upload later.
                 if basic_auth:
-                    _check_credentials(op.open, f"{base}/v2/", basic_auth, registry, _REJECTED_BY_REGISTRY)
+                    _check_credentials(op.open, challenge_url, basic_auth, registry, _REJECTED_BY_REGISTRY)
                 return basic_auth, base
             if auth_scheme != "bearer":
                 return "", base
@@ -552,16 +683,16 @@ def get_auth_token(
             realm = params.get("realm", "")
             if not realm:
                 return "", base
+            realm = resolve_registry_url(challenge_url, realm, insecure=insecure, absolute=True)
             service = params.get("service", "")
             if basic_auth:
                 _check_credentials(op.open, _token_url(realm, service), basic_auth, registry, _REJECTED_BY_TOKEN_SERVICE)
-            token_req = new_request(
+            token_req = registry_request(
                 _token_url(realm, service, f"repository:{repo}:{actions}"), headers=_ua()
             )
             if basic_auth:
                 token_req.add_header("Authorization", basic_auth)
-            data = json.loads(_request_body(op.open, token_req, "Requesting auth token"))
-            return _granted_auth(data, "Requesting auth token"), base
+            return _request_auth(op.open, token_req, "Requesting auth token"), base
         except urllib.error.URLError as exc:
             # The server speaks TLS but its certificate is untrusted. Only
             # reachable when enforcing HTTPS (the insecure opener skips

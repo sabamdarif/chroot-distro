@@ -128,12 +128,9 @@ def _index_lock() -> typing.Iterator[None]:
     support flock the call proceeds unlocked (last-writer-wins, same
     behaviour as before).
 
-    The lock file is named to `locking`, which opens it under the descriptor
-    and replaces anything standing there that is not a plain file. A name it
-    cannot clear (a directory it cannot reach, say) ends in the unlocked
-    path rather than a refusal: the worst an unserialised `record()` costs is
-    the other build's entry, and the file it publishes is written through
-    `atomic_write` either way.
+    `locking` opens the lock file relative to the index directory descriptor.
+    An unexpected entry leaves the index unlocked. A concurrent `record()` may
+    lose its update, but `atomic_write` still publishes a complete file.
     """
     try:
         dir_fd = _index_dir_fd(create=True)

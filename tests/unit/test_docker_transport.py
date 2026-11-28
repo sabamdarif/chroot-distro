@@ -2,6 +2,8 @@
 
 import urllib.request
 
+import pytest
+
 from chroot_distro.helpers.docker.transport import insecure_for
 from chroot_distro.helpers.download import NETWORK_TIMEOUT, _Opener
 
@@ -11,6 +13,8 @@ def test_insecure_for_never_reaches_docker_hub():
     assert insecure_for("ghcr.io", True) is True
     assert insecure_for("ghcr.io", False) is False
     assert insecure_for("localhost:5000", True) is True
+    assert insecure_for("INDEX.DOCKER.IO:443", True) is False
+    assert insecure_for("registry-1.docker.io:5000", True) is False
 
 
 def test_opener_applies_a_default_timeout(monkeypatch):
@@ -157,3 +161,137 @@ def test_check_credentials_reports_a_refusal_without_the_password(monkeypatch):
     text = str(caught.value)
     assert "rejected the credentials in CD_DOCKER_AUTH (HTTP 403)" in text
     assert "dXNlcjpwYXNz" not in text
+
+
+def test_plaintext_and_off_origin_challenges_cannot_send_credentials(monkeypatch):
+    import io
+    import urllib.error
+
+    import pytest
+
+    from chroot_distro.helpers.docker import transport
+    from chroot_distro.helpers.download import RedirectRefused
+
+    monkeypatch.setenv("CD_DOCKER_AUTH", "user:secret")
+    for origin, realm, failure in (
+        ("https://reg.example/v2/", "http://auth.example/token?secret=fixture", RedirectRefused),
+        ("https://other.example/v2/", "https://auth.example/token", RuntimeError),
+        ("https://reg.example/v2/", "https:relative", RedirectRefused),
+        ("https://reg.example/v2/", "https://auth.example%3A443/token", RedirectRefused),
+    ):
+        probe_body = io.BytesIO()
+        error = urllib.error.HTTPError(
+            origin, 401, "Unauthorized", {"WWW-Authenticate": f'Bearer realm="{realm}"'}, probe_body,
+        )
+        requests = []
+
+        def request(_open, req, _what, *, read):
+            assert not read
+            requests.append(req)
+            raise error
+
+        monkeypatch.setattr(transport, "_request_body", request)
+        with pytest.raises(failure) as caught:
+            transport.get_auth_token("repo", "reg.example")
+        assert "secret=fixture" not in str(caught.value)
+        assert probe_body.closed
+        assert [req.get_header("Authorization") for req in requests] == [None]
+
+
+def test_upgraded_basic_challenge_uses_effective_https_url(monkeypatch):
+    import urllib.error
+
+    from chroot_distro.helpers.docker import transport
+
+    monkeypatch.setenv("CD_DOCKER_AUTH", "user:pass")
+    requests = []
+    effective = "https://reg.example/check"
+
+    def request(_open, req, _what, *, read):
+        assert not read
+        requests.append((req.full_url, req.get_header("Authorization")))
+        if req.full_url == "https://reg.example/v2/":
+            raise urllib.error.URLError("fixture plaintext reply")
+        if req.full_url == "http://reg.example/v2/":
+            raise urllib.error.HTTPError(
+                effective, 401, "Unauthorized", {"WWW-Authenticate": "Basic realm=registry"}, None,
+            )
+        return b""
+
+    monkeypatch.setattr(transport, "_request_body", request)
+    monkeypatch.setattr(transport, "is_plaintext_http_tls_error", lambda _exc: True)
+    auth, base = transport.get_auth_token("repo", "reg.example", insecure=True)
+    assert base == "https://reg.example"
+    assert auth.startswith("Basic ")
+    assert requests == [
+        ("https://reg.example/v2/", None), ("http://reg.example/v2/", None), (effective, auth),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("body", "message"),
+    [
+        (b"[]", "must be a JSON object"),
+        (b'{"token":false}', "token grant is not a string"),
+        (b'{"token": "fixture-token"', "invalid token JSON"),
+        (b'{"token":"' + b"x" * 60 + b'"}', "response is too large"),
+    ],
+)
+def test_hub_rejects_invalid_token_responses(monkeypatch, body, message):
+    from types import SimpleNamespace
+
+    from chroot_distro.helpers.docker import transport
+
+    monkeypatch.delenv("CD_DOCKER_AUTH", raising=False)
+    monkeypatch.setattr(transport, "MAX_METADATA_BYTES", 48)
+    monkeypatch.setattr(transport, "auth_opener", lambda: SimpleNamespace(open=lambda _req: _Resp(body)))
+    with pytest.raises(RuntimeError, match=message) as caught:
+        transport.get_auth_token("library/alpine")
+    assert "fixture-token" not in str(caught.value)
+
+
+def test_token_request_retries_incomplete_body_and_accepts_alternate_grant(monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from chroot_distro.helpers import download
+    from chroot_distro.helpers.docker import transport
+
+    body = b'{"token":"","access_token":"fixture"}'
+    responses = [
+        _Resp(body[:-1], {"Content-Length": str(len(body))}),
+        _Resp(body, {"Content-Length": str(len(body))}),
+    ]
+    request = Mock(side_effect=responses)
+    monkeypatch.delenv("CD_DOCKER_AUTH", raising=False)
+    monkeypatch.setattr(transport, "auth_opener", lambda: SimpleNamespace(open=request))
+    monkeypatch.setattr(download.time, "sleep", Mock())
+    assert transport.get_auth_token("library/alpine")[0] == "Bearer fixture"
+    assert request.call_count == 2
+
+
+def test_registry_retry_diagnostics_omit_url_and_reason(monkeypatch, capsys):
+    import io
+    import urllib.error
+
+    from chroot_distro.helpers import download
+    from chroot_distro.helpers.docker import transport
+
+    body = io.BytesIO(b"response")
+    error = urllib.error.HTTPError("https://upload.example/blob?sig=fixture", 503, "reason-fixture", {}, body)
+
+    def refuse(*_args, **_kwargs):
+        raise error
+
+    monkeypatch.setattr(urllib.request.OpenerDirector, "open", refuse)
+    monkeypatch.setattr(download.time, "sleep", lambda _delay: None)
+    with pytest.raises(urllib.error.HTTPError) as caught:
+        download.retry_http(
+            lambda: transport.opener().open(error.url), what="Opening upload", max_retries=2
+        )
+    assert body.closed
+    assert transport.registry_failure(caught.value) == "HTTP Error 503"
+    err = capsys.readouterr().err
+    assert "HTTP 503" in err
+    assert "reason-fixture" not in err
+    assert "sig=fixture" not in err

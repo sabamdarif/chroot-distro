@@ -84,7 +84,18 @@ def opendir(path: str) -> int:
     return os.open(path, _O_RD_DIR)
 
 
-def descend_at(dir_fd: int, parts: Sequence[str], *, create: bool = False, mode: int | None = None) -> int:
+def _mount_id(fd: int) -> int:
+    with open(f"/proc/self/fdinfo/{fd}", "rb") as info:
+        for line in info:
+            field, _, value = line.partition(b":")
+            if field == b"mnt_id" and value.strip().isdigit():
+                return int(value)
+    raise OSError(errno.ENOTSUP, "file descriptor mount ID unavailable")
+
+
+def descend_at(
+    dir_fd: int, parts: Sequence[str], *, create: bool = False, mode: int | None = None, same_mount: bool = False
+) -> int:
     """Open the directory *parts* names under dir_fd. Descriptor, or raises.
 
     Each level is opened O_NOFOLLOW off the level above, so a component that is
@@ -93,6 +104,10 @@ def descend_at(dir_fd: int, parts: Sequence[str], *, create: bool = False, mode:
     FileNotFoundError unless create=True, which makes it with mkdirat off the
     same validated descriptor. *mode* is applied to the leaf through its
     descriptor.
+
+    *same_mount* requires each opened directory to be on the starting mount.
+    Compare mount IDs before using a directory as a parent, since a bind can
+    have the same device number. Unavailable mount IDs raise an OSError.
 
     A caller that has pinned a directory keeps the guarantee that pin gives it
     only by descending from the descriptor: going back to the path re-resolves
@@ -103,6 +118,7 @@ def descend_at(dir_fd: int, parts: Sequence[str], *, create: bool = False, mode:
     on the same directory, so the caller owns and closes what comes back either
     way.
     """
+    expected_mount = _mount_id(dir_fd) if same_mount else None
     fd: int | None = None
     try:
         for part in parts:
@@ -118,6 +134,8 @@ def descend_at(dir_fd: int, parts: Sequence[str], *, create: bool = False, mode:
             if fd is not None:
                 os.close(fd)
             fd = nxt
+            if expected_mount is not None and _mount_id(fd) != expected_mount:
+                raise OSError(errno.EXDEV, "directory is on another mount", part)
         if fd is None:
             fd = reopen(dir_fd)
         if mode is not None:
@@ -183,7 +201,9 @@ def open_file_at(dir_fd: int, name: str, flags: int, mode: int = 0o644) -> int:
     return os.open(name, flags | os.O_NOFOLLOW, mode, dir_fd=dir_fd)
 
 
-def open_regular_at(dir_fd: int, name: str, flags: int, mode: int = 0o644) -> tuple[int, os.stat_result]:
+def open_regular_at(
+    dir_fd: int, name: str, flags: int, mode: int = 0o644, *, same_mount: bool = False
+) -> tuple[int, os.stat_result]:
     """Open *name* under dir_fd as a regular file. Returns (fd, stat).
 
     O_NOFOLLOW keeps a planted symlink from being followed but says nothing
@@ -191,14 +211,16 @@ def open_regular_at(dir_fd: int, name: str, flags: int, mode: int = 0o644) -> tu
     hostile guest simply never provides. O_NONBLOCK makes that open return
     instead, and the fstat that follows refuses every remaining type, so a
     device, a socket, or a pipe with a reader attached cannot be read or
-    written either. The flag has no effect on a regular file, which is all
-    that gets past here.
+    written either. With *same_mount*, also refuse files mounted over the
+    parent's entries.
     """
     fd = open_file_at(dir_fd, name, flags | os.O_NONBLOCK, mode)
     try:
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode):
             raise OSError(errno.EINVAL, "not a regular file", name)
+        if same_mount and _mount_id(fd) != _mount_id(dir_fd):
+            raise OSError(errno.EXDEV, "file is on another mount", name)
     except BaseException:
         os.close(fd)
         raise
@@ -759,15 +781,14 @@ def _revive_level(frame: _Frame, keys: tuple[Any, ...], child: _Frame) -> None:
         frame[slot] = up
 
 
-def count_tree_at(dir_fd: int) -> int:
+def count_tree_at(dir_fd: int, *, include_dirs: bool = False) -> int:
     """Count the files, symlinks and special entries under dir_fd.
 
     A cheap first pass so a copy can show progress against a total, the way
     `sync` does. Directories are descended into but not counted: copy_tree_at
-    reports an entry once it has *written* one, which for a directory is only
-    true after its contents are in, so counting them would leave the bar short
-    of the end by the number of directories. Anything unreadable counts as
-    nothing and is left for the copy itself to report.
+    reports files and symlinks. Removal passes include_dirs=True to count
+    descendant directories too; the caller counts the root. Unreadable
+    directories contribute no descendants, so totals are approximate.
 
     Frame layout: [fd, None, pending names, owned].
     """
@@ -784,9 +805,11 @@ def count_tree_at(dir_fd: int) -> int:
                 except OSError:
                     pending = frame[2] = []
             if not pending:
-                levels.pop()
-                if owned:
-                    os.close(fd)
+                try:
+                    levels.pop()
+                finally:
+                    if owned:
+                        os.close(fd)
                 continue
             name = pending.pop()
             try:
@@ -797,6 +820,8 @@ def count_tree_at(dir_fd: int) -> int:
             except OSError:
                 total += 1
                 continue
+            if include_dirs:
+                total += 1
             levels.push([sub, None, None, True])
     except BaseException:
         close_frames(stack)
@@ -1146,15 +1171,16 @@ def rmtree_at(
 
             if not pending:
                 try:
-                    levels.pop()
+                    try:
+                        levels.pop()
+                    finally:
+                        os.close(fd)
                 except OSError as exc:
-                    os.close(fd)
                     _removal_failed(rel, exc, on_error)
                     close_frames(stack)
                     del stack[:]
                     return False
                 parent_fd = stack[-1][0] if stack else dir_fd
-                os.close(fd)
                 if frame[5]:
                     try:
                         _unlink_at(parent_fd, entry, True, force)

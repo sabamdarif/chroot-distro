@@ -1,509 +1,377 @@
 # SPDX-License-Identifier: GPL-3.0-only
 # Copyright (C) 2025-2026 Md Arif
-"""`chroot-distro restore`: read a backup stream and rebuild one container from it.
+"""Restore one container from the layout written by the backup command.
 
-The archive is input this program did not write, and the shape of this file follows
-from that. Nothing destructive happens until a member that really will produce
-content arrives: `_clear_existing_rootfs` runs at that commit point and not before,
-the manifest is buffered and written only once a valid rootfs directory exists, and
-an archive holding no rootfs at all therefore leaves the installed container as it
-was.
-
-Members are mapped, never extracted by name. `_dest_path` accepts `<name>/rootfs/...`
-and the legacy `installed-rootfs/<name>/...` layout, refuses `..` and bare-root
-members, and puts the container name through `is_valid_name`, so an archive names a
-container but never a path. `_safe_dest` then clamps each write inside that
-container's directory through `tar_extract._safe_resolve`, which is what defeats a
-symlink an earlier member of the same archive planted; the last component is left
-unresolved so the entry itself is what is acted on, and only a hard link's read
-source resolves all the way.
-
-One container per archive: the first valid member fixes the target and takes its
-exclusive lock, and a member naming a second one ends the command. A hard link is
-extracted as a copy, and device nodes, fifos and anything else unexpected are
-skipped. A directory the archive wants unreadable is created wide and chmod'ed back
-in reverse order at the end, so extraction can still descend into it. A member that
-could not be written still lets the modes and the manifest land before the command
-fails, so what was restored is finished and a partial result is never reported as a
-success.
+Members use <name>/rootfs and an optional <name>/manifest.json. The first
+member fixes the container name and takes its lock. The first rootfs member
+starts a marked install. Extraction and retries use pinned directories, and
+hardlinks become copies of files in the guest rootfs.
+The incomplete marker survives errors and interrupts and is removed only after
+the tar terminator and compression stream have been checked and the optional
+manifest has been written.
 """
 
 import contextlib
+import errno
 import os
 import shutil
 import stat
 import sys
-
-if sys.version_info >= (3, 14):
-    import tarfile
-else:
-    from backports.zstd import tarfile
+import tempfile
 import typing
 
-import chroot_distro.helpers.mount_manager as mount_manager
+if sys.version_info >= (3, 14):
+    import tarfile as tar
+else:
+    from backports.zstd import tarfile as tar
+
+from chroot_distro import dirfd
+from chroot_distro.atomic import atomic_write
 from chroot_distro.commands.help import HELP_COMMANDS
-from chroot_distro.constants import CONTAINERS_DIR, PROGRAM_NAME
-from chroot_distro.helpers.tar_extract import _safe_resolve
+from chroot_distro.constants import PROGRAM_NAME
+from chroot_distro.exceptions import ChrootDistroError
+from chroot_distro.helpers.install_state import (
+    clear_incomplete_rootfs,
+    create_install_rootfs,
+    finish_install,
+    write_incomplete_marker,
+)
+from chroot_distro.helpers.tar_extract import safe_resolve_parts_at
+from chroot_distro.helpers.tar_stream import open_tar
 from chroot_distro.locking import ContainerLock
 from chroot_distro.message import (
-    C,
     crit_error,
+    escape_controls,
     log_error,
     log_info,
     msg,
-    warn,
+    quote_path,
 )
 from chroot_distro.names import is_valid_name
 from chroot_distro.paths import (
-    container_dir,
+    container_incomplete_marker,
     container_manifest,
     container_rootfs,
+    open_container_dir,
 )
 from chroot_distro.progress import (
     ByteCounter,
     clear_bar,
     draw_bytes_bar,
-    progress_active,
 )
-
-_MAGIC_COMPRESS = (
-    (b"\x1f\x8b", "gz"),  # gzip
-    (b"BZh", "bz2"),  # bzip2
-    (b"\xfd7zXZ\x00", "xz"),  # xz
-    (b"\x5d\x00", "xz"),  # lzma legacy
-    (b"\x28\xb5\x2f\xfd", "zst"),  # zstd
-)
-
-_LEGACY_PREFIX = "installed-rootfs"
+from chroot_distro.syscalls.mount import fd_path
 
 
-def _detect_compression(header: bytes) -> str:
-    """Return the tarfile mode suffix inferred from *header* magic bytes."""
-    for magic, mode in _MAGIC_COMPRESS:
-        if header.startswith(magic):
-            return mode
-    return ""
+def _dest_path(path: str) -> tuple[str, tuple[str, ...] | None] | None:
+    """Map to a container and rootfs-relative parts, using None for its manifest."""
+    parts = tuple(path.lstrip("/").split("/"))
+    if len(parts) < 2 or not is_valid_name(parts[0]) or any(part in ("..", ".", "") for part in parts):
+        return None
+
+    name, sub = parts[:2]
+    if sub == "manifest.json" and len(parts) == 2:
+        return name, None
+    if sub == "rootfs":
+        return name, parts[2:]
+    return None
 
 
-def _clear_existing_rootfs(container_name: str) -> None:
-    """Remove the destination rootfs before extracting a new copy."""
-    rootfs_dir = container_rootfs(container_name)
-    if not os.path.isdir(rootfs_dir):
+def _start_restore(name: str, pins: contextlib.ExitStack) -> tuple[int, int, str]:
+    container_fd = open_container_dir(name, create=True)
+    pins.callback(os.close, container_fd)
+    marker = os.path.basename(container_incomplete_marker(name))
+    rootfs = os.path.basename(container_rootfs(name))
+    try:
+        dirfd.lstat_at(container_fd, marker)
+    except FileNotFoundError:
+        incomplete = False
+    else:
+        incomplete = True
+    try:
+        rootfs_fd = dirfd.opendir_at(container_fd, rootfs)
+    except FileNotFoundError:
+        rootfs_fd = create_install_rootfs(container_fd, rootfs, marker, incomplete=incomplete)
+        pins.callback(os.close, rootfs_fd)
+    else:
+        pins.callback(os.close, rootfs_fd)
+        if not incomplete:
+            raise ChrootDistroError(
+                f"container '{name}' is already installed. "
+                f"Remove it first ('{PROGRAM_NAME} remove {name}'), or bring "
+                f"the backup in under a new name with '{PROGRAM_NAME} install <archive> --name NEWNAME'."
+            )
+        write_incomplete_marker(marker, dir_fd=container_fd)
+        clear_incomplete_rootfs(name, container_fd, rootfs_fd)
+        os.fchown(rootfs_fd, os.geteuid(), os.getegid())
+        os.fchmod(rootfs_fd, 0o755)
+
+    with contextlib.suppress(FileNotFoundError):
+        os.unlink(os.path.basename(container_manifest(name)), dir_fd=container_fd)
+    return container_fd, rootfs_fd, marker
+
+
+def _open_hardlink(rootfs_fd: int, link_parts: tuple[str, ...]) -> tuple[int, os.stat_result]:
+    resolved = safe_resolve_parts_at(rootfs_fd, link_parts)
+    if not resolved:
+        raise OSError(errno.EINVAL, "hardlink target does not resolve to a guest file")
+    parent_fd = dirfd.descend_at(rootfs_fd, resolved[:-1])
+    try:
+        original = dirfd.lstat_at(parent_fd, resolved[-1])
+        if not stat.S_ISREG(original.st_mode) or original.st_nlink != 1:
+            raise OSError(errno.EINVAL, "hardlink target must be a singly linked regular file")
+        source_fd, opened = dirfd.open_regular_at(parent_fd, resolved[-1], os.O_RDONLY)
+        if opened.st_nlink != 1 or not os.path.samestat(original, opened):
+            os.close(source_fd)
+            raise OSError(errno.ESTALE, "hardlink target was replaced")
+        return source_fd, opened
+    finally:
+        os.close(parent_fd)
+
+
+_DirModes = dict[tuple[str, ...], tuple[os.stat_result, int]]
+
+
+# The procfs path addresses the symlink inode pinned with O_PATH and O_NOFOLLOW.
+def _restore_symlink(parent_fd: int, leaf: str, member: tar.TarInfo) -> None:
+    os.symlink(member.linkname, leaf, dir_fd=parent_fd)
+    fd = dirfd.open_file_at(parent_fd, leaf, os.O_PATH)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISLNK(st.st_mode) or st.st_nlink != 1:
+            raise OSError(errno.ESTALE, "symlink was replaced or linked during restore", leaf)
+        os.chown(fd_path(fd), member.uid, member.gid)
+    finally:
+        os.close(fd)
+
+
+def _restore_member(
+    tf: tar.TarFile,
+    member: tar.TarInfo,
+    name: str,
+    rootfs_fd: int,
+    parts: tuple[str, ...],
+    modes: _DirModes,
+) -> None:
+    mode = stat.S_IMODE(member.mode)
+    if not parts:
+        os.fchown(rootfs_fd, member.uid, member.gid)
+        modes[()] = (os.fstat(rootfs_fd), mode)
         return
 
-    # Never clear a rootfs that still has active mounts.
-    try:
-        mount_manager.ensure_no_mounts(rootfs_dir)
-    except Exception as e:
-        crit_error(f"Failed mount safety check for container '{container_name}': {e}")
-        sys.exit(1)
+    parents = safe_resolve_parts_at(rootfs_fd, parts[:-1])
+    if parents is None:
+        raise OSError(errno.ELOOP, "archive member parent could not be resolved")
+    leaf = parts[-1]
+    target = (*parents, leaf)
+    parent_fd = dirfd.descend_at(rootfs_fd, parents, create=True)
+    with contextlib.ExitStack() as pins:
+        pins.callback(os.close, parent_fd)
+        if member.isdir():
+            try:
+                existing = dirfd.lstat_at(parent_fd, leaf)
+            except FileNotFoundError:
+                existing = None
+            if existing is None or not stat.S_ISDIR(existing.st_mode):
+                if existing is not None:
+                    dirfd.rmtree_at(parent_fd, leaf, force=True)
+                os.mkdir(leaf, dir_fd=parent_fd)
+            fd = dirfd.opendir_at(parent_fd, leaf)
+            try:
+                os.fchown(fd, member.uid, member.gid)
+                os.fchmod(fd, mode | stat.S_IRWXU)
+                if mode & stat.S_IRWXU == stat.S_IRWXU:
+                    modes.pop(target, None)
+                else:
+                    modes[target] = (os.fstat(fd), mode)
+            finally:
+                os.close(fd)
+            return
 
-    pfx = f"{C['BLUE']}[{C['GREEN']}*{C['BLUE']}] {C['CYAN']}"
-    count = 0
-    clear_bar()
-    if progress_active() and not sys.stderr.isatty():
-        sys.stderr.write(f"{pfx}Removing old rootfs...{C['RST']}\n")
-        sys.stderr.flush()
+        modes.pop(target, None)
+        link = None
+        if member.islnk():
+            source = _dest_path(member.linkname)
+            if source is None or source[0] != name or source[1] is None:
+                raise OSError(errno.EINVAL, "hardlink target is outside the guest rootfs")
+            link = _open_hardlink(rootfs_fd, source[1])
+            pins.callback(os.close, link[0])
+        dirfd.rmtree_at(parent_fd, leaf, force=True)
+        if member.issym():
+            _restore_symlink(parent_fd, leaf, member)
+            return
 
-    for dp, dns, fns in os.walk(rootfs_dir, topdown=False, followlinks=False):
-        for fname in fns:
-            with contextlib.suppress(OSError):
-                os.unlink(os.path.join(dp, fname))
-            count += 1
-            if progress_active() and sys.stderr.isatty():
-                sys.stderr.write(f"\r{pfx}Removing old rootfs... {count} files{C['RST']}")
-                sys.stderr.flush()
-        for dname in dns:
-            with contextlib.suppress(OSError):
-                os.rmdir(os.path.join(dp, dname))
-    shutil.rmtree(rootfs_dir, ignore_errors=True)
-    clear_bar()
-
-
-def _remove_existing(dest: str, member: tarfile.TarInfo) -> None:
-    """Remove any existing filesystem entry at *dest* before extraction."""
-    try:
-        if os.path.islink(dest) or os.path.isfile(dest):
-            os.remove(dest)
-        elif os.path.isdir(dest) and not member.isdir():
-            shutil.rmtree(dest)
-    except OSError as exc:
-        warn(f"Failed to remove existing entry at {dest}: {exc}")
-
-
-_SKIP = (None, None)
-
-
-def _dest_path(member_name: str) -> tuple:
-    """Map a TAR member name to (container_name, dest_path_in_containers)."""
-    name = member_name.lstrip("/")
-    if not name or name == ".":
-        return _SKIP
-
-    parts = name.split("/")
-
-    if any(p in ("..", ".", "") for p in parts):
-        return _SKIP
-
-    if len(parts) == 1 and not name.endswith("/"):
-        return _SKIP
-
-    # Legacy format: installed-rootfs/<name>/...  ->  containers/<name>/rootfs/...
-    if parts[0] == _LEGACY_PREFIX:
-        if len(parts) < 2:
-            return _SKIP
-        container_name = parts[1]
-        if not is_valid_name(container_name):
-            return _SKIP
-        rest = parts[2:]
-        if not rest:
-            return (container_name, container_rootfs(container_name))
-        return (container_name, os.path.join(container_rootfs(container_name), *rest))
-
-    # New format: <name>/...
-    container_name = parts[0]
-    if not is_valid_name(container_name):
-        return _SKIP
-
-    if len(parts) == 1:
-        return (container_name, container_dir(container_name))
-
-    sub = parts[1]
-    rest = parts[2:]
-
-    if sub == "manifest.json" and not rest:
-        return (container_name, container_manifest(container_name))
-
-    if sub == "rootfs":
-        if not rest:
-            return (container_name, container_rootfs(container_name))
-        return (container_name, os.path.join(container_rootfs(container_name), *rest))
-
-    return (container_name, os.path.join(container_rootfs(container_name), *parts[1:]))
+        fd, _ = dirfd.open_new_at(parent_fd, leaf, 0o600)
+        pins.callback(os.close, fd)
+        if link is not None:
+            source_fd, source_st = link
+            dirfd.copy_data(source_fd, fd, source_st)
+            os.utime(fd, ns=(source_st.st_atime_ns, source_st.st_mtime_ns))
+            mode = mode or stat.S_IMODE(source_st.st_mode)
+        else:
+            content = tf.extractfile(member)
+            if content is None:
+                raise tar.ReadError("regular archive member has no data stream")
+            with content, open(fd, "wb", closefd=False) as out:
+                shutil.copyfileobj(content, out, 1 << 17)
+        os.fchown(fd, member.uid, member.gid)
+        os.fchmod(fd, mode)
 
 
-def _is_rootfs_dest(container_name: str, dest: str) -> bool:
-    """True if *dest* is the rootfs dir or lives inside it.
+def _apply_dir_modes(rootfs_fd: int, modes: _DirModes) -> None:
+    for parts in sorted(modes, key=len, reverse=True):
+        previous, mode = modes[parts]
+        try:
+            fd = dirfd.descend_at(rootfs_fd, parts)
+        except (FileNotFoundError, NotADirectoryError):
+            continue
+        try:
+            if os.path.samestat(previous, os.fstat(fd)):
+                os.fchmod(fd, mode)
+        finally:
+            os.close(fd)
 
-    Distinguishes real rootfs members (which commit the restore) from the
-    top-level manifest.json.
-    """
-    rootfs = container_rootfs(container_name)
-    return dest == rootfs or dest.startswith(rootfs + os.sep)
 
+def _restore_stream(
+    tf: tar.TarFile,
+    on_entry: typing.Callable[[int, str], None],
+    pins: contextlib.ExitStack,
+) -> tuple[str, int, int, str]:
+    name = None
+    opened = None
+    manifest = None
+    manifest_mode = 0
+    modes: _DirModes = {}
+    for member in tf:
+        if not (member.isdir() or member.isreg() or member.issym() or member.islnk()):
+            continue
 
-def _safe_dest(container_name: str, dest: str, *, follow_final: bool = False) -> str | None:
-    """Clamp *dest* inside the container dir, defeating symlinks planted
-    earlier in the same archive (e.g. `<name>/rootfs/evil -> /`).
+        destination = _dest_path(member.name)
+        if destination is None:
+            raise ChrootDistroError("archive members must use <name>/rootfs/... or <name>/manifest.json.")
+        member_name, parts = destination
+        if parts == () and not member.isdir():
+            raise ChrootDistroError("the archive rootfs entry must be a directory.")
+        if parts is None and member.isdir():
+            raise ChrootDistroError("the archive manifest entry cannot be a directory.")
+        if name is None:
+            name = member_name
+            lock = ContainerLock(name, exclusive=True, command="restore")
+            pins.callback(lock.release)
+            if not lock.acquire():
+                raise ChrootDistroError(str(lock.conflict_error()))
+            log_info(f"Destination: {name}")
+        elif member_name != name:
+            raise ChrootDistroError(
+                f"archive contains more than one container ('{name}' and '{member_name}'). "
+                "Restore handles a single container at a time."
+            )
 
-    follow_final resolves the last component too (for a hardlink's read
-    source); otherwise it's left alone so we act on the entry itself. Returns
-    None on a symlink loop. Mirrors helpers/tar_extract.py.
-    """
-    root = container_dir(container_name)
-    rel = os.path.relpath(dest, root)
-    if rel == os.curdir:  # dest is the container dir itself
-        return root
-    parts = rel.split(os.sep)
-    if os.pardir in parts:  # defensive: dest is always built under root
-        return None
-    if follow_final:
-        return _safe_resolve(root, parts)
-    safe_parent = _safe_resolve(root, parts[:-1])
-    if safe_parent is None:
-        return None
-    return os.path.join(safe_parent, parts[-1])
+        if parts is not None:
+            if opened is None:
+                opened = _start_restore(name, pins)
+            _, rootfs_fd, _ = opened
+            _restore_member(tf, member, name, rootfs_fd, parts, modes)
+        elif member.isreg():
+            if manifest is None:
+                manifest = pins.enter_context(tempfile.SpooledTemporaryFile(max_size=1 << 20))  # noqa: SIM115
+            manifest.seek(0)
+            manifest.truncate()
+            content = tf.extractfile(member)
+            if content is None:
+                raise tar.ReadError("manifest has no data stream")
+            with content:
+                shutil.copyfileobj(content, manifest, 1 << 17)
+            manifest_mode = stat.S_IMODE(member.mode)
+        else:
+            continue
+        on_entry(member.size, member.name)
+
+    if opened is None:
+        raise ChrootDistroError(
+            f"archive does not contain a container rootfs. "
+            f"Only archives created by '{PROGRAM_NAME} backup' are supported."
+        )
+    assert name is not None
+    container_fd, rootfs_fd, marker = opened
+    _apply_dir_modes(rootfs_fd, modes)
+    if manifest is not None:
+        manifest.seek(0)
+        manifest_leaf = os.path.basename(container_manifest(name))
+        with atomic_write(manifest_leaf, binary_mode=True, mode=manifest_mode, dir_fd=container_fd) as out:
+            shutil.copyfileobj(manifest, out, 1 << 17)
+    return name, container_fd, rootfs_fd, marker
 
 
 def command_restore(args) -> None:
-    """Restore a single container from a tar backup.
-
-    The first valid member fixes the target container; members naming a
-    different one are rejected. The destructive clear and the manifest write
-    are both deferred until real rootfs content shows up, so a bad archive
-    leaves the existing container untouched.
-    """
+    """Restore a single container from a tar backup."""
     archive = getattr(args, "archive", None)
     verbose = getattr(args, "verbose", False)
 
     if archive:
+        archive = os.path.expanduser(archive)
+        if not os.path.exists(archive) and archive.startswith("./"):
+            cleaned = "/" + archive.lstrip("./")
+            if os.path.exists(cleaned):
+                archive = cleaned
         if not os.path.exists(archive):
-            crit_error(f"file '{archive}' does not exist.")
+            crit_error(f"file '{quote_path(archive)}' does not exist.")
             sys.exit(1)
         if os.path.isdir(archive):
-            crit_error(f"path '{archive}' is a directory.")
+            crit_error(f"path '{quote_path(archive)}' is a directory.")
             sys.exit(1)
         if not os.access(archive, os.R_OK):
-            crit_error(f"file '{archive}' is not readable.")
+            crit_error(f"file '{quote_path(archive)}' is not readable.")
             sys.exit(1)
-    else:
-        if sys.stdin.isatty():
-            msg()
-            crit_error("archive file path is not specified and nothing is being piped via stdin.")
-            HELP_COMMANDS["restore"]()
-            sys.exit(1)
-
-    os.makedirs(CONTAINERS_DIR, exist_ok=True)
+    elif sys.stdin.isatty():
+        msg()
+        crit_error("archive file path is not specified and nothing is being piped via stdin.")
+        HELP_COMMANDS["restore"]()
+        sys.exit(1)
 
     log_info("Restoring container from the backup...")
 
     done_size = 0
     total_size = 0
-    counter: ByteCounter | None = None
 
     def _on_entry(member_size: int, member_name: str) -> None:
         nonlocal done_size
         done_size += member_size
         if verbose:
-            log_info(f"Extracting: '{member_name}'")
-        if counter is not None and total_size:
+            log_info(f"Extracting: '{quote_path(member_name)}'")
+        if total_size:
             draw_bytes_bar(counter.count, total_size)
         else:
             draw_bytes_bar(done_size, 0, noun="extracted")
 
-    def _check_bare_root(member_name: str) -> bool:
-        name = member_name.lstrip("/")
-        if not name:
-            return False
-        parts = name.split("/")
-        return len(parts) == 1 and not name.endswith("/")
-
-    raw_fh = None
-    restore_name: str | None = None
-    lock = None
-    committed = False
-    pending_manifest = None  # (bytes, mode) written only on success
-    # Dirs widened to owner-rwx for extraction; chmod'd back at the end.
-    deferred_dir_modes: list[tuple[str, int]] = []
-
-    def _write_manifest(data: bytes, mode: int) -> None:
-        if restore_name is None:
-            return
-        mpath = container_manifest(restore_name)
-        try:
-            os.makedirs(os.path.dirname(mpath), exist_ok=True)
-            with open(mpath, "wb") as out:
-                out.write(data)
-        except OSError:
-            return
-        with contextlib.suppress(OSError):
-            os.chmod(mpath, mode)
-
     try:
-        if archive:
-            total_size = os.path.getsize(archive)
-            raw_fh = open(archive, "rb")  # noqa: SIM115
-            counter = ByteCounter(raw_fh)
-            tf_fileobj: typing.Any = counter
-            tf_mode = "r|*"
-        else:
-            import io
-
-            buf = sys.stdin.buffer
-            header = buf.peek(6)[:6] if isinstance(buf, io.BufferedReader) else b""
-            comp = _detect_compression(header)
-            tf_fileobj = sys.stdin.buffer
-            tf_mode = f"r|{comp}"
-
-        failed = False
-
-        with tarfile.open(fileobj=tf_fileobj, mode=tf_mode) as tf:  # type: ignore[call-overload]
-            for member in tf:
-                if member.isblk() or member.ischr() or member.isfifo():
-                    continue
-
-                if _check_bare_root(member.name):
-                    clear_bar()
-                    log_error("Cannot restore: provided file has invalid structure.")
-                    sys.exit(1)
-
-                container_name, dest = _dest_path(member.name)
-                if container_name is None:
-                    continue
-
-                # First valid member fixes the target and takes its lock.
-                if restore_name is None:
-                    restore_name = container_name
-                    lock = ContainerLock(container_name, exclusive=True, command="restore")
-                    if not lock.acquire():
-                        hint = lock.holder_hint()
-                        clear_bar()
-                        log_error(f"Cannot restore: container '{container_name}' is busy{hint}.")
-                        sys.exit(1)
-                    # Refuse to overwrite an installed container, the way
-                    # install does: restore clears the rootfs it finds, so a
-                    # name that is already taken must be removed (or the
-                    # backup installed under a new one with install --name)
-                    # before its data is silently destroyed.
-                    if os.path.isdir(container_rootfs(container_name)):
-                        clear_bar()
-                        log_error(
-                            f"Cannot restore: container '{container_name}' is already installed. "
-                            f"Remove it first ('{PROGRAM_NAME} remove {container_name}'), or bring "
-                            f"the backup in under a new name with "
-                            f"'{PROGRAM_NAME} install <archive> --name NEWNAME'."
-                        )
-                        sys.exit(1)
-                    log_info(f"Destination: {restore_name}")
-                elif container_name != restore_name:
-                    clear_bar()
-                    log_error(
-                        f"Cannot restore: archive contains more than one container "
-                        f"('{restore_name}' and '{container_name}'). "
-                        f"Restore handles a single container at a time."
-                    )
-                    sys.exit(1)
-
-                assert restore_name is not None
-
-                # Buffer the manifest until the restore succeeds; other
-                # non-rootfs members are ignored.
-                if not _is_rootfs_dest(restore_name, dest):
-                    if member.isreg() and dest == container_manifest(restore_name):
-                        fobj = tf.extractfile(member)
-                        data = b""
-                        if fobj is not None:
-                            try:
-                                data = fobj.read()
-                            finally:
-                                fobj.close()
-                        pending_manifest = (data, stat.S_IMODE(member.mode))
-                        _on_entry(member.size, member.name)
-                    continue
-
-                # Clamp the write inside the container dir.
-                dest = _safe_dest(restore_name, dest)
-                if dest is None:
-                    continue
-
-                # Skip members that won't materialise *before* clearing
-                # anything, so a bad archive never destroys the old rootfs.
-                link_src = None
-                if member.islnk():
-                    link_container, raw_src = _dest_path(member.linkname)
-                    if raw_src is None or link_container != restore_name:
-                        continue
-                    link_src = _safe_dest(link_container, raw_src, follow_final=True)
-                    if link_src is None:
-                        continue
-                elif not (member.isdir() or member.issym() or member.isreg()):
-                    continue
-
-                # Destructive commit point: this member produces real content.
-                if not committed:
-                    _clear_existing_rootfs(restore_name)
-                    committed = True
-
-                _remove_existing(dest, member)
-
-                if member.isdir():
-                    os.makedirs(dest, exist_ok=True)
-                    mode = stat.S_IMODE(member.mode)
-                    if (mode & stat.S_IRWXU) != stat.S_IRWXU:
-                        with contextlib.suppress(OSError):
-                            os.chmod(dest, mode | stat.S_IRWXU)
-                        deferred_dir_modes.append((dest, mode))
-                    else:
-                        with contextlib.suppress(OSError):
-                            os.chmod(dest, mode)
-                    with contextlib.suppress(OSError):
-                        os.lchown(dest, member.uid, member.gid)
-
-                elif member.issym():
-                    parent = os.path.dirname(dest)
-                    if parent:
-                        os.makedirs(parent, exist_ok=True)
-                    os.symlink(member.linkname, dest)
-                    with contextlib.suppress(OSError):
-                        os.lchown(dest, member.uid, member.gid)
-
-                elif member.islnk():
-                    assert link_src is not None
-                    parent = os.path.dirname(dest)
-                    if parent:
-                        os.makedirs(parent, exist_ok=True)
-                    try:
-                        shutil.copy2(link_src, dest)
-                        with contextlib.suppress(OSError):
-                            os.lchown(dest, member.uid, member.gid)
-                        if member.mode:
-                            with contextlib.suppress(OSError):
-                                os.chmod(dest, stat.S_IMODE(member.mode))
-                    except OSError as exc:
-                        warn(f"Failed to extract hard link fallback {member.name} to {dest}: {exc}")
-                        failed = True
-
-                elif member.isreg():
-                    fobj = tf.extractfile(member)
-                    if fobj is None:
-                        continue
-                    parent = os.path.dirname(dest)
-                    if parent:
-                        os.makedirs(parent, exist_ok=True)
-                    try:
-                        with open(dest, "wb") as out:
-                            while True:
-                                chunk = fobj.read(1 << 17)
-                                if not chunk:
-                                    break
-                                out.write(chunk)
-                        with contextlib.suppress(OSError):
-                            os.lchown(dest, member.uid, member.gid)
-                        with contextlib.suppress(OSError):
-                            os.chmod(dest, stat.S_IMODE(member.mode))
-                    except OSError as exc:
-                        warn(f"Failed to extract file {member.name} to {dest}: {exc}")
-                        failed = True
-                    finally:
-                        fobj.close()
-
-                _on_entry(member.size, member.name)
-
-        # Nothing was written: the target was never touched.
-        if not committed:
-            clear_bar()
-            log_error(
-                f"Cannot restore: archive does not contain a container rootfs. "
-                f"Only archives created by '{PROGRAM_NAME} backup' are supported."
-            )
-            sys.exit(1)
-
-        assert restore_name is not None
-        rootfs_dir = container_rootfs(restore_name)
-        if os.path.islink(rootfs_dir) or not os.path.isdir(rootfs_dir):
-            # Rootfs came out as a file/symlink: drop the partial result.
-            clear_bar()
-            shutil.rmtree(container_dir(restore_name), ignore_errors=True)
-            log_error(
-                f"Cannot restore: archive did not produce a valid container rootfs. "
-                f"Only archives created by '{PROGRAM_NAME} backup' are supported."
-            )
-            sys.exit(1)
-
-        for path, mode in reversed(deferred_dir_modes):
-            with contextlib.suppress(OSError):
-                os.chmod(path, mode)
-
-        # Write the buffered manifest now that the rootfs is confirmed.
-        if pending_manifest is not None:
-            _write_manifest(*pending_manifest)
-
-        clear_bar()
-        if failed:
-            log_error("Finished with errors. Some files could not be restored.")
-            sys.exit(1)
-        log_info("Finished restoring the container.")
+        with contextlib.ExitStack() as pins:
+            with contextlib.ExitStack() as sources:
+                raw: typing.BinaryIO
+                if archive:
+                    raw = sources.enter_context(open(archive, "rb"))
+                    total_size = os.fstat(raw.fileno()).st_size
+                else:
+                    raw = sys.stdin.buffer
+                counter = ByteCounter(raw)
+                with open_tar(counter) as tf:
+                    result = _restore_stream(tf, _on_entry, pins)
+            finish_install(*result)
 
     except KeyboardInterrupt:
         clear_bar()
         log_error("Aborted by user.")
         sys.exit(1)
-    except (EOFError, OSError, tarfile.TarError) as exc:
+    except (
+        ChrootDistroError,
+        EOFError,
+        OSError,
+        OverflowError,
+        ValueError,
+        tar.TarError,
+    ) as exc:
         clear_bar()
-        log_error(f"Failed to restore container: {exc}")
+        log_error(f"Failed to restore container: {escape_controls(str(exc))}")
         sys.exit(1)
-    finally:
-        if raw_fh is not None:
-            raw_fh.close()
-        if lock is not None:
-            lock.release()
+
+    clear_bar()
+    log_info("Finished restoring the container.")

@@ -343,7 +343,7 @@ def test_command_copy_holds_the_container_lock_while_it_runs(rootfs, tmp_path, m
     command_copy(Namespace(source=str(src), destination="distro:/f.txt", verbose=False, move=False, recursive=False))
 
     assert (rootfs / "f.txt").read_text() == "data"
-    assert os.listdir(locks) == ["distro.lock"]
+    assert sorted(os.listdir(locks)) == ["distro.info", "distro.lock"]
 
 
 # ── --chown ───────────────────────────────────────────────────────────────────

@@ -15,8 +15,15 @@ import urllib.request
 
 from chroot_distro.constants import PROGRAM_NAME, PROGRAM_VERSION
 from chroot_distro.helpers.docker import is_repository_path
-from chroot_distro.helpers.download import http_opener, new_request
-from chroot_distro.message import C, crit_error, msg
+from chroot_distro.helpers.download import (
+    MAX_METADATA_BYTES,
+    NETWORK_ERRORS,
+    declared_length,
+    http_opener,
+    new_request,
+    require_complete_body,
+)
+from chroot_distro.message import C, crit_error, escape_controls, is_quiet, msg
 from chroot_distro.progress import loading_line
 
 _HUB_SEARCH_URL = "https://hub.docker.com/v2/search/repositories/"
@@ -24,14 +31,21 @@ _SOCKET_TIMEOUT = 30
 _DESC_MAX = 60
 
 
-def _fetch(term: str, limit: int) -> list[dict]:
+def _fetch(term: str, limit: int) -> list:
     query = urllib.parse.urlencode({"query": term, "page_size": str(limit), "page": "1"})
     url = f"{_HUB_SEARCH_URL}?{query}"
     req = new_request(url, headers={"User-Agent": f"{PROGRAM_NAME}/{PROGRAM_VERSION}"})
     with http_opener().open(req, timeout=_SOCKET_TIMEOUT) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
-    results = data.get("results") or []
-    return results if isinstance(results, list) else []
+        body = resp.read(MAX_METADATA_BYTES + 1)
+        size = declared_length(resp)
+    if len(body) > MAX_METADATA_BYTES or size > MAX_METADATA_BYTES:
+        raise ValueError("search response exceeds the size limit")
+    require_complete_body(len(body), size, "Docker Hub search")
+    data = json.loads(body.decode("utf-8"))
+    results = data.get("results") if isinstance(data, dict) else None
+    if not isinstance(results, list):
+        raise ValueError("invalid search response")
+    return results
 
 
 def _truncate(text: str, width: int) -> str:
@@ -59,37 +73,49 @@ def command_search(args) -> None:
 
     limit = getattr(args, "limit", None) or 25
     limit = max(1, min(limit, 100))
+    display_term = escape_controls(term)
 
     try:
-        with loading_line(f"Searching Docker Hub for '{term}'..."):
+        with loading_line(f"Searching Docker Hub for '{display_term}'..."):
             results = _fetch(term, limit)
     except urllib.error.HTTPError as exc:
+        exc.close()
         crit_error(f"Docker Hub search failed (HTTP {exc.code}).")
         sys.exit(1)
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        crit_error(f"could not reach Docker Hub: {exc}. Check your network connection.")
+    except NETWORK_ERRORS as exc:
+        crit_error(f"could not reach Docker Hub: {escape_controls(str(exc))}. Check your network connection.")
         sys.exit(1)
-    except (ValueError, json.JSONDecodeError):
+    except (ValueError, RecursionError):
         crit_error("Docker Hub returned an unexpected response.")
         sys.exit(1)
 
-    msg()
-    if not results:
-        msg(f"{C['YELLOW']}No images found for '{term}'.{C['RST']}")
-        msg()
+    if is_quiet():
         return
 
     rows = []
     for item in results:
-        name = str(item.get("repo_name") or item.get("name") or "")
+        if not isinstance(item, dict):
+            continue
+        name = item.get("repo_name") or item.get("name")
         # Docker's repository-name grammar: a name failing it is not addressable
         # by any client, so it is not a result worth printing.
-        if not is_repository_path(name):
+        if not isinstance(name, str) or not is_repository_path(name):
             continue
-        stars = int(item.get("star_count") or 0)
-        official = "[OK]" if item.get("is_official") else ""
-        desc = _truncate(str(item.get("short_description") or ""), _DESC_MAX)
+        stars = item.get("star_count")
+        if type(stars) is not int or stars < 0:
+            stars = 0
+        official = "[OK]" if item.get("is_official") is True else ""
+        description = item.get("short_description")
+        desc = _truncate(escape_controls(description), _DESC_MAX) if isinstance(description, str) else ""
         rows.append((name, str(stars), official, desc))
+        if len(rows) == limit:
+            break
+
+    msg()
+    if not rows:
+        msg(f"{C['YELLOW']}No images found for '{display_term}'.{C['RST']}")
+        msg()
+        return
 
     name_w = max(len("NAME"), *(len(r[0]) for r in rows))
     stars_w = max(len("STARS"), *(len(r[1]) for r in rows))

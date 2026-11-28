@@ -57,7 +57,7 @@ def _run_diff(args=None):
         yield
 
     with (
-        patch.object(diff_mod.os.path, "isdir", return_value=True),
+        patch.object(diff_mod, "container_is_installed", return_value=True),
         patch.object(diff_mod.os.path, "isfile", return_value=True),
         patch.object(diff_mod, "ContainerLock", _noop),
         patch.object(diff_mod, "loading_line", _noop),

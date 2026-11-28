@@ -2,7 +2,8 @@
 # Copyright (C) 2025-2026 Md Arif
 """`chroot-distro run`: build the argv the image declares, then hand it to `login`.
 
-This file resolves a command and nothing else. It sets `args._run_inner` and calls
+A shared container lock covers manifest reading through login handoff. This file
+sets `args._run_inner` and calls
 `command_login`, so the session, mount and isolation path is all `login`'s, and
 `run_inner is not None` is what tells that code it is not an interactive login.
 
@@ -11,22 +12,22 @@ Entrypoint and clears Cmd, trailing args after `--` replace Cmd and keep the
 Entrypoint, a shell-form Entrypoint embeds the whole command and ignores Cmd, and
 precedence for the user and the workdir is CLI flag, then `CD_*`, then the image.
 
-`manifest.json` is a document this program did not write, so every field is held to
+`manifest.json` contains image-supplied configuration, so every field is held to
 the type OCI says it has and a wrong one ends the command as a malformed image.
 Coercing would be worse than refusing: these four fields decide what runs, where,
 and as whom.
 """
 
 import json
-import os
 import sys
 import typing
 
 from chroot_distro.commands.login import command_login
 from chroot_distro.commands.login.env import resolve_override as _resolve_override
+from chroot_distro.locking import ContainerLock
 from chroot_distro.message import crit_error
 from chroot_distro.names import require_valid_name
-from chroot_distro.paths import container_manifest, container_rootfs
+from chroot_distro.paths import container_is_installed, container_manifest
 
 
 def _read_image_config(container_name: str) -> dict:
@@ -95,56 +96,56 @@ def command_run(args) -> None:
 
     require_valid_name(container_name)
 
-    rootfs = container_rootfs(container_name)
-    if not os.path.isdir(rootfs):
-        crit_error(f"container '{container_name}' is not installed.")
-        sys.exit(1)
+    with ContainerLock(container_name, exclusive=False, command="run"):
+        if not container_is_installed(container_name):
+            crit_error(f"container '{container_name}' is not installed.")
+            sys.exit(1)
 
-    # Resolve the override surface with precedence: CLI flag > CD_* env var >
-    # image config default (applied further below). This must run before the
-    # image-default fallbacks so the env vars can take effect.
-    args.user = _resolve_override(getattr(args, "user", None), "CD_USER")
-    args.work_dir = _resolve_override(getattr(args, "work_dir", None), "CD_WORKDIR")
-    entrypoint_override = _resolve_override(getattr(args, "entrypoint", None), "CD_ENTRYPOINT")
+        # Resolve the override surface with precedence: CLI flag > CD_* env var >
+        # image config default (applied further below). This must run before the
+        # image-default fallbacks so the env vars can take effect.
+        args.user = _resolve_override(getattr(args, "user", None), "CD_USER")
+        args.work_dir = _resolve_override(getattr(args, "work_dir", None), "CD_WORKDIR")
+        entrypoint_override = _resolve_override(getattr(args, "entrypoint", None), "CD_ENTRYPOINT")
 
-    img_cfg = _read_image_config(container_name)
+        img_cfg = _read_image_config(container_name)
 
-    image_ep, ep_is_shell = _normalize_argv(img_cfg.get("Entrypoint"), "Entrypoint", container_name)
-    image_cmd, _ = _normalize_argv(img_cfg.get("Cmd"), "Cmd", container_name)
+        image_ep, ep_is_shell = _normalize_argv(img_cfg.get("Entrypoint"), "Entrypoint", container_name)
+        image_cmd, _ = _normalize_argv(img_cfg.get("Cmd"), "Cmd", container_name)
 
-    if entrypoint_override is not None:
-        # An explicit entrypoint replaces the image Entrypoint entirely and
-        # clears Cmd (Docker semantics); trailing run args become its args.
-        inner = [entrypoint_override, *run_args]
-    elif run_args:
-        # Trailing args replace Cmd, leaving the image Entrypoint intact.
-        inner = image_ep + run_args
-    elif ep_is_shell:
-        # A shell-form Entrypoint embeds the whole command and ignores Cmd.
-        inner = image_ep
-    elif image_ep or image_cmd:
-        inner = image_ep + image_cmd
-    else:
-        crit_error(
-            f"the image manifest for '{container_name}' defines neither "
-            f"Entrypoint nor Cmd, and no command was given after "
-            f"'--'."
-        )
-        sys.exit(1)
+        if entrypoint_override is not None:
+            # An explicit entrypoint replaces the image Entrypoint entirely and
+            # clears Cmd (Docker semantics); trailing run args become its args.
+            inner = [entrypoint_override, *run_args]
+        elif run_args:
+            # Trailing args replace Cmd, leaving the image Entrypoint intact.
+            inner = image_ep + run_args
+        elif ep_is_shell:
+            # A shell-form Entrypoint embeds the whole command and ignores Cmd.
+            inner = image_ep
+        elif image_ep or image_cmd:
+            inner = image_ep + image_cmd
+        else:
+            crit_error(
+                f"the image manifest for '{container_name}' defines neither "
+                f"Entrypoint nor Cmd, and no command was given after "
+                f"'--'."
+            )
+            sys.exit(1)
 
-    if not inner:
-        crit_error(f"resolved command is empty for container '{container_name}'.")
-        sys.exit(1)
+        if not inner:
+            crit_error(f"resolved command is empty for container '{container_name}'.")
+            sys.exit(1)
 
-    if not getattr(args, "work_dir", None):
-        args.work_dir = _string_field(img_cfg, "WorkingDir", container_name) or "/"
+        if not getattr(args, "work_dir", None):
+            args.work_dir = _string_field(img_cfg, "WorkingDir", container_name) or "/"
 
-    # Default to the image's User when no explicit --user (or CD_USER) was given.
-    if getattr(args, "user", None) is None:
-        img_user = _string_field(img_cfg, "User", container_name)
-        if img_user:
-            args.user = img_user
+        # Default to the image's User when no explicit --user (or CD_USER) was given.
+        if getattr(args, "user", None) is None:
+            img_user = _string_field(img_cfg, "User", container_name)
+            if img_user:
+                args.user = img_user
 
-    args._run_inner = inner
-    args.login_cmd = []
-    command_login(args)
+        args._run_inner = inner
+        args.login_cmd = []
+        command_login(args)

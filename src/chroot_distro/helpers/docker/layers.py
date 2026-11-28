@@ -17,9 +17,8 @@ that makes that impossible (no Range support, one segment, a failed worker) rais
 `_FallbackToSingleError` and the single-connection path runs, which is a fallback in
 speed only: it verifies the same way.
 
-A bearer token is attached to a segment request only when the probe's final URL is on
-the same host as the original. Redirected CDN URLs are pre-signed and reject the
-header, and a credential must not follow a redirect off the registry regardless.
+Segment requests use the registry's credential policy for both the probe URL
+and any redirects the segment encounters.
 
 SIGINT is handled rather than left to unwind. The signal handler sets the shared abort
 event and closes every live response, because a worker blocked in `read()` on a socket
@@ -41,12 +40,15 @@ import logging
 import os
 import shutil
 import signal
+import sys
 import threading
 import typing
-import urllib.error
-import urllib.parse
-import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+if sys.version_info >= (3, 14):
+    import tarfile
+else:
+    from backports.zstd import tarfile
 
 from chroot_distro.atomic import atomic_replace
 from chroot_distro.helpers.docker.cache import layer_cache_path
@@ -55,6 +57,7 @@ from chroot_distro.helpers.docker.transport import (
     auth_opener,
     opener,
     registry_base_url,
+    same_auth_origin,
 )
 from chroot_distro.helpers.download import (
     _SOCKET_TIMEOUT,
@@ -104,14 +107,14 @@ def download_blob(
     live_responses: "_LiveResponses | None" = None,
     connections: int = 1,
     insecure: bool = False,
+    expected_size: int | None = None,
 ) -> str:
     """Download a blob to the layer cache; return the local file path.
 
     *auth* is the Authorization value transport.get_auth_token() resolved,
     or '' for none.
 
-    Streams the bytes through sha256 and verifies the result against the
-    expected *digest* before promoting the .tmp file.
+    Checks the SHA-256 digest and any declared size before publishing the file.
 
     Retries up to the configured retry limit times on transient network / SSL
     failures with exponential backoff.
@@ -209,10 +212,8 @@ def download_blob(
                     if already_downloaded:
                         progress.add(already_downloaded)
 
-                    original_parsed = urllib.parse.urlparse(url)
-                    final_parsed = urllib.parse.urlparse(probe.final_url)
                     seg_headers = {**_ua()}
-                    if auth and original_parsed.netloc == final_parsed.netloc:
+                    if auth and same_auth_origin(url, probe.final_url):
                         seg_headers["Authorization"] = auth
 
                     local_abort = abort_event or threading.Event()
@@ -237,7 +238,7 @@ def download_blob(
                                 local_abort,
                                 bucket,
                                 live,
-                                insecure=insecure,
+                                opener_factory=functools.partial(opener, insecure),
                             ): seg
                             for seg in segments
                         }
@@ -265,6 +266,10 @@ def download_blob(
                                         shutil.copyfileobj(inp, out, length=1 << 20)
                                 out.flush()
                                 os.fsync(out.fileno())
+                                downloaded = out.tell()
+
+                            if expected_size is not None and downloaded != expected_size:
+                                raise RuntimeError(f"Layer size mismatch for {digest}: expected {expected_size} bytes.")
 
                             # Still inside the atomic_replace block, so a digest
                             # mismatch raises before the rename publishes it.
@@ -328,6 +333,8 @@ def download_blob(
                         chunk = resp.read(_READ_CHUNK)
                         if not chunk:
                             break
+                        if expected_size is not None and downloaded + len(chunk) > expected_size:
+                            raise RuntimeError(f"Layer size mismatch for {digest}: expected {expected_size} bytes.")
                         fh.write(chunk)
                         hasher.update(chunk)
                         chunk_len = len(chunk)
@@ -343,6 +350,8 @@ def download_blob(
                             draw_bytes_bar(downloaded, total, noun="downloaded")
                     if byte_progress is not None and unsent:
                         byte_progress.add(unsent)
+                    if expected_size is not None and downloaded != expected_size:
+                        raise RuntimeError(f"Layer size mismatch for {digest}: expected {expected_size} bytes.")
                     fh.flush()
                     os.fsync(fh.fileno())
                 finally:
@@ -373,7 +382,10 @@ def apply_layer(layer_path: str, rootfs_fd: int) -> None:
     (dir_fd, name) beneath it, so nothing between the caller's check of the
     tree and the last byte written resolves its name a second time.
     """
-    extract_tar_to_rootfs(layer_path, rootfs_fd, handle_whiteouts=True)
+    try:
+        extract_tar_to_rootfs(layer_path, rootfs_fd, handle_whiteouts=True)
+    except tarfile.TarError as exc:
+        raise OSError(f"Invalid image layer tar: {exc}") from exc
 
 
 def materialize_rootfs(layers: list[dict[str, typing.Any]], rootfs_fd: int) -> None:

@@ -1,3 +1,4 @@
+import gzip
 import os
 import shutil
 import sys
@@ -14,6 +15,7 @@ from unittest.mock import patch
 import pytest
 
 from chroot_distro.helpers import tar_extract
+from chroot_distro.helpers.docker.layers import apply_layer
 from chroot_distro.helpers.tar_extract import extract_tar_to_rootfs
 
 
@@ -275,3 +277,139 @@ def test_hardlink_member_cannot_escape_the_rootfs(tmp_path):
         extract_tar_to_rootfs(tar_path, fd)
 
     assert not (rootfs_dir / "stolen.txt").exists()
+
+
+@pytest.mark.parametrize("opaque", [False, True])
+@pytest.mark.parametrize("marker_first", [False, True])
+def test_whiteout_applies_only_to_lower_layer(tmp_path, opaque, marker_first):
+    rootfs = tmp_path / "rootfs"
+    (rootfs / "dir").mkdir(parents=True)
+    (rootfs / "dir" / "new").write_bytes(b"lower")
+    (rootfs / "dir" / "old").write_bytes(b"old")
+    marker = ".wh..wh..opq" if opaque else ".wh.new"
+    members = [(tarfile.TarInfo(f"dir/{marker}"), b""), (tarfile.TarInfo("dir/new"), b"upper")]
+    layer = tmp_path / "layer.tar"
+    _tar_with(layer, members if marker_first else reversed(members))
+
+    with _rootfs_fd(rootfs) as fd:
+        apply_layer(str(layer), fd)
+
+    assert (rootfs / "dir" / "new").read_bytes() == b"upper"
+    assert (rootfs / "dir" / "old").exists() is not opaque
+    assert not (rootfs / "dir" / marker).exists()
+
+
+def test_whiteout_leaves_former_target_of_replaced_directory_symlink(tmp_path):
+    rootfs = tmp_path / "rootfs"
+    (rootfs / "real").mkdir(parents=True)
+    (rootfs / "real" / "keep").write_bytes(b"lower")
+    (rootfs / "alias").symlink_to("real")
+    layer = tmp_path / "layer.tar"
+    directory = tarfile.TarInfo("alias")
+    directory.type = tarfile.DIRTYPE
+    _tar_with(layer, [(tarfile.TarInfo("alias/.wh..wh..opq"), b""), (directory, None)])
+
+    with _rootfs_fd(rootfs) as fd:
+        apply_layer(str(layer), fd)
+
+    assert (rootfs / "real" / "keep").read_bytes() == b"lower"
+    assert not (rootfs / "alias").is_symlink()
+    assert not list((rootfs / "alias").iterdir())
+
+
+@pytest.mark.parametrize("case", ["boundary", "payload", "one-zero", "gzip-trailer", "gzip-crc"])
+def test_incomplete_layer_fails_before_applying_changes(tmp_path, case):
+    rootfs = tmp_path / "rootfs"
+    rootfs.mkdir()
+    (rootfs / "old").write_bytes(b"lower")
+    layer = tmp_path / "layer.tar"
+    _tar_with(layer, [(tarfile.TarInfo(".wh.old"), b""), (tarfile.TarInfo("new"), b"payload")])
+    complete = layer.read_bytes()
+    if case == "gzip-trailer":
+        damaged = gzip.compress(complete)[:-8]
+    elif case == "gzip-crc":
+        encoded = gzip.compress(complete)
+        damaged = encoded[:-8] + bytes([encoded[-8] ^ 1]) + encoded[-7:]
+    else:
+        end = {"boundary": 1536, "payload": 1027, "one-zero": 2048}[case]
+        damaged = complete[:end]
+    layer.write_bytes(damaged)
+
+    with _rootfs_fd(rootfs) as fd, pytest.raises(OSError, match="Invalid image layer tar"):
+        apply_layer(str(layer), fd)
+
+    assert (rootfs / "old").read_bytes() == b"lower"
+    assert not (rootfs / "new").exists()
+
+
+def _hardlink(name, target):
+    link = tarfile.TarInfo(name)
+    link.type = tarfile.LNKTYPE
+    link.linkname = target
+    return link
+
+
+def test_layer_replaces_file_types_and_resolves_forward_hardlinks(tmp_path, monkeypatch):
+    rootfs = tmp_path / "rootfs"
+    (rootfs / "to-file").mkdir(parents=True)
+    (rootfs / "to-file" / "old").touch()
+    (rootfs / "to-dir").write_bytes(b"old")
+    (rootfs / "keep").write_bytes(b"unchanged")
+    (rootfs / "second").symlink_to("keep")
+    (rootfs / "first").mkdir()
+    (rootfs / "first" / "old").touch()
+    layer = tmp_path / "layer.tar"
+    directory = tarfile.TarInfo("to-dir")
+    directory.type = tarfile.DIRTYPE
+    first = _hardlink("first", "second")
+    first.uid, first.gid = 4001, 4002
+    _tar_with(layer, [(first, None), (_hardlink("second", "source"), None),
+                      (tarfile.TarInfo("source"), b"upper"), (directory, None),
+                      (tarfile.TarInfo("to-dir/new"), b"child"), (tarfile.TarInfo("to-file"), b"file")])
+    ownership = []
+    monkeypatch.setattr(os, "fchown", lambda fd, uid, gid: ownership.append((os.fstat(fd).st_ino, uid, gid)))
+
+    with _rootfs_fd(rootfs) as fd:
+        apply_layer(str(layer), fd)
+
+    assert (rootfs / "to-file").read_bytes() == b"file"
+    assert (rootfs / "to-dir" / "new").read_bytes() == b"child"
+    assert (rootfs / "first").read_bytes() == (rootfs / "second").read_bytes() == b"upper"
+    assert not (rootfs / "second").is_symlink()
+    assert (rootfs / "keep").read_bytes() == b"unchanged"
+    assert ((rootfs / "first").stat().st_ino, 4001, 4002) in ownership
+
+
+@pytest.mark.parametrize("target,error", [("missing", "missing tar hardlink source"), ("first", "cyclic tar hardlink")])
+def test_layer_rejects_unresolved_hardlinks(tmp_path, target, error):
+    rootfs = tmp_path / "rootfs"
+    rootfs.mkdir()
+    layer = tmp_path / "layer.tar"
+    _tar_with(layer, [(_hardlink("first", "second"), None), (_hardlink("second", target), None)])
+
+    with _rootfs_fd(rootfs) as fd, pytest.raises(OSError, match=error):
+        apply_layer(str(layer), fd)
+    assert not list(rootfs.iterdir())
+
+
+def test_later_members_supersede_pending_links_and_directory_times(tmp_path):
+    rootfs = tmp_path / "rootfs"
+    rootfs.mkdir()
+    layer = tmp_path / "layer.tar"
+    first = tarfile.TarInfo("dir")
+    first.type, first.mtime = tarfile.DIRTYPE, 1
+    second = tarfile.TarInfo("dir")
+    second.type, second.mtime = tarfile.DIRTYPE, 2
+    third = tarfile.TarInfo("dir")
+    third.type, third.mtime = tarfile.DIRTYPE, 3
+    _tar_with(layer, [
+        (first, None), (_hardlink("dir/old-link", "missing"), None),
+        (tarfile.TarInfo("dir"), b"file"), (second, None), (third, None),
+        (_hardlink("old-link", "missing"), None), (tarfile.TarInfo("old-link"), b"new"),
+    ])
+
+    with _rootfs_fd(rootfs) as fd:
+        apply_layer(str(layer), fd)
+    assert not list((rootfs / "dir").iterdir())
+    assert (rootfs / "dir").stat().st_mtime == 3
+    assert (rootfs / "old-link").read_bytes() == b"new"

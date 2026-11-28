@@ -1,13 +1,26 @@
+import os
+import signal
+import sys
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 import pytest
 
 from chroot_distro.arch import Platform
 from chroot_distro.commands.build import _resolve_build_isolation_mode
+from chroot_distro.commands.login.chroot_cmd import ChrootConfig
 from chroot_distro.helpers import isolation
 from chroot_distro.helpers.build_engine import run_step
 from chroot_distro.helpers.namespace import NamespaceError
+from chroot_distro.syscalls import CLONE_NEWNS, CLONE_NEWPID, nsenter
+
+
+@pytest.fixture(autouse=True)
+def runtime_state(tmp_path, monkeypatch):
+    from chroot_distro import paths
+
+    monkeypatch.setattr(paths, "RUNTIME_DIR", str(tmp_path / "runtime"))
+    monkeypatch.setattr(paths, "IS_TERMUX", False)
 
 
 # ── env resolution ────────────────────────────────────────────────────────────
@@ -101,6 +114,54 @@ def test_mode_none_uses_run_plain(tmp_path):
     ns_sess.assert_not_called()
 
 
+@pytest.fixture
+def run_holder_step(monkeypatch):
+    if not hasattr(os, "fork"):
+        pytest.skip("requires fork")
+
+    def run(flags, script):
+        env = dict(os.environ)
+
+        def record_entry(pid, namespaces, *, regain_ids):
+            assert namespaces == flags and not regain_ids
+            env["JOINER_PID"] = str(os.getpid())
+
+        monkeypatch.setattr(nsenter, "enter_namespaces", record_entry)
+        monkeypatch.setattr(run_step, "enter_chroot", lambda *args, **kwargs: None)
+        holder = SimpleNamespace(pid=1, _live_ns_flags=lambda: flags)
+        config = ChrootConfig(rootfs="/", command=[sys.executable, "-c", script])
+        return run_step._run_in_holder(holder, config, env)
+
+    return run
+
+
+@pytest.mark.parametrize(("flags", "forked"), [(CLONE_NEWNS, False), (CLONE_NEWNS | CLONE_NEWPID, True)])
+def test_holder_step_forks_after_joining_a_pid_namespace(run_holder_step, flags, forked):
+    script = f"""
+import os, sys
+assert os.getsid(0) == os.getpgrp() == os.getpid()
+assert (os.getpid() != int(os.environ["JOINER_PID"])) == {forked}
+sys.exit(37)
+"""
+    assert run_holder_step(flags, script) == 37
+
+
+def test_pid_namespace_step_relays_a_signal_and_waits_for_the_guest(run_holder_step):
+    script = """
+import os, signal
+signal.signal(signal.SIGTERM, lambda *_: os._exit(42))
+signal.alarm(5)
+os.killpg(int(os.environ["JOINER_PID"]), signal.SIGTERM)
+signal.pause()
+"""
+    assert run_holder_step(CLONE_NEWPID, script) == 42
+
+
+def test_pid_namespace_step_reports_a_guest_killed_by_a_signal(run_holder_step):
+    script = "import os, signal; os.kill(os.getpid(), signal.SIGKILL)"
+    assert run_holder_step(CLONE_NEWPID, script) == 128 + signal.SIGKILL
+
+
 @pytest.mark.parametrize(
     ("mode", "used", "unused"),
     [("max", "max_isolation_session", "namespace_session"), ("ns", "namespace_session", "max_isolation_session")],
@@ -192,7 +253,7 @@ def test_namespace_session_holder_not_chrooted_and_default_binds(tmp_path):
         with isolation.namespace_session("key", str(tmp_path)) as h:
             assert h is holder
         # Not chrooted: acquire_holder called without rootfs=.
-        assert acquire.call_args == (("key",),)
+        acquire.assert_called_once_with("key", state_fd=ANY)
         # Default mount set: isolated/max_isolation off, namespaces on.
         gb_kwargs = gb.call_args.kwargs
         assert gb_kwargs["isolated"] is False
@@ -201,7 +262,7 @@ def test_namespace_session_holder_not_chrooted_and_default_binds(tmp_path):
         sp_kwargs = special.call_args.kwargs
         assert sp_kwargs["max_isolation"] is False
         safe_mount.assert_called_once()
-        teardown.assert_called_once_with("key", str(tmp_path), holder)
+        teardown.assert_called_once_with("key", str(tmp_path), holder, state_fd=ANY)
 
 
 def test_namespace_session_teardown_on_namespace_error(tmp_path):
@@ -215,7 +276,7 @@ def test_namespace_session_teardown_on_namespace_error(tmp_path):
     ):
         with isolation.namespace_session("key", str(tmp_path)) as h:
             assert h is None
-        teardown.assert_called_once_with("key", str(tmp_path), holder)
+        teardown.assert_called_once_with("key", str(tmp_path), holder, state_fd=ANY)
 
 
 def test_max_isolation_session_still_chroots_holder(tmp_path):

@@ -1,9 +1,17 @@
+import errno
+import io
 import json
 import os
 import signal
+import stat
+from contextlib import contextmanager, nullcontext
+from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import ANY, Mock, patch
 
+import pytest
+
+from chroot_distro import dirfd
 from chroot_distro.commands.login import (
     _can_fall_back_to_old_isolated,
     _command_login_inner,
@@ -17,6 +25,507 @@ from chroot_distro.commands.login.env import (
     resolve_override,
     resolve_term,
 )
+from chroot_distro.message import StdoutError
+from chroot_distro.syscalls.chroot import PtyOutputError
+
+
+@pytest.fixture
+def command_display(tmp_path, monkeypatch):
+    from chroot_distro import paths
+    from chroot_distro.commands import login
+    from chroot_distro.parser import build_parser
+
+    rootfs = tmp_path / "containers" / "demo" / "rootfs"
+    (rootfs / "bin").mkdir(parents=True)
+    (rootfs / "bin" / "sh").touch()
+    monkeypatch.setattr(paths, "CONTAINERS_DIR", str(rootfs.parent.parent))
+    monkeypatch.setattr(paths, "RUNTIME_DIR", str(tmp_path))
+    monkeypatch.setattr(paths, "IS_TERMUX", False)
+    monkeypatch.setattr(login, "IS_TERMUX", False)
+    monkeypatch.setattr(login, "detect_nvidia_gpu", Mock(return_value=False))
+    monkeypatch.setattr(login.bindings.nvidia_helper, "find_mesa_device_nodes", Mock(return_value=[]))
+    monkeypatch.setattr(login.namespace, "check_isolation_conflicts", Mock())
+    monkeypatch.setattr(login.namespace, "should_use_namespaces", Mock(return_value=False))
+    monkeypatch.setattr(
+        login.isolation, "probe_isolation", Mock(return_value=SimpleNamespace(missing_mandatory=False, has_userns=False))
+    )
+    monkeypatch.setattr(login.isolation, "apply_bind_mounts", Mock())
+    monkeypatch.setattr(login.isolation, "apply_special_mounts", Mock())
+    monkeypatch.setattr(login.mount_manager, "get_active_mounts", Mock(return_value=[]))
+    monkeypatch.setattr(login.mount_manager, "ensure_rootfs_exec", Mock())
+    monkeypatch.setattr(login.mount_manager, "make_rslave", Mock())
+    monkeypatch.setattr(login.mount_manager, "unmount_all", Mock())
+    monkeypatch.setattr(login.session, "get_active_chroot_pids", Mock(return_value=[]))
+    monkeypatch.setattr(login, "_ensure_guest_arch_runnable", Mock())
+    monkeypatch.setattr(login, "_reap_session_processes", Mock())
+    args, unknown = build_parser().parse_known_args(["login", "demo", "--get-chroot-cmd", "--", "/bin/sh"])
+    assert not unknown
+    return login, args, tmp_path / "data" / "demo"
+
+
+def test_command_display_reuses_session_directory_pin(command_display, monkeypatch):
+    login, args, data = command_display
+    calls = []
+
+    def guard(operation):
+        original = getattr(login.session, operation)
+
+        def checked(*args, **kwargs):
+            fd = kwargs.get("state_fd")
+            assert fd is not None
+            assert os.path.samestat(os.fstat(fd), data.stat())
+            calls.append((operation, fd))
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(login.session, operation, checked)
+
+    for operation in ("increment", "decrement", "save_mount_options", "clear_mount_options"):
+        guard(operation)
+    with pytest.raises(SystemExit) as exc:
+        login._command_login_inner_once("demo", args)
+    assert exc.value.code == 0
+    assert [operation for operation, _ in calls] == ["increment", "save_mount_options", "decrement", "clear_mount_options"]
+    assert len({fd for _, fd in calls}) == 1
+
+
+@pytest.mark.parametrize("namespaced", [False, True])
+@pytest.mark.parametrize("is_run", [False, True])
+def test_first_session_prepares_image_volume_before_mounts(command_display, monkeypatch, namespaced, is_run):
+    from pathlib import Path
+
+    login, args, data = command_display
+    root = Path(login.container_rootfs("demo"))
+    volume = root / "image" / "volume"
+    manifest = {"image_config": {"config": {"Volumes": {"/image/volume": {}}}}}
+    (root.parent / "manifest.json").write_text(json.dumps(manifest))
+    holder = SimpleNamespace(pid=1234, nsenter_flags=["--mount"]) if namespaced else None
+    login.namespace.should_use_namespaces.return_value = namespaced
+    monkeypatch.setattr(login.namespace, "acquire_holder", Mock(return_value=holder))
+    monkeypatch.setattr(login.namespace, "release_holder", Mock())
+    monkeypatch.setattr(login.isolation, "finalize_holder", Mock())
+    monkeypatch.setattr(login.dirfd, "_mount_id", lambda fd: 1)
+    monkeypatch.setattr(login.os, "fchown", Mock())
+    if is_run:
+        args._run_inner = ["/bin/sh"]
+
+    cleanup_state = []
+
+    def unmount(rootfs, *, holder):
+        cleanup_state.append((volume.exists(), (data / "sessions").read_text(), holder))
+
+    def mounted(*args, **kwargs):
+        assert volume.is_dir()
+
+    login.mount_manager.unmount_all.side_effect = unmount
+    login.mount_manager.ensure_rootfs_exec.side_effect = mounted
+    login.isolation.apply_bind_mounts.side_effect = mounted
+    login.isolation.apply_special_mounts.side_effect = mounted
+    with pytest.raises(SystemExit) as exc:
+        login._command_login_inner_once("demo", args)
+
+    assert exc.value.code == 0
+    assert cleanup_state[0] == (False, "1", holder)
+    assert volume.is_dir()
+    login.isolation.apply_bind_mounts.assert_called_once()
+    login.isolation.apply_special_mounts.assert_called_once()
+    assert login.mount_manager.ensure_rootfs_exec.called == (not namespaced)
+
+
+@pytest.mark.parametrize(
+    ("termux_host", "dist_type", "mode", "is_run", "prepare_cache"),
+    [
+        (True, "termux", "default", False, True),
+        (True, "termux", "default", True, True),
+        (True, "termux", "minimal", False, True),
+        (True, "termux", "isolated", False, False),
+        (True, "normal", "default", False, False),
+        (False, "termux", "default", False, False),
+    ],
+)
+def test_login_termux_cache_setup(command_display, monkeypatch, termux_host, dist_type, mode, is_run, prepare_cache):
+    from pathlib import Path
+
+    login, args, _data = command_display
+    monkeypatch.setattr(login, "IS_TERMUX", termux_host)
+    monkeypatch.setattr(login, "TERMUX_APP_PACKAGE", "com.example.termux")
+    monkeypatch.setattr(login, "_detect_dist_type", Mock(return_value=dist_type))
+    monkeypatch.setattr(login.dirfd, "_mount_id", lambda fd: 1)
+    args.minimal = mode == "minimal"
+    args.isolated = mode == "isolated"
+    if is_run:
+        args._run_inner = ["/bin/sh"]
+    cache = Path(login.container_rootfs("demo")) / "data/data/com.example.termux/cache"
+
+    def mount(*args, **kwargs):
+        assert cache.is_dir() == prepare_cache
+
+    login.isolation.apply_bind_mounts.side_effect = mount
+    with pytest.raises(SystemExit) as exc:
+        login._command_login_inner_once("demo", args)
+
+    assert exc.value.code == 0
+    assert cache.is_dir() == prepare_cache
+    login.isolation.apply_bind_mounts.assert_called_once()
+
+
+@pytest.mark.parametrize("is_run", [False, True])
+def test_login_setup_does_not_write_through_profile_or_hosts_links(command_display, tmp_path, monkeypatch, is_run):
+    from chroot_distro.paths import container_rootfs
+
+    login, args, _ = command_display
+    monkeypatch.setattr(dirfd, "_mount_id", lambda fd: 1)
+    monkeypatch.setattr(os, "fchown", lambda fd, uid, gid: None)
+    root = container_rootfs("demo")
+    profile = os.path.join(root, "etc/profile.d")
+    os.makedirs(profile)
+    targets = []
+    for name, dest in (
+        ("host-profile", os.path.join(profile, "chroot-profile.sh")),
+        ("host-hosts", os.path.join(root, "etc/hosts")),
+    ):
+        target = tmp_path / name
+        target.write_text("KEEP\n")
+        os.symlink(target, dest)
+        targets.append(target)
+    args.env = ["FOO=value"]
+    if is_run:
+        args._run_inner = ["/bin/sh"]
+
+    with pytest.raises(SystemExit) as exc:
+        login._command_login_inner_once("demo", args)
+
+    assert exc.value.code == 0
+    assert [target.read_text() for target in targets] == ["KEEP\n", "KEEP\n"]
+    if not is_run:
+        with open(os.path.join(profile, "chroot-profile.sh")) as fh:
+            assert fh.read() == "export FOO='value'\n"
+
+
+@pytest.mark.parametrize("is_run", [False, True], ids=["linux-login", "termux-run"])
+@pytest.mark.parametrize("mount_boundary", ["rootfs", "etc", "hosts", "profile.d", "unavailable", None])
+def test_login_setup_checks_mounts_for_hosts_profile_and_dns(command_display, monkeypatch, is_run, mount_boundary):
+    from chroot_distro import paths
+    from chroot_distro.helpers import rootfs
+
+    login, args, _ = command_display
+    root = Path(login.container_rootfs("demo"))
+    etc = root / "etc"
+    profile = etc / "profile.d"
+    profile.mkdir(parents=True)
+    files = {etc / "hosts": "127.0.0.1 localhost\n", etc / "resolv.conf": "nameserver 192.0.2.1\n"}
+    for name in ("chroot-profile.sh", "termux-profile.sh", "termux-prefix.sh"):
+        files[profile / name] = "# old snippet\n"
+    for path, text in files.items():
+        path.write_text(text)
+
+    target = {"rootfs": root, "etc": etc, "hosts": etc / "hosts", "profile.d": profile}.get(mount_boundary)
+
+    def mount_id(fd):
+        if mount_boundary == "unavailable":
+            raise OSError(errno.ENOTSUP, "mount ID unavailable")
+        return 2 if target is not None and os.path.samestat(os.fstat(fd), target.stat()) else 1
+
+    monkeypatch.setattr(dirfd, "_mount_id", mount_id)
+    monkeypatch.setattr(rootfs, "host_nameservers", lambda: ["192.0.2.2"])
+    monkeypatch.setattr(os, "fchown", Mock())
+    args.env = ["FOO=value"]
+    if is_run:
+        monkeypatch.setattr(login, "IS_TERMUX", True)
+        monkeypatch.setattr(paths, "IS_TERMUX", True)
+        monkeypatch.setattr(paths, "TERMUX_PREFIX", str(root.parents[2]))
+        args._run_inner = ["/bin/sh"]
+
+    with pytest.raises(SystemExit) as exc:
+        login._command_login_inner_once("demo", args)
+
+    assert exc.value.code == 0
+    blocked = mount_boundary in ("rootfs", "etc", "unavailable")
+    for path, text in files.items():
+        if blocked or (mount_boundary == "hosts" and path.name == "hosts") or (
+            mount_boundary == "profile.d" and path.parent == profile
+        ):
+            assert path.read_text() == text
+        elif path.name == "hosts":
+            assert "127.0.0.1   demo\n" in path.read_text()
+        elif path.name == "resolv.conf":
+            assert path.read_text() == "nameserver 192.0.2.2\n"
+        elif path.name == "chroot-profile.sh":
+            assert "export FOO='value'\n" in path.read_text()
+        else:
+            assert not path.exists()
+
+
+@pytest.mark.parametrize("interrupt", [False, True])
+def test_first_session_refreshes_dns_after_stale_mount_cleanup(command_display, monkeypatch, interrupt):
+    login, args, data = command_display
+    args.minimal = True
+    root = Path(login.container_rootfs("demo"))
+    fd_seen = []
+    monkeypatch.setattr(dirfd, "_mount_id", lambda fd: 1)
+
+    def refresh(rootfs, *, root_fd, same_mount):
+        login.mount_manager.unmount_all.assert_called_once_with(str(root), holder=None)
+        login.mount_manager.ensure_rootfs_exec.assert_not_called()
+        login.isolation.apply_bind_mounts.assert_not_called()
+        assert same_mount
+        assert os.path.samestat(root.stat(), os.fstat(root_fd))
+        fd_seen.append(root_fd)
+        if interrupt:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(login, "write_resolv_conf", refresh)
+    if interrupt:
+        with pytest.raises(KeyboardInterrupt):
+            login._command_login_inner_once("demo", args)
+        login.isolation.apply_bind_mounts.assert_not_called()
+    else:
+        with pytest.raises(SystemExit) as exc:
+            login._command_login_inner_once("demo", args)
+        assert exc.value.code == 0
+    assert (data / "sessions").read_text() == "0"
+    assert not (data / "isolation.mode").exists()
+    assert len(fd_seen) == 1
+    with pytest.raises(OSError, match="Bad file descriptor"):
+        os.fstat(fd_seen[0])
+
+
+@pytest.mark.parametrize("failure", ["format", "write", "absent"])
+def test_command_display_cleans_up_before_output(command_display, monkeypatch, failure):
+    login, args, data = command_display
+
+    class BrokenOutput(io.StringIO):
+        def write(self, text):
+            assert (data / "sessions").read_text() == "0"
+            assert not (data / "mount_opts.json").exists()
+            raise BrokenPipeError
+
+    if failure == "format":
+        monkeypatch.setattr(login, "format_get_chroot_cmd", Mock(side_effect=ValueError("format failed")))
+    stream = None if failure == "absent" else BrokenOutput()
+    with patch("sys.stdout", stream), pytest.raises(ValueError if failure == "format" else StdoutError):
+        login._command_login_inner_once("demo", args)
+    assert (data / "sessions").read_text() == "0"
+    assert not (data / "mount_opts.json").exists()
+    assert not (data / "isolation.mode").exists()
+    assert login.mount_manager.unmount_all.call_count == 2
+    login._reap_session_processes.assert_not_called()
+
+
+@pytest.mark.parametrize("namespaced", [False, True])
+def test_command_display_unmount_failure(command_display, monkeypatch, namespaced):
+    from chroot_distro.exceptions import MountError
+
+    login, args, data = command_display
+    args._run_inner = ["/bin/sh"]
+    holder = SimpleNamespace(pid=1234, nsenter_flags=["--mount"])
+    acquire = Mock(return_value=holder)
+    release = Mock()
+    monkeypatch.setattr(login.namespace, "acquire_holder", acquire)
+    monkeypatch.setattr(login.namespace, "release_holder", release)
+    def finalize(*_args, **_kwargs):
+        login.namespace.write_isolation_mode("demo", login.namespace.ISOLATION_MODE_NAMESPACE)
+
+    monkeypatch.setattr(login.isolation, "finalize_holder", finalize)
+    login.namespace.should_use_namespaces.return_value = namespaced
+    error = MountError("unmount failed")
+    login.mount_manager.unmount_all.side_effect = [None, error]
+    with (
+        patch.object(login.os, "pipe", side_effect=AssertionError("foreground pipe")),
+        patch.object(login.os, "openpty", side_effect=AssertionError("foreground PTY")),
+        pytest.raises(MountError) as exc,
+    ):
+        login._command_login_inner_once("demo", args)
+    assert exc.value is error
+    assert (data / "sessions").read_text() == "0"
+    if namespaced:
+        acquire.assert_called_once_with("demo", rootfs=None, state_fd=ANY)
+        release.assert_called_once_with("demo", state_fd=ANY)
+        assert not (data / "isolation.mode").exists()
+    else:
+        acquire.assert_not_called()
+        release.assert_not_called()
+        assert (data / "isolation.mode").read_text() == login.namespace.ISOLATION_MODE_HOST
+
+
+def test_command_display_preserves_live_session(command_display, monkeypatch, capsys):
+    login, args, data = command_display
+    data.mkdir(parents=True)
+    (data / "sessions").write_text("1")
+    login.session.get_active_chroot_pids.return_value = [1234]
+    login.namespace.should_use_namespaces.return_value = True
+    monkeypatch.setattr(
+        login.namespace, "get_live_holder", Mock(return_value=SimpleNamespace(pid=1234, nsenter_flags=["--mount"]))
+    )
+    monkeypatch.setattr(login.namespace, "release_holder", Mock())
+    monkeypatch.setattr(login, "_prepare_image_volumes", Mock())
+    with pytest.raises(SystemExit) as exc:
+        login._command_login_inner_once("demo", args)
+    assert exc.value.code == 0
+    assert (data / "sessions").read_text() == "1"
+    assert (data / "mount_opts.json").exists()
+    assert "nsenter" in capsys.readouterr().out
+    login.mount_manager.unmount_all.assert_not_called()
+    login.namespace.release_holder.assert_not_called()
+    login._prepare_image_volumes.assert_not_called()
+
+
+@pytest.mark.parametrize("namespaced", [False, True])
+@pytest.mark.parametrize("interrupted", [False, True])
+def test_state_publication_failure_cleans_session_without_fallback(
+    command_display, monkeypatch, namespaced, interrupted
+):
+    from chroot_distro.exceptions import ChrootDistroError
+
+    login, args, data = command_display
+    error = KeyboardInterrupt() if interrupted else ChrootDistroError("unsafe state")
+    login.namespace.should_use_namespaces.return_value = namespaced
+    holder = SimpleNamespace(pid=1234)
+    acquire = Mock(return_value=holder)
+    release = Mock(side_effect=ChrootDistroError("cleanup refused"))
+    clear = Mock(side_effect=ChrootDistroError("clear refused"))
+    fallback = Mock(return_value=True)
+    monkeypatch.setattr(login.namespace, "acquire_holder", acquire)
+    monkeypatch.setattr(login.namespace, "release_holder", release)
+    monkeypatch.setattr(login.namespace, "clear_isolation_mode", clear)
+    monkeypatch.setattr(login, "_can_fall_back_to_old_isolated", fallback)
+    if namespaced:
+        monkeypatch.setattr(login.isolation, "finalize_holder", Mock(side_effect=error))
+    else:
+        monkeypatch.setattr(login.namespace, "write_isolation_mode", Mock(side_effect=error))
+    with pytest.raises(type(error)) as exc:
+        login._command_login_inner_once("demo", args)
+    assert exc.value is error
+    assert (data / "sessions").read_text() == "0"
+    clear.assert_called_once_with("demo", state_fd=ANY)
+    if namespaced:
+        release.assert_called_once_with("demo", state_fd=ANY)
+    else:
+        release.assert_not_called()
+    fallback.assert_not_called()
+
+
+def test_unsafe_holder_join_undoes_only_new_session(command_display, monkeypatch):
+    from chroot_distro.exceptions import ChrootDistroError
+
+    login, args, data = command_display
+    data.mkdir(parents=True)
+    (data / "sessions").write_text("1")
+    login.session.get_active_chroot_pids.return_value = [1234]
+    login.namespace.should_use_namespaces.return_value = True
+    error = ChrootDistroError("unsafe holder flags")
+    monkeypatch.setattr(login.namespace, "get_live_holder", Mock(side_effect=error))
+    with pytest.raises(ChrootDistroError) as exc:
+        login._command_login_inner_once("demo", args)
+    assert exc.value is error
+    assert (data / "sessions").read_text() == "1"
+    login.mount_manager.unmount_all.assert_not_called()
+
+
+@pytest.mark.parametrize(("command", "joining"), [("login", False), ("login", True), ("run", True)])
+@pytest.mark.parametrize("requested", [False, True])
+def test_parked_holder_forwards_no_new_privs(command_display, monkeypatch, command, joining, requested):
+    from chroot_distro import cli, paths
+    from chroot_distro.commands import run
+
+    login, _, data = command_display
+    holder = SimpleNamespace(pid=1234, is_foreground=False, _live_ns_flags=Mock(return_value=0))
+    acquire = Mock(return_value=holder)
+    reuse = Mock(return_value=holder)
+    login.namespace.should_use_namespaces.return_value = True
+    monkeypatch.setattr(login.namespace, "acquire_holder", acquire)
+    monkeypatch.setattr(login.namespace, "get_live_holder", reuse)
+    monkeypatch.setattr(login.namespace, "release_holder", Mock())
+    monkeypatch.setattr(login.isolation, "finalize_holder", Mock())
+    monkeypatch.setattr(login, "detect_nvidia_gpu", Mock(return_value=False))
+    login._reap_session_processes.return_value = []
+    if joining:
+        data.mkdir(parents=True)
+        (data / "sessions").write_text("1")
+        login.session.get_active_chroot_pids.return_value = [holder.pid]
+
+    def enter_guest(pid, flags, argv, *, setup, **kwargs):
+        assert pid == holder.pid
+        setup()
+        return 0
+
+    enter_chroot = Mock()
+    monkeypatch.setattr(login, "enter_chroot", enter_chroot)
+    monkeypatch.setattr(login, "enter_and_run_with_pty", enter_guest)
+    monkeypatch.setattr(login, "register_session", Mock())
+    monkeypatch.setattr(cli, "_ensure_root_user", Mock())
+    monkeypatch.setattr(login, "ContainerLock", Mock(side_effect=lambda *args, **kwargs: nullcontext()))
+    monkeypatch.setattr(run, "ContainerLock", login.ContainerLock)
+    arguments = ["chroot-distro", command, "demo"]
+    if requested:
+        arguments.append("--no-new-privs")
+    if command == "run":
+        with open(paths.container_manifest("demo"), "w") as fh:
+            json.dump({"image_config": {"config": {"Cmd": ["/bin/sh"]}}}, fh)
+    else:
+        arguments.extend(["--", "true"])
+    monkeypatch.setattr("sys.argv", arguments)
+
+    cli.main()
+
+    assert acquire.call_count == (0 if joining else 1)
+    assert reuse.call_count == (1 if joining else 0)
+    enter_chroot.assert_called_once()
+    assert enter_chroot.call_args.kwargs.get("no_new_privs", False) is requested
+    assert (data / "sessions").read_text() == ("1" if joining else "0")
+
+
+@pytest.mark.parametrize("command", ["login", "run"])
+@pytest.mark.parametrize("error", [errno.EPIPE, errno.EBADF, errno.ENOSPC])
+def test_cli_reports_pty_stdout_failure_after_session_teardown(command_display, monkeypatch, capsys, command, error):
+    from chroot_distro import cli, paths
+
+    login, _, data = command_display
+    manifest = paths.container_manifest("demo")
+    with open(manifest, "w") as fh:
+        json.dump({"image_config": {"config": {"Cmd": ["/bin/sh"]}}}, fh)
+    handle = Mock()
+    release_lock = Mock()
+
+    @contextmanager
+    def container_lock(*args, **kwargs):
+        try:
+            yield
+        finally:
+            assert (data / "sessions").read_text() == "0"
+            assert not (data / "mount_opts.json").exists()
+            handle.close.assert_called_once_with()
+            release_lock()
+
+    def redirect_stdout(src, dst):
+        release_lock.assert_called_once_with()
+        assert dst == 1
+
+    redirect = Mock(side_effect=redirect_stdout)
+    monkeypatch.setattr(cli, "os", SimpleNamespace(devnull=os.devnull, dup2=redirect))
+    monkeypatch.setattr("sys.__stdout__", None if error == errno.EBADF else Mock(fileno=Mock(return_value=1)))
+    monkeypatch.setattr(cli, "_ensure_root_user", Mock())
+    monkeypatch.setattr(login, "ContainerLock", container_lock)
+    login._reap_session_processes.return_value = []
+    monkeypatch.setattr(login, "register_session", Mock(return_value=handle))
+    monkeypatch.setattr(login, "chroot_and_run", Mock(side_effect=PtyOutputError(error, os.strerror(error))))
+    arguments = ["chroot-distro", command, "demo"]
+    if command == "login":
+        arguments.extend(["--", "/bin/sh"])
+    monkeypatch.setattr("sys.argv", arguments)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main()
+    assert exc.value.code == 1
+    release_lock.assert_called_once_with()
+    login.chroot_and_run.assert_called_once()
+    assert login.mount_manager.unmount_all.call_count == 2
+    stderr = capsys.readouterr().err
+    if error == errno.ENOSPC:
+        assert "could not forward guest output to stdout" in stderr
+        assert os.strerror(error) in stderr
+    else:
+        assert stderr == ""
+    assert redirect.call_count == (1 if error == errno.EPIPE else 0)
 
 
 def test_safe_hostname_valid_tokens():
@@ -434,144 +943,126 @@ def test_resolve_host_home_returns_none_for_unknown_guest_user():
         assert resolve_host_home("root") == "/root"
 
 
-def test_sync_passwd_to_path_owner(tmp_path):
-    from chroot_distro.commands.login.passwd import sync_passwd_to_path_owner
+@pytest.mark.parametrize("termux", [False, True])
+@pytest.mark.parametrize("is_run", [False, True])
+def test_shared_home_aligns_named_account_without_changing_shadow(command_display, tmp_path, monkeypatch, termux, is_run):
+    from pathlib import Path
 
-    rootfs = tmp_path / "rootfs"
-    etc = rootfs / "etc"
-    etc.mkdir(parents=True)
-    host_dir = tmp_path / "hosthome"
-    host_dir.mkdir()
-    uid, gid = os.getuid(), os.getgid()
-    os.chown(host_dir, uid, gid)
-    (etc / "passwd").write_text(
-        "ubuntu:x:1000:1000:Ubuntu:/home/ubuntu:/bin/bash\nsaba:x:1001:1001:Saba:/home/saba:/bin/bash\n",
-        encoding="utf-8",
+    login, args, _ = command_display
+    root = Path(login.container_rootfs("demo"))
+    (root / "etc").mkdir()
+    (root / "home/saba").mkdir(parents=True)
+    passwd = root / "etc/passwd"
+    passwd.write_text("saba:x:10328:10328:Saba:/home/saba:/bin/sh\n")
+    (root / "etc/group").write_text("demo:x:6000:saba\n")
+    shadow = root / "etc/shadow"
+    shadow.write_text("saba:!:18446:0:99999:7:::\n")
+    before = shadow.read_bytes(), shadow.stat()
+    host_home = tmp_path / "host"
+    host_home.mkdir()
+    owner_ids = (10428, 10428) if termux else (os.getuid(), os.getgid())
+    if owner_ids[0] == 0:
+        pytest.skip("Linux fixture needs a nonroot host home")
+    monkeypatch.setattr(login, "IS_TERMUX", termux)
+    monkeypatch.setattr(login, "termux_home_owner_ids", lambda: owner_ids)
+    monkeypatch.setattr(login, "resolve_host_home", lambda _: str(host_home))
+    monkeypatch.setattr(login.bindings, "resolve_host_home", lambda _: str(host_home))
+    monkeypatch.setattr(login, "TERMUX_HOME", str(host_home))
+    monkeypatch.setattr(login.dirfd, "_mount_id", lambda fd: 1)
+    monkeypatch.setattr(os, "fchown", lambda *args: None)
+    config = Mock(wraps=login.build_chroot_config)
+    monkeypatch.setattr(login, "build_chroot_config", config)
+
+    args.user = "saba:demo"
+    args.shared_home = True
+    if is_run:
+        args._run_inner = ["/bin/sh"]
+
+    with pytest.raises(SystemExit) as exc:
+        login._command_login_inner_once("demo", args)
+
+    assert exc.value.code == 0
+    assert passwd.read_text() == f"saba:x:{owner_ids[0]}:{owner_ids[1]}:Saba:/home/saba:/bin/sh\n"
+    assert shadow.read_bytes() == before[0]
+    assert os.path.samestat(shadow.stat(), before[1])
+    assert str(config.call_args.kwargs["login_uid"]) == str(owner_ids[0])
+    assert str(config.call_args.kwargs["login_gid"]) == "6000"
+
+
+@pytest.mark.parametrize("is_run", [False, True])
+@pytest.mark.parametrize(
+    ("uid_matches", "bus_source", "warns"),
+    [(False, "host", True), (True, "host", False), (False, "override", False), (False, "absent", False)],
+)
+def test_shared_display_preserves_guest_home_and_uid(
+    command_display, tmp_path, monkeypatch, capsys, is_run, uid_matches, bus_source, warns
+):
+    login, args, _ = command_display
+    root = Path(login.container_rootfs("demo"))
+    home = root / "home/guest"
+    home.mkdir(parents=True, mode=0o700)
+    private_file = home / "private"
+    private_file.write_text("keep")
+    home_stat = home.stat()
+    file_stat = private_file.stat()
+    uid = home_stat.st_uid or 1500
+    gid = home_stat.st_gid
+    host_uid = uid if uid_matches else uid + 1
+    (root / "etc").mkdir()
+    passwd = root / "etc/passwd"
+    account = f"guest:x:{uid}:{gid}::/home/guest:/bin/sh\n"
+    passwd.write_text(account)
+    host_home = tmp_path / "desktop-home"
+    host_home.mkdir()
+    real_stat = os.stat
+    host_stat = list(host_home.stat())
+    host_stat[stat.ST_UID] = host_uid
+
+    def stat_with_host_uid(path, *args, **kwargs):
+        if path == str(host_home):
+            return os.stat_result(host_stat)
+        return real_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(login.dirfd, "_mount_id", lambda fd: 1)
+    monkeypatch.setattr(login, "resolve_invoking_uid", lambda: host_uid)
+    monkeypatch.setattr(login, "resolve_host_home", lambda _: str(host_home))
+    monkeypatch.setattr(os, "stat", stat_with_host_uid)
+    display_env = {"DISPLAY": ":42", "XAUTHORITY": "/host/cookie", "XDG_RUNTIME_DIR": "/host/runtime"}
+    if bus_source != "absent":
+        display_env["DBUS_SESSION_BUS_ADDRESS"] = "unix:path=/host/runtime/bus"
+    monkeypatch.setattr(login, "resolve_display_env", lambda: (display_env, ["/host/cookie"]))
+    monkeypatch.setattr(login, "resolve_display_socket_binds", Mock(return_value=[]))
+    monkeypatch.setattr(login, "x11_auth_bind_path", lambda _: None)
+    monkeypatch.setattr(login, "guest_can_read_auth", lambda *_: False)
+    cookie = Mock(return_value="/guest/cookie")
+    monkeypatch.setattr(login, "provision_guest_xauthority", cookie)
+    config = Mock(wraps=login.build_chroot_config)
+    monkeypatch.setattr(login, "build_chroot_config", config)
+    args.user = "guest"
+    args.shared_display = True
+    args.env = ["DBUS_SESSION_BUS_ADDRESS=unix:path=/guest/bus"] if bus_source == "override" else []
+    if is_run:
+        args._run_inner = ["/bin/sh"]
+
+    with pytest.raises(SystemExit) as exc:
+        login._command_login_inner_once("demo", args)
+
+    assert exc.value.code == 0
+    assert passwd.read_text() == account
+    assert (home.stat().st_mode, home.stat().st_uid, home.stat().st_gid) == (
+        home_stat.st_mode, home_stat.st_uid, home_stat.st_gid
     )
-    assert sync_passwd_to_path_owner(str(rootfs), "saba", str(host_dir))
-    passwd = (etc / "passwd").read_text(encoding="utf-8")
-    assert f"saba:x:{uid}:{gid}:" in passwd
-    assert f"ubuntu:x:{uid}:{gid}:" not in passwd
-
-
-def test_sync_passwd_to_path_owner_skips_root(tmp_path):
-    from chroot_distro.commands.login.passwd import sync_passwd_to_path_owner
-
-    rootfs = tmp_path / "rootfs"
-    etc = rootfs / "etc"
-    etc.mkdir(parents=True)
-    host_dir = tmp_path / "hosthome"
-    host_dir.mkdir()
-    os.chown(host_dir, os.getuid(), os.getgid())
-    (etc / "passwd").write_text(
-        "root:x:0:0:root:/root:/bin/bash\n",
-        encoding="utf-8",
+    assert (private_file.stat().st_mode, private_file.stat().st_uid, private_file.stat().st_gid) == (
+        file_stat.st_mode, file_stat.st_uid, file_stat.st_gid
     )
-    assert not sync_passwd_to_path_owner(str(rootfs), "root", str(host_dir))
-    assert (etc / "passwd").read_text(encoding="utf-8") == ("root:x:0:0:root:/root:/bin/bash\n")
-
-
-def test_sync_passwd_to_path_owner_repairs_stale_root(tmp_path):
-    """Regression (Termux): a previous --shared-home bind left root's passwd
-    uid/gid remapped to the Termux app uid even though /root on disk is
-    root-owned. The next plain login must repair root back to 0:0 so the
-    guest can read its own $HOME."""
-    from chroot_distro.commands.login.passwd import sync_passwd_to_path_owner
-
-    rootfs = tmp_path / "rootfs"
-    etc = rootfs / "etc"
-    etc.mkdir(parents=True)
-    (etc / "passwd").write_text(
-        "root:x:10328:10328:root:/root:/bin/bash\n",
-        encoding="utf-8",
+    assert private_file.read_text() == "keep"
+    assert int(config.call_args.kwargs["login_uid"]) == uid
+    cookie.assert_called_once_with(
+        str(root), host_xauthority="/host/cookie", display=":42", guest_uid=uid, guest_gid=gid
     )
-    host_dir = tmp_path / "root_home"
-    host_dir.mkdir()
-    assert sync_passwd_to_path_owner(str(rootfs), "root", str(host_dir))
-    assert (etc / "passwd").read_text(encoding="utf-8") == ("root:x:0:0:root:/root:/bin/bash\n")
-
-
-def test_sync_passwd_to_home_owner_repairs_stale_root(tmp_path):
-    """End-to-end: resolve the in-rootfs /root and repair the stale root
-    passwd entry left behind by a Termux --shared-home session."""
-    from chroot_distro.commands.login.passwd import sync_passwd_to_home_owner
-
-    rootfs = tmp_path / "rootfs"
-    home = rootfs / "root"
-    home.mkdir(parents=True)
-    etc = rootfs / "etc"
-    etc.mkdir()
-    (etc / "passwd").write_text(
-        "root:x:10328:10328:root:/root:/bin/bash\n",
-        encoding="utf-8",
-    )
-    assert sync_passwd_to_home_owner(str(rootfs), "root", "/root")
-    assert (etc / "passwd").read_text(encoding="utf-8") == ("root:x:0:0:root:/root:/bin/bash\n")
-
-
-def test_release_passwd_uid_conflicts(tmp_path):
-    from chroot_distro.commands.login.passwd import (
-        release_passwd_uid_conflicts,
-        set_passwd_uid_gid,
-    )
-
-    rootfs = tmp_path / "rootfs"
-    etc = rootfs / "etc"
-    etc.mkdir(parents=True)
-    (etc / "passwd").write_text(
-        "root:x:1000:1000:root:/root:/bin/bash\n"
-        "ubuntu:x:1000:1000:Ubuntu:/home/ubuntu:/bin/bash\n"
-        "saba:x:1001:1001:Saba:/home/saba:/bin/bash\n",
-        encoding="utf-8",
-    )
-    uid, gid = 1000, 1000
-    set_passwd_uid_gid(str(rootfs), "saba", uid, gid)
-    release_passwd_uid_conflicts(str(rootfs), "saba", uid, gid)
-    passwd = (etc / "passwd").read_text(encoding="utf-8")
-    assert f"saba:x:{uid}:{gid}:" in passwd
-    assert "root:x:0:0:" in passwd
-    assert f"ubuntu:x:{uid}:{gid}:" not in passwd
-
-
-def test_sync_passwd_to_home_owner(tmp_path):
-    from chroot_distro.commands.login.passwd import sync_passwd_to_home_owner
-
-    rootfs = tmp_path / "rootfs"
-    home = rootfs / "home" / "saba"
-    home.mkdir(parents=True)
-    uid, gid = os.getuid(), os.getgid()
-    os.chown(home, uid, gid)
-    etc = rootfs / "etc"
-    etc.mkdir()
-    (etc / "passwd").write_text(
-        "saba:x:10328:10328:Saba:/home/saba:/bin/bash\n",
-        encoding="utf-8",
-    )
-    assert sync_passwd_to_home_owner(str(rootfs), "saba", "/home/saba")
-    passwd = (etc / "passwd").read_text(encoding="utf-8")
-    assert f"saba:x:{uid}:{gid}:" in passwd
-
-
-def test_align_user_to_termux_owner(tmp_path):
-    from chroot_distro.commands.login.passwd import align_user_to_termux_owner
-
-    rootfs = tmp_path / "rootfs"
-    etc = rootfs / "etc"
-    etc.mkdir(parents=True)
-    (etc / "passwd").write_text(
-        "root:x:0:0:root:/root:/bin/bash\nsaba:x:1000:1000:Saba:/home/saba:/bin/bash\n",
-        encoding="utf-8",
-    )
-    (etc / "shadow").write_text(
-        "root:*:1::::::\nsaba:*:1::::::\n",
-        encoding="utf-8",
-    )
-    assert align_user_to_termux_owner(str(rootfs), "saba", 10328, 10328)
-    passwd = (etc / "passwd").read_text(encoding="utf-8")
-    assert "saba:x:10328:10328:" in passwd
-    shadow = (etc / "shadow").read_text(encoding="utf-8")
-    assert shadow.startswith("root:")
-    assert "saba:*:10328:10328:" in shadow
+    output = capsys.readouterr()
+    assert ("access the host session bus" in output.err) == warns
+    assert "XAUTHORITY=/guest/cookie" in output.out
 
 
 def test_termux_home_owner_ids(tmp_path):
@@ -598,9 +1089,10 @@ def test_ensure_rootfs_exec_skips_when_suid_and_exec_present(tmp_path, monkeypat
     assert calls == []
 
 
-def test_ensure_rootfs_exec_binds_rootfs_and_release_removes_it(tmp_path, monkeypatch):
+@pytest.mark.parametrize("termux", [False, True])
+def test_ensure_rootfs_exec_binds_rootfs_and_release_removes_it(tmp_path, monkeypatch, termux):
     from chroot_distro.helpers import mount_manager
-    from chroot_distro.syscalls.mount import MS_BIND, MS_NOEXEC, MS_NOSUID, MS_RELATIME, MS_REMOUNT
+    from chroot_distro.syscalls.mount import MS_BIND, MS_NOEXEC, MS_NOSUID, MS_RELATIME, MS_REMOUNT, MS_SLAVE
 
     rootfs = tmp_path / "containers" / "c" / "rootfs"
     rootfs.mkdir(parents=True)
@@ -621,6 +1113,8 @@ def test_ensure_rootfs_exec_binds_rootfs_and_release_removes_it(tmp_path, monkey
 
     monkeypatch.setattr(mount_manager, "is_mounted", lambda _target, holder=None: mounted["value"])
     monkeypatch.setattr(mount_manager, "native_mount", fake_native_mount)
+    monkeypatch.setattr(mount_manager, "IS_TERMUX", termux)
+    monkeypatch.setattr(mount_manager, "set_propagation", lambda _target, flags: calls.append(flags))
     monkeypatch.setattr(mount_manager.mount_targets, "open_rootfs_fd", fake_open_rootfs)
     monkeypatch.setattr(
         mount_manager,
@@ -633,10 +1127,11 @@ def test_ensure_rootfs_exec_binds_rootfs_and_release_removes_it(tmp_path, monkey
     assert marker.exists()
     assert len(opened) == 2, "the remount must re-resolve the rootfs after the bind"
     assert calls[0] == MS_BIND
-    assert calls[1] & MS_REMOUNT
-    assert not calls[1] & MS_NOSUID
-    assert not calls[1] & MS_NOEXEC
-    assert calls[1] & MS_RELATIME
+    assert calls[1:-1] == ([MS_SLAVE] if termux else [])
+    assert calls[-1] & MS_REMOUNT
+    assert not calls[-1] & MS_NOSUID
+    assert not calls[-1] & MS_NOEXEC
+    assert calls[-1] & MS_RELATIME
 
     unmounted = []
 
@@ -1385,14 +1880,26 @@ def test_user_env_beats_derived_values_in_termux_container(monkeypatch):
     assert env["LANG"] == "C"
 
 
-def test_inject_env_profile_reexports_requested_keys(tmp_path):
+@pytest.fixture
+def profile_root(tmp_path, monkeypatch):
+    rootfs = tmp_path / "rootfs"
+    rootfs.mkdir()
+    monkeypatch.setattr(dirfd, "_mount_id", lambda fd: 1)
+    root_fd = dirfd.opendir(str(rootfs))
+    try:
+        yield rootfs, root_fd
+    finally:
+        os.close(root_fd)
+
+
+def test_inject_env_profile_reexports_requested_keys(profile_root):
     """A login shell sources /etc/profile, which resets PATH; profile.d wins."""
     from chroot_distro.commands.login.env import inject_env_profile
 
-    rootfs = tmp_path / "rootfs"
+    rootfs, root_fd = profile_root
     (rootfs / "etc" / "profile.d").mkdir(parents=True)
     inject_env_profile(
-        str(rootfs),
+        root_fd,
         {"PATH": "/opt/bin", "HOME": "/srv", "HOSTNAME": "debian"},
         force_keys={"PATH"},
     )
@@ -1403,13 +1910,13 @@ def test_inject_env_profile_reexports_requested_keys(tmp_path):
     assert "HOME" not in content
 
 
-def test_inject_env_profile_skips_secret_values(tmp_path):
+def test_inject_env_profile_skips_secret_values(profile_root):
     from chroot_distro.commands.login.env import inject_env_profile
 
-    rootfs = tmp_path / "rootfs"
+    rootfs, root_fd = profile_root
     (rootfs / "etc" / "profile.d").mkdir(parents=True)
     inject_env_profile(
-        str(rootfs),
+        root_fd,
         {"GITHUB_TOKEN": "s3cret", "PATH": "/opt/bin"},
         force_keys={"GITHUB_TOKEN", "PATH"},
     )
@@ -1418,28 +1925,28 @@ def test_inject_env_profile_skips_secret_values(tmp_path):
     assert "export PATH='/opt/bin'" in content
 
 
-def test_inject_env_profile_clears_stale_snippet(tmp_path):
+def test_inject_env_profile_clears_stale_snippet(profile_root):
     """A later session without --env must not inherit the previous one's."""
     from chroot_distro.commands.login.env import inject_env_profile
 
-    rootfs = tmp_path / "rootfs"
+    rootfs, root_fd = profile_root
     profile_d = rootfs / "etc" / "profile.d"
     profile_d.mkdir(parents=True)
     snippet = profile_d / "chroot-profile.sh"
     snippet.write_text("export PATH='/opt/bin'\n")
-    inject_env_profile(str(rootfs), {})
+    inject_env_profile(root_fd, {})
     assert not snippet.exists()
 
 
-def test_inject_env_profile_uses_guest_prefix(tmp_path):
+def test_inject_env_profile_uses_guest_prefix(profile_root):
     from chroot_distro.commands.login import TERMUX_PREFIX
     from chroot_distro.commands.login.env import inject_env_profile
 
-    rootfs = tmp_path / "rootfs"
+    rootfs, root_fd = profile_root
     profile_d = rootfs / TERMUX_PREFIX.lstrip("/") / "etc" / "profile.d"
     profile_d.mkdir(parents=True)
     inject_env_profile(
-        str(rootfs),
+        root_fd,
         {"PATH": "/opt/bin"},
         force_keys={"PATH"},
         guest_prefix=TERMUX_PREFIX,
@@ -1473,7 +1980,7 @@ def test_format_get_chroot_cmd_termux_su_wrapping():
     with (
         patch.object(chroot_cmd, "IS_TERMUX", True),
         patch.object(chroot_cmd.shutil, "which", return_value=None),
-        patch("chroot_distro.elevate._find_termux_su", return_value="/system/bin/su"),
+        patch("chroot_distro.elevate._find_termux_su", return_value=("/system/bin/su", "")),
     ):
         out = chroot_cmd.format_get_chroot_cmd(env, argv)
     su, dash_c, body = shlex.split(out)

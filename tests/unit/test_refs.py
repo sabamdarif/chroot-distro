@@ -126,7 +126,10 @@ def test_parse_reference(ref, expected):
         ("../../x:1", "registry host is not valid"),
         ("foo:1.0/bar", "registry host is not valid"),
         ("[:5000/img", "registry host is not valid"),
+        ("[:::1]:5000/img", "registry host is not valid"),
+        ("[cafe]:5000/img", "registry host is not valid"),
         ("reg\udcff.example/img", "registry host is not valid"),
+        ("localhost:0/app", "port is out of range"),
         ("localhost:99999/app", "port is out of range"),
         (_HEX, "image ID"),
         ("x" * 250 + "/" + "y" * 10, "255 characters"),
@@ -159,6 +162,8 @@ def test_parse_tag_reference_refuses_a_digest():
         # The same string the loose split gave, so no cache key moves.
         ("localhost/app", "localhost/app:latest"),
         ("Registry/app", "Registry/app:latest"),
+        ("registry-1.docker.io/library/ubuntu", "registry-1.docker.io/library/ubuntu:latest"),
+        ("docker.io:443/library/ubuntu", "docker.io:443/library/ubuntu:latest"),
         (f"debian:12@sha256:{_HEX}", f"library/debian@sha256:{_HEX}"),
     ],
 )

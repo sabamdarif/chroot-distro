@@ -167,7 +167,8 @@ def test_provision_guest_xauthority(tmp_path):
     guest_file = rootfs / "var" / "tmp" / ".chroot-distro-xauthority"
 
     with (
-        patch("os.chown"),
+        patch("os.fchown"),
+        patch("chroot_distro.helpers.x11._invoking_home", return_value=str(tmp_path)),
         patch("os.path.isfile", return_value=True),
     ):
         result = provision_guest_xauthority(
@@ -191,7 +192,10 @@ def test_provision_guest_xauthority_no_xauth(tmp_path):
     # Write an empty file, no entries to extract.
     host_xauth.write_bytes(b"")
 
-    with patch("os.path.isfile", return_value=True):
+    with (
+        patch("os.path.isfile", return_value=True),
+        patch("chroot_distro.helpers.x11._invoking_home", return_value=str(tmp_path)),
+    ):
         assert (
             provision_guest_xauthority(
                 str(rootfs),

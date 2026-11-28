@@ -190,7 +190,7 @@ def test_a_planted_fifo_over_the_index_does_not_stall_the_build(tmp_path):
     assert completed.stdout.strip() == "None", completed.stderr
 
 
-def test_a_planted_symlink_over_the_lock_is_replaced(monkeypatch, tmp_path):
+def test_a_planted_symlink_over_the_lock_is_left_in_place(monkeypatch, tmp_path):
     index = _redirect(monkeypatch, tmp_path)
     outside = tmp_path / "outside"
     outside.write_text("KEEP")
@@ -200,11 +200,11 @@ def test_a_planted_symlink_over_the_lock_is_replaced(monkeypatch, tmp_path):
     build_cache.record("h", LAYER, DIFF, 1)
 
     assert build_cache.lookup("h") is not None
-    assert not lock.is_symlink()
+    assert lock.is_symlink()
     assert outside.read_text() == "KEEP"
 
 
-def test_a_lock_name_that_cannot_be_cleared_still_records_the_step(monkeypatch, tmp_path):
+def test_a_directory_at_the_lock_name_still_records_the_step(monkeypatch, tmp_path):
     # Unlike a container lock, an unserialised record() risks a concurrent
     # build's entry and nothing else, so it goes ahead without the flock.
     index = _redirect(monkeypatch, tmp_path)
